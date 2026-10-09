@@ -69,6 +69,17 @@ def tokenize(text: str, stem: bool = False) -> list[str]:
     return tokens
 
 
+def lexical_tokens(text: str, config) -> list[str]:
+    """Literal lexical matching keeps stopwords, single characters and Unicode.
+
+    No metadata enrichment or stemming in scoped_literal. Entity and dense
+    indexing retain their existing representations independently.
+    """
+    if config.bm25_profile == "scoped_literal":
+        return re.findall(r"\w+", text.casefold())
+    return tokenize(text, stem=config.use_stemming)
+
+
 # ---------------------------------------------------------------------------
 # Stemming (E2 ablation): in-house Porter stemmer (Porter, 1980) for English,
 # plus a light French suffix stripper. No NLTK/snowballstemmer dependency.

@@ -31,7 +31,7 @@ from .migrate import read_v3_log
 from .retrieval import HybridRetriever, SearchHit, mmr
 from .store import MemoryItem, Store, text_hash
 from .temporal import is_valid_at, recency_weight
-from .text import chunk_text, contextual_header, date_str, tokenize
+from .text import chunk_text, contextual_header, date_str, lexical_tokens
 from .vector_index import VectorIndex
 
 logger = logging.getLogger("memory_os_v4")
@@ -52,8 +52,8 @@ def _package_version():
 
 
 def index_text(item: MemoryItem, config: Config) -> str:
-    """The ONE string every signal indexes `item` under: dense embedding,
-    BM25 tokenization (production
+    """Context-enriched dense text; legacy BM25 also indexes this string.
+    scoped_literal BM25 indexes item.text independently (production
     port of the LoCoMo-validated bench mechanism, 2026-09-14 -- see
     `bench/retrievers.py`'s `V4EnrichedRetriever` "facts+keywords" mode).
 
@@ -70,6 +70,11 @@ def index_text(item: MemoryItem, config: Config) -> str:
     if config.index_keywords and item.keywords:
         text += " | keywords: " + ", ".join(item.keywords)
     return text
+
+
+def lexical_index_tokens(item: MemoryItem, config: Config) -> list[str]:
+    text = item.text if config.bm25_profile == "scoped_literal" else index_text(item, config)
+    return lexical_tokens(text, config)
 
 
 def _requires_open(method):
@@ -102,6 +107,10 @@ class MemoryV4:
             self.config.data_dir = data_dir
         self._lock = RLock()
 
+        if self.config.bm25_profile not in {"legacy", "scoped_literal"}:
+            raise ValueError("Unknown BM25 profile")
+        if self.config.lexical_first and self.config.bm25_profile != "scoped_literal":
+            raise ValueError("lexical_first requires scoped_literal")
         self.data_dir = Path(self.config.data_dir).expanduser()
         if self.config.store_backend not in {"jsonl", "sqlite_s1"}:
             raise ValueError("Unknown store backend; choose jsonl or experimental sqlite_s1")
@@ -334,7 +343,14 @@ class MemoryV4:
         elif ids:
             self.vector_index.add(ids, vecs)
 
+        profile = {"profile": self.config.bm25_profile,
+                   "stemming": self.config.use_stemming, "keywords": self.config.index_keywords}
+        if self.store.meta.get("bm25_profile") != profile:
+            # Only rebuild lexical derived state. Never re-encode embeddings
+            # when lexical settings change or when upgrading an old cache.
+            self.bm25 = BM25Index()
         self._reconcile_indexes()
+        self.store.meta["bm25_profile"] = profile
 
         self.store.meta["embed_model"] = self.config.embed_model
         self.store.meta["dim"] = dim
@@ -377,7 +393,7 @@ class MemoryV4:
             self.bm25.remove(doc_id)
         for iid, it in live_items.items():
             if iid not in self.bm25.doc_len:
-                self.bm25.add(iid, tokenize(index_text(it, self.config), stem=self.config.use_stemming))
+                self.bm25.add(iid, lexical_index_tokens(it, self.config))
 
         # ---- entities: drop stale docs, add missing ones ----
         for doc_id in [d for d in self.entities.doc_entities if d not in live_ids]:
@@ -445,7 +461,7 @@ class MemoryV4:
         self.facet_index.rebuild(self.store.all(include_deleted=False))
         for it in self.store.all(include_deleted=False):
             self.bm25.add(
-                it.id, tokenize(index_text(it, self.config), stem=self.config.use_stemming)
+                it.id, lexical_index_tokens(it, self.config)
             )
             self.entities.add(it.id, it.entities)
 
@@ -524,7 +540,7 @@ class MemoryV4:
         self._add_chunk_vectors(items)
         for it in items:
             self.bm25.add(
-                it.id, tokenize(index_text(it, self.config), stem=self.config.use_stemming)
+                it.id, lexical_index_tokens(it, self.config)
             )
             self.entities.add(it.id, it.entities)
             self.facet_index.add(it)

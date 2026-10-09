@@ -27,6 +27,7 @@ class BM25Index:
         # occurrence in bm25.json wasted disk on any doc with repeated words.
         self.doc_term_freqs: dict[str, dict[str, int]] = {}
         self._total_len = 0
+        self.revision = 0  # derived-cache generation; never persisted
 
     @property
     def n_docs(self) -> int:
@@ -41,6 +42,7 @@ class BM25Index:
         if doc_id in self.doc_len:
             self.remove(doc_id)
         counts = Counter(tokens)
+        self.revision += 1
         self.doc_term_freqs[doc_id] = dict(counts)
         self.doc_len[doc_id] = len(tokens)
         self._total_len += len(tokens)
@@ -51,6 +53,7 @@ class BM25Index:
         if doc_id not in self.doc_len:
             return
         term_freqs = self.doc_term_freqs.pop(doc_id, {})
+        self.revision += 1
         self._total_len -= self.doc_len.pop(doc_id, 0)
         for tok in term_freqs:
             bucket = self.postings.get(tok)
@@ -65,6 +68,24 @@ class BM25Index:
             return 0.0
         n = self.n_docs
         return math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+
+    def scoped(self, doc_ids: set[str]) -> "BM25Index":
+        """Independent derived index: corpus N/df/avgdl all obey the scope.
+
+        Merely filtering global top-N is incorrect: excluded documents change
+        IDF/length normalization and may consume every candidate slot.
+        """
+        out = type(self)(self.k1, self.b)
+        for doc_id in sorted(doc_ids):
+            if doc_id not in self.doc_len:
+                continue
+            terms = self.doc_term_freqs[doc_id]
+            out.doc_term_freqs[doc_id] = dict(terms)
+            out.doc_len[doc_id] = self.doc_len[doc_id]
+            out._total_len += self.doc_len[doc_id]
+            for token, tf in terms.items():
+                out.postings.setdefault(token, {})[doc_id] = tf
+        return out
 
     def search(self, query_tokens: list[str], top_k: int) -> list[tuple[str, float]]:
         if not query_tokens or self.n_docs == 0:
@@ -89,7 +110,7 @@ class BM25Index:
                     continue
                 dl = self.doc_len.get(doc_id, 0)
                 denom = tf + self.k1 * (1 - self.b + self.b * dl / avgdl)
-                scores[doc_id] += idf * (tf * (self.k1 + 1)) / denom
+                scores[doc_id] += idf * tf * (self.k1 + 1) / denom
         # Deterministic total order: `candidates` is a set (PYTHONHASHSEED-
         # dependent iteration order), so ties must break on doc_id, not on
         # the random insertion order into `scores` (adversarial review,
@@ -121,7 +142,7 @@ class BM25Index:
             if idf <= 0:
                 continue
             denom = tf + self.k1 * (1 - self.b + self.b * dl / avgdl)
-            score += idf * (tf * (self.k1 + 1)) / denom
+            score += idf * tf * (self.k1 + 1) / denom
         return score
 
     # ------------------------------------------------------------- persist

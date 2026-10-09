@@ -139,6 +139,10 @@ class Config:
     # E2 stem: Porter (English) + light suffix stripping (French) applied in
     # tokenize() for BM25 indexing/querying only (never for display text).
     use_stemming: bool = True  # was False pre-campaign; part of the winning combo
+    # Opt-in lexical parity: literal Unicode words over item.text, scoped corpus
+    # statistics and candidate selection BEFORE project/kind/validity filtering.
+    bm25_profile: str = "legacy"  # legacy | scoped_literal
+    lexical_first: bool = False  # preserve positive lexical ranks; dense fills gaps
 
     # E3 neighbor_expansion: after fusion+scoring, pull in the +-window items
     # adjacent in time within the same doc_ref (episodes ordered by
@@ -338,6 +342,8 @@ class Config:
                 "MEMORY_V4_MULTI_VECTOR_CANDIDATE_MULT", d.multi_vector_candidate_mult
             ),
             use_stemming=_env_bool("MEMORY_V4_USE_STEMMING", d.use_stemming),
+            bm25_profile=_env_str("MEMORY_V4_BM25_PROFILE", d.bm25_profile),
+            lexical_first=_env_bool("MEMORY_V4_LEXICAL_FIRST", d.lexical_first),
             neighbor_expansion=_env_bool("MEMORY_V4_NEIGHBOR_EXPANSION", d.neighbor_expansion),
             neighbor_seed=_env_int("MEMORY_V4_NEIGHBOR_SEED", d.neighbor_seed),
             neighbor_decay=_env_float("MEMORY_V4_NEIGHBOR_DECAY", d.neighbor_decay),

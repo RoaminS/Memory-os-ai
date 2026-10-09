@@ -22,7 +22,7 @@ from .facets import FacetIndex, normalize_facet, rank_facet_pool
 from .rerank import CrossEncoderReranker
 from .store import MemoryItem, Store
 from .temporal import is_valid_at, parse_dates, recency_weight
-from .text import tokenize
+from .text import lexical_tokens
 from .vector_index import VectorIndex
 
 logger = logging.getLogger("memory_os_v4")
@@ -321,6 +321,23 @@ class HybridRetriever:
         # same way (see `_chunk_ids_by_owner`).
         self._chunk_cache: dict[str, list[str]] | None = None
         self._chunk_cache_n: int = -1
+        self._lexical_cache = None
+
+    def lexical_index(self, kinds=None, project=None, at_time=None):
+        """Scope corpus statistics and top-N together; cache is reconstructible.
+
+        Eligible IDs are recomputed so corrections/validity changes invalidate
+        the cache even when item count is unchanged. Index identity + revision
+        cover rebuild, rollback and replacements with the same IDs.
+        """
+        if self.config.bm25_profile == "legacy":
+            return self.bm25
+        ids = frozenset(it.id for it in self.store.all(include_deleted=False)
+                        if _passes_filters(it, kinds, project, at_time))
+        key = (self.bm25, self.bm25.revision, ids)
+        if self._lexical_cache is None or self._lexical_cache[0] != key:
+            self._lexical_cache = (key, self.bm25.scoped(set(ids)))
+        return self._lexical_cache[1]
 
     def _corpus_span_days(self) -> float:
         """max(event_time) - min(event_time) across live items, in days.
@@ -644,7 +661,7 @@ class HybridRetriever:
         rerank: bool | None = None,
     ) -> list[SearchHit]:
         cfg = self.config
-        n = cfg.candidates
+        n = max(cfg.candidates, top_k) if cfg.bm25_profile == "scoped_literal" else cfg.candidates
         query_time = at_time if at_time is not None else time.time()
 
         # A7(b): parse any date the query itself carries (absolute or
@@ -660,7 +677,8 @@ class HybridRetriever:
         # regardless of full_candidate_scoring) and, when
         # `full_candidate_scoring` is on, for re-scoring every candidate
         # against each signal directly (candidate SCORING).
-        query_tokens = tokenize(query, stem=cfg.use_stemming) if cfg.use_bm25 else None
+        query_tokens = lexical_tokens(query, cfg) if cfg.use_bm25 else None
+        lexical = self.lexical_index(kinds, project, at_time) if cfg.use_bm25 else self.bm25
         query_entities = extract_entities(query) if cfg.use_entities else None
 
         signal_hits: dict[str, list[tuple[str, float]]] = {}
@@ -670,7 +688,7 @@ class HybridRetriever:
         else:
             qvec = None
         if cfg.use_bm25:
-            signal_hits["bm25"] = self.bm25.search(query_tokens, n)
+            signal_hits["bm25"] = lexical.search(query_tokens, n)
         if cfg.use_entities:
             signal_hits["entity"] = self.entities.search(query_entities, n)
 
@@ -697,7 +715,9 @@ class HybridRetriever:
             if cfg.use_dense and qvec is not None:
                 full_scores["dense"] = self._dense_full_scores(qvec, candidate_ids)
             if cfg.use_bm25:
-                full_scores["bm25"] = self._bm25_full_scores(query_tokens, candidate_ids)
+                full_scores["bm25"] = (self._bm25_full_scores(query_tokens, candidate_ids)
+                    if cfg.bm25_profile == "legacy" else
+                    {cid: lexical.score_doc(query_tokens, cid) for cid in sorted(candidate_ids)})
             if cfg.use_entities:
                 full_scores["entity"] = self._entity_full_scores(query_entities, candidate_ids)
             fused = fuse_full(candidate_ids, full_scores, weights, cfg.fusion, cfg.dense_norm)
@@ -761,6 +781,37 @@ class HybridRetriever:
         # not on that random insertion order (adversarial review, 2026-09-12:
         # otherwise seed-to-seed jitter of up to 0.007 R@10 on LoCoMo).
         scored.sort(key=lambda h: (-h.score, h.item.id))
+
+        # A lexical-only path must retain exact raw BM25 order, including ties:
+        # minmax's rank fallback and importance are optional hybrid heuristics.
+        lexical_only = (cfg.use_bm25 and not cfg.use_dense and not cfg.use_entities
+                        and not cfg.use_recency and not cfg.neighbor_expansion
+                        and not cfg.entity_expansion and not (rerank or
+                        (rerank is None and cfg.rerank_model)))
+        if cfg.bm25_profile == "scoped_literal" and (lexical_only or cfg.lexical_first):
+            raw = dict(signal_hits.get("bm25", []))
+            # Keep the established current-time invalidation penalty. Historical
+            # at_time queries restore the unpenalized score when valid then.
+            for hit in scored:
+                if hit.item.invalidated_by is not None and not (
+                        at_time is not None and is_valid_at(hit.item, at_time)):
+                    raw[hit.item.id] = raw.get(hit.item.id, 0.0) * .5
+            scored.sort(key=lambda h: (0, -raw[h.item.id], h.item.id)
+                        if raw.get(h.item.id, 0) > 0 else (1, -h.score, h.item.id))
+            for hit in scored:
+                hit.signals["lexical_profile"] = cfg.bm25_profile
+                hit.signals["lexical_corpus_docs"] = lexical.n_docs
+                if lexical_only:
+                    hit.score = raw.get(hit.item.id, 0.0)
+            if cfg.lexical_first:
+                # Explicit policy: no later expansion/reranker may silently
+                # undo the prefix guarantee. Multi-query remains a separate policy.
+                result = scored[:top_k]
+                for rank, hit in enumerate(result, 1):
+                    hit.signals["lexical_first_rank"] = rank
+                    hit.score = 1.0 / rank
+                    self.store.touch(hit.item.id, time.time())
+                return result
 
         if cfg.neighbor_expansion:
             scored = self._expand_neighbors(scored, kinds, project, at_time)
