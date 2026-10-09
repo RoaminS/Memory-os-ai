@@ -101,6 +101,9 @@ bash scripts/run_lexical_dev.sh run "$REV"
 Le troisième argument facultatif est le nouveau dossier de plan, le quatrième
 (prepare seulement) le dossier resident-dev-v2 existant. La préparation
 contrôle la chaîne de preuves et gèle plan/receipt avant le diagnostic.
+Le lancement de C1 exige d'abord un diagnostic complet 100/100 lié au plan
+et au commit par empreintes; une interruption ou erreur du diagnostic bloque
+les campagnes, même si l'opérateur saisit ensuite la commande `run`.
 Résultats : `diagnosis/questions.jsonl`, `diagnosis/report.json`, C1/C2/C3
 avec prédictions, durées démarrage/ingestion/recherche chaude séparées,
 empreintes, puis `development-verdict.json`. Un arrêt de diagnostic conserve
@@ -118,7 +121,7 @@ vertes. Mesures lifecycle S3 rapportées par Claude dans
 1000 froid/chaud/rollback 0,32/0,25/0,22s; 10000 3,6/2,9/2,5s;
 0 texte existant ré-encodé, trois répétitions. Pas de mesure granite nouvelle.
 
-Suite ciblée suivante : **204 passed**, assertions de dérive du
+Suite ciblée suivante : **205 passed**, assertions de dérive du
 protocole incluses.
 
 ```sh

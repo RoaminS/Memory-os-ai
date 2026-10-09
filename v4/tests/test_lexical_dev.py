@@ -1,11 +1,13 @@
 """Protocol guards and causal reconstruction on small synthetic observations."""
 import asyncio
 from copy import deepcopy
+import json
 
 import pytest
 
 from bench.e2e.data import Gold, Inputs, Turn
-from bench.e2e.lexical_dev import arms, eligible, parity, validate_config
+from bench.e2e.lexical_dev import arms, eligible, parity, validate_config, require_diagnosis
+from bench.e2e.data import sha256
 from bench.e2e.lexical_diagnose import capture_case
 from bench.e2e.configuration import resolved_config
 
@@ -85,3 +87,28 @@ def test_frozen_config_rejects_protocol_and_source_drift():
                        ('ingest_bytes', 999), ('limit', 99)]:
         with pytest.raises(ValueError, match='differs'):
             validate_config(plan, arm, {**cfg, key: value}, 'a' * 40)
+
+
+def test_incomplete_or_modified_diagnosis_blocks_campaign(tmp_path):
+    plan = {'source_commit': 'a' * 40, 'selected_ids': [str(i) for i in range(100)]}
+    (tmp_path / 'plan.json').write_text(json.dumps(plan))
+    output = tmp_path / 'diagnosis'
+    output.mkdir()
+    rows = [{'qid': q, 'exact_selected_quote_parity': True} for q in plan['selected_ids']]
+    (output / 'questions.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+    report = {'complete': True, 'parity': True, 'n': 100,
+              'source_commit': plan['source_commit'], 'plan_sha256': sha256(tmp_path / 'plan.json')}
+    def save(r):
+        (output / 'report.json').write_text(json.dumps(r))
+        (output / 'proofs.json').write_text(json.dumps({name: sha256(output / name)
+                                          for name in ('report.json', 'questions.jsonl')}))
+    save(report)
+    require_diagnosis(plan, tmp_path, lambda: None)
+    for key, value in [('complete', False), ('n', 99), ('source_commit', 'b' * 40)]:
+        save({**report, key: value})
+        with pytest.raises(ValueError, match='campaign blocked'):
+            require_diagnosis(plan, tmp_path, lambda: None)
+    save(report)
+    (output / 'questions.jsonl').write_text('changed')
+    with pytest.raises(ValueError, match='evidence changed'):
+        require_diagnosis(plan, tmp_path, lambda: None)

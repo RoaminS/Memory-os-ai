@@ -149,6 +149,7 @@ async def diagnose(plan, directory, check):
             effects[name][metric] = estimate(pairs, plan['seed'], plan['bootstrap'], check)
     write_json(output / 'report.json', {'complete': True, 'n': len(result), 'paired_vs_reference': effects,
               'parity': all(r['exact_selected_quote_parity'] for r in result),
+              'source_commit': plan['source_commit'], 'plan_sha256': sha256(directory / 'plan.json'),
               'qualifier': 'controlled lexical reconstruction with hash; historical CE is observational'})
     write_json(output / 'proofs.json', {name: sha256(output / name) for name in
                                       ('questions.jsonl', 'report.json', 'E1-granite-saved-audit.json',
@@ -187,7 +188,26 @@ def validate_config(plan, arm, cfg, revision):
         raise ValueError('Arm configuration differs from frozen plan')
 
 
+def require_diagnosis(plan, directory, check):
+    output = directory / 'diagnosis'
+    proof = json.loads((output / 'proofs.json').read_text())
+    if not {'questions.jsonl', 'report.json'} <= set(proof):
+        raise ValueError('Complete diagnosis proof required before any campaign')
+    for name, checksum in proof.items():
+        if Path(name).name != name or sha256(output / name, check=check) != checksum:
+            raise ValueError('Diagnosis evidence changed')
+    report = json.loads((output / 'report.json').read_text())
+    rows = [json.loads(line) for line in (output / 'questions.jsonl').read_text().splitlines()]
+    if (report.get('complete') is not True or report.get('parity') is not True
+            or report.get('n') != 100 or report.get('source_commit') != plan['source_commit']
+            or report.get('plan_sha256') != sha256(directory / 'plan.json')
+            or [r['qid'] for r in rows] != plan['selected_ids']
+            or not all(r.get('exact_selected_quote_parity') is True for r in rows)):
+        raise ValueError('Complete 100-case correct diagnosis required; campaign blocked')
+
+
 def run(plan, directory, revision, check):
+    require_diagnosis(plan, directory, check)
     outcomes = []
     for arm in plan['arms']:
         check()
