@@ -22,7 +22,7 @@ def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
         spec.loader.exec_module(module)
     cfg = module.Config(data_dir=data_dir, embed_model=model, device="cpu",
                         embed_batch_size=4, embed_max_seq_length=256, use_recency=False,
-                        rerank_model=None, store_backend="jsonl")
+                        rerank_model=None, store_backend="jsonl", bm25_profile="legacy", lexical_guard_k=0)
     result = asdict(cfg)
     overrides = overrides or {}
     if not isinstance(overrides, dict) or not set(overrides) <= ALLOWED:

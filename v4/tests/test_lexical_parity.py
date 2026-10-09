@@ -15,7 +15,7 @@ from memory_os_v4.text import lexical_tokens
 def config(root, **kw):
     return Config(data_dir=str(root), embed_model='hash', use_dense=False,
                   use_entities=False, use_recency=False, candidates=2,
-                  bm25_profile='scoped_literal', **kw)
+                  bm25_profile='scoped_literal', lexical_guard_k=0, **kw)
 
 
 @pytest.mark.parametrize('backend', ['jsonl', 'sqlite_s1'])

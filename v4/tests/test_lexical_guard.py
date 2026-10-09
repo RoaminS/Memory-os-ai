@@ -94,7 +94,28 @@ def test_invalid_policies_fail_before_creating_store(tmp_path, options):
     assert not root.exists()
 
 
-def test_old_defaults_remain_opt_in():
+def test_c4_defaults_and_sqlite_stays_opt_in():
     config = Config()
-    assert config.bm25_profile == 'legacy' and config.lexical_guard_k == 0
+    assert config.bm25_profile == 'scoped_literal' and config.lexical_guard_k == 3
+    assert config.store_backend == 'jsonl'
     config.validate_lexical_policy()
+
+
+@pytest.mark.parametrize('name,value', [('MEMORY_V4_BM25_PROFILE', 'legacy'),
+    ('MEMORY_V4_USE_BM25', 'false'), ('MEMORY_V4_LEXICAL_FIRST', 'true')])
+def test_existing_env_alternative_opts_out_of_default_guard(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    config = Config.from_env()
+    assert config.lexical_guard_k == 0
+    config.validate_lexical_policy()
+    monkeypatch.setenv('MEMORY_V4_LEXICAL_GUARD_K', '3')
+    with pytest.raises(ValueError):
+        Config.from_env().validate_lexical_policy()
+
+
+def test_benchmark_historical_base_is_not_redefined_by_release_defaults():
+    from bench.e2e.configuration import resolved_config
+    config = resolved_config('hash', '/unused')
+    assert config['bm25_profile'] == 'legacy' and config['lexical_guard_k'] == 0
+    c4 = resolved_config('hash', '/unused', {'bm25_profile': 'scoped_literal', 'lexical_guard_k': 3})
+    assert c4['lexical_guard_k'] == 3

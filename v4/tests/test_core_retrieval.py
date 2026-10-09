@@ -638,7 +638,8 @@ def test_full_candidate_scoring_still_uses_topn_for_candidate_generation(tmp_pat
     lists (Config.candidates) -- only scoring changes. With candidates=1,
     at most 1 dense + 1 bm25 + 1 entity hit feed the candidate union
     regardless of full_candidate_scoring."""
-    m = _make_memory(tmp_path, full_candidate_scoring=True, candidates=1)
+    m = _make_memory(tmp_path, full_candidate_scoring=True, candidates=1,
+                     bm25_profile="legacy", lexical_guard_k=0)
     for i in range(5):
         m.add_episode(f"Kraken note number {i} about rate limits.", project="p1", item_id=f"i{i}")
     hits = m.search("Kraken rate limits", top_k=10)
@@ -709,7 +710,7 @@ def test_rerank_blend_uses_default_symmetric_weight(tmp_path):
     contextual-header duplication, exact blend arithmetic via the recorded
     `signals["rerank"]`); the weight=0.7 test below demonstrates an actual
     order flip once the blend is no longer symmetric."""
-    m = _make_memory(tmp_path, rerank_model="fake/model", rerank_top_n=10)
+    m = _make_memory(tmp_path, rerank_model="fake/model", rerank_top_n=10, lexical_guard_k=0)
     m.add_episode("Kraken exchange API rate limit is 60 requests per minute.", project="p1", item_id="a")
     m.add_episode("A different note about Kraken deposits.", project="p1", item_id="b")
     fake = _FakeReranker({"Kraken exchange API rate limit is 60 requests per minute.": -5.0,

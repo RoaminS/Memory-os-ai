@@ -58,7 +58,8 @@ class Config:
     see docs/ARCHITECTURE.md's "Retrieval scoring" section for the RRF
     formula that was the *previous* default (kept there as the `fusion="rrf"`
     illustration; still fully supported, just no longer what ships). All
-    other fields (`w_dense`, `w_entity`, `use_recency`, the E1/E3/E6 ablation
+    4.0.2 adds scoped literal BM25 and the C4 three-rank lexical guard;
+    see docs/RELEASE_4_0_2_DECISIONS.md for evidence and rollback. Other fields (`w_dense`, `w_entity`, `use_recency`, the E1/E3/E6 ablation
     flags below, ...) are unchanged from pre-campaign defaults: they showed
     no reproducible, above-noise gain on their own (see docs/ABLATIONS.md).
     """
@@ -139,11 +140,11 @@ class Config:
     # E2 stem: Porter (English) + light suffix stripping (French) applied in
     # tokenize() for BM25 indexing/querying only (never for display text).
     use_stemming: bool = True  # was False pre-campaign; part of the winning combo
-    # Opt-in lexical parity: literal Unicode words over item.text, scoped corpus
+    # 4.0.2 lexical parity: literal Unicode words over item.text, scoped corpus
     # statistics and candidate selection BEFORE project/kind/validity filtering.
-    bm25_profile: str = "legacy"  # legacy | scoped_literal
+    bm25_profile: str = "scoped_literal"  # legacy | scoped_literal
     lexical_first: bool = False  # preserve positive lexical ranks; dense fills gaps
-    lexical_guard_k: int = 0  # final protected raw-BM25 prefix; 0 disables C4
+    lexical_guard_k: int = 3  # final protected raw-BM25 prefix; 0 disables C4
 
     def validate_lexical_policy(self) -> None:
         """Reject ambiguous rank policies before opening or modifying a store."""
@@ -315,6 +316,12 @@ class Config:
     def from_env(cls) -> "Config":
         """Build a :class:`Config`, applying ``MEMORY_V4_*`` overrides."""
         d = cls()
+        profile = _env_str("MEMORY_V4_BM25_PROFILE", d.bm25_profile)
+        bm25 = _env_bool("MEMORY_V4_USE_BM25", d.use_bm25)
+        lexical_first = _env_bool("MEMORY_V4_LEXICAL_FIRST", d.lexical_first)
+        # An existing explicit alternative policy opts out of the new default guard.
+        # An explicitly supplied nonzero guard still fails validation if incompatible.
+        guard_default = d.lexical_guard_k if profile == "scoped_literal" and bm25 and not lexical_first else 0
         return cls(
             data_dir=_env_str("MEMORY_V4_DIR", d.data_dir),
             store_backend=_env_str("MEMORY_V4_STORE_BACKEND", d.store_backend),
@@ -345,7 +352,7 @@ class Config:
             ),
             use_recency=_env_bool("MEMORY_V4_USE_RECENCY", d.use_recency),
             use_entities=_env_bool("MEMORY_V4_USE_ENTITIES", d.use_entities),
-            use_bm25=_env_bool("MEMORY_V4_USE_BM25", d.use_bm25),
+            use_bm25=bm25,
             use_dense=_env_bool("MEMORY_V4_USE_DENSE", d.use_dense),
             block_char_limit=_env_int("MEMORY_V4_BLOCK_CHAR_LIMIT", d.block_char_limit),
             episode_ttl_days=_env_int("MEMORY_V4_EPISODE_TTL_DAYS", d.episode_ttl_days),
@@ -356,9 +363,9 @@ class Config:
                 "MEMORY_V4_MULTI_VECTOR_CANDIDATE_MULT", d.multi_vector_candidate_mult
             ),
             use_stemming=_env_bool("MEMORY_V4_USE_STEMMING", d.use_stemming),
-            bm25_profile=_env_str("MEMORY_V4_BM25_PROFILE", d.bm25_profile),
-            lexical_first=_env_bool("MEMORY_V4_LEXICAL_FIRST", d.lexical_first),
-            lexical_guard_k=_env_int("MEMORY_V4_LEXICAL_GUARD_K", d.lexical_guard_k),
+            bm25_profile=profile,
+            lexical_first=lexical_first,
+            lexical_guard_k=_env_int("MEMORY_V4_LEXICAL_GUARD_K", guard_default),
             neighbor_expansion=_env_bool("MEMORY_V4_NEIGHBOR_EXPANSION", d.neighbor_expansion),
             neighbor_seed=_env_int("MEMORY_V4_NEIGHBOR_SEED", d.neighbor_seed),
             neighbor_decay=_env_float("MEMORY_V4_NEIGHBOR_DECAY", d.neighbor_decay),
