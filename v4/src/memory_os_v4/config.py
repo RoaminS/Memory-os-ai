@@ -278,7 +278,7 @@ class Config:
     # LoCoMo-equivalent of 2.0 (2.0 / (2.0 + 4.79) = 0.295). `None` falls
     # back to the absolute `facet_weight` (bench reproduction only).
     facet_share: float | None = 0.30
-    store_backend: str = "jsonl"  # "sqlite_s1" = fresh experimental stores only; not production
+    store_backend: str = "jsonl"  # "sqlite_s1" = experimental S2, fresh/S1 stores; not production
 
     def half_life_days(self, kind: str) -> float:
         """Recency half-life (days) applicable to a given item kind."""

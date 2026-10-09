@@ -76,6 +76,17 @@ def _requires_open(method):
     return guarded
 
 
+def _atomic_mutation(method):
+    """JSONL keeps its existing semantics; SQLite commits the whole facade call."""
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        if self.config.store_backend != "sqlite_s1":
+            return method(self, *args, **kwargs)
+        return self._sql_mutation(method.__name__, {"args": args, "kwargs": kwargs},
+                                  lambda: method(self, *args, **kwargs))
+    return guarded
+
+
 class MemoryV4:
     """Local-first long-term memory engine façade. Thread-safe via a single RLock."""
 
@@ -96,17 +107,23 @@ class MemoryV4:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self._closed = False
+        self._mutation_depth = 0
+        self._index_error = False
         self._writer_lock = WriterLock(self.data_dir)
         self._writer_finalizer = weakref.finalize(self, self._writer_lock.close)
         try:
-            self.requests = RequestJournal(self.data_dir)
             if self.config.store_backend == "sqlite_s1":
                 from .sqlite_store import SQLiteStore
+                from .sqlite_engine import SQLiteBlocks, SQLiteRequests
                 self.store = SQLiteStore(self.data_dir)
+                self.requests = SQLiteRequests(self.store)
+                self.blocks = SQLiteBlocks(self.store, self.config.block_char_limit)
+                self.blocks.mutate = self._sql_mutation
             else:
                 self.store = Store(self.data_dir)
+                self.requests = RequestJournal(self.data_dir)
+                self.blocks = BlockStore(self.data_dir / "blocks.jsonl", self.config.block_char_limit)
             self.embedder = _make_embedder(self.config)
-            self.blocks = BlockStore(self.data_dir / "blocks.jsonl", self.config.block_char_limit)
             self.llm = LLMClient()
 
             self._bm25_path = self.data_dir / "bm25.json"
@@ -142,6 +159,10 @@ class MemoryV4:
         self._writer_lock.assert_owner()
         if self._closed:
             raise RuntimeError("Memory engine is closed; open a new engine or use the shared HTTP server")
+        if getattr(self.store, "_poisoned", False):
+            raise RuntimeError("SQLite commit outcome uncertain; inspect/reopen before further operations")
+        if self._index_error:
+            raise RuntimeError("Derived index rebuild failed; reopen before further operations")
 
     def close(self) -> None:
         """Flush and release the lifetime writer lease, even when flushing fails."""
@@ -169,13 +190,96 @@ class MemoryV4:
         """Serialize the whole MCP handler, including direct block/store access."""
         with self._lock:
             self._ensure_open()
+            if self.config.store_backend == "sqlite_s1":
+                return self._sql_mutation(operation, payload, action, scope=scope, request_id=request_id)
             if request_id is None:
                 return action()
             return self.requests.execute(scope, request_id, operation, payload, action,
                                          lambda: sync_sources(self.data_dir))
 
+    def _sql_mutation(self, operation, payload, action, *, scope="__engine_internal__", request_id=None):
+        """One outer BEGIN IMMEDIATE, sources + final receipt, then acknowledgement.
+
+        Nested facade/handler/block mutations join the same transaction. Low-level
+        Store calls alone are not a public engine acknowledgement boundary.
+        """
+        with self._lock:
+            self._ensure_open()
+            if self._mutation_depth:
+                try:
+                    if request_id is not None:
+                        raise RuntimeError("Nested explicit requests are unsupported")
+                    return action()
+                except BaseException:
+                    self._mutation_failed = True
+                    raise
+            if request_id is not None and (not isinstance(request_id, str) or not request_id):
+                raise ValueError("request_id must be a nonempty string or None")
+            from .sqlite_engine import snapshot
+            payload = snapshot(payload)
+            request_id = uuid.uuid4().hex if request_id is None else request_id
+            found, previous = self.requests.lookup(scope, request_id, operation, payload)
+            if found:
+                return previous
+            self._mutation_depth += 1
+            self._mutation_failed = False
+            try:
+                with self.store.transaction():
+                    result = action()
+                    if self._mutation_failed:
+                        raise RuntimeError("Nested mutation failed; whole request must roll back")
+                    self._flush_sql_sources()
+                    # This is the final source write; COMMIT must precede return.
+                    self.requests.complete(scope, request_id, operation, payload, result)
+                return result
+            except BaseException:
+                if not self.store._poisoned:
+                    try:
+                        self.store.load()
+                        self.store.load_chunk_map()
+                        self.store._dirty_access.clear()
+                        self.blocks.load()
+                        self.requests.load()
+                        self.last_consolidated = self.store.meta.get("last_consolidated")
+                        self._rebuild_sql_indexes()
+                    except BaseException:
+                        self._index_error = True
+                        logger.exception("SQLite rollback source/index reload failed; engine disabled")
+                raise
+            finally:
+                self._mutation_depth -= 1
+
+    def _flush_sql_sources(self):
+        meta = dict(self.store.meta)
+        meta.update(embed_model=self.config.embed_model, dim=self.embedder.dim, version="4.0.1")
+        if self.last_consolidated is not None:
+            meta["last_consolidated"] = self.last_consolidated
+        self.store.save_meta(meta)
+        self.store.flush_access()
+        self.store.save_chunk_map()
+
+    def _rebuild_sql_indexes(self):
+        """Ignore every on-disk cache: committed SQLite records are sufficient."""
+        self.facet_index = FacetIndex()
+        self._reembed_all()
+        self._rebuild_bm25_entities()
+        if hasattr(self, "retriever"):
+            self.retriever.vector_index = self.vector_index
+            self.retriever.bm25 = self.bm25
+            self.retriever.entities = self.entities
+            self.retriever.facet_index = self.facet_index
+            self.retriever._nbr_cache = None
+            self.retriever._nbr_cache_n = -1
+            self.retriever._span_cache = None
+            self.retriever._span_cache_n = -1
+            self.retriever._chunk_cache = None
+            self.retriever._chunk_cache_n = -1
+
     # ------------------------------------------------------------- startup
     def _init_indexes(self) -> None:
+        if self.config.store_backend == "sqlite_s1":
+            self._rebuild_sql_indexes()
+            return
         dim = self.embedder.dim
         stored_model = self.store.meta.get("embed_model")
         stored_dim = self.store.meta.get("dim")
@@ -408,6 +512,7 @@ class MemoryV4:
 
     # --------------------------------------------------------------- writes
     @_requires_open
+    @_atomic_mutation
     def add_episode(
         self,
         text: str,
@@ -447,6 +552,7 @@ class MemoryV4:
             return items[0]
 
     @_requires_open
+    @_atomic_mutation
     def add_episodes_bulk(self, episodes: list[dict]) -> list[MemoryItem]:
         with self._lock:
             items = self._build_items(episodes, kind="episode")
@@ -465,6 +571,7 @@ class MemoryV4:
         return None
 
     @_requires_open
+    @_atomic_mutation
     def add_facts(
         self,
         facts: list[dict],
@@ -526,6 +633,7 @@ class MemoryV4:
             return {"added": added, "deduped": deduped, "superseded": superseded}
 
     @_requires_open
+    @_atomic_mutation
     def forget(self, item_id: str, reason: str = "", project: str | None = None) -> bool:
         """Soft-delete ``item_id`` (A5, additive façade method): marks it
         ``deleted=True`` in the store AND removes it from the vector/BM25/
@@ -553,6 +661,7 @@ class MemoryV4:
             return True
 
     @_requires_open
+    @_atomic_mutation
     def add_document(
         self, name: str, text: str, project: str = "default", doc_ref: str | None = None
     ) -> dict:
@@ -756,6 +865,7 @@ class MemoryV4:
 
     # ------------------------------------------------------------ upkeep
     @_requires_open
+    @_atomic_mutation
     def consolidate(self, dry_run: bool = False, project: str | None = None) -> dict:
         with self._lock:
             deduped = consolidate_mod.dedup_sweep(self.store, self.vector_index, self.config, dry_run, project=project)
@@ -803,8 +913,12 @@ class MemoryV4:
         }
 
     @_requires_open
+    @_atomic_mutation
     def flush(self) -> None:
         with self._lock:
+            if self.config.store_backend == "sqlite_s1":
+                # The outer transaction flushes SQL sources exactly once.
+                return
             ids, vecs = self.vector_index.export()
             self.store.save_embeddings(ids, vecs)
             self.store.save_chunk_map()
@@ -820,6 +934,7 @@ class MemoryV4:
             self.store.flush_access()
 
     @_requires_open
+    @_atomic_mutation
     def migrate_v3(self, log_path: str) -> dict:
         with self._lock:
             episode_specs, summary_specs, skipped = read_v3_log(log_path, self.store.items)

@@ -53,26 +53,15 @@ def engine_readiness(engine) -> tuple[bool, str]:
             return False, "model_not_loaded"
         if not engine.store.check_integrity():
             return False, "store_integrity"
-        blocks = {}
-        for record in _jsonl(engine.blocks.path):
-            scope = record.get("scope", "project")
-            project = None if scope == "global" else record.get("project", "default")
-            if (scope not in {"global", "project"} or not isinstance(record["name"], str)
-                    or not isinstance(record["text"], str)
-                    or (scope == "project" and (not isinstance(project, str) or not project or project == "*"))):
+        if engine.config.store_backend == "sqlite_s1":
+            if not engine.blocks.check_integrity():
                 return False, "blocks_integrity"
-            blocks[(project, record["name"])] = record
-        if set(blocks) != set(engine.blocks._blocks):
-            return False, "blocks_integrity"
-        for key, record in blocks.items():
-            block = engine.blocks._blocks[key]
-            if block.text != record["text"] or block.updated_at != record["updated_at"]:
-                return False, "blocks_integrity"
-        receipts = {}
-        for record in _jsonl(engine.requests.path):
-            receipts[(record["scope"], record["request_id"])] = record
-        if engine.requests._poisoned or receipts != engine.requests.records:
-            return False, "requests_integrity"
+            if not engine.requests.check_integrity():
+                return False, "requests_integrity"
+        else:
+            sources_ok, sources_reason = _jsonl_sources_ready(engine)
+            if not sources_ok:
+                return False, sources_reason
         live_ids = {item.id for item in engine.store.all(False)}
         indexed = {engine.store.chunk_owner.get(key, key) for key in engine.vector_index.ids()}
         if (indexed != live_ids or set(engine.bm25.doc_len) != live_ids
@@ -83,3 +72,27 @@ def engine_readiness(engine) -> tuple[bool, str]:
         return False, "integrity_check_failed"
     finally:
         engine._lock.release()
+
+
+def _jsonl_sources_ready(engine):
+    blocks = {}
+    for record in _jsonl(engine.blocks.path):
+        scope = record.get("scope", "project")
+        project = None if scope == "global" else record.get("project", "default")
+        if (scope not in {"global", "project"} or not isinstance(record["name"], str)
+                or not isinstance(record["text"], str)
+                or (scope == "project" and (not isinstance(project, str) or not project or project == "*"))):
+            return False, "blocks_integrity"
+        blocks[(project, record["name"])] = record
+    if set(blocks) != set(engine.blocks._blocks):
+        return False, "blocks_integrity"
+    for key, record in blocks.items():
+        block = engine.blocks._blocks[key]
+        if block.text != record["text"] or block.updated_at != record["updated_at"]:
+            return False, "blocks_integrity"
+    receipts = {}
+    for record in _jsonl(engine.requests.path):
+        receipts[(record["scope"], record["request_id"])] = record
+    if engine.requests._poisoned or receipts != engine.requests.records:
+        return False, "requests_integrity"
+    return True, "ready"

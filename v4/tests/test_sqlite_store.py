@@ -10,7 +10,7 @@ import pytest
 
 from memory_os_v4 import Config, MemoryItem, MemoryV4
 from memory_os_v4.readiness import engine_readiness
-from memory_os_v4.sqlite_store import APPLICATION_ID, MIN_SQLITE, SQLiteStore
+from memory_os_v4.sqlite_store import APPLICATION_ID, MIN_SQLITE, SCHEMA_VERSION, SQLiteStore
 
 pytestmark = pytest.mark.skipif(sqlite3.sqlite_version_info < MIN_SQLITE,
                                reason="SQLite S1 requires >= 3.51.3; this runtime is not qualified")
@@ -153,7 +153,7 @@ def test_future_schema_and_foreign_database_refused_without_downgrade(tmp_path):
     db = tmp_path / "store.sqlite3"
     conn = sqlite3.connect(db)
     conn.execute(f"PRAGMA application_id={APPLICATION_ID}")
-    conn.execute("PRAGMA user_version=2")
+    conn.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
     conn.close()
     before = db.read_bytes()
     with pytest.raises(ValueError, match="future"):

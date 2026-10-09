@@ -1,7 +1,6 @@
-"""ADR-001 S1: experimental SQLite implementation of the existing Store API.
+"""ADR-001 S2: SQLite authority, with injectable write boundaries.
 
-Fresh stores only; no migration. Blocks/receipts and whole engine transactions
-are NOT integrated yet (S2). Never enable on the live ALPHA store.
+The existing sqlite_s1 flag remains experimental. No implicit JSONL migration.
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
 APPLICATION_ID = 0x4D4F5334
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = (
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at REAL NOT NULL)",
@@ -36,6 +35,25 @@ SCHEMA = (
     "CREATE TRIGGER item_versions_no_delete BEFORE DELETE ON item_versions BEGIN SELECT RAISE(ABORT,'immutable version'); END",
 )
 
+SCHEMA_S2 = (
+    """CREATE TABLE block_versions(
+        sequence INTEGER PRIMARY KEY, block_key TEXT NOT NULL,
+        record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL)""",
+    "CREATE INDEX block_versions_key ON block_versions(block_key,sequence)",
+    "CREATE TRIGGER block_versions_no_update BEFORE UPDATE ON block_versions BEGIN SELECT RAISE(ABORT,'immutable version'); END",
+    "CREATE TRIGGER block_versions_no_delete BEFORE DELETE ON block_versions BEGIN SELECT RAISE(ABORT,'immutable version'); END",
+    """CREATE TABLE request_receipts(
+        sequence INTEGER PRIMARY KEY, scope TEXT NOT NULL, request_id TEXT NOT NULL,
+        record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL, UNIQUE(scope,request_id))""",
+    "CREATE TRIGGER receipts_no_update BEFORE UPDATE ON request_receipts BEGIN SELECT RAISE(ABORT,'immutable receipt'); END",
+    "CREATE TRIGGER receipts_no_delete BEFORE DELETE ON request_receipts BEGIN SELECT RAISE(ABORT,'immutable receipt'); END",
+)
+
+
+def schema_checksums():
+    return [(version, hashlib.sha256("\n".join(statements).encode()).hexdigest())
+            for version, statements in ((1, SCHEMA), (2, SCHEMA_S2))]
+
 
 def _json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -50,6 +68,10 @@ def validate_sqlite_target(directory: Path) -> None:
     db = directory / "store.sqlite3"
     if (directory / "items.jsonl").exists():
         raise ValueError("No implicit JSONL migration or dual item authority; use a fresh test store")
+    for name in ("blocks.jsonl", "requests.jsonl"):
+        path = directory / name
+        if path.exists() and path.stat().st_size:
+            raise ValueError("JSONL blocks/receipts present: offline migration required; no dual authority")
     if not db.exists() and any((directory / name).exists()
                               for name in ("blocks.jsonl", "requests.jsonl", "meta.json")):
         raise ValueError("SQLite S1 requires a fresh test store; migration is not implemented")
@@ -78,17 +100,23 @@ class SQLiteStore(Store):
         if fresh:
             fd = os.open(self.db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
+        version = 0
         self._sql_lock = RLock()
         self._depth = 0
         self._poisoned = False
+        self.fault_hook = None  # Test-only callback; receives every mutation boundary.
         self._connection = sqlite3.connect(self.db_path, isolation_level=None, timeout=5,
                                            check_same_thread=False)
         try:
             if not fresh:
                 app_id = self._connection.execute("PRAGMA application_id").fetchone()[0]
                 version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-                if app_id != APPLICATION_ID or version != SCHEMA_VERSION:
+                if app_id != APPLICATION_ID or version not in (1, SCHEMA_VERSION):
                     raise ValueError("Unknown/future SQLite schema; no implicit downgrade")
+                if self._connection.execute(
+                    "SELECT version,checksum FROM schema_migrations ORDER BY version"
+                ).fetchall() != schema_checksums()[:version]:
+                    raise ValueError("SQLite schema checksum mismatch; upgrade refused")
             self._connection.execute("PRAGMA foreign_keys=ON")
             mode = self._connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
             self._connection.execute("PRAGMA synchronous=FULL")
@@ -100,20 +128,28 @@ class SQLiteStore(Store):
             if mode != "wal" or settings != {"foreign_keys": 1, "synchronous": 2,
                                             "fullfsync": 1, "checkpoint_fullfsync": 1}:
                 raise RuntimeError("Required SQLite WAL/durability settings unavailable")
-            if fresh:
+            if fresh or version < SCHEMA_VERSION:
                 self._connection.execute("BEGIN IMMEDIATE")
                 try:
-                    for statement in SCHEMA:
-                        self._connection.execute(statement)
-                    checksum = hashlib.sha256("\n".join(SCHEMA).encode()).hexdigest()
-                    self._connection.execute("INSERT INTO schema_migrations VALUES(?,?,?)",
-                                             (SCHEMA_VERSION, checksum, time.time()))
+                    for migration, statements in ((1, SCHEMA), (2, SCHEMA_S2)):
+                        if not fresh and migration <= version:
+                            continue
+                        for statement in statements:
+                            self._connection.execute(statement)
+                        self._connection.execute("INSERT INTO schema_migrations VALUES(?,?,?)",
+                                                 (*schema_checksums()[migration - 1], time.time()))
                     self._connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
                     self._connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                     self._connection.execute("COMMIT")
                 except BaseException:
                     self._connection.execute("ROLLBACK")
                     raise
+            if os.name != "nt":
+                fd = os.open(data_dir, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
             super().__init__(data_dir)
             if not self.check_integrity():
                 raise RuntimeError("SQLite source integrity failed")
@@ -129,28 +165,58 @@ class SQLiteStore(Store):
                 raise RuntimeError("SQLite commit outcome uncertain; inspect/reopen before further writes")
             level = self._depth
             savepoint = f"store_{level}"
-            self._connection.execute("BEGIN IMMEDIATE" if level == 0 else f"SAVEPOINT {savepoint}")
+            if level == 0:
+                self._fault("before_begin")
+            try:
+                self._connection.execute("BEGIN IMMEDIATE" if level == 0 else f"SAVEPOINT {savepoint}")
+            except BaseException:
+                if self._connection.in_transaction:
+                    self._poisoned = True
+                raise
             self._depth += 1
             committing = False
             try:
+                if level == 0:
+                    self._fault("after_begin")
                 yield self
+                if level == 0:
+                    self._fault("before_commit")
                 committing = True
                 self._connection.execute("COMMIT" if level == 0 else f"RELEASE SAVEPOINT {savepoint}")
+                if level == 0:
+                    self._fault("after_commit")
             except BaseException:
                 if committing:
                     self._poisoned = True  # No blind retry after an ambiguous commit exception.
-                if self._connection.in_transaction:
-                    if level == 0:
-                        self._connection.execute("ROLLBACK")
-                    else:
-                        self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                        self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
-                self.load()
-                self.load_chunk_map()
-                self._dirty_access.clear()
+                try:
+                    if self._connection.in_transaction:
+                        if level == 0:
+                            self._connection.execute("ROLLBACK")
+                        else:
+                            self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                            self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    self.load()
+                    self.load_chunk_map()
+                    self._dirty_access.clear()
+                except BaseException:
+                    self._poisoned = True  # Recovery failure cannot expose uncommitted state as ready.
+                    raise
                 raise
             finally:
                 self._depth -= 1
+
+    def _fault(self, point: str) -> None:
+        if self.fault_hook is not None:
+            self.fault_hook(point)
+
+    def write(self, label: str, sql: str, parameters=()):
+        """All S2 DML passes here; injection runs before and after each write."""
+        if not self._connection.in_transaction:
+            raise RuntimeError("SQLite source write requires an explicit transaction")
+        self._fault(f"before_{label}")
+        result = self._connection.execute(sql, parameters)
+        self._fault(f"after_{label}")
+        return result
 
     def load(self) -> None:
         with self._sql_lock:
@@ -180,16 +246,16 @@ class SQLiteStore(Store):
                     raise ValueError("An item cannot change project/kind")
                 revision = old[2] + 1 if old else 1
                 record = _json(item.to_dict())
-                self._connection.execute("INSERT INTO item_versions VALUES(?,?,?,?,?)",
+                self.write("item_version", "INSERT INTO item_versions VALUES(?,?,?,?,?)",
                                          (item.id, revision, record, hashlib.sha256(record.encode()).hexdigest(), time.time()))
-                self._connection.execute("INSERT INTO items VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE "
+                self.write("item_head", "INSERT INTO items VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE "
                                          "SET current_revision=excluded.current_revision",
                                          (item.id, item.project, item.kind, revision))
                 self.items[item.id] = item
 
     def save_meta(self, meta: dict) -> None:
         with self.transaction():
-            self._connection.execute("INSERT INTO store_metadata VALUES('metadata',?) "
+            self.write("metadata", "INSERT INTO store_metadata VALUES('metadata',?) "
                                      "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", (_json(meta),))
             self.meta = dict(meta)
 
@@ -201,7 +267,7 @@ class SQLiteStore(Store):
     def save_chunk_map(self, chunk_owner: dict[str, str] | None = None) -> None:
         with self.transaction():
             value = self.chunk_owner if chunk_owner is None else chunk_owner
-            self._connection.execute("INSERT INTO store_metadata VALUES('chunk_map',?) "
+            self.write("chunk_map", "INSERT INTO store_metadata VALUES('chunk_map',?) "
                                      "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", (_json(value),))
             self.chunk_owner = dict(value)
 
@@ -226,10 +292,7 @@ class SQLiteStore(Store):
                     return False
                 if self._connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     return False
-                expected = hashlib.sha256("\n".join(SCHEMA).encode()).hexdigest()
-                if self._connection.execute("SELECT version,checksum FROM schema_migrations").fetchall() != [
-                    (SCHEMA_VERSION, expected)
-                ]:
+                if self._connection.execute("SELECT version,checksum FROM schema_migrations ORDER BY version").fetchall() != schema_checksums():
                     return False
                 for item_id, record, checksum in self._connection.execute(
                     "SELECT item_id,record_json,record_sha256 FROM item_versions"
@@ -263,6 +326,12 @@ class SQLiteStore(Store):
                 for row in self._connection.execute("SELECT value_json FROM store_metadata"):
                     if not isinstance(json.loads(row[0]), dict):
                         return False
+                for table in ("block_versions", "request_receipts"):
+                    for record, checksum in self._connection.execute(
+                        f"SELECT record_json,record_sha256 FROM {table}"
+                    ):
+                        if hashlib.sha256(record.encode()).hexdigest() != checksum:
+                            return False
                 return True
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
                 return False
