@@ -36,11 +36,15 @@ async def evaluate(inputs, system, cfg, root):
         raise ValueError("Shared ingestion budget exceeded")
     phase = {"extraction_ms": extraction_ms}
     calls = 0
-    retrieval_k = max(cfg["top_k"], cfg.get("trace_k", 0))
+    # Multi-query retrieval oversamples in proportion to requested top_k.
+    # Diagnostics MUST NOT widen its primary ranking. Only E5 intentionally
+    # widens the pool to build a context with distinct source turns.
+    retrieval_k = max(cfg["top_k"], cfg.get("trace_k", 0)) if cfg.get("unique_turns") else cfg["top_k"]
     t = time.perf_counter()
     queries = extra_queries(inputs.question, cfg.get("query_mode", "none")) if system == "memory" else []
     phase["planning_ms"] = (time.perf_counter() - t) * 1000
     trace = []
+    candidate_trace = []
     usage_phases = {}
     warm_times = []
     if system == "memory":
@@ -67,6 +71,14 @@ async def evaluate(inputs, system, cfg, root):
             trace = [{**h, "turn_id": quote_by_id[h["id"]].turn_id} for h in result["results"]]
             if cfg.get("reranker") and trace and not any("rerank" in h["signals"] for h in trace):
                 raise RuntimeError("Configured reranker did not execute; silent fallback forbidden in evaluation")
+            if cfg.get("trace_k", 0) > retrieval_k:
+                t = time.perf_counter()
+                diagnostic = await adapter.search(inputs.id, inputs.question, cfg["trace_k"],
+                                                  queries=queries or None, rerank=bool(cfg.get("reranker")))
+                phase["diagnostic_trace_ms"] = (time.perf_counter() - t) * 1000
+                calls += 1
+                candidate_trace = [{**h, "turn_id": quote_by_id[h["id"]].turn_id}
+                                   for h in diagnostic["results"]]
             for _ in range(cfg.get("warm_searches", 0)):
                 t = time.perf_counter()
                 await adapter.search(inputs.id, inputs.question, retrieval_k,
@@ -86,6 +98,11 @@ async def evaluate(inputs, system, cfg, root):
         t = time.perf_counter()
         ranked = retriever.search(inputs.question, retrieval_k)
         phase["retrieval_ms"] = (time.perf_counter() - t) * 1000
+        if cfg.get("trace_k", 0) > retrieval_k:
+            t = time.perf_counter()
+            diagnostic = retriever.search(inputs.question, cfg["trace_k"])
+            phase["diagnostic_trace_ms"] = (time.perf_counter() - t) * 1000
+            candidate_trace = [{"id": q.id, "turn_id": q.turn_id} for q in diagnostic]
         for _ in range(cfg.get("warm_searches", 0)):
             t = time.perf_counter()
             retriever.search(inputs.question, retrieval_k)
@@ -106,6 +123,9 @@ async def evaluate(inputs, system, cfg, root):
             "warm_search_ms": warm_times,
             "queries": queries, "query_expansion_bytes": sum(len(q.encode()) for q in queries),
             "rank_trace": trace if cfg.get("trace_k", 0) else [],
+            "candidate_trace": candidate_trace,
+            "candidate_trace_request_k": cfg.get("trace_k", 0),
+            "primary_request_k": retrieval_k,
             "ranked_quote_ids": [q.id for q in ranked] if cfg.get("trace_k", 0) else [],
             "selected_quote_ids": [q.id for q in context],
             "capture_bytes": sum(len(t.content.encode()) for t in inputs.turns),

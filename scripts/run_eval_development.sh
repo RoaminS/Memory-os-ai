@@ -29,6 +29,6 @@ case "$task_stage" in
       --source-commit "$task_revision" --output "$task_clone/.local-qualification/$task_name" ;;
   run)
     exec nice -n 15 "$task_python" -m bench.e2e.experiments run \
-      --plan-dir "$task_clone/.local-qualification/$task_name" ;;
+      --source-commit "$task_revision" --plan-dir "$task_clone/.local-qualification/$task_name" ;;
   *) echo 'Unknown stage' >&2; exit 2 ;;
 esac

@@ -106,7 +106,9 @@ def main(argv=None):
             raise ValueError('Missing/duplicate historical predictions; denominators unsafe')
         report, rescored, examples = diagnostic(rows, golds, check=check)
         check()
-        if sha256(frozen_path) != proof[frozen_path.name] or sha256(prediction_path) != proof[prediction_path.name]:
+        if (sha256(frozen_path) != proof[frozen_path.name] or
+                sha256(prediction_path) != proof[prediction_path.name] or
+                sha256(data, check=check) != frozen['dataset']['sha256']):
             raise ValueError('Historical inputs changed during re-score')
         output.mkdir(mode=0o700)
         write_json(output / 'report.json', report)

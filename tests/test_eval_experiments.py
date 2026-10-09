@@ -206,7 +206,9 @@ def test_campaign_stops_after_failed_arm_without_trying_next(tmp_path, monkeypat
     assert not (tmp_path / 'campaign-complete.json').exists()
 
 
-def test_warm_queries_count_cost_without_replacing_first_prediction(tmp_path, monkeypatch):
+@pytest.mark.parametrize('warm_searches,trace_k,expected_calls', [(3, 0, 5), (0, 100, 3)])
+def test_warm_queries_count_cost_without_replacing_first_prediction(tmp_path, monkeypatch,
+                                                                    warm_searches, trace_k, expected_calls):
     t = data.Turn('turn', 's', 'user', 'Paris', '2023-01-01T00:00:00+00:00')
     inputs = data.Inputs('q', (t,), 'What city?', t.date)
     class Client:
@@ -225,9 +227,10 @@ def test_warm_queries_count_cost_without_replacing_first_prediction(tmp_path, mo
             return {'hits': [{'id': self.quote['item_id'], 'text': self.quote['text'],
                               'score': 1, 'signals': {}}] if self.searches == 1 else []}
     monkeypatch.setattr(worker, 'ToolClient', Client)
-    cfg = {'run_id': 'run', 'model': 'hash', 'transport': 'dispatch', 'warm_searches': 3,
+    cfg = {'run_id': 'run', 'model': 'hash', 'transport': 'dispatch', 'warm_searches': warm_searches, 'trace_k': trace_k,
            'top_k': 10, 'context_bytes': 12000, 'ingest_bytes': 10000}
     row = asyncio.run(worker.evaluate(inputs, 'memory', cfg, tmp_path))
     assert row['retrieved_turn_ids'] == ['turn']
-    assert row['tool_calls'] == 5 and len(row['warm_search_ms']) == 3
+    assert row['tool_calls'] == expected_calls and len(row['warm_search_ms']) == warm_searches
+    assert row['primary_request_k'] == 10
     assert row['shutdown_ms'] >= 0

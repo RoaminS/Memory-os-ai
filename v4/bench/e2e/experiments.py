@@ -75,10 +75,12 @@ def prepare(data, output, revision, check):
     return plan
 
 
-def execute(directory, check):
+def execute(directory, check, revision=None):
     clone, directory = private_path(directory)
     plan_path = directory / 'plan.json'
     plan = json.loads(plan_path.read_text())
+    if revision is not None and plan['source_commit'] != revision:
+        raise ValueError('Declared source differs from preregistration')
     receipt = json.loads((directory / 'receipt.json').read_text())
     if sha256(plan_path) != receipt['plan_sha256'] or plan['arms'] != arms():
         raise ValueError('Preregistration changed')
@@ -132,6 +134,7 @@ def main(argv=None):
     a.add_argument('--source-commit', required=True)
     a = sub.add_parser('run')
     a.add_argument('--plan-dir', type=Path, required=True)
+    a.add_argument('--source-commit', required=True)
     args = p.parse_args(argv)
     limits = Limits()
     clone = Path(__file__).resolve().parents[3]
@@ -151,7 +154,7 @@ def main(argv=None):
             plan = prepare(args.data, args.output, args.source_commit, check)
             print(json.dumps({'plan': str(args.output / 'plan.json'), 'arms': len(plan['arms'])}))
         else:
-            execute(args.plan_dir, check)
+            execute(args.plan_dir, check, args.source_commit)
         return 0
     except (ResourceStop, ValueError, OSError) as exc:
         print(f'STOP: {exc}', file=sys.stderr)
