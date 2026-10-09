@@ -33,8 +33,15 @@ def _non_finite(token: str):
     raise StoreCheckError(f"non-finite number {token}")
 
 
+def _finite_float(token: str):
+    value = float(token)
+    if not math.isfinite(value):
+        raise StoreCheckError("overflowing JSON number")
+    return value
+
+
 def loads_strict(data: bytes | str):
-    return json.loads(data, object_pairs_hook=_no_dup, parse_constant=_non_finite)
+    return json.loads(data, object_pairs_hook=_no_dup, parse_constant=_non_finite, parse_float=_finite_float)
 
 
 def _jsonl(name: str, data: bytes) -> list[dict]:

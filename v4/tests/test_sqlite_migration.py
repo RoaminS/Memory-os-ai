@@ -216,7 +216,7 @@ def test_hash_search_brief_timeline_unchanged_on_comparison_copy(tmp_path, monke
 
 
 @pytest.mark.parametrize(
-    "damage", ["truncated", "malformed", "duplicate", "nan", "pending_state", "kind_change", "linked"]
+    "damage", ["truncated", "malformed", "duplicate", "nan", "overflow", "pending_state", "kind_change", "linked"]
 )
 def test_invalid_source_refused_without_source_or_target_change(tmp_path, damage):
     source = source_fixture(tmp_path / "source")
@@ -229,6 +229,8 @@ def test_invalid_source_refused_without_source_or_target_change(tmp_path, damage
         (source / "meta.json").write_text('{"version":1,"version":2}')
     elif damage == "nan":
         (source / "meta.json").write_text('{"value":NaN}')
+    elif damage == "overflow":
+        (source / "meta.json").write_text('{"nested":{"value":1e999}}')
     elif damage == "pending_state":
         write_log(
             source / "requests.jsonl",
