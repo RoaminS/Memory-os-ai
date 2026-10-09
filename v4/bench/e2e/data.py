@@ -34,6 +34,40 @@ class Gold:
     category: str
     sessions: tuple[str, ...]  # observable source identities, for clustered CI
     excluded_future_turns: int
+    turn_aliases: tuple[tuple[str, str], ...] = ()  # scorer-only physical -> source turn
+
+
+SESSION_POLICY = 'identical-session-copies-with-dates-v2'
+
+
+def session_copies(entry: dict) -> tuple[list[str], list[dict]]:
+    """Physical identities use observables only; reject conflicting duplicates."""
+    sessions, ids, dates = entry['haystack_sessions'], entry['haystack_session_ids'], entry['haystack_dates']
+    if not len(sessions) == len(ids) == len(dates):
+        raise ValueError('Ambiguous session alignment')
+    groups: dict[str, list[int]] = {}
+    for i, sid in enumerate(ids):
+        if not isinstance(sid, str) or not sid:
+            raise ValueError('Nonempty string session id required')
+        groups.setdefault(sid, []).append(i)
+    physical = list(ids)
+    audit = []
+    for sid, positions in groups.items():
+        if len(positions) < 2:
+            continue
+        payloads = [json.dumps([(t['role'], t.get('content') or '') for t in sessions[i]],
+                              ensure_ascii=False, separators=(',', ':')) for i in positions]
+        if len(set(payloads)) != 1:
+            raise ValueError('Ambiguous session alignment: duplicate session contents differ')
+        for i in positions:
+            identity = json.dumps([sid, iso_date(dates[i]), i], ensure_ascii=False)
+            physical[i] = 'copy-' + hashlib.sha256(identity.encode()).hexdigest()
+        audit.append({'question_id': str(entry['question_id']), 'source_session_id': sid,
+                      'positions': positions, 'dates': [iso_date(dates[i]) for i in positions],
+                      'observable_sha256': hashlib.sha256(payloads[0].encode()).hexdigest()})
+    if len(set(physical)) != len(physical):
+        raise ValueError('Physical session identity collision')
+    return physical, audit
 
 
 def sha256(path: Path, check=None) -> str:
@@ -125,18 +159,20 @@ def cases(path: Path, check=None) -> Iterator[tuple[Inputs, Gold]]:
         seen.add(qid)
         case_id = hashlib.sha256(qid.encode()).hexdigest()[:24]
         sessions, ids, dates = e["haystack_sessions"], e["haystack_session_ids"], e["haystack_dates"]
-        if not len(sessions) == len(ids) == len(dates) or len(set(ids)) != len(ids):
-            raise ValueError("Ambiguous session alignment")
+        physical, _ = session_copies(e)
         query_date = iso_date(e["question_date"])
-        turns, evidence = [], []
+        turns, evidence, aliases = [], [], []
         excluded = 0
-        for session, sid, date in zip(sessions, ids, dates):
+        for session, sid, physical_sid, date in zip(sessions, ids, physical, dates):
             date = iso_date(date)
             for ti, t in enumerate(session):
-                tid = f"{sid}:{ti}"
+                tid = f"{physical_sid}:{ti}"
+                source_tid = f"{sid}:{ti}"
+                if physical_sid != sid:
+                    aliases.append((tid, source_tid))
                 # Gold is scorer-only, even when the associated turn is future.
                 if t.get("has_answer"):
-                    evidence.append(tid)
+                    evidence.append(source_tid)
                 content = t.get("content") or ""
                 if date > query_date:
                     excluded += 1
@@ -144,14 +180,14 @@ def cases(path: Path, check=None) -> Iterator[tuple[Inputs, Gold]]:
                 if t["role"] not in {"user", "assistant", "system", "doc"}:
                     raise ValueError("Unknown speaker role")
                 if content.strip():
-                    turns.append(Turn(tid, str(sid), t["role"], content, date))
+                    turns.append(Turn(tid, physical_sid, t["role"], content, date))
         # Stable chronological replay; preserves source order within a session.
         turns.sort(key=lambda t: t.date)
         answer = e.get("answer")
         answers = answer if isinstance(answer, list) else [answer]
         yield Inputs(case_id, tuple(turns), str(e["question"]), query_date), Gold(
             qid, tuple(evidence), tuple(str(a) for a in answers if a is not None),
-            str(e.get("question_type", "unknown")), tuple(map(str, ids)), excluded,
+            str(e.get("question_type", "unknown")), tuple(map(str, ids)), excluded, tuple(aliases),
         )
 
 
@@ -159,7 +195,10 @@ def inventory(path: Path, variant: str, check=None) -> dict:
     counts: dict[str, int] = {}
     n = no_evidence = sessions = future = 0
     all_oracle = True
+    duplicate_audit = []
     for e in array_entries(path, check=check):
+        _, audit = session_copies(e)
+        duplicate_audit.extend(audit)
         n += 1
         category = str(e.get("question_type", "unknown"))
         counts[category] = counts.get(category, 0) + 1
@@ -173,4 +212,6 @@ def inventory(path: Path, variant: str, check=None) -> dict:
     return {"variant": variant, "questions": n, "sessions": sessions,
             "empty_evidence_questions": no_evidence, "categories": counts,
             "future_turns_excluded": future, "all_haystacks_oracle": all_oracle,
-            "path": str(path.resolve()), "bytes": path.stat().st_size, "sha256": sha256(path, check=check)}
+            "path": str(path.resolve()), "bytes": path.stat().st_size, "sha256": sha256(path, check=check),
+            "session_policy": SESSION_POLICY, "duplicate_session_groups": duplicate_audit,
+            "duplicate_question_ids": sorted({a['question_id'] for a in duplicate_audit})}

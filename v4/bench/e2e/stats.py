@@ -12,9 +12,13 @@ from .answers import normalize as normalize, response_metrics
 
 def score(ids: list[str], response: str | None, gold: Gold, k: int) -> dict:
     unique = list(dict.fromkeys(ids))[:k]
+    aliases = dict(gold.turn_aliases)
+    canonical = [aliases.get(tid, tid) for tid in unique]
     evidence = set(gold.evidence)
-    found = len(evidence & set(unique))
-    relevant = [i for i, tid in enumerate(unique, 1) if tid in evidence]
+    found = len(evidence & set(canonical))
+    seen_relevant = set()
+    relevant = [i for i, tid in enumerate(canonical, 1)
+                if tid in evidence and not (tid in seen_relevant or seen_relevant.add(tid))]
     ideal = sum(1 / math.log2(i + 1) for i in range(1, min(k, len(evidence)) + 1))
     return {"recall": found / len(evidence) if evidence else None,
             "mrr": 1 / relevant[0] if relevant else (0.0 if evidence else None),
