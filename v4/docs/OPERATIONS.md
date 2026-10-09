@@ -24,17 +24,25 @@ Install the ops extra: `pip install 'memory-os-ai[ops]'` (adds `cryptography` fo
 
 ## 2. Installation (macOS)
 ```bash
-memory-os-admin token create                       # 0600 token file, never displayed
-memory-os-admin setup --write-launchd ~/memory-os-launchd
+pip install 'memory-os-ai[ops]'
+memory-os-admin setup --write-launchd ~/memory-os-launchd   # creates the 0600 token if missing (never displayed)
 cp ~/memory-os-launchd/*.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.memory-os-v4.plist
-memory-os-admin health
+memory-os-admin doctor                                       # read-only check of everything, exit 1 on failure
 ```
+`doctor` checks the token and backup key files, the server (`/health` 200 with the token, 401 without), `/ready`
+and the build identity, the launchd job, the strict structure of the store, the last verified backup, and every
+known AI client configuration (Claude Code, Claude Desktop, Codex, VS Code / GitHub Copilot, Cursor, Antigravity,
+Gemini CLI, Grok CLI, Windsurf): `relay` is OK; `direct-http` will get 401 from a secured server; `legacy-v3` is a
+separate old memory. `--json` gives machine-readable output.
+
 `setup` prints the client configuration. All clients go through `memory-os-relay` (stdio), which reads the token
 file itself, so no secret is ever written into a client configuration:
 - **Claude Code** `~/.mcp.json` and **Claude Desktop** `claude_desktop_config.json` →
   `{"mcpServers": {"memory-os-ai": {"command": "<python>", "args": ["-m", "memory_os_v4.ops.relay"]}}}`.
   Claude Desktop rewrites its config from memory: edit it **with the app closed**.
+- **VS Code / GitHub Copilot, Cursor, Antigravity, Gemini CLI, Windsurf, Grok** → snippets printed by `setup`
+  (each points to the same relay).
 - **Codex** → `codex mcp add memory-os-ai -- <python> -m memory_os_v4.ops.relay`; optionally
   `default_tools_approval_mode = "approve"` under `[mcp_servers.memory-os-ai]` to skip per-call approval.
 - **Claude Code hooks** (`~/.claude/settings.json`): `SessionStart` → `memory-os-admin hook session-start` injects the

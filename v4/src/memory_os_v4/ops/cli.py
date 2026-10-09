@@ -131,8 +131,16 @@ def _plist(
 
 
 def cmd_setup(args, s: OpsSettings) -> int:
+    from .auth import create_token
+    from .clients import CLIENTS, snippet
+
+    try:  # one-command installation: the token is created when missing (never printed, never overwritten)
+        created = create_token(s.token_file)
+    except (ValueError, OSError) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 1
+    print(f"# token: {'created' if created else 'exists and is valid'} — {s.token_file} (0600, never printed)")
     py = sys.executable
-    relay = {"command": py, "args": ["-m", "memory_os_v4.ops.relay"]}  # env added below
     # Every NON-secret setting is propagated; the token stays in its 0600 file (only its path is written).
     env = {
         "MEMORY_V4_DIR": str(s.store_dir),
@@ -165,16 +173,12 @@ def cmd_setup(args, s: OpsSettings) -> int:
     hook_env = "env " + " ".join(
         shlex.quote(f"{k}={env[k]}") for k in ("MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE", "MEMORY_V4_OPS_DIR")
     )
-    print("# 1. Claude Code (~/.mcp.json) and Claude Desktop (claude_desktop_config.json, app closed):")
-    _print_json({"mcpServers": {"memory-os-ai": {**relay, "env": relay_env}}})
-    print("\n# 2. Codex:")
-    print(
-        "codex mcp add memory-os-ai "
-        + " ".join(f"--env {shlex.quote(f'{k}={v}')}" for k, v in relay_env.items())
-        + " -- "
-        + " ".join(shlex.quote(a) for a in [relay["command"], *relay["args"]])
-    )
-    print("\n# 3. Claude Code hooks (~/.claude/settings.json, merge into 'hooks'):")
+    print("# 1. Connect each AI client through the relay (the relay reads the token file; no secret in configs):")
+    for client in CLIENTS:
+        note = f" — {client.note}" if client.note else ""
+        print(f"\n## {client.name} (~/{client.path}){note}")
+        print(snippet(client, py, relay_env))
+    print("\n# 2. Claude Code hooks (~/.claude/settings.json, merge into 'hooks'):")
     _print_json(
         {
             "SessionStart": [
@@ -242,13 +246,26 @@ def cmd_setup(args, s: OpsSettings) -> int:
         for name, xml in jobs.items():
             (out / f"{name}.plist").write_text(xml)
         print(
-            f"\n# 4. launchd jobs written to {out} — copy to ~/Library/LaunchAgents, then "
+            f"\n# 3. launchd jobs written to {out} — copy to ~/Library/LaunchAgents, then "
             f"`launchctl bootstrap gui/$(id -u) <plist>` (after editing a plist: bootout + bootstrap)."
         )
     else:
-        print(f"\n# 4. launchd jobs: rerun with --write-launchd DIR ({', '.join(jobs)})")
-    print("\n# Then: memory-os-admin token create && memory-os-admin health")
+        print(f"\n# 3. launchd jobs: rerun with --write-launchd DIR ({', '.join(jobs)})")
+    print("\n# 4. Then check everything: memory-os-admin doctor")
     return 0
+
+
+def cmd_doctor(args, s: OpsSettings) -> int:
+    from dataclasses import asdict
+
+    from .doctor import render, run
+
+    checks = run(s)
+    if args.json:
+        _print_json([asdict(c) for c in checks])
+    else:
+        print(render(checks))
+    return 1 if any(c.status == "FAIL" for c in checks) else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -270,6 +287,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-server", action="store_true")
     k = sub.add_parser("hook")
     k.add_argument("name", choices=["session-start", "stop-nudge"])
+    dr = sub.add_parser("doctor", help="read-only check of the whole installation and of every AI client")
+    dr.add_argument("--json", action="store_true")
     st = sub.add_parser("setup")
     st.add_argument("--write-launchd", metavar="DIR")
     args = p.parse_args(argv)
@@ -282,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         "restore-drill": cmd_restore_drill,
         "hook": cmd_hook,
         "setup": cmd_setup,
+        "doctor": cmd_doctor,
     }[args.cmd]
     return handler(args, s)
 
