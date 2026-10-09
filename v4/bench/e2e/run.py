@@ -30,6 +30,13 @@ from .processes import cleanup
 SYSTEMS = ["memory", "bm25", "dense", "files", "full-context"]
 
 
+def capture_namespace(seed: int) -> str:
+    # Stores/processes are private per case. Keep citation ids and tie-breaking
+    # identical across treatments. Dataset checksums include gold annotations:
+    # NEVER feed them into ids/tie-breaking; retain checksums for proof only.
+    return hashlib.sha256(json.dumps(["e2e-quotes-v1", seed]).encode()).hexdigest()
+
+
 def model_record(model: str, check=None) -> dict:
     if model == "hash":
         return {"id": "hash", "revision": "deterministic-core-source", "neural": False,
@@ -207,8 +214,9 @@ def main(argv=None) -> int:
         code = code_record()
         verify_source(clone, args.source_commit, code)
         cfg = {"stage": "exploratory (historically tuned oracle; NOT held-out qualification)",
-               "protocol": "e2e-quotes-v1", "run_id": hashlib.sha256(
-                   json.dumps([data["sha256"], args.source_commit, args.seed, str(output)]).encode()).hexdigest(),
+               "protocol": "e2e-quotes-v1", "run_id": capture_namespace(
+                   args.seed),
+               "campaign_id": hashlib.sha256(str(output).encode()).hexdigest(),
                "source_commit": args.source_commit, "code_files": code, "data": str(args.data.resolve()),
                "process_owner": uuid.uuid4().hex,
                "dataset": data, "selected_ids": selection, "limit": len(golds), "systems": systems,

@@ -234,3 +234,26 @@ def test_warm_queries_count_cost_without_replacing_first_prediction(tmp_path, mo
     assert row['tool_calls'] == expected_calls and len(row['warm_search_ms']) == warm_searches
     assert row['primary_request_k'] == 10
     assert row['shutdown_ms'] >= 0
+
+
+def test_annotation_changes_do_not_change_capture_identity(tmp_path):
+    from bench.e2e.run import capture_namespace
+    from bench.e2e.client import project_for
+    namespace = capture_namespace(17)
+    assert namespace != capture_namespace(18)
+    base = {'question_id': 'q', 'question_type': 'user', 'question': 'What city?',
+            'question_date': '2023/04/10 (Mon) 23:07', 'answer': 'Paris',
+            'haystack_sessions': [[{'role': 'user', 'content': 'Paris', 'has_answer': True}]],
+            'haystack_session_ids': ['s'], 'haystack_dates': ['2023/04/09 (Sun) 23:07'],
+            'answer_session_ids': ['s']}
+    path = tmp_path / 'data.json'
+    path.write_text(json.dumps([base]))
+    first_sha = data.sha256(path)
+    inputs, _ = next(data.cases(path))
+    first = pipeline.extract(project_for(namespace, inputs.id), inputs.turns)
+    base['answer'] = 'FUTURE-GOLD-DIFFERENT'
+    base['haystack_sessions'][0][0]['has_answer'] = False
+    path.write_text(json.dumps([base]))
+    assert data.sha256(path) != first_sha
+    changed, _ = next(data.cases(path))
+    assert first == pipeline.extract(project_for(namespace, changed.id), changed.turns)
