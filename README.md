@@ -53,8 +53,8 @@ instructions) and a reminder to save after long sessions.
 - **Local and private by default.** One server per user on `127.0.0.1`, mandatory bearer token (0600 file),
   Host/Origin validation against DNS-rebinding, no telemetry. Memories are treated as data, never as instructions.
 - **No LLM on the server.** Extraction is done by the client assistant at save time; search is hybrid dense + BM25
-  with multi-query fusion. Latency is a known weak point being worked on: 4.7 s p50 end to end in the current
-  evaluation harness (MCP + encoding included), versus milliseconds for BM25.
+  with multi-query fusion. A warm search takes about 15 ms in the evaluation harness; cold start (server and
+  model load, ~3 s) and ingestion are paid once, not per query.
 - **Facts that change correctly.** Bi-temporal facts (`event_time`, `valid_from`/`valid_until`): a fact is only
   replaced explicitly or on a declared unique property — never because two sentences look alike — and history is
   kept. `memory_timeline` answers "how did X evolve", `at_time` answers "what was true on …".
