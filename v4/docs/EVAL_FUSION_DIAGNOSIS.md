@@ -144,6 +144,11 @@ ne sont utilisées que pour répartir/scorer, jamais par extraction ou requêtes
 | E4 | requête initiale + au plus deux expansions lexicales déterministes tirées de la question seule, sans LLM ni annotations |
 | E5 | morceaux 512 caractères, pool primaire 100, déduplication des tours avant contexte limité à dix citations |
 
+Les identifiants de citations et le départage des ex æquo sont stables entre bras.
+Le namespace dépend du protocole et de la graine ; les empreintes du fichier
+contenant les annotations servent uniquement de preuve, jamais de signal pour
+les identifiants. Les magasins restent privés et distincts par question.
+
 BM25 indépendant est réexécuté **dans chaque bras**, avec mêmes citations et
 budget de contexte ; E5 applique son découpage et sa déduplication aux deux
 systèmes. CPU, un thread, encodeur/cross-encoder batch=4 et longueur=256,
@@ -182,9 +187,9 @@ commandes dans l'ordre (relecture de plan.json entre prepare et run) :
 
 ```sh
 cd /Users/romain/Documents/Codex/2026-10-09/v/work/implementation
-./scripts/run_eval_development.sh 80496d6987cce35046e89956f7052de4d969adea eval-dev-fusion-v1 diagnose
-./scripts/run_eval_development.sh 80496d6987cce35046e89956f7052de4d969adea eval-dev-fusion-v1 prepare
-./scripts/run_eval_development.sh 80496d6987cce35046e89956f7052de4d969adea eval-dev-fusion-v1 run
+./scripts/run_eval_development.sh 76af27628aec8bd853f3ad8a7b61223dcd4159c5 eval-dev-fusion-v1 diagnose
+./scripts/run_eval_development.sh 76af27628aec8bd853f3ad8a7b61223dcd4159c5 eval-dev-fusion-v1 prepare
+./scripts/run_eval_development.sh 76af27628aec8bd853f3ad8a7b61223dcd4159c5 eval-dev-fusion-v1 run
 ```
 
 Le hash indiqué atteste le code exécuté ; le commit documentaire ultérieur ne le modifie pas.
@@ -207,7 +212,7 @@ ruff check src tests v4/src v4/tests v4/bench scripts tools --select E9,F
 sh -n scripts/run_eval_development.sh
 ```
 
-**76 passed**, deux lints verts, syntaxe shell valide. Les gardes des commandes
+**77 passed**, deux lints verts, syntaxe shell valide. Les gardes des commandes
 prepare/diagnose refusent ici nice (`Operation not permitted`), code retour 2,
 aucun dossier de campagne créé. Ces tests ne remplacent pas la campagne réelle.
 
