@@ -131,3 +131,14 @@ def test_metadata_freeze_preserves_v2_winner_and_never_reads_s(tmp_path, monkeyp
     assert receipt['plan_sha256'] == data.sha256(output / 'plan.json')
     with pytest.raises(ValueError, match='already reserved'):
         amended.prepare(previous, tmp_path / 'again', 'a' * 40)
+
+
+@pytest.mark.parametrize('changed', ['data', 'model'])
+def test_frozen_data_or_model_changes_fail_before_worker(tmp_path, monkeypatch, changed):
+    plan = {'data': str(tmp_path / 'S'), 'models': {'minilm': {'id': 'cached'}}}
+    monkeypatch.setattr(amended, 'inputs', lambda *a: plan)
+    monkeypatch.setattr(amended, 'sha256', lambda *a, **kw: 'changed' if changed == 'data' else amended.S_SHA)
+    monkeypatch.setattr(amended, 'model_record', lambda *a, **kw: {'id': 'different'})
+    monkeypatch.setattr(amended, 'run_campaign', lambda *a: pytest.fail('Frozen-input mismatch must block model workers'))
+    with pytest.raises(ValueError, match='no worker allowed'):
+        amended.run(tmp_path, 'a' * 40, lambda: None)

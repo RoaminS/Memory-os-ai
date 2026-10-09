@@ -19,7 +19,7 @@ from .guard import Limits, ResourceStop, ensure_priority, sample
 from .lexical_c4 import ARM, CRITERION, SHARED, S_FIXED, eligible, exclusive_json, validate_config
 from .lexical_s_v2 import dev_equivalence, VERSION as PREVIOUS_VERSION
 from .network import deny_ip_network
-from .run import code_record, main as run_campaign, verify_source, write_json
+from .run import code_record, main as run_campaign, model_record, verify_source, write_json
 
 VERSION = 'lexical-c4-s-v3'
 ADDITION = 'bench/e2e/lexical_s_v3.py'
@@ -163,6 +163,10 @@ def validate_execution(plan, cfg, report):
 
 def run(directory, revision, check):
     plan = inputs(directory, revision)
+    if sha256(Path(plan['data']), check=check) != S_SHA:
+        raise ValueError('Official frozen S input changed; no worker allowed')
+    if model_record(plan['models']['minilm']['id'], check=check) != plan['models']['minilm']:
+        raise ValueError('Frozen C4 model changed; no worker allowed')
     target = directory / 'C4'
     if (directory / 'C4-outcome.json').exists():
         outcome = verify_outcome(plan, directory, ARM, check)
