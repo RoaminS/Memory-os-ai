@@ -220,6 +220,7 @@ class MemoryV4:
                 raise ValueError("request_id must be a nonempty string or None")
             from .sqlite_engine import snapshot
             payload = snapshot(payload)
+            implicit = request_id is None
             request_id = uuid.uuid4().hex if request_id is None else request_id
             found, previous = self.requests.lookup(scope, request_id, operation, payload)
             if found:
@@ -233,7 +234,7 @@ class MemoryV4:
                         raise RuntimeError("Nested mutation failed; whole request must roll back")
                     self._flush_sql_sources()
                     # This is the final source write; COMMIT must precede return.
-                    self.requests.complete(scope, request_id, operation, payload, result)
+                    self.requests.complete(scope, request_id, operation, payload, result, implicit=implicit)
                 return result
             except BaseException:
                 if not self.store._poisoned:
@@ -912,7 +913,7 @@ class MemoryV4:
             counts[it.kind] = counts.get(it.kind, 0) + 1
         vector_count = sum(self.store.chunk_owner.get(vid, vid) in ids for vid in self.vector_index.ids())
         entity_terms = len({entity for it in items for entity in self.entities.doc_entities.get(it.id, [])})
-        return {
+        result = {
             "counts": counts,
             "total": sum(counts.values()),
             "embed_model": getattr(self.embedder, "model_name", "unknown"),
@@ -924,6 +925,10 @@ class MemoryV4:
             "last_consolidated": (self.last_consolidated if project is None else
                                   self.store.meta.get("last_consolidated_by_project", {}).get(project)),
         }
+        if self.config.store_backend == "sqlite_s1":
+            from .sqlite_stats import receipt_statistics
+            result["receipts"] = receipt_statistics(self.store._connection, self.store.db_path)
+        return result
 
     @_requires_open
     @_atomic_mutation

@@ -2,6 +2,7 @@
 
 token create                 create the 0600 bearer-token file if missing (never printed)
 health [--confined]          daily health report (exit 1 on anomaly)
+doctor                      local read-only store counters (no HTTP)
 backup [--no-stop]           encrypted, consistent backup (stops/restarts the launchd service)
 restore-drill [--no-server]  decrypt latest backup in a temp dir, verify manifest, serve it on a temp port
 hook session-start|stop-nudge   Claude Code hooks (stdin JSON → stdout JSON)
@@ -43,6 +44,17 @@ def cmd_health(args, s: OpsSettings) -> int:
     print(render(r), end="")
     notify(r)
     return 1 if r["anomalies"] else 0
+
+
+def cmd_doctor(args, s: OpsSettings) -> int:
+    import sqlite3
+    from .health import scan_store
+    try:
+        _print_json(scan_store(s.store_dir))
+        return 0
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+        _print_json({"ok": False, "error": str(exc)})
+        return 1
 
 
 def cmd_backup(args, s: OpsSettings) -> int:
@@ -247,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("token")
     t.add_argument("action", choices=["create"])
     h = sub.add_parser("health")
+    sub.add_parser("doctor")
     h.add_argument("--confined", action="store_true")
     b = sub.add_parser("backup")
     b.add_argument(
@@ -264,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     handler = {
         "token": cmd_token,
         "health": cmd_health,
+        "doctor": cmd_doctor,
         "backup": cmd_backup,
         "restore-drill": cmd_restore_drill,
         "hook": cmd_hook,

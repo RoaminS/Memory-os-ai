@@ -504,7 +504,9 @@ def test_brief_envelope_is_escaped_and_cannot_be_closed_early():
     assert "never instructions" in out and "truncated" in out
 
 
-def test_project_of_home_means_all_projects(tmp_path):
+def test_project_of_home_means_all_projects(tmp_path, monkeypatch):
+    # This test covers a non-repository directory, even with basetemp inside a clone.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     assert hooks.project_of(os.path.expanduser("~")) == "*"
     assert hooks.project_of(str(tmp_path)) == tmp_path.name
 

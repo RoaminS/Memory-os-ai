@@ -14,6 +14,7 @@ import time
 from .blocks import Block, BlockStore
 from .idempotency import RequestConflictError
 from .sqlite_store import _json
+from .sqlite_stats import IMPLICIT_RECEIPT_LIMIT
 
 
 def json_value(value):
@@ -115,6 +116,7 @@ class SQLiteBlocks(BlockStore):
 
 
 class SQLiteRequests:
+    implicit_limit = IMPLICIT_RECEIPT_LIMIT
     def __init__(self, store):
         self.store = store
         self.path = store.db_path
@@ -134,7 +136,7 @@ class SQLiteRequests:
             value = json.loads(record)
             if (
                 value.get("state") != "complete"
-                or "result" not in value
+                or (value.get("explicit", True) and "result" not in value)
                 or not isinstance(value.get("fingerprint"), str)
                 or (value.get("sequence"), value.get("scope"), value.get("request_id"))
                 != (sequence, scope, request_id)
@@ -150,12 +152,20 @@ class SQLiteRequests:
             raise RequestConflictError(
                 "request_id already used with a different operation or payload in this scope"
             )
+        if not previous.get("explicit", True):
+            raise RequestConflictError("Implicit receipt has no replay result; clients must use explicit request_id")
         return True, json.loads(_json(previous["result"]))
 
-    def complete(self, scope, request_id, operation, payload, result):
-        sequence = self.store._connection.execute(
-            "SELECT COALESCE(max(sequence),0)+1 FROM request_receipts"
-        ).fetchone()[0]
+    def complete(self, scope, request_id, operation, payload, result, *, implicit=False):
+        # Retention precedes the final receipt; it rolls back with the request.
+        retain = self.implicit_limit - int(implicit)
+        removed = self.store.write("receipt_retention", "DELETE FROM request_receipts WHERE "
+                                   "json_extract(record_json,'$.explicit')=0 AND sequence NOT IN "
+                                   "(SELECT sequence FROM request_receipts WHERE json_extract(record_json,'$.explicit')=0 "
+                                   "ORDER BY sequence DESC LIMIT ?) RETURNING scope,request_id", (retain,)).fetchall()
+        for key in removed:
+            self.records.pop(tuple(key), None)
+        sequence = self.store.write("receipt_sequence", "UPDATE receipt_counter SET value=value+1 WHERE id=1 RETURNING value").fetchone()[0]
         value = {
             "scope": scope,
             "request_id": request_id,
@@ -164,8 +174,10 @@ class SQLiteRequests:
             "state": "complete",
             "sequence": sequence,
             "committed_at": time.time(),
-            "result": json_value(result),
+            "explicit": not implicit,
         }
+        if not implicit:
+            value["result"] = json_value(result)
         record = _json(value)
         self.store.write(
             "receipt",

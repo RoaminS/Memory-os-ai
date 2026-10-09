@@ -17,7 +17,7 @@ from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
 APPLICATION_ID = 0x4D4F5334
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = (
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at REAL NOT NULL)",
@@ -55,7 +55,17 @@ SCHEMA_CACHE = (
         vector BLOB NOT NULL, vector_sha256 TEXT NOT NULL)""",
 )
 
-MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE)
+SCHEMA_RETENTION = (
+    "CREATE TABLE receipt_counter(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL)",
+    "INSERT INTO receipt_counter SELECT 1, COALESCE(max(sequence),0) FROM request_receipts",
+    "DROP TRIGGER receipts_no_delete",
+    """CREATE TRIGGER receipts_no_delete BEFORE DELETE ON request_receipts
+        WHEN COALESCE(json_extract(OLD.record_json,'$.explicit'),1)<>0
+        BEGIN SELECT RAISE(ABORT,'immutable explicit receipt'); END""",
+    "CREATE INDEX receipts_explicit ON request_receipts(COALESCE(json_extract(record_json,'$.explicit'),1),sequence)",
+)
+
+MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION)
 
 
 def schema_checksums():
@@ -340,6 +350,10 @@ class SQLiteStore(Store):
                     ):
                         if hashlib.sha256(record.encode()).hexdigest() != checksum:
                             return False
+                counter = self._connection.execute("SELECT value FROM receipt_counter WHERE id=1").fetchone()
+                maximum = self._connection.execute("SELECT COALESCE(max(sequence),0) FROM request_receipts").fetchone()[0]
+                if counter is None or counter[0] < maximum:
+                    return False
                 return True
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
                 return False

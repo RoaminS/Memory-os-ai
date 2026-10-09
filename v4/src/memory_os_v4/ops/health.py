@@ -26,6 +26,9 @@ BACKUP_MAX_AGE_H = 26.0
 
 def scan_store(store: Path) -> dict:
     items = store / "items.jsonl"
+    if (store / "store.sqlite3").exists():
+        from ..sqlite_stats import scan_sqlite
+        return scan_sqlite(store / "store.sqlite3")
     if any(p.name.endswith(SQLITE_MARKERS) for p in store.iterdir()):
         raise ValueError("SQLite store: not supported by this report (ADR-001 S4)")
     last: dict[str, dict] = {}
@@ -163,6 +166,7 @@ def render(r: dict) -> str:
         f"- Added 24 h: {r.get('added_24h')} · forgotten 24 h: {r.get('forgotten_24h')} · supersessions "
         f"{r.get('superseded_total')} (new {len(r.get('superseded_new', []))})",
         f"- Last verified backup: {r.get('last_backup_age_h')} h · free disk {r.get('disk_free_gib')} GiB",
+        f"- Receipts (SQLite): {r.get('receipts', 'not available')}",
         "",
         "## Anomalies",
         *(f"- {a}" for a in r["anomalies"] or ["none"]),

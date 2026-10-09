@@ -77,7 +77,7 @@ def source_rows(engine):
     # A logical snapshot catches modifications to old history/provenance, not just counts.
     return {
         table: engine.store._connection.execute(f"SELECT * FROM {table} ORDER BY 1,2").fetchall()
-        for table in ("items", "item_versions", "block_versions", "request_receipts", "store_metadata")
+        for table in ("items", "item_versions", "block_versions", "request_receipts", "store_metadata", "receipt_counter")
     }
 
 
