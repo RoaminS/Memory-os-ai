@@ -41,11 +41,15 @@ def tokens(text: str) -> list[str]:
     return re.findall(r"\w+", text.casefold())
 
 
-def pack(ranked: list[Quote], top_k: int, context_bytes: int, full: bool = False) -> list[Quote]:
+def pack(ranked: list[Quote], top_k: int, context_bytes: int, full: bool = False,
+         unique_turns: bool = False) -> list[Quote]:
     """Identical k/UTF-8-byte context cap for retrieval systems; no gold access."""
     if top_k < 1 or context_bytes < 1:
         raise ValueError("positive context budgets required")
     out, used = [], 0
+    if unique_turns and not full:
+        seen = set()
+        ranked = [q for q in ranked if not (q.turn_id in seen or seen.add(q.turn_id))]
     for quote in ranked if full else ranked[:top_k]:
         size = len(quote.text.encode("utf-8")) + 1
         if used + size > context_bytes:

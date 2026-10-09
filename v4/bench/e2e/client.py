@@ -57,8 +57,10 @@ def offline_env() -> dict:
 
 
 class ToolClient:
-    def __init__(self, root: Path, model: str, transport: str = "stdio"):
+    def __init__(self, root: Path, model: str, transport: str = "stdio",
+                 overrides: dict | None = None, reranker: str | None = None):
         self.root, self.model, self.transport = root, model, transport
+        self.overrides, self.reranker = overrides, reranker
         self.stack = AsyncExitStack()
 
     async def __aenter__(self):
@@ -68,7 +70,7 @@ class ToolClient:
             install(self.root / "usage.json", self.model)
             from memory_os_v4 import Config, MemoryV4
             from memory_os_v4 import server
-            cfg = Config(**resolved_config(self.model, str(self.root / "store")))
+            cfg = Config(**resolved_config(self.model, str(self.root / "store"), self.overrides, self.reranker))
             self.engine = MemoryV4(config=cfg)
             server.set_engine(self.engine)
         elif self.transport == "stdio":
@@ -83,7 +85,8 @@ class ToolClient:
                        MEMORY_V4_USE_RECENCY="0", MEMORY_V4_STORE_BACKEND="jsonl")
             env["MEMORY_EVAL_USAGE_FILE"] = str(self.root / "usage.json")
             config_path = self.root / "engine-config.json"
-            config_path.write_text(json.dumps(resolved_config(self.model, str(self.root / "store"))))
+            config_path.write_text(json.dumps(resolved_config(self.model, str(self.root / "store"),
+                                                              self.overrides, self.reranker)))
             env["MEMORY_EVAL_CONFIG_FILE"] = str(config_path)
             # Absolute source roots, no production editable-package dependency.
             v4 = Path(__file__).resolve().parents[2]

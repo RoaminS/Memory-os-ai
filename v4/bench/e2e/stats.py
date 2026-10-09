@@ -4,14 +4,10 @@ from __future__ import annotations
 from collections import defaultdict
 import math
 import random
-import re
 from statistics import mean
 
 from .data import Gold
-
-
-def normalize(text: str) -> str:
-    return " ".join(re.sub(r"[^\w\s]", "", text.casefold()).split())
+from .answers import normalize as normalize, response_metrics
 
 
 def score(ids: list[str], response: str | None, gold: Gold, k: int) -> dict:
@@ -23,8 +19,7 @@ def score(ids: list[str], response: str | None, gold: Gold, k: int) -> dict:
     return {"recall": found / len(evidence) if evidence else None,
             "mrr": 1 / relevant[0] if relevant else (0.0 if evidence else None),
             "ndcg": sum(1 / math.log2(i + 1) for i in relevant) / ideal if ideal else None,
-            "answer_em": float(response is not None and any(
-                normalize(response) == normalize(a) for a in gold.answers)) if gold.answers else None,
+            **response_metrics(response, gold.answers),
             "abstained": response is None}
 
 
@@ -90,13 +85,14 @@ def summarize(rows: list[dict], golds: list[Gold], systems: list[str], seed: int
     by_id = {g.id: g for g in golds}
     indexed = {(r["system"], r["qid"]): r for r in rows}
     output = {"systems": {}, "paired_delta_memory": {}, "paired_answer_em_delta_memory": {},
+              "paired_other_delta_memory": {},
               "bootstrap": {"level": "shared-haystack-session connected components",
                             "seed": seed, "replicates": bootstrap_replicates, "confidence": .95,
                             "known_user_identity": False}}
     for system in systems:
         entries = [r for r in rows if r["system"] == system]
         metrics = {}
-        for metric in ("recall", "mrr", "ndcg", "answer_em"):
+        for metric in ("recall", "mrr", "ndcg", "answer_em", "answer_f1", "answer_contains"):
             pairs = [(clusters[r["qid"]], r[metric]) for r in entries if r.get(metric) is not None]
             metrics[metric] = estimate(pairs, seed, bootstrap_replicates, check)
         categories = {}
@@ -114,12 +110,17 @@ def summarize(rows: list[dict], golds: list[Gold], systems: list[str], seed: int
                                           if v["recall"]["mean"] is not None)
             if any(v["recall"]["mean"] is not None for v in categories.values()) else None,
             "end_to_end_ms": {"p50": percentile(times, .50), "p95": percentile(times, .95)},
+            "warm_search_ms": {"p50": percentile([v for r in entries for v in r.get("warm_search_ms", [])], .50),
+                               "p95": percentile([v for r in entries for v in r.get("warm_search_ms", [])], .95)},
             "api_usd": 0.0, "llm_calls": 0,
             "tool_calls": sum(r.get("tool_calls", 0) for r in entries),
             "context_bytes": sum(r.get("context_bytes", 0) for r in entries),
             "encoder_calls": sum(r.get("model_usage", {}).get("encoder_calls", 0) for r in entries),
             "encoder_texts": sum(r.get("model_usage", {}).get("encoder_texts", 0) for r in entries),
             "encoder_input_tokens": sum(r.get("model_usage", {}).get("encoder_input_tokens", 0) for r in entries),
+            "reranker_calls": sum(r.get("model_usage", {}).get("reranker_calls", 0) for r in entries),
+            "reranker_pairs": sum(r.get("model_usage", {}).get("reranker_pairs", 0) for r in entries),
+            "reranker_input_tokens": sum(r.get("model_usage", {}).get("reranker_input_tokens", 0) for r in entries),
             "partial_failed_usage_unknown": any(r["status"] == "failed" for r in entries),
         }
         if system == "full-context":
@@ -140,4 +141,13 @@ def summarize(rows: list[dict], golds: list[Gold], systems: list[str], seed: int
             if a and b and a.get("answer_em") is not None and b.get("answer_em") is not None:
                 em_delta.append((clusters[g.id], a["answer_em"] - b["answer_em"]))
         output["paired_answer_em_delta_memory"][system] = estimate(em_delta, seed, bootstrap_replicates, check)
+        output["paired_other_delta_memory"][system] = {}
+        for metric in ("mrr", "answer_f1", "answer_contains"):
+            pairs = []
+            for g in golds:
+                a, b = indexed.get(("memory", g.id)), indexed.get((system, g.id))
+                if a and b and a.get(metric) is not None and b.get(metric) is not None:
+                    pairs.append((clusters[g.id], a[metric] - b[metric]))
+            output["paired_other_delta_memory"][system][metric] = estimate(
+                pairs, seed, bootstrap_replicates, check)
     return output

@@ -22,6 +22,7 @@ import uuid
 from .client import offline_env
 from .configuration import resolved_config
 from .data import cases, inventory, sha256
+from .partitions import validate as validate_selection
 from .guard import Limits, ResourceStop, ensure_priority, sample
 from .stats import score, summarize
 from .processes import cleanup
@@ -127,7 +128,22 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=20261009)
     p.add_argument("--transport", default="stdio", choices=["stdio", "dispatch"])
     p.add_argument("--source-commit", required=True)
+    p.add_argument("--engine-overrides", default="{}", help="JSON retrieval overrides only")
+    p.add_argument("--reranker", help="existing local <=300 MB cross-encoder snapshot")
+    p.add_argument("--selection", type=Path, help="frozen DEVELOPMENT split, never test")
+    p.add_argument("--chunk-chars", type=int, default=1024)
+    p.add_argument("--unique-turns", action="store_true")
+    p.add_argument("--query-mode", choices=["none", "lexical"], default="none")
+    p.add_argument("--trace-k", type=int, default=0)
+    p.add_argument("--warm-searches", type=int, default=0)
     args = p.parse_args(argv)
+    if not 128 <= args.chunk_chars <= 2048 or not 0 <= args.trace_k <= 200 or not 0 <= args.warm_searches <= 3:
+        p.error("Chunk/trace budget invalid")
+    try:
+        overrides = json.loads(args.engine_overrides)
+        resolved_config(args.model, "<private>", overrides, args.reranker)
+    except (ValueError, TypeError) as exc:
+        p.error(str(exc))
     # Graceful operator interruption must also clean SDK-owned server sessions.
     def terminate(signum, frame):
         raise ResourceStop("Evaluation supervisor interrupted by SIGTERM")
@@ -174,7 +190,17 @@ def main(argv=None) -> int:
         data = inventory(args.data, args.variant, check=check)
         model = model_record(args.model, check=check)
         model_path = model["id"]
-        golds = [g for _, g in islice(cases(args.data, check=check), args.limit)]
+        selection_record = None
+        if args.selection:
+            all_golds = [g for _, g in cases(args.data, check=check)]
+            selection_record = json.loads(args.selection.read_text())
+            allowed = validate_selection(selection_record, all_golds, data["sha256"])
+            golds = [g for g in all_golds if g.id in allowed][:args.limit]
+        else:
+            golds = [g for _, g in islice(cases(args.data, check=check), args.limit)]
+        reranker = model_record(args.reranker, check=check) if args.reranker else None
+        if reranker is not None and not reranker["neural"]:
+            raise ValueError("Reranker must be a cached neural snapshot")
         if not golds:
             raise ValueError("Empty dataset")
         selection = [g.id for g in golds]
@@ -187,12 +213,18 @@ def main(argv=None) -> int:
                "process_owner": uuid.uuid4().hex,
                "dataset": data, "selected_ids": selection, "limit": len(golds), "systems": systems,
                "model": model_path, "model_record": model, "transport": args.transport,
-               "resolved_engine_config": resolved_config(model_path, "<private fresh store per question>"),
+               "resolved_engine_config": resolved_config(model_path, "<private fresh store per question>", overrides, args.reranker),
+               "engine_overrides": overrides, "reranker": args.reranker, "reranker_record": reranker,
+               "selection_filter": bool(args.selection), "selection_record": selection_record,
+               "selection_sha256": sha256(args.selection) if args.selection else None,
+               "chunk_chars": args.chunk_chars, "unique_turns": args.unique_turns,
+               "query_mode": args.query_mode, "trace_k": args.trace_k,
+               "warm_searches": args.warm_searches,
                "top_k": args.top_k, "context_bytes": args.context_bytes, "ingest_bytes": args.ingest_bytes,
                "run_seconds": args.run_seconds, "case_seconds": args.case_seconds,
                "seed": args.seed, "bootstrap_replicates": 2000, "confidence": .95,
-               "extraction": "quoted observable spans, 1024 chars, no LLM/no future annotations",
-               "response": "highest query-term overlap sentence, strict normalized EM only",
+               "extraction": f"quoted observable spans, {args.chunk_chars} chars, no LLM/no future annotations",
+               "response": "highest query-term overlap sentence; answer-proxies-v2 EM/F1/containment (nonofficial)",
                "budgets": "shared UTF-8 bytes; chars/4 estimates are NOT tokenizer budgets",
                "concurrency": 1, "threads": 1, "device": "cpu", "limits": asdict(limits),
                "cache": "memory stdio: model cold per case; dense: process-cold then warm",
@@ -217,6 +249,10 @@ def main(argv=None) -> int:
                 sample(output, limits)
                 if sha256(config_path) != freeze_sha or sha256(args.data, check=check) != data["sha256"] or code_record() != code:
                     raise ResourceStop("Frozen inputs changed")
+                if args.selection and sha256(args.selection) != cfg["selection_sha256"]:
+                    raise ResourceStop("Frozen development selection changed")
+                if reranker and model_record(args.reranker, check=check) != reranker:
+                    raise ResourceStop("Frozen reranker changed")
                 if model_record(model_path, check=check) != model:
                     raise ResourceStop("Frozen model changed")
                 cmd = [sys.executable, "-m", "bench.e2e.worker", "--config", str(config_path),
@@ -227,6 +263,10 @@ def main(argv=None) -> int:
                 sample(output, limits)
                 if sha256(config_path) != freeze_sha or sha256(args.data, check=check) != data["sha256"] or code_record() != code:
                     raise ResourceStop("Frozen inputs changed during worker")
+                if args.selection and sha256(args.selection) != cfg["selection_sha256"]:
+                    raise ResourceStop("Frozen development selection changed")
+                if reranker and model_record(args.reranker, check=check) != reranker:
+                    raise ResourceStop("Frozen reranker changed")
                 if model_record(model_path, check=check) != model:
                     raise ResourceStop("Frozen model changed during worker")
                 print(f"{system}: exit {statuses[system]}", flush=True)
@@ -266,7 +306,7 @@ def main(argv=None) -> int:
                       source_commit=args.source_commit, resource_samples=len(measurements),
                       max_swap_bytes=max(m["swap_bytes"] for m in measurements),
                       min_free_bytes=min(m["free_bytes"] for m in measurements),
-                      response_judge="strict EM/extractive, NOT official LME judge",
+                      response_judge="answer-proxies-v2 EM/F1/containment, NOT official LME judge",
                       agent_tasks="not evaluated", leaderboard_rank="not evaluated")
         write_json(output / "report.json", report)
         write_json(output / "resource-samples.json", measurements)

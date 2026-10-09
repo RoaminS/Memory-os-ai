@@ -56,14 +56,16 @@ class AddSearchAdapter:
                 raise RuntimeError("Unexpected supersession of quoted observations")
         return {"tool_calls": calls, "added": added, "deduped": deduped}
 
-    async def search(self, user_id: str, query: str, limit: int = 10) -> dict:
+    async def search(self, user_id: str, query: str, limit: int = 10, *,
+                     queries: list[str] | None = None, rerank: bool = False) -> dict:
         if not query.strip() or not 1 <= limit <= 200:
             raise ValueError("Nonempty query and limit 1..200 required")
         out = await self.client.call("memory_search", {
             "project": project_for(self.namespace, user_id), "query": query,
-            "top_k": limit, "kinds": ["fact"], "rerank": False,
+            "top_k": limit, "kinds": ["fact"], "rerank": rerank, "queries": queries,
         })
-        return {"results": [{"id": h["id"], "text": h["text"], "score": h["score"]}
+        return {"results": [{"id": h["id"], "text": h["text"], "score": h["score"],
+                             "signals": h.get("signals", {})}
                             for h in out["hits"]], "tool_calls": 1}
 
     async def request(self, payload: dict) -> dict:
