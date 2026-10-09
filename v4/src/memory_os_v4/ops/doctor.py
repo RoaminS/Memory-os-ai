@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,19 +62,29 @@ def _server(settings: OpsSettings) -> list[Check]:
         checks.append(Check("security", "FAIL", f"/health without token → {without_token}: token NOT enforced",
                             "run a SEC-1 server (≥ 4.0.1) with MEMORY_V4_TOKEN_FILE"))
     status, body = http_get(settings.ready_url, settings)
-    reason, info = "", {}
+    info = {}
     try:
         info = json.loads(body or b"{}")
-        reason = info.get("reason", "")
-    except ValueError:
+        if not isinstance(info, dict):
+            info = {}
+    except (ValueError, UnicodeError):
         pass
     if status == 200:
-        checks.append(Check("ready", "PASS", f"/ready → ready, version {info.get('version')}, commit "
-                                             f"{str(info.get('commit'))[:7]} ({info.get('commit_source')})"))
+        version, commit = info.get("version"), info.get("commit")
+        attested = (info.get("ok") is True and info.get("ready") is True
+                    and (info.get("commit_source") == "deployment_manifest"
+                         or (info.get("commit_source") == "checkout" and info.get("source_dirty") is False))
+                    and info.get("source_dirty") is not True and isinstance(version, str)
+                    and re.fullmatch(r"\d+\.\d+\.\d+", version)
+                    and isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit))
+        checks.append(Check("ready", "PASS" if attested else "FAIL",
+                            f"/ready → ready, version {version}, commit {commit[:7]}" if attested
+                            else "/ready → 200 with missing/invalid ready or build identity",
+                            "" if attested else "check the qualified server build and /ready contract"))
     elif status == 404:
         checks.append(Check("ready", "WARN", "/ready not available (server < 4.0.1)", "upgrade the server"))
     else:
-        checks.append(Check("ready", "FAIL", f"/ready → {status} {reason}".strip(),
+        checks.append(Check("ready", "FAIL", f"/ready → {status}",
                             "build_unqualified: set MEMORY_V4_BUILD_COMMIT; indexes_not_ready: see RB-02"))
     return checks
 
@@ -97,8 +108,11 @@ def _service(settings: OpsSettings) -> Check:
     if not settings.service_label:
         return Check("service", "WARN", "MEMORY_V4_SERVICE_LABEL not set: launchd state not checked",
                      "export MEMORY_V4_SERVICE_LABEL=<label> (needed for qualified backups)")
-    rc = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{settings.service_label}"],
-                        capture_output=True, check=False).returncode
+    try:
+        rc = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{settings.service_label}"],
+                            capture_output=True, check=False, timeout=5).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return Check("service", "WARN", "launchd status unavailable (platform or timeout)")
     return (Check("service", "PASS", f"launchd job {settings.service_label} loaded") if rc == 0 else
             Check("service", "FAIL", f"launchd job {settings.service_label} not loaded",
                   "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist"))
@@ -108,6 +122,17 @@ def _store(settings: OpsSettings) -> Check:
     from .storecheck import StoreCheckError, check_dir
 
     store = settings.store_dir
+    if (store / "store.sqlite3").exists():
+        try:
+            from ..sqlite_stats import scan_sqlite
+            report = scan_sqlite(store / "store.sqlite3")
+            counts = report["receipts"]
+            return Check("store", "PASS", f"SQLite quick_check valid; {report['live_total']} live items; "
+                         f"receipts explicit={counts['explicit']} implicit={counts['implicit']} "
+                         f"json_bytes={counts['json_bytes']} db_bytes={counts['db_bytes']} wal_bytes={counts['wal_bytes']}")
+        except Exception as exc:
+            return Check("store", "FAIL", f"SQLite read-only check failed: {type(exc).__name__}",
+                         "see ADR-001; doctor never repairs or upgrades SQLite")
     if not (store / "items.jsonl").is_file():
         return Check("store", "WARN", f"{store}/items.jsonl not found (empty installation?)")
     names = [p.name for p in store.iterdir() if p.is_file() and p.name in
@@ -134,7 +159,7 @@ def _backup(settings: OpsSettings) -> Check:
 
 def _clients(home: Path) -> list[Check]:
     hints = {
-        "direct-http": "will get 401 from a secured server: switch to the relay (memory-os-admin setup)",
+        "direct-http": "HTTP authentication not checked: prefer the token-file relay (memory-os-admin setup)",
         "legacy-v3": "old v3 server = separate memory: switch to the relay (memory-os-admin setup)",
         "other": "unrecognised entry: switch to the relay (memory-os-admin setup)",
         "absent": "not connected: add the relay entry (memory-os-admin setup)",
@@ -143,7 +168,7 @@ def _clients(home: Path) -> list[Check]:
     for client in CLIENTS:
         state, entry = read_entry(client, home)
         if state == "missing-config":
-            checks.append(Check(f"client:{client.key}", "PASS", f"{client.name}: not installed / no config"))
+            checks.append(Check(f"client:{client.key}", "WARN", f"{client.name}: no config found (installation unknown)"))
             continue
         if state == "unreadable":
             checks.append(Check(f"client:{client.key}", "WARN", f"{client.name}: config unreadable",
@@ -151,7 +176,8 @@ def _clients(home: Path) -> list[Check]:
             continue
         kind = classify(entry)
         checks.append(Check(f"client:{client.key}", "PASS" if kind == "relay" else "WARN",
-                            f"{client.name}: {kind}", "" if kind == "relay" else hints[kind]))
+                            f"{client.name}: {kind}" + (" (configuration only; handshake not checked)" if kind == "relay" else ""),
+                            "" if kind == "relay" else hints[kind]))
     return checks
 
 

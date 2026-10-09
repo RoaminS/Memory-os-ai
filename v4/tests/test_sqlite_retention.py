@@ -40,7 +40,7 @@ def test_implicit_receipts_bounded_without_results_and_explicit_replay_retained(
         assert maximum == 8 and engine.store.check_integrity()
         assert scan_store(tmp_path)["receipts"]["json_bytes"] == stats["json_bytes"]
         monkeypatch.setenv("MEMORY_V4_DIR", str(tmp_path))
-        assert main(["doctor"]) == 0
+        assert main(["doctor", "--store-only"]) == 0
         assert json.loads(capsys.readouterr().out)["receipts"]["explicit"] == 1
 
 
@@ -69,7 +69,7 @@ def test_retention_is_rolled_back_with_failed_final_receipt(tmp_path):
 def test_doctor_refuses_invalid_database_without_traceback(tmp_path, monkeypatch, capsys):
     (tmp_path / "store.sqlite3").write_bytes(b"bad database")
     monkeypatch.setenv("MEMORY_V4_DIR", str(tmp_path))
-    assert main(["doctor"]) == 1
+    assert main(["doctor", "--store-only"]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
 
 

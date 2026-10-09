@@ -30,7 +30,8 @@ class Client:
 
 
 CLIENTS: tuple[Client, ...] = (
-    Client("claude-code", "Claude Code", ".mcp.json", "mcpServers"),
+    Client("claude-code", "Claude Code", ".claude.json", "claude-user",
+           "user scope; project .mcp.json can override it; use claude mcp add --scope user"),
     Client("claude-desktop", "Claude Desktop", "Library/Application Support/Claude/claude_desktop_config.json",
            "mcpServers", "edit with the app closed: it rewrites this file from memory"),
     Client("codex", "Codex (CLI/app)", ".codex/config.toml", "codex-toml"),
@@ -44,8 +45,12 @@ CLIENTS: tuple[Client, ...] = (
 
 
 def classify(entry: dict | None) -> str:
+    if entry is not None and not isinstance(entry, dict):
+        return "other"
     if not entry:
         return "absent"
+    if not isinstance(entry.get("args", []), list):
+        return "other"
     command = " ".join(str(x) for x in [entry.get("command", ""), *(entry.get("args") or [])])
     url = str(entry.get("url") or entry.get("serverUrl") or entry.get("httpUrl") or "")
     if any(marker in command for marker in RELAY_MARKERS):
@@ -70,19 +75,26 @@ def _toml_entry(text: str) -> dict | None:
 def read_entry(client: Client, home: Path) -> tuple[str, dict | None]:
     """(state, entry): state is ``missing-config`` when the client has no configuration file at all."""
     path = client.config_path(home)
-    if not path.is_file():
-        return "missing-config", None
-    raw = path.read_text(encoding="utf-8").strip()
-    if not raw:
-        return "ok", None
     try:
+        raw = path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return "ok", None
         if client.fmt.endswith("toml"):
-            return "ok", _toml_entry(raw)
-        data = json.loads(raw)
-    except Exception:
+            entry = _toml_entry(raw)
+        else:
+            data = json.loads(raw)
+            key = "servers" if client.fmt == "vscode" else "mcpServers"
+            servers = data.get(key, {})
+            if not isinstance(servers, dict):
+                return "unreadable", None
+            entry = servers.get(SERVER)
+        if entry is not None and not isinstance(entry, dict):
+            return "unreadable", None
+        return "ok", entry
+    except FileNotFoundError:
+        return "missing-config", None
+    except (OSError, ValueError, TypeError, AttributeError):
         return "unreadable", None
-    key = "servers" if client.fmt == "vscode" else "mcpServers"
-    return "ok", (data.get(key) or {}).get(SERVER)
 
 
 def relay_command(python: str) -> tuple[str, list[str]]:
@@ -91,6 +103,10 @@ def relay_command(python: str) -> tuple[str, list[str]]:
 
 def snippet(client: Client, python: str, env: dict[str, str]) -> str:
     command, args = relay_command(python)
+    if client.fmt == "claude-user":
+        flags = " ".join(f"--env {shlex.quote(f'{k}={v}')}" for k, v in env.items())
+        return f"claude mcp add --scope user --transport stdio {flags} {SERVER} -- " + " ".join(
+            shlex.quote(a) for a in [command, *args])
     if client.fmt == "vscode":
         return json.dumps({"servers": {SERVER: {"type": "stdio", "command": command, "args": args, "env": env}}},
                           indent=1)
@@ -98,6 +114,8 @@ def snippet(client: Client, python: str, env: dict[str, str]) -> str:
         flags = " ".join(f"--env {shlex.quote(f'{k}={v}')}" for k, v in env.items())
         return f"codex mcp add {SERVER} {flags} -- " + " ".join(shlex.quote(a) for a in [command, *args])
     if client.fmt == "grok-toml":
-        return f"grok mcp add {SERVER} " + " ".join(shlex.quote(a) for a in [command, "--", *args])
+        # TOML is mergeable and propagates all non-secret settings, unlike an unqualified CLI flag guess.
+        return f"[mcp_servers.{SERVER}]\ncommand = {json.dumps(command)}\nargs = {json.dumps(args)}\n" + (
+            f"[mcp_servers.{SERVER}.env]\n" + "\n".join(f"{k} = {json.dumps(v)}" for k, v in env.items()))
     return json.dumps({"mcpServers": {SERVER: {"command": command, "args": args, "env": env}}}, indent=1)
 

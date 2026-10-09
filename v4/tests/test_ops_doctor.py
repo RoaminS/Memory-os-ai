@@ -82,7 +82,7 @@ def test_doctor_reports_failures_and_client_states(settings, tmp_path):
     assert by["store"].status == "PASS" and "1 live items" in by["store"].detail
     assert by["client:claude-code"].status == "PASS"
     assert by["client:vscode"].status == "WARN" and "legacy-v3" in by["client:vscode"].detail
-    assert by["client:windsurf"].status == "PASS"  # not installed is fine
+    assert by["client:windsurf"].status == "WARN"  # config absence does not prove installation
     text = doctor.render(checks)
     assert "fail" in text and "→" in text
 
@@ -113,3 +113,49 @@ def test_setup_creates_missing_token_and_lists_every_client(settings, tmp_path, 
     for client in clients.CLIENTS:
         assert client.name in out
     assert cli.main(["setup"]) == 0 and "exists and is valid" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("content", ['[]', 'null', '{"mcpServers": []}', '{"mcpServers": {"memory-os-ai": 1}}', '\xff'])
+def test_malformed_client_config_never_crashes(tmp_path, content):
+    _write(tmp_path, "cursor", content)
+    client = next(c for c in clients.CLIENTS if c.key == "cursor")
+    assert clients.read_entry(client, tmp_path)[0] == "unreadable"
+    assert doctor._clients(tmp_path)
+
+
+def test_read_errors_and_non_list_args_are_reported(tmp_path, monkeypatch):
+    client = clients.CLIENTS[0]
+    monkeypatch.setattr(Path, "read_text", lambda *a, **kw: (_ for _ in ()).throw(PermissionError()))
+    assert clients.read_entry(client, tmp_path) == ("unreadable", None)
+    assert clients.classify({"args": 1}) == "other"
+
+
+@pytest.mark.parametrize("body,expected", [
+    ({"ok": True, "ready": True, "version": "4.0.2", "commit": "a" * 40,
+      "commit_source": "deployment_manifest", "source_dirty": None}, "PASS"),
+    ({}, "FAIL"), ([], "FAIL"), ({"ready": False}, "FAIL"),
+    ({"ok": True, "ready": True, "version": "4.0.2", "commit": "a" * 40,
+      "commit_source": "checkout", "source_dirty": True}, "FAIL"),
+])
+def test_ready_requires_valid_identity(settings, monkeypatch, body, expected):
+    monkeypatch.setattr(doctor, "http_get", lambda *a: (200, json.dumps(body).encode()))
+    monkeypatch.setattr(doctor, "_get_without_token", lambda *a: 401)
+    assert {c.area: c for c in doctor._server(settings)}["ready"].status == expected
+
+
+def test_grok_toml_propagates_non_secret_settings():
+    import tomllib
+    client = next(c for c in clients.CLIENTS if c.key == "grok")
+    env = {"MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/", "MEMORY_V4_TOKEN_FILE": "/tmp/custom.token"}
+    entry = tomllib.loads(clients.snippet(client, "/py", env))["mcp_servers"][clients.SERVER]
+    assert entry["env"] == env
+    assert clients.classify(entry) == "relay"
+
+
+def test_doctor_checks_sqlite_receipts_without_engine_or_reencoding(settings):
+    from memory_os_v4 import Config, MemoryV4
+    (settings.store_dir / "items.jsonl").unlink()
+    with MemoryV4(config=Config(data_dir=str(settings.store_dir), store_backend="sqlite_s1", embed_model="hash")) as engine:
+        engine.add_facts([{"text": "A synthetic fact", "item_id": "a"}], project="P")
+    check = doctor._store(settings)
+    assert check.status == "PASS" and "SQLite" in check.detail and "receipts" in check.detail

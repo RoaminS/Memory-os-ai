@@ -2,7 +2,7 @@
 
 token create                 create the 0600 bearer-token file if missing (never printed)
 health [--confined]          daily health report (exit 1 on anomaly)
-doctor                      local read-only store counters (no HTTP)
+doctor [--json|--store-only]  read-only installation checks or local store counters
 backup [--no-stop]           encrypted, consistent backup (stops/restarts the launchd service)
 restore-drill [--no-server]  decrypt latest backup in a temp dir, verify manifest, serve it on a temp port
 hook session-start|stop-nudge   Claude Code hooks (stdin JSON → stdout JSON)
@@ -46,7 +46,7 @@ def cmd_health(args, s: OpsSettings) -> int:
     return 1 if r["anomalies"] else 0
 
 
-def cmd_doctor(args, s: OpsSettings) -> int:
+def cmd_store_doctor(args, s: OpsSettings) -> int:
     import sqlite3
     from .health import scan_store
     try:
@@ -260,6 +260,8 @@ def cmd_doctor(args, s: OpsSettings) -> int:
 
     from .doctor import render, run
 
+    if args.store_only:
+        return cmd_store_doctor(args, s)
     checks = run(s)
     if args.json:
         _print_json([asdict(c) for c in checks])
@@ -276,7 +278,6 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("token")
     t.add_argument("action", choices=["create"])
     h = sub.add_parser("health")
-    sub.add_parser("doctor")
     h.add_argument("--confined", action="store_true")
     b = sub.add_parser("backup")
     b.add_argument(
@@ -289,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("name", choices=["session-start", "stop-nudge"])
     dr = sub.add_parser("doctor", help="read-only check of the whole installation and of every AI client")
     dr.add_argument("--json", action="store_true")
+    dr.add_argument("--store-only", action="store_true", help="local store counters only (no HTTP or client reads)")
     st = sub.add_parser("setup")
     st.add_argument("--write-launchd", metavar="DIR")
     args = p.parse_args(argv)
@@ -296,7 +298,6 @@ def main(argv: list[str] | None = None) -> int:
     handler = {
         "token": cmd_token,
         "health": cmd_health,
-        "doctor": cmd_doctor,
         "backup": cmd_backup,
         "restore-drill": cmd_restore_drill,
         "hook": cmd_hook,

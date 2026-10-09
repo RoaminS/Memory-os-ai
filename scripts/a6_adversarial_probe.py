@@ -99,6 +99,10 @@ def main() -> int:
             passed.append("R2: unsafe existing token refused")
         else:
             defects.append("R2: unsafe token accepted")
+        # 4.0.2 setup now validates/creates the token; the unsafe-token case above
+        # must not poison this independent launchd configuration probe.
+        settings.token_file.unlink()
+        auth.create_token(settings.token_file)
 
         # An unverified future filename must not evict the backup just verified.
         for index in range(8):
