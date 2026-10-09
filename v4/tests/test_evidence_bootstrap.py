@@ -114,7 +114,7 @@ def test_metadata_freeze_preserves_v2_winner_and_never_reads_s(tmp_path, monkeyp
     devdir.mkdir()
     (previous / 'winner.json').write_bytes(b'{"kept": true}\n')
     (previous / 'plan.json').write_text('{}')
-    prior = {'version': 'lexical-c4-s-v2', 'source_clusters': 1, 'evidence_files': {'winner.json': 'old'},
+    prior = {'version': 'lexical-c4-s-v2', 'source_clusters': 1, 'evidence_files': {'winner.json': 'old'}, 'bootstrap': 2000,
              'selected_ids': [str(i) for i in range(500)], 'criterion': amended.CRITERION, 'arms': [amended.ARM]}
     monkeypatch.setattr(amended, 'private_path', lambda p: (tmp_path, p.resolve()))
     monkeypatch.setattr(amended, 'verify_source', lambda *a: None)
@@ -123,7 +123,8 @@ def test_metadata_freeze_preserves_v2_winner_and_never_reads_s(tmp_path, monkeyp
     monkeypatch.setattr(amended, 'dev_unchanged', lambda *a: {'all_development_metrics_and_intervals_identical': True})
     monkeypatch.setattr(amended, 'run_campaign', lambda *a: pytest.fail('No campaign during freeze'))
     plan = amended.prepare(previous, output, 'a' * 40)
-    assert plan['bootstrap'] == BOOTSTRAP and plan['criterion'] == prior['criterion']
+    assert plan['bootstrap_inference'] == BOOTSTRAP and plan['bootstrap'] == 2000
+    assert plan['criterion'] == prior['criterion']
     assert plan['source_clusters'] is None and plan['previous_all_haystack_clusters'] == 1
     assert (output / 'winner.json').read_bytes() == (previous / 'winner.json').read_bytes()
     receipt = json.loads((output / 'receipt.json').read_text())

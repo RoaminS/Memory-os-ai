@@ -117,7 +117,7 @@ def prepare(previous_directory, output, revision):
     write_json(output / 'dev-bootstrap-equivalence.json', equivalence)
     exclusive_json(lockpath, {'output': str(output), 'winner_sha256': sha256(output / 'winner.json'), 'arm': ARM})
     plan = dict(previous)
-    plan.update(version=VERSION, source_commit=revision, code_files=code_record(), bootstrap=BOOTSTRAP,
+    plan.update(version=VERSION, source_commit=revision, code_files=code_record(), bootstrap_inference=BOOTSTRAP,
                 previous_directory=str(previous_directory), previous_plan_sha256=sha256(previous_directory / 'plan.json'),
                 source_clusters=None, previous_all_haystack_clusters=previous['source_clusters'],
                 evidence_only_clusters_observed_by_Claude=495,
@@ -130,7 +130,7 @@ def prepare(previous_directory, output, revision):
 
 def inputs(directory, revision):
     plan = load_plan(directory, revision)
-    if (plan['version'] != VERSION or plan['bootstrap'] != BOOTSTRAP
+    if (plan['version'] != VERSION or plan['bootstrap_inference'] != BOOTSTRAP
             or plan['code_files'] != code_record() or plan['arms'] != [ARM] or plan['criterion'] != CRITERION
             or plan['dataset_sha256'] != S_SHA or plan['session_policy'] != SESSION_POLICY
             or len(set(plan['selected_ids'])) != 500 or len(plan['selected_ids']) != 500
@@ -218,7 +218,7 @@ def main(argv=None):
         if args.operation == 'prepare':
             _, previous = private_path(args.previous_dir)
             plan = prepare(previous, directory, args.source_commit)
-            print(json.dumps({'plan_sha256': sha256(directory / 'plan.json'), 'bootstrap': plan['bootstrap'],
+            print(json.dumps({'plan_sha256': sha256(directory / 'plan.json'), 'bootstrap': plan['bootstrap_inference'],
                               'questions': len(plan['selected_ids'])}))
         else:
             ensure_priority(Limits())
