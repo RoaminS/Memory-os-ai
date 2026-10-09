@@ -24,7 +24,7 @@ from .configuration import resolved_config
 from .data import cases, inventory, sha256
 from .partitions import validate as validate_selection
 from .guard import Limits, ResourceStop, ensure_priority, sample
-from .stats import score, summarize
+from .stats import EVIDENCE_POLICY, bootstrap_preflight, score, summarize
 from .processes import cleanup
 
 SYSTEMS = ["memory", "bm25", "dense", "files", "full-context"]
@@ -133,6 +133,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data", required=True, type=Path)
     p.add_argument("--variant", required=True, choices=["s", "oracle"])
+    p.add_argument('--bootstrap-policy', choices=['haystack', EVIDENCE_POLICY], default='haystack')
+    p.add_argument('--bootstrap-min-clusters', type=int, default=2)
     p.add_argument("--output", required=True, type=Path)
     p.add_argument("--model", default="hash", help="hash or existing <=300 MB local snapshot directory")
     p.add_argument("--systems", default=",".join(SYSTEMS))
@@ -155,6 +157,8 @@ def main(argv=None) -> int:
     p.add_argument("--warm-searches", type=int, default=0)
     p.add_argument("--resident", action="store_true")
     args = p.parse_args(argv)
+    if args.variant == 'oracle' and (args.bootstrap_policy != 'haystack' or args.bootstrap_min_clusters != 2):
+        p.error('S bootstrap amendment forbidden for oracle development')
     if not 128 <= args.chunk_chars <= 2048 or not 0 <= args.trace_k <= 200 or not 0 <= args.warm_searches <= 3:
         p.error("Chunk/trace budget invalid")
     try:
@@ -223,6 +227,18 @@ def main(argv=None) -> int:
             raise ValueError("Reranker must be a cached neural snapshot")
         if not golds:
             raise ValueError("Empty dataset")
+        bootstrap_record = None
+        if args.bootstrap_policy != 'haystack' or args.bootstrap_min_clusters != 2:
+            if args.variant != 's':
+                raise ValueError('S bootstrap amendment forbidden for oracle development')
+            try:
+                bootstrap_record = bootstrap_preflight(golds, args.bootstrap_policy, args.bootstrap_min_clusters)
+            except ValueError as exc:
+                write_json(output / 'bootstrap-preflight.json', {'available': False,
+                           'policy': args.bootstrap_policy, 'minimum_clusters': args.bootstrap_min_clusters,
+                           'reason': str(exc), 'model_workers_started': 0})
+                raise
+            write_json(output / 'bootstrap-preflight.json', bootstrap_record)
         selection = [g.id for g in golds]
         code = code_record()
         verify_source(clone, args.source_commit, code)
@@ -252,6 +268,9 @@ def main(argv=None) -> int:
                "python": sys.version, "platform": platform.platform(),
                "dependencies": sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions())}
         config_path = output / "frozen.json"
+        if bootstrap_record is not None:
+            cfg['bootstrap_policy'] = args.bootstrap_policy
+            cfg['bootstrap_min_clusters'] = args.bootstrap_min_clusters
         write_json(config_path, cfg)
         freeze_sha = sha256(config_path)
         write_json(output / "freeze-receipt.json", {"sha256": freeze_sha,
@@ -319,7 +338,8 @@ def main(argv=None) -> int:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
         report = summarize(rows, golds, systems, args.seed,
-                           bootstrap_replicates=0 if stopped else 2000, check=None if stopped else check)
+                           bootstrap_replicates=0 if stopped else 2000, check=None if stopped else check,
+                           cluster_policy=args.bootstrap_policy, minimum_clusters=args.bootstrap_min_clusters)
         report.update(frozen_sha256=freeze_sha, complete=stopped is None,
                       stopped=stopped, termination_class=termination_class(stopped, statuses), selected_count=len(golds), variant=args.variant,
                       all_cases_executed_without_failure=all(len([r for r in rows if r["system"] == s and

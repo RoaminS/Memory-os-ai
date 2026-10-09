@@ -35,6 +35,7 @@ class Gold:
     sessions: tuple[str, ...]  # observable source identities, for clustered CI
     excluded_future_turns: int
     turn_aliases: tuple[tuple[str, str], ...] = ()  # scorer-only physical -> source turn
+    answer_sessions: tuple[str, ...] = ()  # scorer-only source evidence-session labels
 
 
 SESSION_POLICY = 'identical-session-copies-with-dates-v2'
@@ -188,6 +189,7 @@ def cases(path: Path, check=None) -> Iterator[tuple[Inputs, Gold]]:
         yield Inputs(case_id, tuple(turns), str(e["question"]), query_date), Gold(
             qid, tuple(evidence), tuple(str(a) for a in answers if a is not None),
             str(e.get("question_type", "unknown")), tuple(map(str, ids)), excluded, tuple(aliases),
+            tuple(map(str, e.get("answer_session_ids", ()))),
         )
 
 
