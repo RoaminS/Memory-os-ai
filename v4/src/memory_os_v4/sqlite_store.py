@@ -17,7 +17,7 @@ from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
 APPLICATION_ID = 0x4D4F5334
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = (
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at REAL NOT NULL)",
@@ -49,10 +49,18 @@ SCHEMA_S2 = (
     "CREATE TRIGGER receipts_no_delete BEFORE DELETE ON request_receipts BEGIN SELECT RAISE(ABORT,'immutable receipt'); END",
 )
 
+SCHEMA_CACHE = (
+    """CREATE TABLE embedding_cache(
+        cache_key TEXT PRIMARY KEY, dim INTEGER NOT NULL CHECK(dim>0),
+        vector BLOB NOT NULL, vector_sha256 TEXT NOT NULL)""",
+)
+
+MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE)
+
 
 def schema_checksums():
     return [(version, hashlib.sha256("\n".join(statements).encode()).hexdigest())
-            for version, statements in ((1, SCHEMA), (2, SCHEMA_S2))]
+            for version, statements in enumerate(MIGRATIONS, 1)]
 
 
 def _json(value) -> str:
@@ -111,7 +119,7 @@ class SQLiteStore(Store):
             if not fresh:
                 app_id = self._connection.execute("PRAGMA application_id").fetchone()[0]
                 version = self._connection.execute("PRAGMA user_version").fetchone()[0]
-                if app_id != APPLICATION_ID or version not in (1, SCHEMA_VERSION):
+                if app_id != APPLICATION_ID or version not in range(1, SCHEMA_VERSION + 1):
                     raise ValueError("Unknown/future SQLite schema; no implicit downgrade")
                 if self._connection.execute(
                     "SELECT version,checksum FROM schema_migrations ORDER BY version"
@@ -131,7 +139,7 @@ class SQLiteStore(Store):
             if fresh or version < SCHEMA_VERSION:
                 self._connection.execute("BEGIN IMMEDIATE")
                 try:
-                    for migration, statements in ((1, SCHEMA), (2, SCHEMA_S2)):
+                    for migration, statements in enumerate(MIGRATIONS, 1):
                         if not fresh and migration <= version:
                             continue
                         for statement in statements:

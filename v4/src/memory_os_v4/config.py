@@ -279,6 +279,7 @@ class Config:
     # back to the absolute `facet_weight` (bench reproduction only).
     facet_share: float | None = 0.30
     store_backend: str = "jsonl"  # "sqlite_s1" = experimental S2, fresh/S1 stores; not production
+    sqlite_embedding_namespace: str = "v1"  # Bump when local model weights/revision change.
 
     def half_life_days(self, kind: str) -> float:
         """Recency half-life (days) applicable to a given item kind."""
@@ -299,6 +300,7 @@ class Config:
         return cls(
             data_dir=_env_str("MEMORY_V4_DIR", d.data_dir),
             store_backend=_env_str("MEMORY_V4_STORE_BACKEND", d.store_backend),
+            sqlite_embedding_namespace=_env_str("MEMORY_V4_SQLITE_EMBEDDING_NAMESPACE", d.sqlite_embedding_namespace),
             embed_model=_env_str("MEMORY_V4_EMBED_MODEL", d.embed_model),
             device=_env_str("MEMORY_V4_DEVICE", d.device),
             hash_dim=_env_int("MEMORY_V4_HASH_DIM", d.hash_dim),

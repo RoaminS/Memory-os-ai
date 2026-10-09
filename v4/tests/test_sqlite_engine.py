@@ -17,7 +17,7 @@ from memory_os_v4 import Config, MemoryV4
 from memory_os_v4 import server
 from memory_os_v4.idempotency import RequestConflictError
 from memory_os_v4.readiness import engine_readiness
-from memory_os_v4.sqlite_store import APPLICATION_ID, MIN_SQLITE, SCHEMA, schema_checksums
+from memory_os_v4.sqlite_store import APPLICATION_ID, MIN_SQLITE, SCHEMA, SCHEMA_VERSION, schema_checksums
 
 pytestmark = pytest.mark.skipif(sqlite3.sqlite_version_info < MIN_SQLITE, reason="Unqualified SQLite runtime")
 
@@ -354,7 +354,7 @@ def test_s1_schema_upgrade_preserves_records_and_refuses_nonempty_jsonl(tmp_path
     (directory / "blocks.jsonl").unlink()
     with open_engine(directory) as reopened:
         assert reopened.store.meta["provenance"] == "S1"
-        assert reopened.store._connection.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert reopened.store._connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(

@@ -124,6 +124,9 @@ class MemoryV4:
                 self.requests = RequestJournal(self.data_dir)
                 self.blocks = BlockStore(self.data_dir / "blocks.jsonl", self.config.block_char_limit)
             self.embedder = _make_embedder(self.config)
+            if self.config.store_backend == "sqlite_s1":
+                from .sqlite_embeddings import SQLiteEmbeddings
+                self._embedding_cache = SQLiteEmbeddings(self.store)
             self.llm = LLMClient()
 
             self._bm25_path = self.data_dir / "bm25.json"
@@ -259,7 +262,7 @@ class MemoryV4:
         self.store.save_chunk_map()
 
     def _rebuild_sql_indexes(self):
-        """Ignore every on-disk cache: committed SQLite records are sufficient."""
+        """Rebuild indexes, reusing fingerprint-checked corpus embeddings."""
         self.facet_index = FacetIndex()
         self._reembed_all()
         self._rebuild_bm25_entities()
@@ -274,6 +277,16 @@ class MemoryV4:
             self.retriever._span_cache_n = -1
             self.retriever._chunk_cache = None
             self.retriever._chunk_cache_n = -1
+
+    def _encode_index_texts(self, texts):
+        if self.config.store_backend != "sqlite_s1":
+            return self.embedder.encode(texts)
+        from . import __version__
+        profile = {"model": self.config.embed_model, "dim": self.embedder.dim,
+                   "max_seq_length": self.config.embed_max_seq_length,
+                   "device": getattr(self.embedder, "device", "hash"),
+                   "implementation": __version__, "namespace": self.config.sqlite_embedding_namespace}
+        return self._embedding_cache.encode(texts, self.embedder.encode, self.embedder.dim, profile)
 
     # ------------------------------------------------------------- startup
     def _init_indexes(self) -> None:
@@ -348,7 +361,7 @@ class MemoryV4:
         if missing_ids:
             missing_items = [live_items[iid] for iid in missing_ids]
             texts = [index_text(it, self.config) for it in missing_items]
-            vecs = self.embedder.encode(texts)
+            vecs = self._encode_index_texts(texts)
             self.vector_index.add(missing_ids, vecs)
             self._add_chunk_vectors(missing_items)
 
@@ -380,7 +393,7 @@ class MemoryV4:
         if not items:
             return
         texts = [index_text(it, self.config) for it in items]
-        vecs = self.embedder.encode(texts)
+        vecs = self._encode_index_texts(texts)
         self.vector_index.add([it.id for it in items], vecs)
         self._add_chunk_vectors(items)
 
@@ -414,7 +427,7 @@ class MemoryV4:
                 owners.append(it.id)
         if not chunk_ids:
             return
-        vecs = self.embedder.encode(chunk_texts)
+        vecs = self._encode_index_texts(chunk_texts)
         self.vector_index.add(chunk_ids, vecs)
         for cid, owner in zip(chunk_ids, owners):
             self.store.chunk_owner[cid] = owner
@@ -498,7 +511,7 @@ class MemoryV4:
             return
         if vecs is None:
             texts = [index_text(it, self.config) for it in items]
-            vecs = self.embedder.encode(texts)
+            vecs = self._encode_index_texts(texts)
         ids = [it.id for it in items]
         self.vector_index.add(ids, vecs)
         self._add_chunk_vectors(items)
@@ -622,7 +635,7 @@ class MemoryV4:
                 # Embeddings serve retrieval, never duplicate decisions. Reuse
                 # this vector for indexing rather than computing it twice.
                 probe_text = index_text(item, self.config)
-                vec = self.embedder.encode([probe_text])[0]
+                vec = self._encode_index_texts([probe_text])[0]
 
                 self._index_items([item], vecs=np.asarray([vec]))
                 added.append(item.id)
