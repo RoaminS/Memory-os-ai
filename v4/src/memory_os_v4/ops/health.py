@@ -1,7 +1,7 @@
 """Daily health report (PLAN §10.1): read-only checks, never a traceback — every problem becomes an anomaly.
 
 Checks: ``/health`` and ``/ready`` (404 = server predates readiness, reported as info; anything else but 200 is an
-anomaly), strict scan of the JSONL store (SQLite stores are reported as unsupported by this report), *new* fact
+anomaly), strict JSONL scan or read-only SQLite counters/quick_check, *new* fact
 supersessions compared with a baseline (an S1 anomaly while supersession is confined), age of the last backup that
 is qualified, read-back verified, still present and unchanged on disk, and free disk space.
 """

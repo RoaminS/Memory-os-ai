@@ -1,4 +1,5 @@
 """Disposable, fingerprinted float32 corpus-vector cache; queries stay uncached."""
+
 from __future__ import annotations
 
 import hashlib
@@ -22,14 +23,17 @@ class SQLiteEmbeddings:
         vectors = {}
         with self.store._sql_lock:
             for start in range(0, len(unique), 500):
-                batch = unique[start:start + 500]
+                batch = unique[start : start + 500]
                 rows = self.store._connection.execute(
                     f"SELECT cache_key,dim,vector,vector_sha256 FROM embedding_cache WHERE cache_key IN ({','.join('?' for _ in batch)})",
                     batch,
                 )
                 for key, saved_dim, blob, checksum in rows:
-                    if (saved_dim != dim or len(blob) != dim * 4
-                            or hashlib.sha256(blob).hexdigest() != checksum):
+                    if (
+                        saved_dim != dim
+                        or len(blob) != dim * 4
+                        or hashlib.sha256(blob).hexdigest() != checksum
+                    ):
                         continue
                     vec = np.frombuffer(blob, dtype="<f4")
                     if np.isfinite(vec).all():
@@ -46,9 +50,12 @@ class SQLiteEmbeddings:
                 with self.store.transaction():
                     for (key, _), vec in zip(missing.items(), encoded):
                         blob = vec.tobytes()
-                        self.store.write("embedding_cache", "INSERT INTO embedding_cache VALUES(?,?,?,?) "
-                                         "ON CONFLICT(cache_key) DO UPDATE SET dim=excluded.dim,vector=excluded.vector,"
-                                         "vector_sha256=excluded.vector_sha256",
-                                         (key, dim, blob, hashlib.sha256(blob).hexdigest()))
+                        self.store.write(
+                            "embedding_cache",
+                            "INSERT INTO embedding_cache VALUES(?,?,?,?) "
+                            "ON CONFLICT(cache_key) DO UPDATE SET dim=excluded.dim,vector=excluded.vector,"
+                            "vector_sha256=excluded.vector_sha256",
+                            (key, dim, blob, hashlib.sha256(blob).hexdigest()),
+                        )
                         vectors[key] = vec
             return np.stack([vectors[key] for key in keys]).astype(np.float32, copy=False)

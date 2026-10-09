@@ -12,7 +12,7 @@ import json
 import time
 
 from .blocks import Block, BlockStore
-from .idempotency import RequestConflictError
+from .idempotency import RequestConflictError, RequestIncompleteError
 from .sqlite_store import _json
 from .sqlite_stats import IMPLICIT_RECEIPT_LIMIT
 
@@ -54,7 +54,7 @@ class SQLiteBlocks(BlockStore):
         ):
             if hashlib.sha256(record.encode()).hexdigest() != checksum:
                 raise RuntimeError("SQLite block checksum mismatch")
-            block = Block(**json.loads(record))
+            block = Block(**{key: value for key, value in json.loads(record).items() if key in Block.__dataclass_fields__})
             if (
                 block.scope not in {"global", "project"}
                 or not isinstance(block.name, str)
@@ -84,7 +84,9 @@ class SQLiteBlocks(BlockStore):
                 raise ValueError("Invalid block name/text/project")
             block = Block(name, text[: self.char_limit], time.time(), target, scope)
             key = (target, name)
-            record = _json(asdict(block))
+            previous = self.store._connection.execute(
+                "SELECT record_json FROM block_versions WHERE block_key=? ORDER BY sequence DESC LIMIT 1", (_json(key),)).fetchone()
+            record = _json({**(json.loads(previous[0]) if previous else {}), **asdict(block)})
             self.store.write(
                 "block_version",
                 "INSERT INTO block_versions(block_key,record_json,record_sha256) VALUES(?,?,?)",
@@ -143,6 +145,16 @@ class SQLiteRequests:
             ):
                 raise RuntimeError("Invalid SQLite completed receipt")
             self.records[(scope, request_id)] = value
+        for scope, request_id, record, checksum in self.store._connection.execute(
+            "SELECT scope,request_id,record_json,record_sha256 FROM legacy_pending_requests"
+        ):
+            value = json.loads(record)
+            if (hashlib.sha256(record.encode()).hexdigest() != checksum or value.get("state") != "pending"
+                    or (value.get("scope"), value.get("request_id")) != (scope, request_id)
+                    or not isinstance(value.get("fingerprint"), str)
+                    or (scope, request_id) in self.records):
+                raise RuntimeError("Invalid legacy uncertain receipt")
+            self.records[(scope, request_id)] = value
 
     def lookup(self, scope, request_id, operation, payload):
         previous = self.records.get((scope, request_id))
@@ -152,6 +164,8 @@ class SQLiteRequests:
             raise RequestConflictError(
                 "request_id already used with a different operation or payload in this scope"
             )
+        if previous.get("state") != "complete":
+            raise RequestIncompleteError("Legacy request has an uncertain outcome; reconcile it before any retry")
         if not previous.get("explicit", True):
             raise RequestConflictError("Implicit receipt has no replay result; clients must use explicit request_id")
         return True, json.loads(_json(previous["result"]))

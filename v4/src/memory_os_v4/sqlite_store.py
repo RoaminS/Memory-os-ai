@@ -17,7 +17,7 @@ from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
 APPLICATION_ID = 0x4D4F5334
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = (
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at REAL NOT NULL)",
@@ -65,7 +65,16 @@ SCHEMA_RETENTION = (
     "CREATE INDEX receipts_explicit ON request_receipts(COALESCE(json_extract(record_json,'$.explicit'),1),sequence)",
 )
 
-MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION)
+SCHEMA_LEGACY = (
+    "CREATE TABLE legacy_files(path TEXT PRIMARY KEY, contents BLOB NOT NULL, sha256 TEXT NOT NULL)",
+    "CREATE TABLE legacy_request_log(ordinal INTEGER PRIMARY KEY, record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL)",
+    """CREATE TABLE legacy_pending_requests(scope TEXT NOT NULL, request_id TEXT NOT NULL,
+        record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL, PRIMARY KEY(scope,request_id))""",
+    *tuple(f"CREATE TRIGGER {table}_no_{op} BEFORE {op.upper()} ON {table} BEGIN SELECT RAISE(ABORT,'immutable legacy'); END"
+           for table in ("legacy_files", "legacy_request_log", "legacy_pending_requests") for op in ("update", "delete")),
+)
+
+MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION, SCHEMA_LEGACY)
 
 
 def schema_checksums():
@@ -263,7 +272,11 @@ class SQLiteStore(Store):
                 if old and (item.project, item.kind) != old[:2]:
                     raise ValueError("An item cannot change project/kind")
                 revision = old[2] + 1 if old else 1
-                record = _json(item.to_dict())
+                previous = self._connection.execute(
+                    "SELECT record_json FROM item_versions WHERE item_id=? AND revision=?",
+                    (item.id, old[2])).fetchone() if old else None
+                # Preserve unknown legacy fields through later corrections/forget/access flush.
+                record = _json({**(json.loads(previous[0]) if previous else {}), **item.to_dict()})
                 self.write("item_version", "INSERT INTO item_versions VALUES(?,?,?,?,?)",
                                          (item.id, revision, record, hashlib.sha256(record.encode()).hexdigest(), time.time()))
                 self.write("item_head", "INSERT INTO items VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE "
@@ -296,6 +309,11 @@ class SQLiteStore(Store):
     def history(self, item_id: str) -> list[MemoryItem]:
         with self._sql_lock:
             return [MemoryItem.from_dict(json.loads(row[0])) for row in self._connection.execute(
+                "SELECT record_json FROM item_versions WHERE item_id=? ORDER BY revision", (item_id,))]
+
+    def raw_history(self, item_id: str) -> list[dict]:
+        with self._sql_lock:
+            return [json.loads(row[0]) for row in self._connection.execute(
                 "SELECT record_json FROM item_versions WHERE item_id=? ORDER BY revision", (item_id,))]
 
     def check_integrity(self) -> bool:
@@ -344,12 +362,15 @@ class SQLiteStore(Store):
                 for row in self._connection.execute("SELECT value_json FROM store_metadata"):
                     if not isinstance(json.loads(row[0]), dict):
                         return False
-                for table in ("block_versions", "request_receipts"):
+                for table in ("block_versions", "request_receipts", "legacy_request_log", "legacy_pending_requests"):
                     for record, checksum in self._connection.execute(
                         f"SELECT record_json,record_sha256 FROM {table}"
                     ):
                         if hashlib.sha256(record.encode()).hexdigest() != checksum:
                             return False
+                for contents, checksum in self._connection.execute("SELECT contents,sha256 FROM legacy_files"):
+                    if hashlib.sha256(contents).hexdigest() != checksum:
+                        return False
                 counter = self._connection.execute("SELECT value FROM receipt_counter WHERE id=1").fetchone()
                 maximum = self._connection.execute("SELECT COALESCE(max(sequence),0) FROM request_receipts").fetchone()[0]
                 if counter is None or counter[0] < maximum:
