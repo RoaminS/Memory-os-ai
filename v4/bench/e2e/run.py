@@ -115,6 +115,16 @@ def supervise(command, log, cwd, env, deadline, limits, measurements,
                 kill_group(child)
 
 
+def termination_class(reason, statuses=None):
+    if not reason:
+        return None
+    if reason.startswith(("Frozen wall-time budget exceeded", "Case exceeded wall timeout")):
+        return "budget"
+    if reason.startswith("Worker "):
+        return "budget" if 3 in (statuses or {}).values() else "correctness"
+    return "resource" if any(word in reason.lower() for word in ("swap", "free disk", "nice")) else "correctness"
+
+
 def write_json(path: Path, value):
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
 
@@ -143,6 +153,7 @@ def main(argv=None) -> int:
     p.add_argument("--query-mode", choices=["none", "lexical"], default="none")
     p.add_argument("--trace-k", type=int, default=0)
     p.add_argument("--warm-searches", type=int, default=0)
+    p.add_argument("--resident", action="store_true")
     args = p.parse_args(argv)
     if not 128 <= args.chunk_chars <= 2048 or not 0 <= args.trace_k <= 200 or not 0 <= args.warm_searches <= 3:
         p.error("Chunk/trace budget invalid")
@@ -151,6 +162,8 @@ def main(argv=None) -> int:
         resolved_config(args.model, "<private>", overrides, args.reranker)
     except (ValueError, TypeError) as exc:
         p.error(str(exc))
+    if args.resident and args.transport != "stdio":
+        p.error("Resident protocol requires real MCP stdio")
     # Graceful operator interruption must also clean SDK-owned server sessions.
     def terminate(signum, frame):
         raise ResourceStop("Evaluation supervisor interrupted by SIGTERM")
@@ -213,8 +226,8 @@ def main(argv=None) -> int:
         selection = [g.id for g in golds]
         code = code_record()
         verify_source(clone, args.source_commit, code)
-        cfg = {"stage": "exploratory (historically tuned oracle; NOT held-out qualification)",
-               "protocol": "e2e-quotes-v1", "run_id": capture_namespace(
+        cfg = {"stage": "oracle development" if args.variant == "oracle" else "S fixed-candidate confirmation; independence checked by amendment plan",
+               "protocol": "e2e-resident-v2" if args.resident else "e2e-quotes-v1", "resident": args.resident, "run_id": capture_namespace(
                    args.seed),
                "campaign_id": hashlib.sha256(str(output).encode()).hexdigest(),
                "source_commit": args.source_commit, "code_files": code, "data": str(args.data.resolve()),
@@ -235,7 +248,7 @@ def main(argv=None) -> int:
                "response": "highest query-term overlap sentence; answer-proxies-v2 EM/F1/containment (nonofficial)",
                "budgets": "shared UTF-8 bytes; chars/4 estimates are NOT tokenizer budgets",
                "concurrency": 1, "threads": 1, "device": "cpu", "limits": asdict(limits),
-               "cache": "memory stdio: model cold per case; dense: process-cold then warm",
+               "cache": "memory: resident model per arm, isolated fresh conversation stores" if args.resident else "memory stdio: model cold per case; dense: process-cold then warm",
                "python": sys.version, "platform": platform.platform(),
                "dependencies": sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions())}
         config_path = output / "frozen.json"
@@ -308,7 +321,7 @@ def main(argv=None) -> int:
         report = summarize(rows, golds, systems, args.seed,
                            bootstrap_replicates=0 if stopped else 2000, check=None if stopped else check)
         report.update(frozen_sha256=freeze_sha, complete=stopped is None,
-                      stopped=stopped, selected_count=len(golds), variant=args.variant,
+                      stopped=stopped, termination_class=termination_class(stopped, statuses), selected_count=len(golds), variant=args.variant,
                       all_cases_executed_without_failure=all(len([r for r in rows if r["system"] == s and
                                                        r["status"] != "failed"]) == len(golds) for s in systems),
                       source_commit=args.source_commit, resource_samples=len(measurements),
@@ -316,13 +329,18 @@ def main(argv=None) -> int:
                       min_free_bytes=min(m["free_bytes"] for m in measurements),
                       response_judge="answer-proxies-v2 EM/F1/containment, NOT official LME judge",
                       agent_tasks="not evaluated", leaderboard_rank="not evaluated")
+        lifecycle = output / "memory-lifecycle.json"
+        if lifecycle.exists():
+            report["memory_lifecycle"] = json.loads(lifecycle.read_text())
+        if not report["all_cases_executed_without_failure"] and report["termination_class"] is None:
+            report["termination_class"] = "correctness"
         write_json(output / "report.json", report)
         write_json(output / "resource-samples.json", measurements)
         write_json(output / "proofs.json", {p.name: sha256(p) for p in sorted(output.iterdir()) if p.is_file()})
         print(json.dumps({"report": str(output / "report.json"), "complete": report["complete"]}))
         return 0 if report["complete"] and report["all_cases_executed_without_failure"] else 1
     except (ValueError, OSError, ResourceStop) as e:
-        write_json(output / "aborted.json", {"reason": str(e), "complete": False})
+        write_json(output / "aborted.json", {"reason": str(e), "complete": False, "termination_class": termination_class(str(e))})
         print(f"STOP: {e}", file=sys.stderr)
         return 2
 

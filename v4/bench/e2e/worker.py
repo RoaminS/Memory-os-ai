@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import asynccontextmanager
 import gc
 import json
 from pathlib import Path
@@ -25,8 +26,24 @@ def footprint(root: Path) -> int:
     return sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
 
 
-async def evaluate(inputs, system, cfg, root):
+@asynccontextmanager
+async def borrowed(client):
+    yield client
+
+
+def usage_delta(after, before):
+    result = dict(after)
+    for key in ('encoder_calls', 'encoder_texts', 'encoder_input_tokens', 'encoder_ms',
+                'reranker_calls', 'reranker_pairs', 'reranker_input_tokens', 'reranker_ms',
+                'llm_calls', 'api_usd'):
+        result[key] = after.get(key, 0) - before.get(key, 0)
+    return result
+
+
+async def evaluate(inputs, system, cfg, root, shared_client=None):
     start = time.perf_counter()
+    usage_root = shared_client.root if shared_client is not None else root
+    usage_start = read(usage_root / "usage.json") if shared_client is not None else {}
     t = time.perf_counter()
     project = project_for(cfg["run_id"], inputs.id)
     quotes = extract(project, inputs.turns, cfg.get("chunk_chars", 1024))
@@ -49,22 +66,30 @@ async def evaluate(inputs, system, cfg, root):
     warm_times = []
     if system == "memory":
         t = time.perf_counter()
-        async with ToolClient(root, cfg["model"], cfg["transport"],
-                              cfg.get("engine_overrides"), cfg.get("reranker")) as client:
+        context = borrowed(shared_client) if shared_client is not None else ToolClient(
+            root, cfg["model"], cfg["transport"], cfg.get("engine_overrides"), cfg.get("reranker"))
+        async with context as client:
+            if shared_client is not None:
+                opened = await client.call('eval_open_conversation', {'conversation_id': inputs.id})
+                if not opened.get('encoder_reused') or not opened.get('store_empty'):
+                    raise RuntimeError('Resident conversation isolation/model reuse not proven')
+                phase.update(conversation_close_ms=opened['conversation_close_ms'],
+                             conversation_init_ms=opened['conversation_init_ms'])
+                calls += 1
             phase["init_ms"] = (time.perf_counter() - t) * 1000
-            usage_phases["after_init"] = read(root / "usage.json")
+            usage_phases["after_init"] = read(usage_root / "usage.json")
             adapter = AddSearchAdapter(client, cfg["run_id"])
             t = time.perf_counter()
             capture = await adapter._capture(inputs.id, inputs.turns, quotes)
             calls += capture["tool_calls"]
             phase["ingest_ms"] = (time.perf_counter() - t) * 1000
-            usage_phases["after_ingest"] = read(root / "usage.json")
+            usage_phases["after_ingest"] = read(usage_root / "usage.json")
             t = time.perf_counter()
             result = await adapter.search(inputs.id, inputs.question, retrieval_k,
                                           queries=queries or None, rerank=bool(cfg.get("reranker")))
             calls += result["tool_calls"]
             phase["retrieval_ms"] = (time.perf_counter() - t) * 1000
-            usage_phases["after_retrieval"] = read(root / "usage.json")
+            usage_phases["after_retrieval"] = read(usage_root / "usage.json")
             # A returned id not produced by the client is an isolation/provenance
             # defect, not a silently ignored retrieval result.
             ranked = [quote_by_id[h["id"]] for h in result["results"]]
@@ -85,7 +110,7 @@ async def evaluate(inputs, system, cfg, root):
                                      queries=queries or None, rerank=bool(cfg.get("reranker")))
                 warm_times.append((time.perf_counter() - t) * 1000)
                 calls += 1
-            usage_phases["after_warm_searches"] = read(root / "usage.json")
+            usage_phases["after_warm_searches"] = read(usage_root / "usage.json")
             t = time.perf_counter()
         phase["shutdown_ms"] = (time.perf_counter() - t) * 1000
     else:
@@ -118,8 +143,8 @@ async def evaluate(inputs, system, cfg, root):
     context_bytes = sum(len(q.text.encode()) + 1 for q in context)
     return {"status": "ok", "retrieved_turn_ids": list(dict.fromkeys(q.turn_id for q in context)),
             "response": response, "tool_calls": calls, "llm_calls": 0, "api_usd": 0.0,
-            "model_usage": read(root / "usage.json"),
-            "model_usage_phase_snapshots": usage_phases,
+            "model_usage": usage_delta(read(usage_root / "usage.json"), usage_start),
+            "model_usage_phase_snapshots": {k: usage_delta(v, usage_start) for k, v in usage_phases.items()},
             "warm_search_ms": warm_times,
             "queries": queries, "query_expansion_bytes": sum(len(q.encode()) for q in queries),
             "rank_trace": trace if cfg.get("trace_k", 0) else [],
@@ -135,13 +160,13 @@ async def evaluate(inputs, system, cfg, root):
                 "capture": sum(len(t.content) for t in inputs.turns) / 4,
                 "extracted": sum(len(q.text) for q in quotes) / 4,
                 "query": len(inputs.question) / 4, "context": sum(len(q.text) for q in context) / 4},
-            "persistent_bytes": footprint(root),
+            "persistent_bytes": footprint(usage_root),
             "rss_self_peak_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             "rss_children_peak_bytes": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss,
             "end_to_end_ms": (time.perf_counter() - start) * 1000, **phase}
 
 
-async def run(cfg: dict, system: str, out: Path, work: Path):
+async def run_cases(cfg: dict, system: str, out: Path, work: Path, shared_client=None):
     allowed = set(cfg["selected_ids"]) if cfg.get("selection_filter") else None
     i = 0
     with out.open("x") as f:
@@ -154,10 +179,11 @@ async def run(cfg: dict, system: str, out: Path, work: Path):
             try:
                 with tempfile.TemporaryDirectory(prefix=f"{system}-{i}-", dir=work) as d:
                     async with asyncio.timeout(cfg["case_seconds"]):
-                        row = await evaluate(inputs, system, cfg, Path(d))
+                        row = await evaluate(inputs, system, cfg, Path(d), shared_client) if shared_client is not None else await evaluate(inputs, system, cfg, Path(d))
             except Exception as exc:
                 # Every selected failed question remains in the denominator.
                 row = {"status": "failed", "reason": type(exc).__name__ + ": " + str(exc),
+                       "failure_class": "budget" if isinstance(exc, TimeoutError) else "correctness",
                        "retrieved_turn_ids": [], "response": None,
                        "end_to_end_ms": (time.perf_counter() - start) * 1000}
             if row["status"] == "not_applicable":
@@ -180,6 +206,33 @@ async def run(cfg: dict, system: str, out: Path, work: Path):
             print(f"{system} {i + 1}/{cfg['limit']} {row['status']}", flush=True)
             i += 1
             gc.collect()
+            if cfg.get("resident") and row["status"] == "failed":
+                if row.get("failure_class") == "budget":
+                    raise TimeoutError(row["reason"])
+                raise RuntimeError(row["reason"])
+
+
+async def run(cfg: dict, system: str, out: Path, work: Path):
+    if not cfg.get("resident") or system != "memory":
+        return await run_cases(cfg, system, out, work)
+    with tempfile.TemporaryDirectory(prefix="resident-arm-", dir=work) as d:
+        root = Path(d)
+        lifecycle = {}
+        t = time.perf_counter()
+        try:
+            async with ToolClient(root, cfg["model"], cfg["transport"],
+                                  cfg.get("engine_overrides"), cfg.get("reranker"), True) as client:
+                lifecycle.update(startup_ms=(time.perf_counter() - t) * 1000,
+                                 startup_model_usage=read(root / "usage.json"),
+                                 residency="one model/MCP process per arm; fresh conversation stores")
+                try:
+                    await run_cases(cfg, system, out, work, client)
+                finally:
+                    lifecycle["total_model_usage"] = read(root / "usage.json")
+                    t = time.perf_counter()
+        finally:
+            lifecycle["shutdown_ms"] = (time.perf_counter() - t) * 1000
+            out.with_name(system + "-lifecycle.json").write_text(json.dumps(lifecycle, allow_nan=False))
 
 
 def main():
@@ -195,7 +248,11 @@ def main():
     p.add_argument("--work", required=True, type=Path)
     args = p.parse_args()
     cfg = json.loads(args.config.read_text())
-    asyncio.run(run(cfg, args.system, args.output, args.work))
+    try:
+        asyncio.run(run(cfg, args.system, args.output, args.work))
+    except TimeoutError as exc:
+        print(f"BUDGET: {exc}", flush=True)
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":

@@ -58,9 +58,11 @@ def offline_env() -> dict:
 
 class ToolClient:
     def __init__(self, root: Path, model: str, transport: str = "stdio",
-                 overrides: dict | None = None, reranker: str | None = None):
+                 overrides: dict | None = None, reranker: str | None = None, resident: bool = False):
         self.root, self.model, self.transport = root, model, transport
-        self.overrides, self.reranker = overrides, reranker
+        self.overrides, self.reranker, self.resident = overrides, reranker, resident
+        if resident and transport != "stdio":
+            raise ValueError("Resident campaigns require real private MCP stdio")
         self.stack = AsyncExitStack()
 
     async def __aenter__(self):
@@ -83,6 +85,7 @@ class ToolClient:
                        MEMORY_V4_DEVICE="cpu", MEMORY_V4_EMBED_BATCH_SIZE="4",
                        MEMORY_V4_EMBED_MAX_SEQ_LENGTH="256",
                        MEMORY_V4_USE_RECENCY="0", MEMORY_V4_STORE_BACKEND="jsonl")
+            env["MEMORY_EVAL_RESIDENT"] = "1" if self.resident else "0"
             env["MEMORY_EVAL_USAGE_FILE"] = str(self.root / "usage.json")
             config_path = self.root / "engine-config.json"
             config_path.write_text(json.dumps(resolved_config(self.model, str(self.root / "store"),

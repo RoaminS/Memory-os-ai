@@ -35,5 +35,11 @@ from memory_os_v4.server import run, set_engine  # noqa: E402
 if __name__ == "__main__":
     sys.argv.remove(f"--eval-owner={owner}")
     cfg = Config(**raw_cfg)
-    set_engine(MemoryV4(config=cfg))
+    if os.environ.get("MEMORY_EVAL_RESIDENT") == "1":
+        from memory_os_v4 import memory as memory_module, server as server_module
+        from .resident import ResidentPool
+        pool = ResidentPool(memory_module, server_module, cfg)
+        pool.install()
+    else:
+        set_engine(MemoryV4(config=cfg))
     run()
