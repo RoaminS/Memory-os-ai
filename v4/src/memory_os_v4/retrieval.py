@@ -821,6 +821,18 @@ class HybridRetriever:
                     self.store.touch(hit.item.id, time.time())
                 return result
 
+        # Select anchors before optional expansions/CE, then enforce them LAST.
+        # Only positive scoped lexical matches qualify; tail remains fused order.
+        anchors = []
+        if cfg.lexical_guard_k:
+            raw = dict(signal_hits.get("bm25", []))
+            for hit in scored:
+                if hit.item.invalidated_by is not None and not (
+                        at_time is not None and is_valid_at(hit.item, at_time)):
+                    raw[hit.item.id] = raw.get(hit.item.id, 0.0) * .5
+            anchors = sorted((h for h in scored if raw.get(h.item.id, 0) > 0),
+                             key=lambda h: (-raw[h.item.id], h.item.id))[:min(cfg.lexical_guard_k, top_k)]
+
         if cfg.neighbor_expansion:
             scored = self._expand_neighbors(scored, kinds, project, at_time)
 
@@ -828,6 +840,16 @@ class HybridRetriever:
             scored = self._expand_entities(scored, kinds, project, at_time, top_k)
 
         scored = self._rerank_hits(query, scored, rerank)
+
+        if cfg.lexical_guard_k:
+            protected = {h.item.id for h in anchors}
+            scored = anchors + [h for h in scored if h.item.id not in protected]
+            for rank, hit in enumerate(scored, 1):
+                hit.signals["lexical_guard_k"] = cfg.lexical_guard_k
+                hit.signals["lexical_guard_anchor"] = hit.item.id in protected
+                hit.signals["pre_guard_score"] = hit.score
+                # Public score reflects returned order, as for lexical_first.
+                hit.score = 1.0 / rank
 
         result = scored[:top_k]
         now = time.time()

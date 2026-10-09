@@ -7,7 +7,7 @@ import sys
 
 ALLOWED = {"fusion", "w_dense", "w_bm25", "w_entity", "candidates", "dense_norm",
            "full_candidate_scoring", "use_entities", "use_dense", "use_stemming",
-           "rerank_top_n", "rerank_weight", "bm25_profile", "lexical_first"}
+           "rerank_top_n", "rerank_weight", "bm25_profile", "lexical_first", "lexical_guard_k"}
 
 
 def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
@@ -37,10 +37,7 @@ def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
         result[key] = value
     if result["fusion"] not in {"cc", "rrf", "dbsf"} or result["dense_norm"] not in {"minmax", "fixed"}:
         raise ValueError("Unsupported fusion/normalization")
-    if result['bm25_profile'] not in {'legacy', 'scoped_literal'}:
-        raise ValueError('Invalid BM25 profile')
-    if result['lexical_first'] and result['bm25_profile'] != 'scoped_literal':
-        raise ValueError('lexical_first requires scoped_literal')
+    module.Config(**result).validate_lexical_policy()
     import math
     if any(not math.isfinite(result[k]) or result[k] < 0 for k in ("w_dense", "w_bm25", "w_entity")):
         raise ValueError("Nonnegative finite weights required")

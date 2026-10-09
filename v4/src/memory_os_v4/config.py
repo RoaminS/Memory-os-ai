@@ -143,6 +143,20 @@ class Config:
     # statistics and candidate selection BEFORE project/kind/validity filtering.
     bm25_profile: str = "legacy"  # legacy | scoped_literal
     lexical_first: bool = False  # preserve positive lexical ranks; dense fills gaps
+    lexical_guard_k: int = 0  # final protected raw-BM25 prefix; 0 disables C4
+
+    def validate_lexical_policy(self) -> None:
+        """Reject ambiguous rank policies before opening or modifying a store."""
+        if self.bm25_profile not in {"legacy", "scoped_literal"}:
+            raise ValueError("Unknown BM25 profile")
+        if self.lexical_first and self.bm25_profile != "scoped_literal":
+            raise ValueError("lexical_first requires scoped_literal")
+        if type(self.lexical_guard_k) is not int or not 0 <= self.lexical_guard_k <= 100:
+            raise ValueError("lexical_guard_k must be an integer in [0, 100]")
+        if self.lexical_guard_k and (self.bm25_profile != "scoped_literal" or not self.use_bm25):
+            raise ValueError("lexical_guard_k requires scoped_literal and BM25 enabled")
+        if self.lexical_guard_k and self.lexical_first:
+            raise ValueError("lexical_guard_k and lexical_first are mutually exclusive")
 
     # E3 neighbor_expansion: after fusion+scoring, pull in the +-window items
     # adjacent in time within the same doc_ref (episodes ordered by
@@ -344,6 +358,7 @@ class Config:
             use_stemming=_env_bool("MEMORY_V4_USE_STEMMING", d.use_stemming),
             bm25_profile=_env_str("MEMORY_V4_BM25_PROFILE", d.bm25_profile),
             lexical_first=_env_bool("MEMORY_V4_LEXICAL_FIRST", d.lexical_first),
+            lexical_guard_k=_env_int("MEMORY_V4_LEXICAL_GUARD_K", d.lexical_guard_k),
             neighbor_expansion=_env_bool("MEMORY_V4_NEIGHBOR_EXPANSION", d.neighbor_expansion),
             neighbor_seed=_env_int("MEMORY_V4_NEIGHBOR_SEED", d.neighbor_seed),
             neighbor_decay=_env_float("MEMORY_V4_NEIGHBOR_DECAY", d.neighbor_decay),

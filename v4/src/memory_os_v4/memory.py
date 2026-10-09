@@ -107,10 +107,7 @@ class MemoryV4:
             self.config.data_dir = data_dir
         self._lock = RLock()
 
-        if self.config.bm25_profile not in {"legacy", "scoped_literal"}:
-            raise ValueError("Unknown BM25 profile")
-        if self.config.lexical_first and self.config.bm25_profile != "scoped_literal":
-            raise ValueError("lexical_first requires scoped_literal")
+        self.config.validate_lexical_policy()
         self.data_dir = Path(self.config.data_dir).expanduser()
         if self.config.store_backend not in {"jsonl", "sqlite_s1"}:
             raise ValueError("Unknown store backend; choose jsonl or experimental sqlite_s1")
