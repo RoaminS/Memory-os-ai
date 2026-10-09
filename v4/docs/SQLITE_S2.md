@@ -1,6 +1,7 @@
 # ADR-001 S2 — transactions complètes du moteur SQLite
 
 Date : 2026-10-09. Auteur : Codex. Revue et qualification cible : Claude.
+**Version historique S2 : amendements courants [P1/P2/P3 et S3](SQLITE_S3.md).**
 Ce lot est expérimental derrière **le drapeau existant**
 `MEMORY_V4_STORE_BACKEND=sqlite_s1`. JSONL reste le défaut. Aucune bascule de
 production, migration JSONL ni publication n'est exécutée ou autorisée par ce lot.

@@ -1,7 +1,7 @@
 # ADR-001 — SQLite transactionnel comme stockage faisant autorité de l'ALPHA
 
 Date : 2026-10-09. Décideur : Romain. Responsable moteur : Codex. Revue adverse : Claude.
-**Statut : décision approuvée ; S1 et S2 expérimentaux implémentés, S3–S5 et qualification industrielle à faire.** Romain a
+**Statut : décision approuvée ; S1–S3 expérimentaux implémentés sur copies, S4–S5 et qualification industrielle à faire.** Romain a
 approuvé PLAN_FINAL_v3 (« Ok let's go ») et explicitement retenu SQLite pour l'ALPHA,
 selon son instruction de mise en œuvre et `~/memory-os-local/TASKS.md`. Cette décision
 remplace le report conditionnel de SQLite de l'accord précédent. Les formulations
@@ -13,7 +13,14 @@ livré. **[S1](SQLITE_S1.md) fournit un adaptateur derrière Store, sous drapeau
 magasins neufs uniquement ; aucune migration exécutable ni bascule de production.**
 [S2](SQLITE_S2.md) ajoute les transactions moteur englobantes, blocs/reçus SQLite,
 reconstruction des index et qualification par exceptions/SIGKILL sur magasins
-jetables. Le contrat cible ci-dessous inclut toujours des éléments S3–S5 non livrés.
+jetables. Le contrat cible ci-dessous inclut toujours des éléments de qualification
+et d'exploitation industrielle non livrés.
+
+**Amendement courant : [P1/P2/P3 et S3](SQLITE_S3.md)** livrent cache de vecteurs,
+rétention des reçus implicites, version applicative dynamique et import/export
+hors ligne sur copies. Les mesures 1 000/10 000 attendent Claude hors sandbox ;
+S4/S5 restent non livrés. Le détail historique S1/S2 ci-dessus n'est pas le statut
+actuel du backend expérimental.
 
 ## Contexte et problème
 
