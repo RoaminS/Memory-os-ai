@@ -28,11 +28,12 @@ L'importance/recency sont constantes dans cette campagne; aucun MMR dans
 
 Lecture des **traces déjà produites**, aucune nouvelle exécution neuronale :
 sur les 100 IDs retenus, E3 contient 13,06 faits visibles en moyenne sur son
-pool global de 30; le premier rang global n'est pas un fait pour 75 questions.
+pool global plafonné à 30; le premier rang global n'est pas visible parmi les
+faits retournés pour 75 questions.
 99/100 traces primaires ont un signal de reranker. Les contextes E3 contiennent
 7,69 tours distincts en moyenne contre 8,80 pour la référence (77 contextes
 E3 avec moins de 10 tours). E1 : 23,21 faits visibles parmi son pool lexical
-global de 100, 79 premiers rangs filtrés, 8,07 tours contre 8,80. Ces traces
+global plafonné à 100, 79 premiers rangs non visibles, 8,07 tours contre 8,80. Ces traces
 sont bornées : un fait absent ne prouve pas sa suppression à l'ingestion.
 Preuve locale : `.local-qualification/lexical-dev-v1-evidence/historical-audits.json`,
 empreintes des artefacts précédents contrôlées. Attribution nette header /
@@ -47,6 +48,10 @@ d'index et ensemble des IDs éligibles. top-N couvre au moins top_k. Les
 changements de profil reconstruisent BM25 au redémarrage sans ré-encodage.
 Dense/entities gardent leurs représentations actuelles. Le profil par défaut
 reste legacy; aucune activation de production dans ce lot.
+En fusion, les candidats hors scope sont écartés **avant normalisation** pour
+ne pas fixer les extrema/les rangs du scoring des faits autorisés. Le budget
+de collecte dense/entity reste global top-N; cette limite demeure mesurée
+par la campagne, aucun gain de fusion n'est présumé.
 Le filtrage temporel reste celui du moteur; la pénalité actuelle des faits
 invalidés est conservée. La parité exacte suppose des observations valides,
 de même importance; la capture de ce protocole satisfait ces conditions.
@@ -107,13 +112,13 @@ produire des chiffres nouveaux ici; Claude exécute les campagnes hors sandbox.
 
 S3 intégré depuis `98000fa` (hérite de S2 `61eda7b`). Le runner Store crée son
 dossier de basetemp et fixe MEMORY_WORKSPACE au clone sauf valeur explicite.
-`bash scripts/run_store_checks.sh` : **329 passed**, 25,13s; deux commandes lint
+`bash scripts/run_store_checks.sh` : **329 passed**, 32,73s; deux commandes lint
 vertes. Mesures lifecycle S3 rapportées par Claude dans
 `/Users/romain/memory-os-local/reviews/claude_results_dev_v2_and_s3.md` :
 1000 froid/chaud/rollback 0,32/0,25/0,22s; 10000 3,6/2,9/2,5s;
 0 texte existant ré-encodé, trois répétitions. Pas de mesure granite nouvelle.
 
-Suite ciblée suivante : **202 passed**, 1,45s, assertions de dérive du
+Suite ciblée suivante : **204 passed**, assertions de dérive du
 protocole incluses.
 
 ```sh

@@ -42,13 +42,13 @@ def saved_audit(directory, selected_ids):
                         'delta_recall': a['recall'] - b['recall'] if a['recall'] is not None else None,
                         'delta_mrr': a['mrr'] - b['mrr'] if a['mrr'] is not None else None,
                         'facts_visible_in_global_pool': len(lexical),
-                        'global_rank_1_not_a_fact': bool(global_ranks) and min(global_ranks) > 1,
+                        'global_rank_1_missing_from_fact_trace': bool(global_ranks) and min(global_ranks) > 1,
                         'reranker_executed': any('rerank' in h['signals'] for h in a['rank_trace']),
                         'reference_quotes_missing_from_visible_pool': sorted(
                             set(b['selected_quote_ids']) - {h['id'] for h in trace}),
                         'scope': 'saved bounded trace, NOT exhaustive corpus attribution'})
     return {'n': len(details), 'reranked': sum(d['reranker_executed'] for d in details),
-            'rank1_filtered_questions': sum(d['global_rank_1_not_a_fact'] for d in details),
+            'rank1_not_visible_questions': sum(d['global_rank_1_missing_from_fact_trace'] for d in details),
             'mean_visible_facts': mean(d['facts_visible_in_global_pool'] for d in details),
             'memory_less_than_10_turns': sum(d['memory_turns'] < 10 for d in details),
             'mean_memory_turns': mean(d['memory_turns'] for d in details),

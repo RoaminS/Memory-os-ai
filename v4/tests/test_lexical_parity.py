@@ -107,3 +107,37 @@ def test_environment_and_invalid_profile(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='Unknown BM25 profile'):
         MemoryV4(config=replace(config(tmp_path / 'bad'), bm25_profile='typo'))
     assert not (tmp_path / 'bad').exists()
+
+
+def test_excluded_dense_hits_cannot_change_hybrid_normalization(tmp_path):
+    cfg = config(tmp_path / 'store')
+    cfg.use_dense = True
+    cfg.full_candidate_scoring = True
+    with MemoryV4(config=cfg) as engine:
+        engine.add_facts([{'item_id': 'a', 'text': 'apple'},
+                          {'item_id': 'b', 'text': 'apple pear'}], project='P')
+        engine.add_facts([{'item_id': 'foreign', 'text': 'apple'}], project='OTHER')
+        engine.retriever._dense_candidates = lambda q, n: [('foreign', 100), ('b', .9), ('a', .8)]
+        observed = []
+        def scores(q, ids):
+            observed.append(set(ids))
+            return {i: {'a': .8, 'b': .9, 'foreign': 100}[i] for i in ids}
+        engine.retriever._dense_full_scores = scores
+        engine.search('apple', kinds=['fact'], project='P')
+        assert observed == [{'a', 'b'}]
+
+
+def test_sqlite_rollback_discards_scoped_index_of_partial_batch(tmp_path):
+    with MemoryV4(config=config(tmp_path / 'store', store_backend='sqlite_s1')) as engine:
+        engine.add_facts([{'item_id': 'old', 'text': 'committed apple'}], project='P')
+        assert engine.retriever.lexical_index(['fact'], 'P').n_docs == 1
+        def fail_after_indexing():
+            engine.add_facts([{'item_id': 'phantom', 'text': 'phantom pear'}], project='P')
+            assert engine.retriever.lexical_index(['fact'], 'P').n_docs == 2
+            raise ValueError('injected interruption')
+        with pytest.raises(ValueError, match='injected interruption'):
+            engine.execute_request('rollback', 'request', {}, 'rollback', fail_after_indexing)
+        assert engine.store.get('phantom') is None
+        assert engine.retriever.lexical_index(['fact'], 'P').n_docs == 1
+        assert not engine.search('phantom', project='P', kinds=['fact'])
+        assert [h.item.id for h in engine.search('apple', project='P', kinds=['fact'])] == ['old']

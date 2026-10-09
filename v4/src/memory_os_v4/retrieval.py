@@ -692,6 +692,14 @@ class HybridRetriever:
         if cfg.use_entities:
             signal_hits["entity"] = self.entities.search(query_entities, n)
 
+        if cfg.bm25_profile == "scoped_literal":
+            # Excluded episodes/projects must not set hybrid normalization
+            # extrema or full-candidate ranks. Lexical generation already
+            # scopes BEFORE top-N; other channels retain their fetch budgets.
+            signal_hits = {name: [(cid, value) for cid, value in hits
+                           if _passes_filters(self.store.get(cid), kinds, project, at_time)]
+                           for name, hits in signal_hits.items()}
+
         candidate_ids: set[str] = set()
         for hits in signal_hits.values():
             candidate_ids.update(doc_id for doc_id, _ in hits)
