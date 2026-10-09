@@ -1,5 +1,11 @@
 # ADR-001 S1 — adaptateur SQLite expérimental derrière Store
 
+## Notice de version
+
+Ce document décrit le lot S1 historique. Le backend `sqlite_s1` livré désormais
+inclut [S2](SQLITE_S2.md) : blocs et reçus SQLite, transactions moteur complètes.
+Consulter S2 pour le comportement actuel et les limites de qualification.
+
 Statut : **implémenté pour qualification sur magasins neufs, pas pour la production**.
 Le choix SQLite est déjà approuvé ; ce lot ne réalise ni migration ni bascule.
 Le backend par défaut reste `jsonl`. L'option explicite
