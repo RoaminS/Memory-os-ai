@@ -59,3 +59,16 @@ def test_doctor_refuses_invalid_database_without_traceback(tmp_path, monkeypatch
     monkeypatch.setenv("MEMORY_V4_DIR", str(tmp_path))
     assert main(["doctor"]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite_s1"])
+def test_metadata_version_tracks_package_version(tmp_path, monkeypatch, backend):
+    import memory_os_v4
+    monkeypatch.setattr(memory_os_v4, "__version__", "4.9.99-test")
+    config = Config(data_dir=str(tmp_path), store_backend=backend, embed_model="hash")
+    with MemoryV4(config=config) as engine:
+        engine.add_episode("Synthetic versioned episode")
+        engine.flush()
+        assert engine.store.meta["version"] == memory_os_v4.__version__
+    with MemoryV4(config=config) as reopened:
+        assert reopened.store.meta["version"] == memory_os_v4.__version__

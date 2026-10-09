@@ -45,6 +45,12 @@ def _make_embedder(config: Config) -> Embedder | HashEmbedder:
     return Embedder(config.embed_model, config.device, config.embed_max_seq_length, config.embed_batch_size)
 
 
+def _package_version():
+    # Lazy import: __init__ defines __version__ after importing this facade.
+    from . import __version__
+    return __version__
+
+
 def index_text(item: MemoryItem, config: Config) -> str:
     """The ONE string every signal indexes `item` under: dense embedding,
     BM25 tokenization (production
@@ -255,7 +261,7 @@ class MemoryV4:
 
     def _flush_sql_sources(self):
         meta = dict(self.store.meta)
-        meta.update(embed_model=self.config.embed_model, dim=self.embedder.dim, version="4.0.1")
+        meta.update(embed_model=self.config.embed_model, dim=self.embedder.dim, version=_package_version())
         if self.last_consolidated is not None:
             meta["last_consolidated"] = self.last_consolidated
         self.store.save_meta(meta)
@@ -332,7 +338,7 @@ class MemoryV4:
 
         self.store.meta["embed_model"] = self.config.embed_model
         self.store.meta["dim"] = dim
-        self.store.meta["version"] = "4.0.1"
+        self.store.meta["version"] = _package_version()
 
     def _reconcile_indexes(self) -> None:
         """A1 (adversarial review, 2026-09-12): after loading whatever was
@@ -945,7 +951,7 @@ class MemoryV4:
             meta = dict(self.store.meta)
             meta["embed_model"] = self.config.embed_model
             meta["dim"] = self.embedder.dim
-            meta["version"] = "4.0.1"
+            meta["version"] = _package_version()
             if self.last_consolidated is not None:
                 meta["last_consolidated"] = self.last_consolidated
             self.store.save_meta(meta)
