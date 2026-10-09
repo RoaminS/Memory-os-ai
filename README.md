@@ -68,14 +68,16 @@ Every number below comes from a versioned run you can reproduce; none is a vendo
 
 | What | Result | Protocol |
 |---|---|---|
-| End-to-end evidence recall, LongMemEval **oracle** (500 questions, no LLM, MiniLM) | Memory OS 0.802 [0.771, 0.832] vs BM25 0.812 [0.781, 0.841]: **no significant difference yet**; vs dense-only +0.098, vs plain files +0.061 (95 % CI, grouped bootstrap) | `v4/bench/e2e`, frozen manifest, failures kept |
+| **LongMemEval-S** evidence Recall@10, 500 questions, ~50 sessions of history each, no LLM, MiniLM — candidate C4 (scoped literal BM25 + 3 protected lexical results + hybrid fusion) | **0.754 [0.721, 0.785] vs BM25 0.712 [0.675, 0.748]; paired Δ +0.042 [+0.022, +0.061]** (466 evidence clusters); MRR 0.626 vs 0.614, Δ +0.012 [+0.008, +0.017]; 0 failures | Frozen preregistered plan `lexical-c4-s-v3` (sha256 38c1877e…); CI conditional on the fixed distractor corpus; questions overlap the oracle variant used for development, so this is **not** an independent confirmation and **not** an official leaderboard score |
+| Development history, LongMemEval oracle (exploratory) | 4.0.1 defaults ≈ BM25 (0.802 vs 0.812); root cause found (filtering after candidate truncation); corrected lexical path = exact BM25 parity; C4 +0.026 recall on dev | `v4/docs/LEXICAL_DEV_V1.md`, failures kept |
 | LoCoMo evidence Recall@10 (exploratory) | 0.538 production defaults → 0.815 with offline LLM enrichment and reranking | `v4/RESULTS.md`; offline enrichment is not the production path |
 | 4.0.1 release qualification | 478 v3 + 795 v4 tests, two adversarial review rounds, installed-artifact relay proof (round-trip, failure, reconnection, no replay) for wheel and sdist | `releases/4.0.1/QUALIFICATION.md` |
 
 We publish retrieval recall, answer quality and agent-task success **separately**, with sample sizes and
-confidence intervals, and always next to simple baselines (BM25, dense-only, files, full context). Beating BM25
-significantly on a held-out partition is the next milestone; leaderboard submissions come after independent
-reproduction.
+confidence intervals, and always next to simple baselines (BM25, dense-only, files, full context). Next
+milestones: a benchmark with questions never seen during development, answer accuracy with a fixed reader model,
+and independent reproduction — before any leaderboard claim. End-to-end time per LongMemEval-S question
+(19.7 s p50) is dominated by indexing ~50 sessions with the neural encoder; warm search stays in milliseconds.
 
 ## Architecture
 
@@ -101,8 +103,9 @@ Details: [`v4/docs/ARCHITECTURE.md`](v4/docs/ARCHITECTURE.md), [`v4/docs/HTTP_CL
   people. No remote access: assistants that run only in the cloud cannot reach a local server yet.
 - The JSONL store and request receipts are not atomic across files; industrial durability guarantees arrive with
   the transactional SQLite store (ADR-001 stages S2–S5).
-- Retrieval currently matches BM25 rather than beating it on LongMemEval oracle; answer-accuracy and agent-task
-  benchmarks are being built.
+- The retrieval gain over BM25 is shown on LongMemEval-S with C4 settings that are opt-in in 4.0.1
+  (`MEMORY_V4_BM25_PROFILE=scoped_literal`, `MEMORY_V4_LEXICAL_GUARD_K=3`); an independent benchmark and
+  answer-accuracy measurements are still to come.
 
 ## Development
 
