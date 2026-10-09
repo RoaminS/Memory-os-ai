@@ -17,8 +17,15 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def expected_artifacts(version):
+    if not isinstance(version, str) or not re.fullmatch(r'4\.\d+\.\d+', version):
+        raise ValueError('version stable v4 invalide')
+    return {f'memory_os_ai-{version}-py3-none-any.whl', f'memory_os_ai-{version}.tar.gz'}
+
+
 def validate_local(manifest, directory):
-    if manifest.get('version') != '4.0.1' or not re.fullmatch(r'[0-9a-f]{40}', manifest.get('source_commit', '')):
+    expected = expected_artifacts(manifest.get('version'))
+    if not re.fullmatch(r'[0-9a-f]{40}', manifest.get('source_commit', '')):
         raise ValueError('identité version/source invalide')
     if manifest.get('open_blockers'):
         raise ValueError('blocages ouverts')
@@ -26,7 +33,7 @@ def validate_local(manifest, directory):
     if not all(checks.get(name) == 'passed' for name in REQUIRED_CHECKS):
         raise ValueError('preuves locales incomplètes ou en échec')
     artifacts = manifest.get('artifacts', [])
-    if len(artifacts) != 2 or {a['name'] for a in artifacts} != EXPECTED:
+    if len(artifacts) != 2 or {a['name'] for a in artifacts} != expected:
         raise ValueError('inventaire wheel/sdist incorrect')
     for artifact in artifacts:
         path = directory / 'artifacts' / artifact['name']
@@ -47,7 +54,7 @@ def validate_relay(proof, manifest):
         suffix = '.whl' if case['kind'] == 'wheel' else '.tar.gz'
         artifact = next(a for a in manifest['artifacts'] if a['name'].endswith(suffix))
         if (case.get('ok') is not True or case.get('exit_code') != 0 or case.get('facts') != 2
-                or case.get('version') != '4.0.1' or case.get('source_commit') != manifest['source_commit']
+                or case.get('version') != manifest['version'] or case.get('source_commit') != manifest['source_commit']
                 or case.get('artifact_sha256') != artifact['sha256']
                 or not all(case.get(check) is True for check in CASE_CHECKS)):
             raise ValueError('cas installé incomplet/en échec ou autre artefact : ' + case['kind'])

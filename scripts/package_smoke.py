@@ -5,6 +5,7 @@ Exercises real installed console scripts through MCP; never downloads weights.
 from __future__ import annotations
 
 import asyncio
+import argparse
 import importlib.metadata
 import json
 import os
@@ -38,8 +39,11 @@ async def smoke(command: Path, data_dir: str) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--version', default='4.0.1')
+    args = parser.parse_args()
     distribution = importlib.metadata.distribution("memory-os-ai")
-    assert distribution.version == "4.0.1", distribution.version
+    assert distribution.version == args.version, distribution.version
     assert distribution.metadata["License-Expression"] == "LGPL-3.0-or-later"
     files = {str(path): path for path in distribution.files or ()}
     for name, header in (("LICENSE", "GNU LESSER GENERAL PUBLIC LICENSE"),
@@ -64,7 +68,7 @@ def main() -> None:
         imported = __import__(module, fromlist=["__file__"])
         assert package_root in Path(imported.__file__).resolve().parents, imported.__file__
     docs = Path(sys.executable).parent.parent / "share/doc/memory-os-ai"
-    for document in ("AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "v4.0.1.md", "v4/OPERATIONS.md",
+    for document in ("AGENTS.md", "CLAUDE.md", "CHANGELOG.md", f"v{args.version}.md", "v4/OPERATIONS.md",
                      "v4/A6_REVIEW_966eca5.md"):
         assert (docs / document).is_file(), document
     for name in ("memory-os-ai", "memory-os-v4", "memory-os-ai-v3"):
@@ -94,6 +98,12 @@ def main() -> None:
         setup = subprocess.run([str(admin), "setup", "--write-launchd", str(root / "plists")],
                                env=env, check=True, capture_output=True, text=True, timeout=10)
         assert token not in setup.stdout + setup.stderr and len(list((root / "plists").glob("*.plist"))) == 3
+        if args.version == '4.0.2':
+            from memory_os_v4 import Config
+            assert Config().bm25_profile == 'scoped_literal' and Config().lexical_guard_k == 3
+            assert Config().store_backend == 'jsonl'
+            assert 'doctor' in subprocess.run([str(admin), '--help'], check=True, capture_output=True,
+                                              text=True, timeout=10).stdout
         hook = subprocess.run([str(admin), "hook", "stop-nudge"], input=json.dumps({}), env=env,
                               check=True, capture_output=True, text=True, timeout=10)
         assert not hook.stdout
@@ -116,7 +126,7 @@ def main() -> None:
                                      text=True, timeout=20)
         assert unavailable.returncode == 1, unavailable.returncode
         assert "cannot reach" in unavailable.stderr and token not in unavailable.stderr + unavailable.stdout
-    print("4.0.1: three installed servers passed MCP startup; six admin commands and relay-unavailable passed.")
+    print(f"{args.version}: three installed servers passed MCP startup; admin commands and relay-unavailable passed.")
     print("Five entry points and installed docs/licenses verified; relay TCP/reconnection NOT qualified here.")
     print("Backup/drill CLI smoke is diagnostic only, not A6 durability/consistency qualification.")
 

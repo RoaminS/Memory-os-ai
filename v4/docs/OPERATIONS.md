@@ -108,3 +108,21 @@ process environment** (`ps eww -p <pid> | tr ' ' '\n' | grep MEMORY_V4_`).
 
 Incidents: severity S1 (loss, corruption, leak, abusive invalidation) → confine immediately, freeze writes,
 post-mortem within 48 h; S2 (prolonged outage, stale backup) → same day; S3/S4 → backlog.
+
+
+## Candidate 4.0.2 : diagnostic et limites de SQLite
+
+`memory-os-admin doctor` fournit le diagnostic complet (HTTP loopback authentifié,
+configuration de neuf clients, magasin, backups). `--json` expose les mêmes checks ;
+`--store-only` conserve le diagnostic local S3 sans HTTP ni lecture de configs.
+Une configuration relay détectée ne prouve pas un handshake ; absence de fichier = WARN.
+Claude Code user scope : `~/.claude.json`, commande `claude mcp add --scope user` ;
+les configurations local/projet/managed peuvent la supplanter. Les recettes Grok/
+Antigravity doivent être vérifiées avec le client installé ; aucun CLI fournisseur exécuté
+par setup. Setup crée exclusivement un jeton absent et refuse un existant invalide.
+
+JSONL reste le défaut. SQLite S2/S3 est expérimental opt-in ; doctor/health reconnaissent
+sa base et exposent la rétention/octet des reçus. La commande backup actuelle refuse
+SQLite : sauvegarde via API backup et restore-drill S4 sont un prérequis de bascule.
+C4 par défaut est une proposition du paquet, voir RELEASE_4_0_2_DECISIONS.md ;
+installation, activation C4 et migration SQLite exigent chacune le GO opérateur.

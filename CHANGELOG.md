@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.0.2 — candidate ALPHA (2026-10-10), non publiée
+
+- Doctor installation + registre neuf clients + setup auto-jeton ; erreurs de configuration
+  contrôlées, diagnostic SQLite conservé via `doctor --store-only`.
+- C4 scoped_literal/garde 3 proposés par défaut ; rollback explicite legacy/0.
+  LongMemEval-S : 500 exécutées, 479 avec preuve, 466 clusters ; ΔRecall +0,042
+  IC95 [+0,022;+0,061], ΔMRR +0,012 [+0,008;+0,0164]. MiniLM, questions recoupant
+  l’oracle : résultat non indépendant, pas une exactitude de réponse ni un classement.
+- SQLite S2 transactions/cache/reçus et S3 migration hors ligne réversible livrés opt-in ;
+  JSONL reste par défaut. Backup/restore SQLite S4 restent à qualifier.
+- Qualification de deux nouveaux artefacts ; garde fermée tant que manquent les preuves
+  du relais installé. Activation de production réservée à Romain.
+- Voir `docs/releases/v4.0.2.md`, `v4/docs/RELEASE_4_0_2_DECISIONS.md`
+  et `releases/4.0.2/QUALIFICATION.md`.
+
 ## 4.0.1 — ALPHA intermédiaire, publication soumise à qualification finale
 
 - Identité de distribution et des deux moteurs : 4.0.1, sans suffixe rc.

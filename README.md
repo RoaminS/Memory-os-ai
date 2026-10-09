@@ -1,6 +1,8 @@
 <!-- mcp-name: io.github.romainsantoli-web/memory-os-ai -->
 # Memory OS AI
 
+**4.0.2 candidate — qualification in progress; not published or deployed.**
+
 > **One local memory for all your AI assistants.** Decisions, facts and lessons saved by Claude are recalled by
 > Codex, Copilot, Cursor, Gemini or Grok — on your machine, under your control, with evidence for every claim.
 
@@ -28,12 +30,12 @@ memory-os-admin doctor                                       # checks the server
 ## Works with your assistants and editors
 
 All clients connect through `memory-os-relay`, which reads your private token file itself — **no secret is ever
-written into a client configuration**. `memory-os-admin setup` prints the exact snippet for each one, and
-`memory-os-admin doctor` tells you which ones are connected.
+written into a client configuration**. `memory-os-admin setup` prints a configuration snippet for each one, and
+`memory-os-admin doctor` checks their configuration syntax; it does not prove a live handshake for every client.
 
-| Client | Configuration | Status in 4.0.1 |
+| Client | Configuration | Client evidence / candidate configuration |
 |---|---|---|
-| Claude Code | `~/.mcp.json` | verified end to end |
+| Claude Code | `claude mcp add --scope user …` (`~/.claude.json`; project overrides possible) | previous relay run verified; generated configuration only |
 | Claude Desktop | `claude_desktop_config.json` (edit with the app closed) | verified |
 | OpenAI Codex (CLI / app) | `codex mcp add …` | verified end to end |
 | VS Code / GitHub Copilot | `Code/User/mcp.json` | configuration generated and checked |
@@ -68,7 +70,7 @@ Every number below comes from a versioned run you can reproduce; none is a vendo
 
 | What | Result | Protocol |
 |---|---|---|
-| **LongMemEval-S** evidence Recall@10, 500 questions, ~50 sessions of history each, no LLM, MiniLM — candidate C4 (scoped literal BM25 + 3 protected lexical results + hybrid fusion) | **0.754 [0.721, 0.785] vs BM25 0.712 [0.675, 0.748]; paired Δ +0.042 [+0.022, +0.061]** (466 evidence clusters); MRR 0.626 vs 0.614, Δ +0.012 [+0.008, +0.017]; 0 failures | Frozen preregistered plan `lexical-c4-s-v3` (sha256 38c1877e…); CI conditional on the fixed distractor corpus; questions overlap the oracle variant used for development, so this is **not** an independent confirmation and **not** an official leaderboard score |
+| **LongMemEval-S** evidence Recall@10, 500 questions executed (479 with evidence scored; 21 abstention cases excluded from retrieval metrics), ~50 sessions of history each, no LLM, MiniLM — candidate C4 (scoped literal BM25 + 3 protected lexical results + hybrid fusion) | **0.754 [0.721, 0.785] vs BM25 0.712 [0.675, 0.748]; paired Δ +0.042 [+0.022, +0.061]** (466 evidence clusters); MRR 0.626 vs 0.614, Δ +0.012 [+0.008, +0.0164]; 0 failures | Frozen preregistered plan `lexical-c4-s-v3` (sha256 38c1877e…); CI conditional on the fixed distractor corpus; questions overlap the oracle variant used for development, so this is **not** an independent confirmation and **not** an official leaderboard score |
 | Development history, LongMemEval oracle (exploratory) | 4.0.1 defaults ≈ BM25 (0.802 vs 0.812); root cause found (filtering after candidate truncation); corrected lexical path = exact BM25 parity; C4 +0.026 recall on dev | `v4/docs/LEXICAL_DEV_V1.md`, failures kept |
 | LoCoMo evidence Recall@10 (exploratory) | 0.538 production defaults → 0.815 with offline LLM enrichment and reranking | `v4/RESULTS.md`; offline enrichment is not the production path |
 | 4.0.1 release qualification | 478 v3 + 795 v4 tests, two adversarial review rounds, installed-artifact relay proof (round-trip, failure, reconnection, no replay) for wheel and sdist | `releases/4.0.1/QUALIFICATION.md` |
@@ -90,7 +92,7 @@ and independent reproduction — before any leaderboard claim. End-to-end time p
                                      ├─ engine: typed bi-temporal items, project scopes, explicit fact updates
                                      ├─ retrieval: dense (granite-97m multilingual) + BM25 + entities, RRF fusion
                                      ├─ single writer lock · request receipts · /health · /ready
-                                     └─ store: append-only JSONL today → transactional SQLite (ADR-001, in progress)
+                                     └─ store: JSONL by default; transactional SQLite S2/S3 opt-in (qualified backups not yet supported)
  memory-os-admin: setup · doctor · backup · restore-drill · health · hooks
 ```
 
@@ -101,10 +103,13 @@ Details: [`v4/docs/ARCHITECTURE.md`](v4/docs/ARCHITECTURE.md), [`v4/docs/HTTP_CL
 
 - One user, one machine (macOS qualified). Projects organise memory; they are not a security boundary between
   people. No remote access: assistants that run only in the cloud cannot reach a local server yet.
-- The JSONL store and request receipts are not atomic across files; industrial durability guarantees arrive with
-  the transactional SQLite store (ADR-001 stages S2–S5).
-- The retrieval gain over BM25 is shown on LongMemEval-S with C4 settings that are opt-in in 4.0.1
-  (`MEMORY_V4_BM25_PROFILE=scoped_literal`, `MEMORY_V4_LEXICAL_GUARD_K=3`); an independent benchmark and
+- The JSONL store and request receipts are not atomic across files; transactional SQLite S2 and offline reversible migration S3 ship opt-in,
+  with failure-injection tests and embedding caching. SQLite qualified backups/restore drills (S4) remain to do;
+  the current ops backup command refuses SQLite.
+- The retrieval gain over BM25 is shown on LongMemEval-S with C4 settings proposed as defaults in the 4.0.2 candidate
+  (`MEMORY_V4_BM25_PROFILE=scoped_literal`, `MEMORY_V4_LEXICAL_GUARD_K=3`); these options were not in published 4.0.1.
+  Romain decides activation; rollback uses `MEMORY_V4_BM25_PROFILE=legacy` and `MEMORY_V4_LEXICAL_GUARD_K=0`.
+  The measured MiniLM/English gain does not qualify Granite, multilingual use, multi-query RRF or MMR context; an independent benchmark and
   answer-accuracy measurements are still to come.
 
 ## Development

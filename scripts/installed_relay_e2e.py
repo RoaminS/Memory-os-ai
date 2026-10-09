@@ -29,12 +29,12 @@ def main() -> int:
     parser.add_argument('--check-only', action='store_true', help='Check artifact/environment inventory without TCP')
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text())
+    from verify_release_manifest import validate_local
+    validate_local(manifest, args.manifest.parent)
     environments = json.loads(args.environments.read_text())
     case = Path(__file__).with_name('installed_relay_case.py')
     runner_hashes = {'runner': digest(Path(__file__)), 'case': digest(case)}
     assert runner_hashes == manifest['installed_relay_scripts_sha256'], 'test scripts differ from qualification'
-    assert {a['name'] for a in manifest['artifacts']} == {
-        'memory_os_ai-4.0.1-py3-none-any.whl', 'memory_os_ai-4.0.1.tar.gz'}
     repo = Path(__file__).resolve().parents[1]
     for kind, suffix in [('wheel', '.whl'), ('sdist', '.tar.gz')]:
         artifact = next(a for a in manifest['artifacts'] if a['name'].endswith(suffix))
@@ -61,6 +61,7 @@ def main() -> int:
                     result = subprocess.run([str(Path(environments[kind + '_environment']) / 'bin/python'),
                                              str(executable_case), '--kind', kind, '--artifact', str(path),
                                              '--sha256', artifact['sha256'], '--source-commit', manifest['source_commit'],
+                                             '--version', manifest['version'],
                                              '--output', str(output)], cwd=workspace, env=env,
                                             stdout=log, stderr=log, timeout=180)
                     record = json.loads(output.read_text()) if output.exists() else {'ok': False, 'error': 'case produced no report'}

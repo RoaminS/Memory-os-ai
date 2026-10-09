@@ -73,3 +73,26 @@ def test_complete_evidence_can_be_recorded_but_later_tampering_is_refused(candid
     assert gate.main([str(path)]) == 0
     (path.parent / 'installed-relay-proof.json').write_text('{}')
     assert gate.main([str(path)]) == 1
+
+
+def test_402_requires_402_artifacts_and_relay_version(candidate):
+    path, manifest, proof = candidate
+    manifest['version'] = '4.0.2'
+    for artifact in manifest['artifacts']:
+        previous = path.parent / 'artifacts' / artifact['name']
+        artifact['name'] = artifact['name'].replace('4.0.1', '4.0.2')
+        previous.rename(previous.with_name(artifact['name']))
+    path.write_text(json.dumps(manifest))
+    evidence = path.parent / 'evidence.json'
+    evidence.write_text(json.dumps(proof))
+    assert gate.main([str(path), '--record-relay-proof', str(evidence)]) == 1
+    for case in proof['cases']:
+        case['version'] = '4.0.2'
+    evidence.write_text(json.dumps(proof))
+    assert gate.main([str(path), '--record-relay-proof', str(evidence)]) == 0
+
+
+@pytest.mark.parametrize('version', ['4.0.2rc1', '../4.0.2', '5.0.0', None])
+def test_stable_v4_release_identity_only(version):
+    with pytest.raises(ValueError):
+        gate.expected_artifacts(version)

@@ -26,6 +26,7 @@ def main() -> int:
     parser.add_argument('--artifact', type=Path, required=True)
     parser.add_argument('--sha256', required=True)
     parser.add_argument('--source-commit', required=True)
+    parser.add_argument('--version', required=True)
     parser.add_argument('--kind', choices=['wheel', 'sdist'], required=True)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
@@ -38,7 +39,7 @@ def main() -> int:
         package = Path(memory_os_v4.__file__).resolve()
         assert prefix in package.parents and 'site-packages' in package.parts
         dist = importlib.metadata.distribution('memory-os-ai')
-        assert dist.version == memory_os_v4.__version__ == '4.0.1'
+        assert dist.version == memory_os_v4.__version__ == args.version
         direct = json.loads(dist.read_text('direct_url.json'))
         assert direct.get('archive_info', {}).get('hashes', {}).get('sha256') == args.sha256
         assert not direct.get('dir_info', {}).get('editable')
@@ -89,7 +90,7 @@ def main() -> int:
                     try:
                         status, body = get('/ready')
                         if status == 200:
-                            assert body['version'] == '4.0.1' and body['commit'] == args.source_commit
+                            assert body['version'] == args.version and body['commit'] == args.source_commit
                             assert get('/health', authenticated=False)[0] == 401
                             report['ready'] = True
                             return process
