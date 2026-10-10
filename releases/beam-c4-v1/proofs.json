@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-10",
+  "code_commit": "e15859ece77f6527b09fefac6c409bb84a80cdd2",
+  "tests": [
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 /Users/romain/Memory-os-ai/.venv/bin/python -m pytest -q v4/tests --no-cov -m 'not slow' --ignore=v4/tests/test_server_http_e2e.py --ignore=v4/tests/test_ops_e2e.py --basetemp=.local-qualification/beam-tests-final",
+      "source_commit": "454d7856f3d2ee4eac964feb822093dfc8359ff8",
+      "passed": 964,
+      "deselected": 1,
+      "seconds": 29.02
+    },
+    {
+      "command": "PYTHONDONTWRITEBYTECODE=1 /Users/romain/Memory-os-ai/.venv/bin/python -m pytest -q v4/tests/test_beam.py --no-cov",
+      "source_commit": "e15859ece77f6527b09fefac6c409bb84a80cdd2",
+      "passed": 30,
+      "seconds": 0.1
+    }
+  ],
+  "lint": {
+    "scoped": "ruff check --config pyproject.toml v4/bench/e2e/beam.py v4/bench/e2e/beam_campaign.py v4/bench/e2e/codex_reader.py v4/bench/e2e/client.py v4/bench/e2e/configuration.py v4/tests/test_beam.py",
+    "result": "passed",
+    "release_policy_checks": [
+      "ruff check --config pyproject.toml src tests scripts",
+      "ruff check --config pyproject.toml --select E9,F src tests v4/src v4/tests v4/bench scripts"
+    ],
+    "release_policy_result": "passed",
+    "broader_style_check": "60 existing E/F style errors in historical v4 benches/tests; not changed"
+  },
+  "mcp_stdio_hash_smoke": {
+    "model": "hash",
+    "encoder_reused": true,
+    "store_empty": true,
+    "facts_added": 1,
+    "deduped": 0,
+    "hits": 1,
+    "bm25_profile": "scoped_literal"
+  },
+  "actual_neural_inference_calls": 0,
+  "actual_codex_model_calls": 0,
+  "downloads": 0,
+  "mutations_to_live_store": 0,
+  "tcp_tests_not_run": 10
+}

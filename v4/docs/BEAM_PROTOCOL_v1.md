@@ -84,6 +84,10 @@ top_k=10 et même plafond de contexte UTF-8 de 12 000 octets. Scores calculés
 après ce plafond et regroupement des ids de tours ; nommer la métrique
 « rappel de tours annotés sous budget @10 », pas « réponse correcte ».
 Rangs, contextes, temps et compteurs d'encodage sont conservés.
+Recherche monorequête sur le projet isolé, `kinds=["fact"]` : les épisodes
+provenant de la capture restent stockés/indexés et leur coût est compté, mais
+ne sont pas admissibles à la récupération. Ce résultat ne démontrera donc
+pas une supériorité pour une recherche non filtrée sur tous les types de mémoire.
 
 ## Hypothèse, intervalles et arrêts
 

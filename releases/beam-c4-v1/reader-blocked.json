@@ -1,0 +1,6 @@
+{
+  "complete": false,
+  "blocked": "Requested effort unavailable/unknown; no inference authorized",
+  "model_calls": 0,
+  "expansion_allowed": false
+}

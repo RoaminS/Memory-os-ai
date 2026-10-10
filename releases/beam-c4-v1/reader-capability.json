@@ -1,0 +1,15 @@
+{
+  "model": "gpt-5.6-luna",
+  "effort": "minimal",
+  "supported_efforts": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "supported": false,
+  "reason": "Requested effort unavailable/unknown; no inference authorized",
+  "quota_remaining": null,
+  "quota_note": "Subscription quota not exposed by exec usage; tokens are NOT quota percentages"
+}

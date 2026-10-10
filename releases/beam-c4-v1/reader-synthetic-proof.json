@@ -1,0 +1,8 @@
+{
+  "synthetic_only": true,
+  "actual_model_calls": 0,
+  "answer": "synthetic-ok",
+  "cli_attempts": 1,
+  "tokens": 23,
+  "guard_checks": 2
+}
