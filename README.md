@@ -18,6 +18,11 @@ use extracts the facts — so recall costs no API call and works offline.
 
 ## Quick start (macOS)
 
+Before `setup`, set `MEMORY_V4_BUILD_COMMIT` to the **40-character source commit from the qualified release
+dossier** (`releases/4.0.2/QUALIFICATION.md` for this candidate). An installed wheel has no Git checkout:
+without this operator-provided identity, `/ready` refuses the build and `doctor` reports FAIL.
+Download/setup is not proof of a qualified build; candidate activation still requires Romain's GO.
+
 ```bash
 pip install 'memory-os-ai[ops]'
 memory-os-admin setup --write-launchd ~/memory-os-launchd   # creates your private access token + prints client configs
