@@ -17,6 +17,23 @@ def test_dtype_and_fact_batch_env_are_explicit_opt_ins(monkeypatch):
     assert cfg.embed_dtype == 'float32' and cfg.batch_facts is True
 
 
+def test_default_stays_cpu_even_when_mps_is_available(monkeypatch):
+    import torch
+    monkeypatch.delenv('MEMORY_V4_DEVICE', raising=False)
+    monkeypatch.setattr(torch.backends.mps, 'is_available', lambda: True)
+    assert Config().device == Config.from_env().device == 'cpu'
+    assert embed._resolve_device(Config.from_env().device) == 'cpu'
+
+
+def test_mps_float32_profile_is_explicit_from_environment(monkeypatch):
+    monkeypatch.setenv('MEMORY_V4_DEVICE', 'mps')
+    monkeypatch.setenv('MEMORY_V4_EMBED_DTYPE', 'float32')
+    monkeypatch.setenv('MEMORY_V4_EMBED_BATCH_SIZE', '4')
+    monkeypatch.setenv('MEMORY_V4_BATCH_FACTS', '0')
+    cfg = Config.from_env()
+    assert (cfg.device, cfg.embed_dtype, cfg.embed_batch_size, cfg.batch_facts) == ('mps', 'float32', 4, False)
+
+
 def test_bad_precision_is_rejected_before_store_creation(tmp_path):
     with pytest.raises(ValueError, match='embed_dtype'):
         MemoryV4(config=Config(data_dir=str(tmp_path / 'store'), embed_model='hash', embed_dtype='int8'))

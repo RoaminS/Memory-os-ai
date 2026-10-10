@@ -66,7 +66,7 @@ class Config:
 
     data_dir: str = "~/.memory-os-v4"
     embed_model: str = "ibm-granite/granite-embedding-97m-multilingual-r2"  # promoted 2026-09-13: wins LoCoMo 0.538 vs 0.527 and LME 0.8369 vs 0.832; multilingual (FR/EN); MiniLM remains valid via MEMORY_V4_EMBED_MODEL
-    device: str = "auto"
+    device: str = "cpu"  # MPS remains explicit opt-in until independently qualified
     hash_dim: int = 64
 
     # Palier 2-3 (2026-09-13, E10): cap on SentenceTransformer.max_seq_length,
