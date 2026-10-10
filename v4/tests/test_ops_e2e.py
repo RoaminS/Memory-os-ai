@@ -21,6 +21,7 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from memory_os_v4 import __version__
 from memory_os_v4.ops import auth
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
@@ -77,7 +78,8 @@ def test_relay_with_token_against_secured_server(tmp_path):
             params = StdioServerParameters(command=sys.executable, args=["-m", "memory_os_v4.ops.relay"], env=env)
             async with stdio_client(params) as (r, w):
                 async with ClientSession(r, w) as s:
-                    await s.initialize()
+                    initialized = await s.initialize()
+                    assert initialized.serverInfo.version == __version__
                     tools = {t.name for t in (await s.list_tools()).tools}
                     add = await s.call_tool(
                         "memory_add_facts",

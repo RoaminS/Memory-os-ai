@@ -512,6 +512,37 @@ def test_project_of_home_means_all_projects(tmp_path, monkeypatch):
 
 
 # --- R7: relay lifecycle --------------------------------------------------------------------------------
+@pytest.mark.parametrize('version', ['4.0.3', '4.0.4rc1', 'upstream-build-identity'])
+def test_relay_initialization_preserves_upstream_version(settings, monkeypatch, version):
+    from contextlib import asynccontextmanager
+    from mcp import types
+    init = types.InitializeResult(protocolVersion='2025-03-26', capabilities=types.ServerCapabilities(),
+                                  serverInfo=types.Implementation(name='upstream', version=version),
+                                  instructions='Upstream instructions')
+    captured = []
+
+    async def fake_owner(_settings, recv, ready):
+        ready(init)
+        async with recv:
+            async for _ in recv:
+                raise AssertionError('No upstream request in identity test')
+
+    @asynccontextmanager
+    async def fake_stdio():
+        yield None, None
+
+    async def fake_run(self, r, w, options):
+        captured.append(options)
+
+    monkeypatch.setattr(relay, 'owner', fake_owner)
+    monkeypatch.setattr(relay, 'stdio_server', fake_stdio)
+    monkeypatch.setattr(relay.Server, 'run', fake_run)
+    anyio.run(relay.serve, settings)
+    options, = captured
+    assert (options.server_name, options.server_version, options.instructions) == (
+        'upstream', version, 'Upstream instructions')
+
+
 class _FakeSession:
     def __init__(self, fail_first_call: bool):
         self.fail = fail_first_call

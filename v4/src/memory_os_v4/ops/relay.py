@@ -193,7 +193,8 @@ async def serve(settings: OpsSettings) -> None:
             await send.aclose()
             raise SystemExit(1)
         relay = Relay(send)
-        server = Server(init.serverInfo.name, instructions=init.instructions)
+        server = Server(init.serverInfo.name, version=init.serverInfo.version,
+                        instructions=init.instructions)
 
         @server.list_tools()
         async def list_tools() -> list[types.Tool]:
