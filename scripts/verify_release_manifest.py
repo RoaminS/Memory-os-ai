@@ -23,7 +23,19 @@ def expected_artifacts(version):
     return {f'memory_os_ai-{version}-py3-none-any.whl', f'memory_os_ai-{version}.tar.gz'}
 
 
-def validate_local(manifest, directory):
+def validate_source(proof, manifest):
+    if (proof.get('ok') is not True or proof.get('version') != manifest['version']
+            or proof.get('source_commit') != manifest['source_commit']
+            or not manifest.get('qualification_source_sha256')
+            or proof.get('source_sha256') != manifest['qualification_source_sha256']):
+        raise ValueError('preuve source TCP/modèle absente ou différente')
+    for name, count in [('source_tcp', 10), ('cached_semantic', 1)]:
+        result = proof.get('checks', {}).get(name, {})
+        if result != {'passed': count, 'failed': 0, 'errors': 0, 'skipped': 0}:
+            raise ValueError('suite source incomplète/ignorée/en échec : ' + name)
+
+
+def validate_local(manifest, directory, *, require_source=True):
     expected = expected_artifacts(manifest.get('version'))
     if not re.fullmatch(r'[0-9a-f]{40}', manifest.get('source_commit', '')):
         raise ValueError('identité version/source invalide')
@@ -39,6 +51,13 @@ def validate_local(manifest, directory):
         path = directory / 'artifacts' / artifact['name']
         if not path.is_file() or sha256(path) != artifact['sha256']:
             raise ValueError('artefact absent/modifié : ' + artifact['name'])
+    if manifest['version'] == '4.0.2' and require_source:
+        if not all(checks.get(name) == 'passed' for name in ('source_tcp', 'cached_semantic')):
+            raise ValueError('TCP source et test MiniLM cached encore en attente')
+        path = directory / 'source-proof.json'
+        if not path.is_file() or sha256(path) != manifest.get('source_proof_sha256'):
+            raise ValueError('preuve source absente/modifiée')
+        validate_source(json.loads(path.read_text()), manifest)
 
 
 def validate_relay(proof, manifest):
@@ -65,9 +84,24 @@ def main(argv=None) -> int:
     parser.add_argument('manifest', type=Path)
     parser.add_argument('--record-relay-proof', type=Path,
                         help='Enregistre les preuves concordantes et lève la garde seulement si tous les contrôles passent')
+    parser.add_argument('--record-source-proof', type=Path,
+                        help='Enregistre TCP source et MiniLM cached concordants, sans lever la garde relais')
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(args.manifest.read_text())
+        if args.record_source_proof:
+            if args.record_relay_proof:
+                raise ValueError('enregistrer source et relais séparément')
+            validate_local(manifest, args.manifest.parent, require_source=False)
+            proof = json.loads(args.record_source_proof.read_text())
+            validate_source(proof, manifest)
+            destination = args.manifest.parent / 'source-proof.json'
+            destination.write_bytes(args.record_source_proof.read_bytes())
+            manifest['checks'].update(source_tcp='passed', cached_semantic='passed')
+            manifest.update(source_proof_sha256=sha256(destination), release_ready=False)
+            args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+            print('Preuve source enregistrée ; garde relais toujours fermée. Aucune publication.')
+            return 0
         validate_local(manifest, args.manifest.parent)
         proof_path = args.record_relay_proof or args.manifest.parent / 'installed-relay-proof.json'
         if not args.record_relay_proof and manifest.get('release_ready') is not True:

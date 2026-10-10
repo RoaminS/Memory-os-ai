@@ -84,12 +84,24 @@ def test_402_requires_402_artifacts_and_relay_version(candidate):
         previous.rename(previous.with_name(artifact['name']))
     path.write_text(json.dumps(manifest))
     evidence = path.parent / 'evidence.json'
+    manifest['qualification_source_sha256'] = {'synthetic.py': 'd' * 64}
+    path.write_text(json.dumps(manifest))
+    source = {k: manifest[k] for k in ('version', 'source_commit')}
+    source.update(ok=True, source_sha256=manifest['qualification_source_sha256'],
+                  checks={'source_tcp': {'passed': 10, 'failed': 0, 'errors': 0, 'skipped': 0},
+                          'cached_semantic': {'passed': 1, 'failed': 0, 'errors': 0, 'skipped': 0}})
+    source_path = path.parent / 'source-evidence.json'
+    source_path.write_text(json.dumps(source))
+    assert gate.main([str(path)]) == 1
+    assert gate.main([str(path), '--record-source-proof', str(source_path)]) == 0
     evidence.write_text(json.dumps(proof))
     assert gate.main([str(path), '--record-relay-proof', str(evidence)]) == 1
     for case in proof['cases']:
         case['version'] = '4.0.2'
     evidence.write_text(json.dumps(proof))
     assert gate.main([str(path), '--record-relay-proof', str(evidence)]) == 0
+    (path.parent / 'source-proof.json').write_text('{}')
+    assert gate.main([str(path)]) == 1
 
 
 @pytest.mark.parametrize('version', ['4.0.2rc1', '../4.0.2', '5.0.0', None])

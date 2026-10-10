@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Claude outside sandbox: source TCP + one cached MiniLM test, guarded and sequential.
+
+Synthetic stores only. Never downloads, touches a live service, or publishes.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def resources(root):
+    text = subprocess.check_output(['/usr/sbin/sysctl', '-n', 'vm.swapusage'], text=True, timeout=3)
+    match = re.search(r'used\s*=\s*([0-9.]+)([KMG])', text)
+    if not match:
+        raise RuntimeError('Swap measurement unavailable; no test may start')
+    swap = float(match[1]) * {'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}[match[2]]
+    free = shutil.disk_usage(root).free
+    if swap > 8_500_000_000 or free < 5_000_000_000:
+        raise RuntimeError(f'Resource guard stopped: swap={int(swap)}, free={free}')
+    return {'swap_bytes': int(swap), 'free_bytes': free}
+
+
+def junit_counts(path):
+    tree = ET.parse(path).getroot()
+    suites = [tree] if tree.tag == 'testsuite' else list(tree.iter('testsuite'))
+    counts = {name: sum(int(s.get(name, '0')) for s in suites) for name in ('tests', 'failures', 'errors', 'skipped')}
+    return {'passed': counts['tests'] - counts['failures'] - counts['errors'] - counts['skipped'],
+            'failed': counts['failures'], 'errors': counts['errors'], 'skipped': counts['skipped']}
+
+
+def main():
+    if not __debug__:
+        raise RuntimeError('Assertions required; do not use Python -O')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    directory = args.manifest.resolve().parent
+    manifest = json.loads(args.manifest.read_text())
+    if manifest['version'] != '4.0.2':
+        raise ValueError('This source qualification targets 4.0.2')
+    files = manifest['qualification_source_sha256']
+    if any(digest(root / name) != sha for name, sha in files.items()):
+        raise ValueError('Source files differ from qualified artifacts')
+    report = {'ok': False, 'version': manifest['version'], 'source_commit': manifest['source_commit'],
+              'source_sha256': files, 'checks': {}, 'samples': [], 'evidence_sha256': {}}
+    env = {**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONOPTIMIZE': '0',
+           'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'OMP_NUM_THREADS': '1',
+           'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
+           'PYTHONPATH': str(root / 'src') + ':' + str(root / 'v4/src') + ':' + str(root / 'v4'),
+           'MEMORY_WORKSPACE': str(root), 'MEMORY_V4_BUILD_COMMIT': manifest['source_commit']}
+    suites = [('source_tcp', ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py'], 10),
+              ('cached_semantic', ['v4/tests/test_core_slow_integration.py'], 1)]
+    try:
+        for name, paths, count in suites:
+            xml = directory / (name + '.xml')
+            log_path = directory / (name + '.log')
+            report['samples'].append(resources(root))  # before model import or network bind
+            command = ['/usr/bin/nice', '-n', '15', sys.executable, '-m', 'pytest', '-c', 'pyproject.toml',
+                       '-q', '-p', 'no:cacheprovider', '--basetemp=' + str(directory / (name + '-tests')),
+                       '--junitxml=' + str(xml), *paths]
+            with log_path.open('w') as log:
+                process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                           start_new_session=True)
+                try:
+                    started = time.monotonic()
+                    while process.poll() is None:
+                        report['samples'].append(resources(root))
+                        if time.monotonic() - started > 300:
+                            raise RuntimeError(name + ' exceeded 300 s')
+                        time.sleep(2)
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            os.killpg(process.pid, signal.SIGKILL)
+                            process.wait(timeout=5)
+            result = junit_counts(xml)
+            report['checks'][name] = result
+            report['evidence_sha256'].update({xml.name: digest(xml), log_path.name: digest(log_path)})
+            if process.returncode or result != {'passed': count, 'failed': 0, 'errors': 0, 'skipped': 0}:
+                raise RuntimeError(name + ' failed/incomplete; see log')
+            print(f'{name}: {count} passed, 0 skipped', flush=True)
+        # Detect any concurrent source edit as well as an initial mismatch.
+        if any(digest(root / name) != sha for name, sha in files.items()):
+            raise RuntimeError('Source changed during checks')
+        report['ok'] = True
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, ET.ParseError) as exc:
+        report['error'] = str(exc)
+        print('REFUS: ' + str(exc), flush=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(report, indent=2) + '\n')
+    return 0 if report['ok'] else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

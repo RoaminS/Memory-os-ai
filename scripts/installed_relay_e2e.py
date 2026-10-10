@@ -30,7 +30,7 @@ def main() -> int:
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text())
     from verify_release_manifest import validate_local
-    validate_local(manifest, args.manifest.parent)
+    validate_local(manifest, args.manifest.parent, require_source=not args.check_only)
     environments = json.loads(args.environments.read_text())
     case = Path(__file__).with_name('installed_relay_case.py')
     runner_hashes = {'runner': digest(Path(__file__)), 'case': digest(case)}
