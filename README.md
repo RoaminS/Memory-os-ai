@@ -117,6 +117,10 @@ BEAM 500K was downloaded with approval but **refused before inference**: only 15
 fresh independent groups survived the audit (minimum 30). Its first annotation
 failure is a missing `source_chat_ids` field, not a demonstrated dangling ID.
 See [held-out alternatives and diagnosis](v4/docs/HELDOUT_OPTIONS_V2.md).
+Romain authorized **MemoryAgentBench-LRU download and audit only** (55 MB cap).
+The [bounded acquisition and zero-inference audit](v4/docs/MAB_LRU_ACQUISITION_AUDIT_v1.md)
+require attested original sources; a dataset-eligibility GO still requires a sealed
+campaign plan before any reader/judge call.
 See [copy qualification and later rollout](v4/docs/QUALIFY_4_0_3.md).
 
 
