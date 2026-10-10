@@ -1,0 +1,191 @@
+{
+  "source_commit": "df04fc6da31010c5839f577a02355cd464c6ebe4",
+  "plan_sha256": "38c1877e3cc234107740f0587bc83b50c1e2c5ae518f0f12a948faca87a3b905",
+  "report_sha256": "e66301b3c8606e1bca59fa46c913897785334f025ae3131f753d42dfea8950b8",
+  "dataset_sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894",
+  "executed": 500,
+  "evidence_questions": 479,
+  "evidence_clusters": 466,
+  "all_cases_executed_without_failure": true,
+  "systems": {
+    "memory": {
+      "n": 500,
+      "failures": 0,
+      "metrics": {
+        "recall": {
+          "n": 479,
+          "clusters": 466,
+          "mean": 0.7535838552540014,
+          "ci95": [
+            0.7212847222222222,
+            0.7854035087719298
+          ]
+        },
+        "mrr": {
+          "n": 479,
+          "clusters": 466,
+          "mean": 0.6259759088047189,
+          "ci95": [
+            0.5888125124526795,
+            0.6620128370128372
+          ]
+        },
+        "ndcg": {
+          "n": 479,
+          "clusters": 466,
+          "mean": 0.6157675564244717,
+          "ci95": [
+            0.5834366538034512,
+            0.6468393158238291
+          ]
+        },
+        "answer_em": {
+          "n": 500,
+          "clusters": 466,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "answer_f1": {
+          "n": 500,
+          "clusters": 466,
+          "mean": 0.06763746335549631,
+          "ci95": [
+            0.05932078033631518,
+            0.07671602637752464
+          ]
+        },
+        "answer_contains": {
+          "n": 500,
+          "clusters": 466,
+          "mean": 0.16,
+          "ci95": [
+            0.1277445109780439,
+            0.19246031746031747
+          ]
+        }
+      }
+    },
+    "bm25": {
+      "n": 500,
+      "failures": 0,
+      "metrics": {
+        "recall": {
+          "n": 479,
+          "clusters": 466,
+          "mean": 0.7119345859429367,
+          "ci95": [
+            0.6751033057851241,
+            0.7475890985324947
+          ]
+        },
+        "mrr": {
+          "n": 479,
+          "clusters": 466,
+          "mean": 0.6138366968220831,
+          "ci95": [
+            0.5754875754875752,
+            0.6512476459510357
+          ]
+        },
+        "ndcg": {
+          "n": 479,
+          "clusters": 466,
+          "mean": 0.5942647493972159,
+          "ci95": [
+            0.5595154244689138,
+            0.6285318945057469
+          ]
+        },
+        "answer_em": {
+          "n": 500,
+          "clusters": 466,
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "answer_f1": {
+          "n": 500,
+          "clusters": 466,
+          "mean": 0.06723168756144239,
+          "ci95": [
+            0.05884592540532008,
+            0.07614658363077191
+          ]
+        },
+        "answer_contains": {
+          "n": 500,
+          "clusters": 466,
+          "mean": 0.16,
+          "ci95": [
+            0.1277445109780439,
+            0.19246031746031747
+          ]
+        }
+      }
+    }
+  },
+  "paired_delta_memory": {
+    "bm25": {
+      "n": 479,
+      "clusters": 466,
+      "mean": 0.04164926931106472,
+      "ci95": [
+        0.021708683473389348,
+        0.0607681755829904
+      ]
+    }
+  },
+  "paired_other_delta_memory": {
+    "bm25": {
+      "mrr": {
+        "n": 479,
+        "clusters": 466,
+        "mean": 0.012139211982635782,
+        "ci95": [
+          0.008015203268367825,
+          0.016413690476190474
+        ]
+      },
+      "answer_f1": {
+        "n": 500,
+        "clusters": 466,
+        "mean": 0.00040577579405392454,
+        "ci95": [
+          -0.0013386014204607895,
+          0.0027462173436076723
+        ]
+      },
+      "answer_contains": {
+        "n": 500,
+        "clusters": 466,
+        "mean": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      }
+    }
+  },
+  "bootstrap": {
+    "level": "shared-evidence-session and source-abs connected components",
+    "seed": 20261009,
+    "replicates": 2000,
+    "confidence": 0.95,
+    "known_user_identity": false,
+    "policy": "evidence-sessions-abs-v3",
+    "minimum_clusters": 30,
+    "conditional_on_fixed_distractor_corpus": true
+  },
+  "oracle_overlap_questions": 500,
+  "independent": false,
+  "official_leaderboard": false,
+  "reader_llm_calls": 0,
+  "e2e_p50_s_reported_by_claude": 19.7,
+  "raw_evidence_directory": ".local-qualification/lexical-c4-s-v3",
+  "frozen_source_required_for_reproduction": true
+}
