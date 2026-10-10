@@ -35,7 +35,7 @@ from .memory import MemoryV4
 from .migrate import resolve_under_home as _resolve_under_home
 from .store import MemoryItem
 from .text import tokenize
-from . import models
+from . import __version__, models
 
 logger = logging.getLogger("memory_os_v4.server")
 
@@ -580,7 +580,7 @@ def dispatch(name: str, arguments: dict | None) -> dict:
 # (same lazy-vs-eager tradeoff as everything else here: the engine itself is
 # lazy, but `Server(instructions=...)` needs a string at construction time) --
 # see instructions.py `build_instructions` for the facet-channel addendum.
-server = Server("memory-os-v4", instructions=build_instructions(Config.from_env()))
+server = Server("memory-os-v4", version=__version__, instructions=build_instructions(Config.from_env()))
 
 
 @server.list_tools()

@@ -31,7 +31,10 @@ async def test_stdio_list_tools_and_status_and_chat_save(tmp_path):
     params = _server_params(tmp_path)
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
-            await session.initialize()
+            initialized = await session.initialize()
+            from memory_os_v4 import __version__
+            assert initialized.serverInfo.name == "memory-os-v4"
+            assert initialized.serverInfo.version == __version__
 
             tools_result = await session.list_tools()
             names = {t.name for t in tools_result.tools}
