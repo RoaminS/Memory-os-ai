@@ -1,0 +1,64 @@
+{
+  "campaign": "mps-beam-reuse-v1",
+  "date": "2026-10-10",
+  "source_commit": "dce97ba5708e094918526ec4ddaf32cbdcefe700",
+  "plan_sha256": "7dfe1880418f19ae18211cd85cad27c072220da4f2f3fca0194275d1cbda8a68",
+  "report": {
+    "complete": true,
+    "questions": 400,
+    "quality": {
+      "clusters": 20,
+      "questions": 355,
+      "metrics": {
+        "recall": {
+          "delta": 0.0006187122736418514,
+          "ci": [
+            -0.00831315577078289,
+            0.013537894030851778
+          ]
+        },
+        "mrr": {
+          "delta": 0.0006561591772859379,
+          "ci": [
+            -0.0003152246814218644,
+            0.0019166998275633373
+          ]
+        }
+      },
+      "equivalent": false
+    },
+    "performance": {
+      "p50": 29.080140853999183,
+      "p95_nearest_rank": 43.14661220787093,
+      "max": 43.68760516680777,
+      "historical_cpu_speedup_not_paired": true
+    },
+    "predictions_sha256": "99e3fa58a637c4651a293176421936998f5fb6e1b68e081208ee61d29ee1c92b",
+    "complete_sha256": "1e9c9698dd97d355953f0f4420cf799300b0b9aa6ed73d4d4d9a829865458272",
+    "historical_predictions_sha256": "f25fc2326e209a0f6c9635b3c3c48bd214b9bab4385acc9f80a519d5e07036b9",
+    "performance_met": true,
+    "criterion_met": false,
+    "systems": {
+      "cpu": {
+        "recall": 0.4619048127146719,
+        "mrr": 0.4442734182875028
+      },
+      "mps": {
+        "recall": 0.46252352498831373,
+        "mrr": 0.44492957746478873
+      }
+    },
+    "claim": "observed BEAM development equivalence vs historical CPU; not contemporary paired speed experiment, independent confirmation, answer accuracy or leaderboard rank"
+  },
+  "files": {
+    "plan.json": "7dfe1880418f19ae18211cd85cad27c072220da4f2f3fca0194275d1cbda8a68",
+    "receipt.json": "1cbb24537069a35be8f9a62bdb6983097b104ac9f3bb2e1c70420a5d4a25f251",
+    "report.json": "fa1b0b456cb4d310b35d2afe1a73e06c123c1df7bc00e613b3b8301e16d9800a",
+    "source/.local-qualification/measurement/predictions.jsonl": "99e3fa58a637c4651a293176421936998f5fb6e1b68e081208ee61d29ee1c92b",
+    "source/.local-qualification/measurement/complete.json": "1e9c9698dd97d355953f0f4420cf799300b0b9aa6ed73d4d4d9a829865458272"
+  },
+  "verdict": "equivalence_not_demonstrated",
+  "no_posthoc_rescoring": true,
+  "qualification": "experimental_opt_in_only_no_production_activation",
+  "historical_runtime_not_attested": true
+}

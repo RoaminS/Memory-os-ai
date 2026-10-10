@@ -126,3 +126,16 @@ sa base et exposent la rétention/octet des reçus. La commande backup actuelle 
 SQLite : sauvegarde via API backup et restore-drill S4 sont un prérequis de bascule.
 C4 par défaut est une proposition du paquet, voir RELEASE_4_0_2_DECISIONS.md ;
 installation, activation C4 et migration SQLite exigent chacune le GO opérateur.
+
+## Candidate de développement : CPU défaut, MPS expérimental
+
+La candidate postérieure à la publication 4.0.2 fixe `MEMORY_V4_DEVICE=cpu`
+par défaut, au lieu de `auto` qui peut sélectionner MPS sur Mac. Un réglage
+explicite existant garde sa priorité ; vérifier la configuration effective.
+Le service installé et le magasin de production ne sont pas modifiés.
+
+L'option `MEMORY_V4_DEVICE=mps` avec `MEMORY_V4_EMBED_DTYPE=float32`, longueur512,
+batch4 et faits scalaires reste expérimentale : le lot BEAM complet a réussi
+ses objectifs de performance, mais **échoué l'équivalence préenregistrée**.
+Contrat complet, séparation/reconstruction des caches, retour CPU, gardes et
+GO nécessaire : [MPS_RESULT_V1.md](MPS_RESULT_V1.md). Aucun basculement automatique.

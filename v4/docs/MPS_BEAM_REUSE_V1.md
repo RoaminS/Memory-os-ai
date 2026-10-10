@@ -1,5 +1,9 @@
 # MPS : diagnostic et extension BEAM préenregistrée — 2026-10-10
 
+**Mise à jour après exécution : lot complet, performance réussie, équivalence
+non démontrée ; voir [MPS_RESULT_V1.md](MPS_RESULT_V1.md).** Le protocole
+préenregistré ci-dessous reste conservé, sans nouveau scoring ni changement de gate.
+
 Statut : prêt pour Claude, **aucune exécution neuronale par Codex**. GO Romain
 existant pour le chantier indexation ; un seul job lourd supplémentaire,
 séquentiel. Aucun changement de production, téléchargement, appel API/LLM,

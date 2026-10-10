@@ -88,6 +88,15 @@ indexing-cost target, a new held-out temporal test, answer accuracy with a fixed
 reproduction — before any leaderboard claim. On BEAM, indexing took 678 s per conversation at the median while
 warm search stayed at 41 ms p50; the encoder consumed 99.86% of measured ingestion time.
 
+The experimental MPS/float32 run completed the same 20 BEAM conversations in 661 s:
+ingestion p50 29.1 s, p95 43.1 s, max 43.7 s. Against archived CPU predictions,
+Recall@10 Δ +0.0006 (97.5% CI [-0.0083, +0.0135]) and MRR Δ +0.0007
+[-0.0003, +0.0019]. **Preregistered two-sided equivalence was not demonstrated**;
+no post-hoc non-inferiority claim is made. Historical CPU timings are not paired.
+The development candidate defaults explicitly to CPU; MPS remains an experimental
+configuration requiring operator approval for production. See
+[`MPS_RESULT_V1.md`](v4/docs/MPS_RESULT_V1.md) for evidence, settings and limitations.
+
 ## Architecture
 
 ```
