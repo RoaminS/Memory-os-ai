@@ -63,6 +63,12 @@ retirée. Le rollback documenté reste `BM25_PROFILE=legacy` et
 
 ### P0 — réduire l'indexation sans régler la qualité sur BEAM
 
+Suite autorisée le 2026-10-10 : correctif/tests et lanceur apparié livrés dans
+[INDEXING_BATCH_V1](INDEXING_BATCH_V1.md). Les objectifs Granite restent non
+mesurés. Les protocoles de
+[réponses E2E](E2E_HELDOUT_DESIGN_V1.md) et de
+[temporalité](TEMPORAL_HELDOUT_DESIGN_V1.md) sont des designs, avec GO distinct.
+
 1. Instrumenter temps, taille de batch, RSS, swap et appels par phase.
 2. Construire et valider le lot de faits avant mutation, éliminer les doublons
    par texte/identité, puis encoder les faits acceptés par vrais lots. Préserver
