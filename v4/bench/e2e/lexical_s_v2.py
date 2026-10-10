@@ -32,7 +32,7 @@ def old_reader(clone, revision):
     metadata = clone / '.local-qualification/git-state'
     git = ['git', '--git-dir', str(metadata)] if metadata.is_dir() else ['git', '-C', str(clone)]
     result = subprocess.run([*git, 'show', revision + ':v4/bench/e2e/data.py'],
-                            capture_output=True, text=True, timeout=10, check=True)
+                            capture_output=True, text=True, timeout=10, check=True, cwd=clone)
     name = '_memory_s_v2_archived_data'
     module = types.ModuleType(name)
     sys.modules[name] = module

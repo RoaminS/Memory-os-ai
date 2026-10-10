@@ -33,7 +33,7 @@ def archived_stats(clone, revision):
     metadata = clone / '.local-qualification/git-state'
     git = ['git', '--git-dir', str(metadata)] if metadata.is_dir() else ['git', '-C', str(clone)]
     result = subprocess.run([*git, 'show', revision + ':v4/bench/e2e/stats.py'],
-                            capture_output=True, text=True, timeout=10, check=True)
+                            capture_output=True, text=True, timeout=10, check=True, cwd=clone)
     name = 'bench.e2e._s_v3_archived_stats'
     module = types.ModuleType(name)
     module.__package__ = 'bench.e2e'

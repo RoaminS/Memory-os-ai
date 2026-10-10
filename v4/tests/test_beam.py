@@ -1,6 +1,7 @@
 """BEAM schema/annotation firewall, clustered inference and no-tool CLI checks."""
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -8,6 +9,8 @@ from bench.e2e.beam import CATEGORIES, conversations, decode
 from bench.e2e.beam_campaign import select_pilot, summarize
 from bench.e2e.codex_reader import CLI, CodexReader, PilotStop, capability, command, parse_events
 from bench.e2e.configuration import resolved_config
+from bench.e2e.data import sha256
+from bench.e2e.run import verify_source
 
 
 def row(cid='one'):
@@ -167,3 +170,29 @@ def test_tool_events_block(item):
 def test_judge_strict_bool(value):
     with pytest.raises(PilotStop):
         parse_events(events(value), 'correct')
+
+
+def test_verify_source_from_untracked_private_worker_directory(tmp_path, monkeypatch):
+    clone = tmp_path / 'clone'
+    metadata = clone / '.local-qualification' / 'git-state'
+    source = clone / 'v4' / 'src'
+    evaluator = clone / 'v4' / 'bench' / 'e2e'
+    source.mkdir(parents=True)
+    evaluator.mkdir(parents=True)
+    (source / 'core.py').write_text('VALUE = 1\n')
+    (evaluator / 'worker.py').write_text('VALUE = 2\n')
+    metadata.parent.mkdir(parents=True)
+    subprocess.run(['git', 'init', '--separate-git-dir', str(metadata), str(clone)],
+                   check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(clone), 'add', 'v4/src', 'v4/bench/e2e'], check=True)
+    subprocess.run(['git', '-C', str(clone), '-c', 'user.name=Test',
+                    '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture'],
+                   check=True, capture_output=True)
+    revision = subprocess.run(['git', '-C', str(clone), 'rev-parse', 'HEAD'],
+                              check=True, capture_output=True, text=True).stdout.strip()
+    code = {'src/core.py': sha256(source / 'core.py'),
+            'bench/e2e/worker.py': sha256(evaluator / 'worker.py')}
+    untracked = clone / '.local-qualification' / 'plan' / 'pilot-retrieval'
+    untracked.mkdir(parents=True)
+    monkeypatch.chdir(untracked)
+    verify_source(clone, revision, code)

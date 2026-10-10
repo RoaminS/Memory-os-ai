@@ -66,7 +66,7 @@ def verify_source(clone: Path, revision: str, code: dict) -> None:
     metadata = clone / ".local-qualification/git-state"
     git = ["git", "--git-dir", str(metadata)] if metadata.is_dir() else ["git", "-C", str(clone)]
     result = subprocess.run([*git, "archive", revision, "v4/src", "v4/bench/e2e"],
-                            capture_output=True, timeout=10)
+                            capture_output=True, timeout=10, cwd=clone)
     if result.returncode:
         raise ValueError("Cannot attest declared source commit in local Git metadata")
     records = {}
