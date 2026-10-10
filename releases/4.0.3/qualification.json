@@ -1,7 +1,7 @@
 {
   "version": "4.0.3",
-  "source_commit": "4b3df5941a2a0c8c1b5fab0d3f481b6c44768b94",
-  "source_date_epoch": 1791654728,
+  "source_commit": "53030c2c99b09b5dc3f8467dda0a114e47477ee2",
+  "source_date_epoch": 1791655458,
   "release_ready": false,
   "open_blockers": [],
   "checks": {
@@ -30,18 +30,18 @@
   "artifacts": [
     {
       "name": "memory_os_ai-4.0.3-py3-none-any.whl",
-      "bytes": 435034,
-      "sha256": "499be63e656720ded9c1847cf715128975da05139f5c0b8084c21ab0d1b472dc"
+      "bytes": 435236,
+      "sha256": "740888408e84dace96fef81cde132b61216d365cd0e770e288e93d918668b9b5"
     },
     {
       "name": "memory_os_ai-4.0.3.tar.gz",
-      "bytes": 783616,
-      "sha256": "1ce52377c5540f91dca68163337923ed10afe941d776c3af344bd769d611c2c5"
+      "bytes": 783812,
+      "sha256": "0a7b5182742ffb1d197db7de7758d6583c4427c6349fcd2f00a678637d32a656"
     }
   ],
   "qualification_source_sha256": {
     "pyproject.toml": "eb26a973665313fda569d5893197996c06d82c9f4cdb32db61bbf0ceabe2fd2b",
-    "src/memory_os_ai/__init__.py": "57f3092e3fba6f858f77770259fd2a0b4910b0136de3a0d447fcd81e7c6803a7",
+    "src/memory_os_ai/__init__.py": "6d43e7aa1483e3393aa30609614b1fa25a325d5ea84ff46319d5464decf18819",
     "src/memory_os_ai/__main__.py": "30c055a1c7ed90fb25db8f4f4e4bb0cf1cdbd64b743b769abbd48028bf32bc47",
     "src/memory_os_ai/chat_extractor.py": "8133b945ec6162bb5682c8185ccbcb0ac7b750e7b379faa31b7f300ccc9227d8",
     "src/memory_os_ai/cloud_storage.py": "7037395e9309b81ec906f9d06700ff062f2327d8224612745deb807aa3821d7b",
@@ -94,7 +94,7 @@
     "v4/src/memory_os_v4/text.py": "196dafd461d8d5b4e6d4d7e1b5e9cfad8aaa9804554824af715723a117e92072",
     "v4/src/memory_os_v4/vector_index.py": "3610061123efb102e6d18d5404cde85512315a97119a32c311cb99cb3506138d",
     "v4/src/memory_os_v4/writer_lock.py": "8f318e7aa789d64dafd72da94eca4b703110b5483c6f819404365420a136718d",
-    "v4/tests/test_server_http_e2e.py": "23c02e753f6c578b2e98987da82d838f2989725391b1bb2705116da40da2148b",
+    "v4/tests/test_server_http_e2e.py": "79aaffab47e2b18b07045b7c0813cb6a6f2aff378cab34cb19b2282a382fe117",
     "v4/tests/test_ops_e2e.py": "62b66749b977009bee2307b6ff8f905e8e32424c27f989cff81def6f42178ab2",
     "v4/tests/test_core_slow_integration.py": "84208e64acc60f821e65b8a3bef2002f99c7698d747d33bc646a6a701dc72d8b"
   },
@@ -124,7 +124,6 @@
     "installed sdist relay TCP"
   ],
   "status": "local-unit-qualification-green; external proofs pending",
-  "bundle_base": "0e1b77386940ef60d4a2d1b9f0853df323f46cd0",
   "unit_results": {
     "v3": {
       "passed": 566,
@@ -149,7 +148,6 @@
       "reason": "four Git-archive checks inapplicable without history + one real MiniLM slow test"
     }
   },
-  "commands_receipt_sha256": "ddf00290257fc46a0fc2562bf50ada3432cfd3caf9e6a800b6d40b5bad5628ca",
   "pilot": {
     "status": "not run",
     "questions": 10,
@@ -181,5 +179,25 @@
     "host_skills_skipped": true,
     "unified_exec_backend_metadata": true,
     "note": "Shell tools disabled; backend metadata remains true. This metadata check is not proof of zero tools during inference; pilot events must attest that."
+  },
+  "bundle_base": "49f3ec8f8b16b73ee66d7c4a0fd60d64dda6d5c6",
+  "commands_receipt_sha256": "7bb166650710756e419abc27c1ac462eb64dfef160e65c354b2292232959f1e5",
+  "readiness_asgi": {
+    "passed": 25,
+    "log_sha256": "f2a8ce02b42cc30701feff1a09e68203a567b1e4f46c1861cb179bdb4da53bd1"
+  },
+  "preserved_failed_v1": {
+    "directory": ".local-qualification/release-4.0.3",
+    "source_tcp": {
+      "passed": 9,
+      "failed": 1
+    },
+    "reason": "hard-coded 4.0.2 assertion, candidate announces 4.0.3",
+    "files_sha256": {
+      "manifest.json": "6f476919bb276f27c1358339ac64df9b887b5022c2cb553216c6eba984852baa",
+      "source-proof.json": "69b4b3922bb2c901fa6084515d85edb73bfb5664676b03c5da9d48f1ebba155f",
+      "source_tcp.xml": "fe2dac958c3c19b864a35d175c0501a5fb5517099ec6c2d9bb11a582e4cea22b",
+      "source_tcp.log": "0622e89be77a6f2bd2c884d6dffd3b227fc8bae01974bc14e8b6dc140dc28142"
+    }
   }
 }

@@ -1,12 +1,17 @@
-# T05 4.0.3 — candidate locale verte, garde FERMÉE
+# T05 4.0.3 v2 — candidate locale verte, garde FERMÉE
 
-Non publiée, non déployée. Source définitive des artefacts et du protocole :
-`4b3df5941a2a0c8c1b5fab0d3f481b6c44768b94`.
+Non publiée, non déployée. Cette candidate remplace les artefacts v1.
+Tentative v1 conservée intégralement dans `.local-qualification/release-4.0.3/`
+(9/10 TCP, assertion de version ancienne) ; aucune preuve v1 réutilisée.
+[Audit et correctifs de version](VERSION_AUDIT_v2.md) ; **25 readiness ASGI verts**.
+
+Source définitive des artefacts et du protocole :
+`53030c2c99b09b5dc3f8467dda0a114e47477ee2`.
 Ce dossier est un reçu après construction ; `releases/` n'entre pas dans les
 artefacts. Aucune modification runtime/banc après cette source.
 
 [Reçu structuré](qualification.json), logs/commandes/venv/manifeste/artefacts :
-`.local-qualification/release-4.0.3/`. Aucun modèle téléchargé, encodage neuronal,
+`.local-qualification/release-4.0.3-v2/`. Aucun modèle téléchargé, encodage neuronal,
 appel LLM/API, TCP ou magasin de production exécuté/ouvert par Codex.
 
 | Preuve locale | Résultat |
@@ -60,12 +65,12 @@ Aucune exclusion pour un échec fonctionnel applicable au paquet installé.
 ## Empreintes finales
 
 ```text
-499be63e656720ded9c1847cf715128975da05139f5c0b8084c21ab0d1b472dc  memory_os_ai-4.0.3-py3-none-any.whl
-1ce52377c5540f91dca68163337923ed10afe941d776c3af344bd769d611c2c5  memory_os_ai-4.0.3.tar.gz
+740888408e84dace96fef81cde132b61216d365cd0e770e288e93d918668b9b5  memory_os_ai-4.0.3-py3-none-any.whl
+0a7b5182742ffb1d197db7de7758d6583c4427c6349fcd2f00a678637d32a656  memory_os_ai-4.0.3.tar.gz
 ```
 
 Artefacts hors bundle, déjà présents dans le clone partagé. Ne pas reconstruire
-pour publier. Manifeste/garde : `.local-qualification/release-4.0.3/manifest.json`.
+pour publier. Manifeste/garde : `.local-qualification/release-4.0.3-v2/manifest.json`.
 
 ## Claude : ordre exact hors sandbox
 
