@@ -84,6 +84,7 @@ def prepare(directory, source_commit, data, provenance, copy_proof):
     if (origin.get('dataset') != 'Mohammadta/BEAM' or origin.get('revision') != REVISION
             or origin.get('file') != 'data/500K-00000-of-00001.parquet'
             or origin.get('licence') != 'CC-BY-SA-4.0' or not origin.get('romain_download_go')
+            or origin.get('converter_script_sha256') != sha256(clone / 'scripts/acquire_beam_500k.py')
             or origin.get('conversations') != 35 or origin.get('jsonl_sha256') != sha256(data)
             or not 0 < origin.get('download_bytes', 0) <= 110_000_000
             or sha256(provenance.parent / 'beam_500k.parquet') != origin.get('parquet_sha256')):

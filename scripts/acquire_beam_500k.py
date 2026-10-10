@@ -41,7 +41,7 @@ def main():
     if not 0 < size <= CAP or len(expected) != 64:
         raise ValueError('Upstream metadata exceeds download budget or lacks SHA-256')
     import pyarrow.parquet as pq
-    out.mkdir(mode=0o700)
+    out.mkdir(mode=0o700, parents=True)
     path = out / 'beam_500k.parquet'
     url = f'https://huggingface.co/datasets/Mohammadta/BEAM/resolve/{REVISION}/{REMOTE}'
     h, total = hashlib.sha256(), 0
@@ -71,7 +71,8 @@ def main():
                   'parquet_sha256': expected, 'jsonl_sha256': derived_sha,
                   'romain_download_go': a.romain_download_go, 'conversations': count,
                   'converter': 'pyarrow.iter_batches(1).to_pylist; json.dumps(default=str)',
-                  'pyarrow': __import__('pyarrow').__version__, 'inference_calls': 0}
+                  'pyarrow': __import__('pyarrow').__version__, 'inference_calls': 0,
+                  'converter_script_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     (out / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n')
     print(json.dumps(provenance, indent=2))
 
