@@ -1,5 +1,14 @@
 # MPS BEAM — verdict et décision proposée, 2026-10-10
 
+**Rectification après audit production : le service installé utilise auto→MPS,
+chargement natif et batch32. CPU n'était pas le statu quo ; la recommandation
+CPU défaut ci-dessous est retirée, et la candidate est revenue à auto.**
+Voir [MPS_PRODUCTION_ALIGNMENT_V1.md](MPS_PRODUCTION_ALIGNMENT_V1.md) pour la
+décision courante, la différence avec le profil mesuré float32/batch4 et la
+reconstruction obligatoire des caches historiques non attestés. Le résultat
+scientifique et le design historique ci-dessous restent conservés ; ce design
+n'est pas un plan exécutable pour le nouveau profil de production.
+
 ## Verdict officiel : équivalence non démontrée
 
 Claude a terminé `mps-beam-reuse-v1` en 661 s, avec 400 recherches,
@@ -46,7 +55,7 @@ calculer des scores et ne réexécute pas le bootstrap. Ne pas utiliser l'ancien
 `compare` pour modifier le verdict ; les nouveaux changements de source
 refuseraient de toute façon son attestation de harness.
 
-## Recommandation à Romain : CPU défaut, MPS expérimental explicite
+## Recommandation historique retirée : CPU défaut, MPS expérimental explicite
 
 Je recommande de **conserver CPU comme choix de production**, et de proposer
 MPS/float32 en option expérimentale pour les utilisateurs qui acceptent cette
@@ -119,7 +128,7 @@ des dépendances restantes ou un changement de corpus peuvent exiger davantage.
 Une demi-largeur d'un point n'assure pas à elle seule la puissance d'une
 non-infériorité ; les hypothèses d'effet vrai et de variance sont indispensables.
 
-## Prochain test éventuel : design, pas lancement autorisé
+## Design historique à réviser après audit du profil de production
 
 Choix proposé : **MPS-HOLDOUT-100**, nouveau corpus de 100 conversations
 indépendantes d'environ 100K tokens chacune, inspiré du cadre BEAM, construit

@@ -93,9 +93,13 @@ ingestion p50 29.1 s, p95 43.1 s, max 43.7 s. Against archived CPU predictions,
 Recall@10 Δ +0.0006 (97.5% CI [-0.0083, +0.0135]) and MRR Δ +0.0007
 [-0.0003, +0.0019]. **Preregistered two-sided equivalence was not demonstrated**;
 no post-hoc non-inferiority claim is made. Historical CPU timings are not paired.
-The development candidate defaults explicitly to CPU; MPS remains an experimental
-configuration requiring operator approval for production. See
+The development candidate preserves `device=auto`, matching the existing MPS
+deployment on this Mac. Production uses native loading and batch32; the measured
+MPS float32/batch4 profile differs and remains an experimental variant. Backend
+or precision changes require operator approval and compatible/rebuilt vectors. See
 [`MPS_RESULT_V1.md`](v4/docs/MPS_RESULT_V1.md) for evidence, settings and limitations.
+The production audit and corrected recommendation are documented in
+[`MPS_PRODUCTION_ALIGNMENT_V1.md`](v4/docs/MPS_PRODUCTION_ALIGNMENT_V1.md).
 
 ## Architecture
 

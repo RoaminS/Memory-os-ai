@@ -127,15 +127,18 @@ SQLite : sauvegarde via API backup et restore-drill S4 sont un prérequis de bas
 C4 par défaut est une proposition du paquet, voir RELEASE_4_0_2_DECISIONS.md ;
 installation, activation C4 et migration SQLite exigent chacune le GO opérateur.
 
-## Candidate de développement : CPU défaut, MPS expérimental
+## Candidate de développement : correction après audit production
 
-La candidate postérieure à la publication 4.0.2 fixe `MEMORY_V4_DEVICE=cpu`
-par défaut, au lieu de `auto` qui peut sélectionner MPS sur Mac. Un réglage
-explicite existant garde sa priorité ; vérifier la configuration effective.
-Le service installé et le magasin de production ne sont pas modifiés.
+La recommandation CPU du lot précédent est retirée : production est déjà
+auto→MPS. La candidate préserve de nouveau `device=auto`. Un pin explicite
+`MEMORY_V4_DEVICE=mps`, sans changement de précision/batch, est recommandé
+après GO opérateur. Service installé et magasin restent inchangés.
 
-L'option `MEMORY_V4_DEVICE=mps` avec `MEMORY_V4_EMBED_DTYPE=float32`, longueur512,
-batch4 et faits scalaires reste expérimentale : le lot BEAM complet a réussi
+La variante MPS **float32/batch4** reste distincte du profil natif/batch32 du
+service : le lot BEAM complet a réussi
 ses objectifs de performance, mais **échoué l'équivalence préenregistrée**.
 Contrat complet, séparation/reconstruction des caches, retour CPU, gardes et
-GO nécessaire : [MPS_RESULT_V1.md](MPS_RESULT_V1.md). Aucun basculement automatique.
+GO nécessaire : [MPS_PRODUCTION_ALIGNMENT_V1.md](MPS_PRODUCTION_ALIGNMENT_V1.md).
+La candidate reconstruit les vecteurs JSONL sans profil complet avant recherche ;
+qualification sur copie requise avant déploiement, même avec device inchangé.
+Aucun basculement automatique.
