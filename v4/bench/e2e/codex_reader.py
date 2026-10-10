@@ -136,12 +136,14 @@ class CodexReader:
                                                             'tokens_total': self.tokens, 'pending_usage_unknown': True}, indent=2) + '\n')
             log_path = self.root / f'{index:03d}.events.jsonl'
             error_path = self.root / f'{index:03d}.stderr'
-            with log_path.open('x') as log, error_path.open('x') as err:
-                child = subprocess.Popen(command(work, schema, self.effort), stdin=subprocess.PIPE,
+            prompt_path = work / 'prompt.txt'
+            prompt_path.write_text(prompt)
+            # A regular stdin file avoids blocking the guard on a full pipe
+            # while CLI startup/auth waits; the supervisor stays responsive.
+            with prompt_path.open() as input_file, log_path.open('x') as log, error_path.open('x') as err:
+                child = subprocess.Popen(command(work, schema, self.effort), stdin=input_file,
                                          stdout=log, stderr=err, text=True, env=env, start_new_session=True)
                 try:
-                    child.stdin.write(prompt)
-                    child.stdin.close()
                     while child.poll() is None:
                         self.check()
                         if time.monotonic() - start > 90 or time.monotonic() >= self.deadline:
