@@ -10,6 +10,7 @@ import time
 import uuid
 import weakref
 from functools import wraps
+from itertools import chain
 from pathlib import Path
 from threading import RLock
 
@@ -23,7 +24,9 @@ from .embed import Embedder, HashEmbedder
 from .entities import EntityIndex, extract_entities
 from .extract import normalize_client_facts
 from .facets import FacetIndex, normalize_facets
-from .fact_updates import duplicate_compatible, equivalent_assertions, validate_replacements, replacement_sweep
+from .fact_updates import (
+    duplicate_compatible, equivalent_assertions, validate_replacements, replacement_sweep,
+)
 from .llm import LLMClient
 from .idempotency import RequestJournal, sync_sources
 from .writer_lock import WriterLock
@@ -115,7 +118,8 @@ class MemoryV4:
             from .sqlite_store import validate_sqlite_target
             validate_sqlite_target(self.data_dir)
         elif (self.data_dir / "store.sqlite3").exists():
-            raise ValueError("SQLite store present: explicit backend selection required; no implicit downgrade")
+            raise ValueError("SQLite store present: explicit backend selection required; "
+                             "no implicit downgrade")
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self._closed = False
@@ -592,13 +596,13 @@ class MemoryV4:
             self._index_items(items)
             return items
 
-    def _find_duplicate(self, item: MemoryItem) -> str | None:
+    def _find_duplicate(self, item: MemoryItem, pending=()) -> str | None:
         """Cosine similarity never proves duplicate identity.
 
         An identity names a property, not its value: differing values must reach
         explicit replacement logic. Equal normalized text is required for all kinds.
         """
-        for it in self.store.all(include_deleted=False):
+        for it in chain(self.store.all(include_deleted=False), pending):
             if duplicate_compatible(it, item) and equivalent_assertions(it, item):
                 return it.id
         return None
@@ -632,8 +636,25 @@ class MemoryV4:
             added: list[str] = []
             deduped: list[str] = []
             superseded: list[tuple[str, str]] = []
+            pending: list[MemoryItem] = []
+            # Keep allocation bounded by the existing encoder batch setting.
+            # Updates are barriers: their validation/dedup must see preceding
+            # writes and their replacement sweep must precede following writes.
+            batch_size = max(1, self.config.embed_batch_size)
+
+            def flush_pending():
+                if pending:
+                    self._index_items(pending)
+                    added.extend(it.id for it in pending)
+                    pending.clear()
 
             for nf in normalized:
+                if nf.get("identity") or nf.get("replaces"):
+                    flush_pending()
+                if nf.get("item_id") and any(it.id == nf["item_id"] for it in pending):
+                    # Preserve duplicate-id failure semantics, including the
+                    # preceding JSONL writes (SQLite rolls back the whole call).
+                    flush_pending()
                 kind = nf.get("kind", "fact")
                 ev_time = nf.get("event_time")
                 if ev_time is None:
@@ -645,11 +666,21 @@ class MemoryV4:
                 spec["parent_ids"] = parent_ids
                 spec["event_time"] = ev_time
                 spec["source"] = source
-                item = self._build_items([spec], kind=kind)[0]
+                try:
+                    item = self._build_items([spec], kind=kind)[0]
+                except Exception:
+                    flush_pending()
+                    raise
                 validate_replacements(item, self.store)
-                duplicate_id = self._find_duplicate(item)
+                duplicate_id = self._find_duplicate(item, pending)
                 if duplicate_id:
                     deduped.append(duplicate_id)
+                    continue
+
+                if not item.identity and not item.replaces:
+                    pending.append(item)
+                    if len(pending) >= batch_size:
+                        flush_pending()
                     continue
 
                 # Embeddings serve retrieval, never duplicate decisions. Reuse
@@ -663,6 +694,7 @@ class MemoryV4:
                                        (item.identity and item.identity["cardinality"] == "single")):
                     superseded.extend(replacement_sweep(self.store, project=project, focus=item))
 
+            flush_pending()
             return {"added": added, "deduped": deduped, "superseded": superseded}
 
     @_requires_open
@@ -901,8 +933,10 @@ class MemoryV4:
     @_atomic_mutation
     def consolidate(self, dry_run: bool = False, project: str | None = None) -> dict:
         with self._lock:
-            deduped = consolidate_mod.dedup_sweep(self.store, self.vector_index, self.config, dry_run, project=project)
-            superseded = consolidate_mod.supersede_sweep(self.store, self.vector_index, self.config, dry_run, project=project)
+            deduped = consolidate_mod.dedup_sweep(
+                self.store, self.vector_index, self.config, dry_run, project=project)
+            superseded = consolidate_mod.supersede_sweep(
+                self.store, self.vector_index, self.config, dry_run, project=project)
             decayed = consolidate_mod.decay(self.store, self.config, time.time(), dry_run, project=project)
             proposals = consolidate_mod.summary_proposals(self.store, self.vector_index, project=project)
 
@@ -912,7 +946,8 @@ class MemoryV4:
             if not dry_run:
                 self.last_consolidated = time.time()
                 self.store.meta["last_consolidated"] = self.last_consolidated
-                self.store.meta.setdefault("last_consolidated_by_project", {})[project or "*"] = self.last_consolidated
+                self.store.meta.setdefault("last_consolidated_by_project", {})[project or "*"] = (
+                    self.last_consolidated)
 
             return {
                 "deduped": len(deduped),

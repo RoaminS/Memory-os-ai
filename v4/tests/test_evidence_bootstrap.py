@@ -78,7 +78,9 @@ def test_oracle_rejects_s_bootstrap_before_data_or_worker(tmp_path, monkeypatch)
 
 
 def test_s_preflight_stops_before_any_model_worker(tmp_path, monkeypatch):
-    output = tmp_path / 'refused'
+    # Exercise the bootstrap gate after the private-output safety gate.
+    monkeypatch.setattr(run, '__file__', str(tmp_path / 'v4/bench/e2e/run.py'))
+    output = tmp_path / '.local-qualification/refused'
     monkeypatch.setattr(run, 'ensure_priority', lambda *a: None)
     monkeypatch.setattr(run, 'sample', lambda *a: {'swap_bytes': 0, 'free_bytes': 10_000_000_000})
     monkeypatch.setattr(run, 'inventory', lambda *a, **kw: {'sha256': 'x'})
