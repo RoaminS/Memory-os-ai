@@ -141,6 +141,11 @@ questions et configuration d'encodage ;**3510s CLI nouvelles +90s réservées**.
 Les scores restent descriptifs, sans comparaison officielle/claim ; relire les
 réponses pour refus/abstentions. Publication/bascule4.0.3 restent des GO distincts.
 
+**Préparation déjà effectuée par Codex, zéro appel modèle** : dans le clone
+partagé, ne pas réexécuter les commandes prepare ci-dessus (trace de procédure).
+Après import, Claude lance seulement answer. Plan SHA et preuve de préparation :
+[reçu prêt à exécuter](../../releases/answer-pilot-warnings-v2/README.md).
+
 ## Bascule et retour arrière : procédure pour un GO ultérieur seulement
 
 Ce paragraphe est un runbook, **aucune étape live autorisée aujourd'hui**.

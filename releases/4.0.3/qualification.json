@@ -2,7 +2,7 @@
   "version": "4.0.3",
   "source_commit": "53030c2c99b09b5dc3f8467dda0a114e47477ee2",
   "source_date_epoch": 1791655458,
-  "release_ready": false,
+  "release_ready": true,
   "open_blockers": [],
   "checks": {
     "adversarial_probe": "passed",
@@ -21,10 +21,10 @@
     "sdist_smoke": "passed",
     "sdist_source_v3": "passed",
     "sdist_source_v4": "passed",
-    "source_tcp": "pending",
-    "cached_semantic": "pending",
-    "v3_cached": "pending",
-    "production_copy": "pending"
+    "source_tcp": "passed",
+    "cached_semantic": "passed",
+    "v3_cached": "passed",
+    "production_copy": "passed"
   },
   "source_expected_v3_tests": 566,
   "artifacts": [
@@ -123,7 +123,7 @@
     "installed wheel relay TCP",
     "installed sdist relay TCP"
   ],
-  "status": "local-unit-qualification-green; external proofs pending",
+  "status": "fully qualified by Claude outside sandbox; publication/switchover await Romain GO",
   "unit_results": {
     "v3": {
       "passed": 566,
@@ -199,5 +199,24 @@
       "source_tcp.xml": "fe2dac958c3c19b864a35d175c0501a5fb5517099ec6c2d9bb11a582e4cea22b",
       "source_tcp.log": "0622e89be77a6f2bd2c884d6dffd3b227fc8bae01974bc14e8b6dc140dc28142"
     }
+  },
+  "source_proof_sha256": "e56f23da425209f41389d0a7972581d8ac1309589838046a9e247b4b86ceab67",
+  "copy_proof_sha256": "658e46d181de7b944340523def3cfe102e78c31012a0903144bb273a5e453126",
+  "relay_proof_sha256": "7a70ca6bb549eac73a7db1a8e1da5808c140ceeccdafc9216eacccbdcd4bfa30",
+  "external_qualification": {
+    "client": "Claude",
+    "manifest_sha256": "ad80c69fa5fe68e2e32e9b045d6518a6aae9fbd27b7b7cb17fe36fd9ef5cd9ed",
+    "source_tcp_passed": 10,
+    "cached_semantic_passed": 1,
+    "v3_cached_passed": 566,
+    "production_copy_items": 1031,
+    "production_modified": false,
+    "warm_reencodings": 0,
+    "private_doctor_fail": 0,
+    "installed_relays": [
+      "wheel",
+      "sdist"
+    ],
+    "copy_search_changes": "Claude review recorded; not a quality-equivalence proof"
   }
 }

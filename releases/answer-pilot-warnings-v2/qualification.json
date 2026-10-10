@@ -1,0 +1,112 @@
+{
+  "source_commit": "6fc00c99333a4414c06e71add98523d8ae8d9813",
+  "bundle_base": "e51fda05b3bf326e651458815b65f731c4e0f26a",
+  "plan_dir": "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-warnings-v2",
+  "plan_sha256": "3e81a3c09926ff6acdc749b334be05e858f8aafcb4d01bb8ad89cb295d5529bb",
+  "plan_version": "answer-pilot-production-v2",
+  "status": "prepared and frozen; zero new LLM/API calls; Claude may answer once",
+  "prior_usage": {
+    "input_tokens": 9165,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 21,
+    "reasoning_output_tokens": 0
+  },
+  "cumulative_call_cap": 40,
+  "prior_calls": 1,
+  "new_calls_max": 39,
+  "new_cli_seconds_max": 3510,
+  "old_cli_seconds_reserved": 90,
+  "tokens_stop_threshold": 400000,
+  "questions": 10,
+  "reader": {
+    "model": "gpt-5.6-luna",
+    "effort": "low"
+  },
+  "judge": {
+    "model": "gpt-6-astra",
+    "effort": "high",
+    "not_published_gpt4o_judge": true
+  },
+  "encoder_profile": {
+    "device": "mps",
+    "dtype": "native",
+    "batch_size": 32,
+    "max_seq_length": 512,
+    "parameter_dtypes": [
+      "torch.bfloat16"
+    ],
+    "parameter_devices": [
+      "mps"
+    ],
+    "model_revision": "835ad14087e140460703cf0fae09f97d469d65c2",
+    "runtime": {
+      "torch": "2.10.0",
+      "sentence-transformers": "5.2.3",
+      "transformers": "5.2.0",
+      "numpy": "2.4.2"
+    },
+    "encoder_source_sha256": "c2c335c468d7dedf7cff0ca2ce281c83d7c12fc9c65fd2c5b93adbbfcc5d60a7",
+    "normalized": true,
+    "output_dtype": "float32"
+  },
+  "historical_evidence_sha256": {
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/plan.json": "10ad5b43db48b48daf45ec8a1c2d14d9e03b6856dd8165ac458d11222dc5b634",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/receipt.json": "67a0634bfa19165fb1f788f0111ced324230dd0175de95963363996471422f62",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/retrieval/report.json": "5669020d68f65775cb8562f188b677f5a8d025eb6ae12d14f3b38c56e3fd0e13",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/retrieval/contexts.jsonl": "7346110caa9033363336ee0a5a7dc8c31feb11827da71ebe71542098acba13b6",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/retrieval/encoder-attestation.json": "d2ad2a6a253808ab353cadfdac86065b89839d4d946377523df7acdb73c89db3",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/answers/stopped.json": "30a02ede66ef430ba53cb21126b22bb34606d3b4806ac3c66969b2d78a9a8022",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/answers/predictions.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/answers/calls/usage.json": "5d1a6f21a7cb337cd6a54178f24aed4e48635fb657e1875b6dd6111d3d905cc2",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/answers/calls/000.events.jsonl": "d05062a2fa645851d56155100144493858e3837db9d857505d74e7848a5bb1c4",
+    "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/answer-pilot-production-v1/answers/calls/000.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "retrieval_sha256": {
+    "contexts.jsonl": "7346110caa9033363336ee0a5a7dc8c31feb11827da71ebe71542098acba13b6",
+    "encoder-attestation.json": "d2ad2a6a253808ab353cadfdac86065b89839d4d946377523df7acdb73c89db3",
+    "report.json": "885f3d3c315acf5737405b48ec05619e7d136f6236729932a1b0dd34284c81c0"
+  },
+  "unit_results": {
+    "targeted": 68,
+    "v4_light": 1063,
+    "v3_synthetic": 566,
+    "lint": "passed"
+  },
+  "proofs_sha256": {
+    "pilot-warnings-v2-tests-r2.log": "d554054bf6d01cbe9144181efc8079eef1d9332fb5f5924110d8409ef08c091d",
+    "pilot-warnings-v2-v4.log": "ab9f508b7cdb4bd3fd31f6a26a0e40b9ea86a5ed3f0d746153e191fe79b2f48f",
+    "pilot-warnings-v2-v4.xml": "cc422aab32c40d1b503cf03ae50b60f9c05c038d39a03ee0ffcac55281b5efbe",
+    "pilot-warnings-v2-v3.log": "2a71b48569398bb89579eb0af0847e4919421d1cb0518a147400857a21876add",
+    "pilot-warnings-v2-v3.xml": "376cf8a1dae415c068ada7077ba5626f2eca3909778b9143b76dcd8cd644fb4a",
+    "pilot-warnings-v2-audit.json": "8b0abb515a1f57eef076945da14e7bfe2bc501fbde11f32c0562282eea51763f",
+    "pilot-warnings-v2-cli-metadata.json": "a62bcf1bbb26a7f45d306cb97edda8dd01ab4feed6cc729c00f3a354f8caaaf6",
+    "pilot-warnings-v2-prepare.log": "1ae2ce53f6c4a3265acd385e7e4a21d827a2b5594337d0d9ae68b92a856b30dc"
+  },
+  "release_403": {
+    "source_commit": "53030c2c99b09b5dc3f8467dda0a114e47477ee2",
+    "manifest_sha256": "ad80c69fa5fe68e2e32e9b045d6518a6aae9fbd27b7b7cb17fe36fd9ef5cd9ed",
+    "artifacts": [
+      {
+        "name": "memory_os_ai-4.0.3-py3-none-any.whl",
+        "bytes": 435236,
+        "sha256": "740888408e84dace96fef81cde132b61216d365cd0e770e288e93d918668b9b5"
+      },
+      {
+        "name": "memory_os_ai-4.0.3.tar.gz",
+        "bytes": 783812,
+        "sha256": "0a7b5182742ffb1d197db7de7758d6583c4427c6349fcd2f00a678637d32a656"
+      }
+    ],
+    "qualified": true,
+    "published": false,
+    "production_changed_by_codex": false
+  },
+  "limitations": [
+    "One historical reader result was already observed; descriptive only",
+    "Original temporary stdin file gone; prompt reconstructed from frozen source/context",
+    "Actual warning suppression verified only by next CLI run; tool/error guard remains strict",
+    "Sandbox nice emitted a warning during metadata-only prepare; answer enforces nice15 outside sandbox",
+    "No new model/API call by Codex; no estimate of percentage ChatGPT quota"
+  ]
+}

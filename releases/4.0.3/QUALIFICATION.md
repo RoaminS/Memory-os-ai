@@ -1,6 +1,15 @@
-# T05 4.0.3 v2 — candidate locale verte, garde FERMÉE
+# T05 4.0.3 v2 — qualification complète Claude, GO opérateur attendu
 
-Non publiée, non déployée. Cette candidate remplace les artefacts v1.
+Non publiée, non déployée par Codex.
+
+Le 2026-10-10, Claude a terminé la qualification hors sandbox :10 TCP,1 MiniLM,
+566 v3 réels ; copies1031 éléments/rebuild19–20s/reopen0 réencodage ;
+wheel=sdist=reopen ; doctor privé0 FAIL ; deux relais installés PASS.
+6/10 requêtes ont changé : revue Claude enregistrée, sans preuve de qualité
+équivalente. Le manifeste final et ses SHA ont été revérifiés par Codex.
+**release_ready=true pour la qualification ; publication et bascule exigent
+encore les GO de Romain.**
+ Cette candidate remplace les artefacts v1.
 Tentative v1 conservée intégralement dans `.local-qualification/release-4.0.3/`
 (9/10 TCP, assertion de version ancienne) ; aucune preuve v1 réutilisée.
 [Audit et correctifs de version](VERSION_AUDIT_v2.md) ; **25 readiness ASGI verts**.
@@ -26,7 +35,7 @@ appel LLM/API, TCP ou magasin de production exécuté/ouvert par Codex.
 | Cinq commandes/docs/licences | deux package_smoke verts : trois serveurs stdio hash, admin, relais indisponible contrôlé, docs/entry points/licences |
 | Suites sdist hors dépôt | **566 v3**, **1 037 v4**, exclusions Git/slow ci-dessous |
 | Résultats historiques MPS | verify_mps_reuse_result_v1 OK ; criterion_met=false conservé, aucun nouveau score |
-| Publication | refus attendu, release_ready=false : modèle/TCP/copie/relais encore en attente |
+| État au build local | refus attendu, release_ready=false ; levé ensuite par les preuves Claude ci-dessus |
 
 Python3.11.14/macOS ARM64 ; 3.12 absent. Dépendances partagées depuis un pool privé
 copié, sans projet éditable/pth source ; aucun changement du venv de production.
@@ -75,13 +84,13 @@ pour publier. Manifeste/garde : `.local-qualification/release-4.0.3-v2/manifest.
 ## Claude : ordre exact hors sandbox
 
 [Commandes complètes et procédure de retour arrière](../../v4/docs/QUALIFY_4_0_3.md).
-D'abord source10 TCP +1 MiniLM réel +566 v3 cached réels, puis copies baseline4.0.2/
+Déjà exécutées par Claude : source10 TCP +1 MiniLM réel +566 v3 cached réels, puis copies baseline4.0.2/
 wheel4.0.3/sdist4.0.3 et reopens, profil natif attesté, doctor privé, revue des
 classements changés éventuels, enfin deux relais installés. Tout refus est bloquant.
 L'explication d'un écart de recherche nécessite un reçu Claude lié au SHA du rapport
 copie ; aucun accord automatique. Défauts conservés auto/native/32/512, C4, JSONL.
 
-Deuxième gros job seulement : pilote BEAM observé10 questions, **40 tentatives
+Pilote BEAM observé10 questions (amendement v2 séparé : [reçu](../answer-pilot-warnings-v2/README.md)), **40 tentatives
 CLI maximum**, Luna low lecteur / Astra high juge, via ChatGPT ; production-copy
 receipt et profil exact exigés avant préparation. prepare/retrieve/answer séparés,
 aucun relancement automatique ni score officiel/comparaison aux publications.
@@ -90,7 +99,7 @@ affiche encore unified_exec=true malgré --disable : ce backend reste dérivé,
 **shell_tool=false** est le verrou shell. Les événements du vrai pilote doivent
 prouver absence d'outils ; les contrôles locaux ne prétendent pas l'avoir prouvée.
 
-Garde closed jusqu'aux preuves sources/copie/relais. Pilot accuracy n'est pas une
+Preuves sources/copie/relais validées et garde de qualification ouverte par Claude. Pilot accuracy n'est pas une
 condition de supériorité ni un rang. Romain conserve des GO distincts : publication,
 bascule, toute migration SQLite, nouveau corpus/coût/campagne de confirmation.
 Aucun changement de configurations utilisateurs déjà modifiées dans le clone livré.
