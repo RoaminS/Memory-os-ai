@@ -1,4 +1,4 @@
-"""Pre-registered BEAM retrieval and optional bounded subscription-reader pilot."""
+"""Pre-registered BEAM retrieval-only C4 versus same-arm BM25 campaign."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,6 @@ import uuid
 from .baselines import BM25
 from .beam import CATEGORIES, DATA_SHA, audit, conversations, identity
 from .client import ToolClient, project_for
-from .codex_reader import CodexReader, PilotStop, capability, runtime_record
 from .configuration import resolved_config
 from .data import sha256
 from .experiments import MODELS, private_path
@@ -27,15 +26,14 @@ from .pipeline import extract, pack
 from .run import code_record, kill_group, model_record, verify_source, write_json
 from .stats import score
 
-VERSION = 'beam-c4-v1'
+VERSION = 'beam-c4-retrieval-v2'
 DATA = Path('/Users/romain/Memory-os-ai/v4/bench/data/beam/beam_100k.jsonl')
 S_DATA = DATA.parent.parent / 'longmemeval_s.json'
 SEED = 20261010
-MAX_PILOT_CALLS = 84  # 20 questions x 2 readers x (answer+judge) + 4 controls
 
 
 def select_pilot(items):
-    """Two whole conversations; one question/category in each; no outcome access."""
+    """Two whole conversations; one retrieval probe/category in each; no outcome access."""
     selected = sorted(items, key=lambda c: identity('beam-pilot-v1', c.source_id))[:2]
     ids = []
     for c in selected:
@@ -81,7 +79,7 @@ def summarize(rows, expected_ids, minimum=20):
     return output
 
 
-def prepare(directory, revision, effort='minimal'):
+def prepare(directory, revision):
     clone, directory = private_path(directory)
     if directory.exists():
         raise ValueError('Fresh preregistration directory required')
@@ -104,16 +102,10 @@ def prepare(directory, revision, effort='minimal'):
             'primary': 'paired delta annotated-turn Recall@10 memory minus SAME-arm BM25, packed same context budget',
             'criterion': 'all 400 questions complete, no failure, 20 conversation clusters; IC95 lower paired recall delta >0 AND mean paired MRR delta >=0; missing IC never passes',
             'missing_evidence': '40 abstention + 5 explicit empty annotations: retrieve all, exclude only from recall/MRR; publish ids; no evidence inferred',
-            'retrieval_pilot_conversations': pilot_conversations, 'reader_pilot_question_ids': pilot_questions,
-            'answer_confirmation_excluded_conversations': pilot_conversations,
+            'retrieval_pilot_conversations': pilot_conversations, 'retrieval_pilot_question_ids': pilot_questions,
             'retrieval_confirmatory_policy': 'all 20 conversations, fixed C4 before any pilot; no outcome-based tuning; pilot never authorizes retuning',
-            'reader': {'model': 'gpt-5.6-luna', 'effort': effort, 'questions': 20, 'calls': MAX_PILOT_CALLS,
-                       'cli_record': runtime_record(),
-                       'seconds': 2700, 'call_seconds': 90, 'tokens': 500_000, 'max_prompt_bytes': 24000,
-                       'judge': 'same-model blind anonymous rubric judge; non-official, correlated reader/judge bias',
-                       'utility_rule': 'all 4 judge controls correct; >=4 of 40 reader outputs judged correct; >=90% human agreement on first 10 anonymous judgments; all budgets respected; expansion requires Romain GO',
-                       'stop': 'unsupported effort/model/auth; any quota/schema/tool/correctness error; no retry/fallback; budget/resources stop immediately',
-                       'quota': 'actual input/cached/output tokens + wall time; remaining subscription quota unavailable; never convert to API dollars'},
+            'answer_reader': {'status': 'skipped-by-romain-2026-10-10',
+                              'model_calls_authorized': 0, 'not_part_of_this_plan': True},
             'budgets': {'pilot_retrieval_seconds': 7200, 'full_retrieval_seconds': 28800,
                         'conversation_seconds': 3600, 'swap_bytes': 8_500_000_000, 'free_bytes': 5_000_000_000,
                         'nice': 15, 'concurrency': 1, 'downloads': 0},
@@ -178,7 +170,7 @@ async def retrieval_worker(plan, output, pilot):
                 bm25 = BM25(quotes, baseline_root, model)
                 baseline_seconds = time.monotonic() - started
                 for probe in c.probes:
-                    if pilot and probe.id not in plan['reader_pilot_question_ids']:
+                    if pilot and probe.id not in plan['retrieval_pilot_question_ids']:
                         continue
                     expected.append(probe.id)
                     started = time.monotonic()
@@ -212,7 +204,7 @@ async def retrieval_worker(plan, output, pilot):
     report['plan_sha256'] = sha256(output.parent / 'plan.json')
     # Verify full independent denominator instead of accepting worker-selected ids.
     actual_expected = [p.id for c in conversations(Path(plan['data'])) for p in c.probes
-                       if not pilot or p.id in plan['reader_pilot_question_ids']]
+                       if not pilot or p.id in plan['retrieval_pilot_question_ids']]
     if set(expected) != set(actual_expected):
         raise ValueError('Question selection mismatch')
     write_json(output / 'report.json', report)
@@ -258,108 +250,23 @@ def run_retrieval(directory, pilot):
                 kill_group(child)
 
 
-def reader_pilot(directory):
-    plan = frozen(directory)
-    output = directory / 'reader-pilot'
-    output.mkdir(mode=0o700, exist_ok=False)
-    cap = capability(plan['reader']['effort'])
-    write_json(output / 'capability.json', cap)
-    if not cap['supported']:
-        write_json(output / 'report.json', {'complete': False, 'blocked': cap['reason'], 'model_calls': 0,
-                                          'expansion_allowed': False})
-        return 3
-    if runtime_record() != plan['reader']['cli_record']:
-        raise PilotStop('CLI runtime changed since preregistration; prepare an explicit amendment')
-    ensure_priority(Limits())
-    def check():
-        return sample(directory)
-    check()
-    prior = directory / 'pilot-retrieval'
-    report = json.loads((prior / 'report.json').read_text())
-    if (not report['complete'] or report.get('plan_sha256') != sha256(directory / 'plan.json')
-            or report['contexts_sha256'] != sha256(prior / 'contexts.jsonl')):
-        raise ValueError('Complete attested pilot contexts required')
-    contexts = [json.loads(line) for line in (prior / 'contexts.jsonl').read_text().splitlines()]
-    if len(contexts) != 20 or {r['qid'] for r in contexts} != set(plan['reader_pilot_question_ids']):
-        raise ValueError('Exact <=20-question pilot membership required')
-    allowed = {'qid', 'conversation', 'question', 'contexts'}
-    if any(set(r) != allowed or set(r['contexts']) != {'memory', 'bm25'} for r in contexts):
-        raise ValueError('Annotation-free reader journal required')
-    reader = CodexReader(output / 'calls', plan['reader']['effort'], check, seconds=2700,
-                         max_calls=MAX_PILOT_CALLS, max_tokens=500_000)
-    results, controls = [], []
-    try:
-        golds = {p.id: p for c in conversations(Path(plan['data'])) for p in c.probes
-                 if p.id in plan['reader_pilot_question_ids']}
-        # Controls reuse two pilot questions: no additional unique question.
-        control_ids = [p.id for p in golds.values() if p.gold.category == 'information_extraction']
-        for qid in sorted(control_ids):
-            p = golds[qid]
-            for candidate, expected in [(p.gold.answers[0], True), ('PURPLE_ELEPHANTS_UNRELATED_987654', False)]:
-                controls.append(reader.judge(p.question, candidate, p.gold.answers[0], p.rubric) is expected)
-        if len(controls) != 4 or not all(controls):
-            raise PilotStop('Judge control failed: not useful, stop without reader calls')
-        from .answers import response_metrics
-        for row in contexts:
-            p = golds[row['qid']]
-            if row['question'] != p.question:
-                raise PilotStop('Pilot question changed')
-            order = ['memory', 'bm25']
-            random.Random(row['qid']).shuffle(order)
-            for system in order:
-                prediction = reader.answer(row['question'], row['contexts'][system])
-                correct = reader.judge(row['question'], prediction, p.gold.answers[0], p.rubric)
-                item = {'qid': row['qid'], 'system': system, 'answer': prediction, 'judged_correct': correct,
-                        **response_metrics(prediction, p.gold.answers)}
-                results.append(item)
-                with (output / 'answers.jsonl').open('a') as f:
-                    f.write(json.dumps(item) + '\n')
-        # Independent human audit is mandatory before approving utility/expansion.
-        anonymous = [{'audit_id': i, 'question': golds[r['qid']].question,
-                      'reference': golds[r['qid']].gold.answers[0], 'rubric': golds[r['qid']].rubric,
-                      'candidate': r['answer'], 'human_correct': None} for i, r in enumerate(results[:10])]
-        write_json(output / 'human-audit.json', anonymous)
-        seconds = sum(c['seconds'] for c in reader.calls)
-        write_json(output / 'report.json', {'complete': True, 'questions': 20, 'cli_attempts': reader.attempts, 'model_calls': len(reader.calls),
-                  'tokens_total': reader.tokens, 'seconds': seconds, 'controls_passed': all(controls),
-                  'judged_correct': sum(r['judged_correct'] for r in results),
-                  'provisional_useful': sum(r['judged_correct'] for r in results) >= 4,
-                  'human_agreement_required': .9, 'human_agreement': None, 'expansion_allowed': False,
-                  'quota_remaining': None, 'confirmation_estimate': {'questions': 360, 'calls': 1440,
-                  'tokens': reader.tokens / len(reader.calls) * 1440, 'seconds': seconds / len(reader.calls) * 1440},
-                  'limitations': ['same reader/judge model', 'non-official rubric scoring', 'human audit + Romain GO required']})
-        return 0
-    except (PilotStop, ResourceStop) as exc:
-        write_json(output / 'report.json', {'complete': False, 'reason': str(exc), 'cli_attempts': reader.attempts, 'model_calls': len(reader.calls),
-                                           'tokens_total': reader.tokens, 'expansion_allowed': False})
-        return 3
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=['prepare', 'preflight', 'pilot-retrieval', 'retrieve', 'pilot-reader', '_worker'])
+    parser.add_argument('operation', choices=['prepare', 'pilot-retrieval', 'retrieve', '_worker'])
     parser.add_argument('--plan-dir', type=Path, required=True)
     parser.add_argument('--source-commit')
-    parser.add_argument('--effort', choices=['minimal', 'low'], default='minimal',
-                        help='low requires explicit Romain approval BEFORE preparing a fresh plan')
     parser.add_argument('--pilot', action='store_true')
     args = parser.parse_args(argv)
     _, directory = private_path(args.plan_dir)
     if args.operation == 'prepare':
         if not args.source_commit:
             parser.error('--source-commit required')
-        prepare(directory, args.source_commit, args.effort)
-    elif args.operation == 'preflight':
-        plan = frozen(directory)
-        print(json.dumps(capability(plan['reader']['effort']), indent=2))
-        return 0 if capability(plan['reader']['effort'])['supported'] else 3
+        prepare(directory, args.source_commit)
     elif args.operation == '_worker':
         plan = frozen(directory)
         asyncio.run(retrieval_worker(plan, directory / ('pilot-retrieval' if args.pilot else 'retrieval'), args.pilot))
     elif args.operation in {'pilot-retrieval', 'retrieve'}:
         run_retrieval(directory, args.operation == 'pilot-retrieval')
-    else:
-        return reader_pilot(directory)
     return 0
 
 
