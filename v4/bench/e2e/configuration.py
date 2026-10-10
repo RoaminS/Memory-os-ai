@@ -11,7 +11,8 @@ ALLOWED = {"fusion", "w_dense", "w_bm25", "w_entity", "candidates", "dense_norm"
 
 
 def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
-                    reranker: str | None = None, *, profile: str = 'historical') -> dict:
+                    reranker: str | None = None, *, profile: str = 'historical',
+                    encoding: dict | None = None) -> dict:
     path = Path(__file__).resolve().parents[2] / "src/memory_os_v4/config.py"
     name = "_memory_eval_stdlib_config"
     module = sys.modules.get(name)
@@ -30,6 +31,16 @@ def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
     elif cfg.bm25_profile != 'scoped_literal' or cfg.lexical_guard_k != 3:
         raise ValueError('BEAM requires approved 4.0.2 C4 retrieval defaults')
     result = asdict(cfg)
+    if encoding is not None:
+        allowed = {'device', 'embed_dtype', 'embed_batch_size', 'batch_facts'}
+        if profile != 'beam-c4-4.0.2' or not isinstance(encoding, dict) or set(encoding) != allowed:
+            raise ValueError('Explicit complete encoding profile requires frozen BEAM C4')
+        if (encoding['device'] not in {'cpu', 'mps'} or
+                encoding['embed_dtype'] not in {'native', 'float32'} or
+                type(encoding['embed_batch_size']) is not int or encoding['embed_batch_size'] != 4 or
+                encoding['batch_facts'] is not False):
+            raise ValueError('Unsupported preregistered encoding profile')
+        result.update(encoding)
     overrides = overrides or {}
     if not isinstance(overrides, dict) or not set(overrides) <= ALLOWED:
         raise ValueError("Only preregistered retrieval fields may be overridden")

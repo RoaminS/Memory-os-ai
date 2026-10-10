@@ -14,6 +14,8 @@ def install(path: Path, model: str) -> None:
     global _path, _counts, _installed
     _path = path
     _counts = {"encoder_calls": 0, "encoder_texts": 0, "encoder_input_tokens": 0,
+               "padded_input_tokens": 0, "model_dtype": None, "model_device": None,
+               "mps_driver_bytes": 0, "mps_driver_peak_bytes": 0,
                "reranker_calls": 0, "reranker_pairs": 0, "reranker_ms": 0.0,
                "reranker_input_tokens": 0, "reranker_batch_size": 4,
                "encoder_ms": 0.0, "llm_calls": 0, "api_usd": 0.0,
@@ -31,18 +33,31 @@ def install(path: Path, model: str) -> None:
     def encode(self, sentences, *args, **kwargs):
         values = [sentences] if isinstance(sentences, str) else list(sentences)
         # Bounded token counting, matching the model's actual preprocessing.
-        count = 0
-        for start in range(0, len(values), 4):
-            batch = self.tokenize(values[start:start + 4])
+        count = padded = 0
+        batch_size = kwargs.get('batch_size', 32)
+        ordered = sorted(values, key=self._text_length, reverse=True)
+        for start in range(0, len(ordered), batch_size):
+            batch = self.tokenize(ordered[start:start + batch_size])
             count += int(batch["attention_mask"].sum())
+            padded += int(batch['attention_mask'].numel())
+        parameter = next(self.parameters())
+        _counts['model_dtype'], _counts['model_device'] = str(parameter.dtype), parameter.device.type
         t = time.perf_counter()
         result = original(self, sentences, *args, **kwargs)
         _counts["encoder_calls"] += 1
         _counts["encoder_texts"] += len(values)
         _counts["encoder_input_tokens"] += count
+        _counts['padded_input_tokens'] += padded
         _counts["encoder_ms"] += (time.perf_counter() - t) * 1000
+        if parameter.device.type == 'mps':
+            import torch
+            allocated = int(torch.mps.driver_allocated_memory())
+            _counts['mps_driver_bytes'] = allocated
+            _counts['mps_driver_peak_bytes'] = max(allocated, _counts['mps_driver_peak_bytes'])
         if _path is not None:
-            _path.write_text(json.dumps(_counts, allow_nan=False))
+            temporary = _path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(_counts, allow_nan=False))
+            temporary.replace(_path)
         return result
 
     SentenceTransformer.encode = encode

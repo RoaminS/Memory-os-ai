@@ -81,10 +81,11 @@ class Config:
     # Operational knob (2026-09-13, resource-constrained machine: 16 GB RAM,
     # MPS-wired memory pressure during encoding) -- SentenceTransformer.encode
     # batch size. Lower than sentence-transformers' own default (32) trades a
-    # little throughput for a smaller MPS working set; does not change
-    # embedding VALUES (batching is purely a compute-chunking detail), so it
-    # never appears in ledger comparisons as its own variable.
+    # throughput for a smaller working set. Batching can change floating-point
+    # values/ranks (observed on Granite bf16); it must be qualified explicitly.
     embed_batch_size: int = 32
+    embed_dtype: str = "native"  # native | float32; final numpy cast is not model precision
+    batch_facts: bool = False  # CPU batch trial failed; opt-in until qualified
 
     fusion: str = "cc"  # "rrf" | "dbsf" | "cc" — was "rrf" pre-campaign (docs/ABLATIONS.md E4/E7)
     w_dense: float = 1.0
@@ -148,6 +149,10 @@ class Config:
 
     def validate_lexical_policy(self) -> None:
         """Reject ambiguous rank policies before opening or modifying a store."""
+        if self.embed_dtype not in {"native", "float32"}:
+            raise ValueError("embed_dtype must be native or float32")
+        if type(self.batch_facts) is not bool:
+            raise ValueError("batch_facts must be a boolean")
         if self.bm25_profile not in {"legacy", "scoped_literal"}:
             raise ValueError("Unknown BM25 profile")
         if self.lexical_first and self.bm25_profile != "scoped_literal":
@@ -331,6 +336,8 @@ class Config:
             hash_dim=_env_int("MEMORY_V4_HASH_DIM", d.hash_dim),
             embed_max_seq_length=_env_int("MEMORY_V4_EMBED_MAX_SEQ_LENGTH", d.embed_max_seq_length),
             embed_batch_size=_env_int("MEMORY_V4_EMBED_BATCH_SIZE", d.embed_batch_size),
+            embed_dtype=_env_str("MEMORY_V4_EMBED_DTYPE", d.embed_dtype),
+            batch_facts=_env_bool("MEMORY_V4_BATCH_FACTS", d.batch_facts),
             fusion=_env_str("MEMORY_V4_FUSION", d.fusion),
             w_dense=_env_float("MEMORY_V4_W_DENSE", d.w_dense),
             w_bm25=_env_float("MEMORY_V4_W_BM25", d.w_bm25),

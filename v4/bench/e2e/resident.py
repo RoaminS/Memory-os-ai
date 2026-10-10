@@ -30,7 +30,8 @@ class ResidentPool:
     @staticmethod
     def model_key(config):
         return tuple(getattr(config, k) for k in
-                     ('embed_model', 'device', 'embed_max_seq_length', 'embed_batch_size', 'hash_dim'))
+                     ('embed_model', 'device', 'embed_max_seq_length', 'embed_batch_size',
+                      'embed_dtype', 'hash_dim'))
 
     def factory(self, config):
         if self.model_key(config) != self.key:

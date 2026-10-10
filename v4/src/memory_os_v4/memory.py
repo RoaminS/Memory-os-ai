@@ -45,7 +45,8 @@ _PENDING_RE = re.compile(r"\bTODO\b|\ba faire\b|\bà faire\b|\bnext step\b|\bpro
 def _make_embedder(config: Config) -> Embedder | HashEmbedder:
     if config.embed_model == "hash":
         return HashEmbedder(dim=config.hash_dim)
-    return Embedder(config.embed_model, config.device, config.embed_max_seq_length, config.embed_batch_size)
+    return Embedder(config.embed_model, config.device, config.embed_max_seq_length,
+                    config.embed_batch_size, config.embed_dtype)
 
 
 def _package_version():
@@ -303,6 +304,8 @@ class MemoryV4:
                    "max_seq_length": self.config.embed_max_seq_length,
                    "device": getattr(self.embedder, "device", "hash"),
                    "implementation": __version__, "namespace": self.config.sqlite_embedding_namespace}
+        if self.config.embed_dtype != "native":
+            profile["dtype"] = self.config.embed_dtype
         return self._embedding_cache.encode(texts, self.embedder.encode, self.embedder.dim, profile)
 
     # ------------------------------------------------------------- startup
@@ -314,6 +317,14 @@ class MemoryV4:
         stored_model = self.store.meta.get("embed_model")
         stored_dim = self.store.meta.get("dim")
         need_reembed = stored_model is not None and stored_model != self.config.embed_model
+        compute_profile = {"device": getattr(self.embedder, "device", "hash"),
+                           "dtype": self.config.embed_dtype,
+                           "max_seq_length": self.config.embed_max_seq_length}
+        old_profile = self.store.meta.get("embed_compute_profile")
+        if old_profile is not None and old_profile != compute_profile:
+            need_reembed = True
+        elif old_profile is None and self.config.embed_dtype != "native":
+            need_reembed = True  # legacy cache cannot attest non-native precision
         if stored_dim is not None and stored_dim != dim:
             need_reembed = True
 
@@ -354,6 +365,7 @@ class MemoryV4:
         self.store.meta["bm25_profile"] = profile
 
         self.store.meta["embed_model"] = self.config.embed_model
+        self.store.meta["embed_compute_profile"] = compute_profile
         self.store.meta["dim"] = dim
         self.store.meta["version"] = _package_version()
 
@@ -640,7 +652,7 @@ class MemoryV4:
             # Keep allocation bounded by the existing encoder batch setting.
             # Updates are barriers: their validation/dedup must see preceding
             # writes and their replacement sweep must precede following writes.
-            batch_size = max(1, self.config.embed_batch_size)
+            batch_size = max(1, self.config.embed_batch_size) if self.config.batch_facts else 1
 
             def flush_pending():
                 if pending:

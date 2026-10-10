@@ -10,7 +10,8 @@ from memory_os_v4.embed import HashEmbedder
 
 def engine(path, backend, size):
     return MemoryV4(config=Config(data_dir=str(path), embed_model="hash", hash_dim=32,
-                                 store_backend=backend, embed_batch_size=size, use_recency=False))
+                                 store_backend=backend, embed_batch_size=size,
+                                 batch_facts=True, use_recency=False))
 
 
 @pytest.mark.parametrize("backend", ["jsonl", "sqlite_s1"])

@@ -15,7 +15,7 @@ from .text import tokenize
 logger = logging.getLogger("memory_os_v4")
 
 # Process-wide cache of loaded SentenceTransformer models, keyed by
-# (model_name, resolved device, max_seq_length). 2026-09-13 resource
+# (model_name, resolved device, max_seq_length, compute dtype). 2026-09-13 resource
 # constraint: MemoryV4 (and therefore a fresh Embedder) is recreated per
 # conversation by bench/retrievers.py's V4Retriever.reset() -- for
 # LongMemEval oracle (one question per "conversation") that is up to 150
@@ -27,7 +27,7 @@ logger = logging.getLogger("memory_os_v4")
 # object itself (not its outputs -- every encode() call is still a real,
 # identical forward pass) fixes both the reload latency and the memory
 # pressure, with zero effect on any embedding value.
-_MODEL_CACHE: dict[tuple[str, str, int], object] = {}
+_MODEL_CACHE: dict[tuple[str, str, int, str], object] = {}
 
 
 def _resolve_device(device: str) -> str:
@@ -42,7 +42,7 @@ def _resolve_device(device: str) -> str:
 
 
 class Embedder:
-    """sentence-transformers wrapper: normalized float32 embeddings, lazy load."""
+    """Lazy wrapper; float32 output arrays do not imply float32 model computation."""
 
     def __init__(
         self,
@@ -50,10 +50,14 @@ class Embedder:
         device: str = "auto",
         max_seq_length: int = 512,
         batch_size: int = 32,
+        dtype: str = "native",
     ) -> None:
         self.model_name = model_name
         self.device = _resolve_device(device)
         self.batch_size = batch_size
+        if dtype not in {"native", "float32"}:
+            raise ValueError("Unsupported model compute dtype")
+        self.dtype = dtype
         # Palier 2-3 (E10, Config.embed_max_seq_length): some cached models
         # (e.g. ibm-granite/granite-embedding-97m-multilingual-r2, ModernBERT-
         # based) report a native max_seq_length far longer (32768) than any
@@ -65,7 +69,7 @@ class Embedder:
 
     def _ensure_model(self):
         if self._model is None:
-            key = (self.model_name, self.device, self.max_seq_length)
+            key = (self.model_name, self.device, self.max_seq_length, self.dtype)
             cached = _MODEL_CACHE.get(key)
             if cached is None:
                 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -74,7 +78,12 @@ class Embedder:
                 from sentence_transformers import SentenceTransformer
 
                 torch.set_num_threads(1)  # see memory_os_v4/__init__.py: avoids a faiss/torch segfault
-                cached = SentenceTransformer(self.model_name, device=self.device)
+                if self.device == "mps" and not torch.backends.mps.is_available():
+                    raise RuntimeError("Explicit MPS device unavailable; no CPU fallback")
+                kwargs = {"model_kwargs": {"torch_dtype": torch.float32}} if self.dtype == "float32" else {}
+                cached = SentenceTransformer(self.model_name, device=self.device, **kwargs)
+                if self.dtype == "float32" and any(p.dtype != torch.float32 for p in cached.parameters()):
+                    raise RuntimeError("Model did not honor explicit float32 precision")
                 cached.max_seq_length = self.max_seq_length
                 cached.encode(["_warmup_"], show_progress_bar=False)  # force one real forward pass
                 _MODEL_CACHE[key] = cached
