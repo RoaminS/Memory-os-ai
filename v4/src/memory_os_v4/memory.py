@@ -302,6 +302,7 @@ class MemoryV4:
         from . import __version__
         profile = {"model": self.config.embed_model, "dim": self.embedder.dim,
                    "max_seq_length": self.config.embed_max_seq_length,
+                   "batch_size": self.config.embed_batch_size,
                    "device": getattr(self.embedder, "device", "hash"),
                    "implementation": __version__, "namespace": self.config.sqlite_embedding_namespace}
         if self.config.embed_dtype != "native":
@@ -319,12 +320,14 @@ class MemoryV4:
         need_reembed = stored_model is not None and stored_model != self.config.embed_model
         compute_profile = {"device": getattr(self.embedder, "device", "hash"),
                            "dtype": self.config.embed_dtype,
+                           "batch_size": self.config.embed_batch_size,
                            "max_seq_length": self.config.embed_max_seq_length}
         old_profile = self.store.meta.get("embed_compute_profile")
-        if old_profile is not None and old_profile != compute_profile:
+        if old_profile != compute_profile:
+            # Even native precision cannot attest the backend of a legacy
+            # cache. Rebuild once before serving queries; never adopt unknown
+            # vectors by simply stamping the new configuration on their meta.
             need_reembed = True
-        elif old_profile is None and self.config.embed_dtype != "native":
-            need_reembed = True  # legacy cache cannot attest non-native precision
         if stored_dim is not None and stored_dim != dim:
             need_reembed = True
 

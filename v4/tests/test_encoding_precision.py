@@ -17,12 +17,13 @@ def test_dtype_and_fact_batch_env_are_explicit_opt_ins(monkeypatch):
     assert cfg.embed_dtype == 'float32' and cfg.batch_facts is True
 
 
-def test_default_stays_cpu_even_when_mps_is_available(monkeypatch):
+@pytest.mark.parametrize('available,resolved', [(True, 'mps'), (False, 'cpu')])
+def test_auto_default_preserves_deployed_backend_selection(monkeypatch, available, resolved):
     import torch
     monkeypatch.delenv('MEMORY_V4_DEVICE', raising=False)
-    monkeypatch.setattr(torch.backends.mps, 'is_available', lambda: True)
-    assert Config().device == Config.from_env().device == 'cpu'
-    assert embed._resolve_device(Config.from_env().device) == 'cpu'
+    monkeypatch.setattr(torch.backends.mps, 'is_available', lambda: available)
+    assert Config().device == Config.from_env().device == 'auto'
+    assert embed._resolve_device(Config.from_env().device) == resolved
 
 
 def test_mps_float32_profile_is_explicit_from_environment(monkeypatch):
@@ -103,4 +104,86 @@ def test_cache_precision_change_reencodes_once_and_reopen_reuses(tmp_path, monke
     calls.clear()
     with MemoryV4(config=config('float32')):
         pass
+    assert calls == []
+
+
+@pytest.mark.parametrize('backend', ['jsonl', 'sqlite_s1'])
+def test_resolved_device_and_batch_profile_change_never_reuse_old_vectors(tmp_path, monkeypatch, backend):
+    import memory_os_v4.memory as module
+    calls = []
+    class Fake(HashEmbedder):
+        def __init__(self, cfg):
+            super().__init__(dim=cfg.hash_dim)
+            self.device = cfg.device
+        def encode(self, texts):
+            calls.extend(texts)
+            return super().encode(texts)
+    monkeypatch.setattr(module, '_make_embedder', Fake)
+    def config(device, batch=4):
+        return Config(data_dir=str(tmp_path), embed_model='hash', store_backend=backend,
+                      device=device, embed_batch_size=batch)
+    with MemoryV4(config=config('mps')) as engine:
+        engine.add_facts([{'text': 'Original device-specific fact', 'item_id': 'fact'}], event_time=100)
+    for device, batch in [('cpu', 4), ('cpu', 8)]:
+        calls.clear()
+        with MemoryV4(config=config(device, batch)) as engine:
+            assert engine.store.get('fact').text == 'Original device-specific fact'
+        assert calls == ['Original device-specific fact'] or (
+            len(calls) == 1 and 'Original device-specific fact' in calls[0])
+        calls.clear()
+        with MemoryV4(config=config(device, batch)):
+            pass
+        assert calls == []
+
+
+@pytest.mark.parametrize('missing', ['profile', 'batch_size'])
+def test_legacy_jsonl_without_complete_profile_rebuilds_once_in_native_mode(tmp_path, monkeypatch, missing):
+    import json
+    from dataclasses import asdict
+    cfg = Config(data_dir=str(tmp_path), embed_model='hash', embed_dtype='native')
+    with MemoryV4(config=cfg) as engine:
+        engine.add_facts([{'text': 'Legacy unverified vector', 'item_id': 'fact'}], event_time=100)
+        expected = asdict(engine.store.get('fact'))
+    p = tmp_path / 'meta.json'
+    meta = json.loads(p.read_text())
+    if missing == 'profile':
+        meta.pop('embed_compute_profile')
+    else:
+        meta['embed_compute_profile'].pop('batch_size')
+    p.write_text(json.dumps(meta))
+    calls = []
+    original = HashEmbedder.encode
+    def encode(self, texts):
+        calls.extend(texts)
+        return original(self, texts)
+    monkeypatch.setattr(HashEmbedder, 'encode', encode)
+    with MemoryV4(config=cfg) as engine:
+        assert asdict(engine.store.get('fact')) == expected
+    assert len(calls) == 1 and 'Legacy unverified vector' in calls[0]
+    calls.clear()
+    with MemoryV4(config=cfg):
+        pass
+    assert calls == []
+
+
+@pytest.mark.parametrize('backend', ['jsonl', 'sqlite_s1'])
+def test_auto_to_explicit_mps_reuses_only_an_attested_same_profile(tmp_path, monkeypatch, backend):
+    import torch
+    import memory_os_v4.memory as module
+    calls = []
+    monkeypatch.setattr(torch.backends.mps, 'is_available', lambda: True)
+    class Fake(HashEmbedder):
+        def __init__(self, cfg):
+            super().__init__(dim=cfg.hash_dim)
+            self.device = embed._resolve_device(cfg.device)
+        def encode(self, texts):
+            calls.extend(texts)
+            return super().encode(texts)
+    monkeypatch.setattr(module, '_make_embedder', Fake)
+    cfg = dict(data_dir=str(tmp_path), embed_model='hash', store_backend=backend)
+    with MemoryV4(config=Config(**cfg, device='auto')) as engine:
+        engine.add_facts([{'text': 'Attested MPS fact', 'item_id': 'fact'}], event_time=100)
+    calls.clear()
+    with MemoryV4(config=Config(**cfg, device='mps')) as engine:
+        assert engine.store.get('fact').text == 'Attested MPS fact'
     assert calls == []

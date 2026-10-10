@@ -38,7 +38,8 @@ def main():
     report = verify(args.evidence_dir, args.summary)
     print(json.dumps({'verified': True, 'complete': report['complete'],
         'performance_met': report['performance_met'], 'equivalent': False, 'criterion_met': False,
-        'posthoc_rescoring': False, 'production_activated': False}, indent=2))
+        'posthoc_rescoring': False, 'production_activation_performed': False,
+        'production_state_inspected': False}, indent=2))
 
 
 if __name__ == '__main__':
