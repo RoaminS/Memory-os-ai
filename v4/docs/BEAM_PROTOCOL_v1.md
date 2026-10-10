@@ -132,7 +132,10 @@ Romain puis un **nouveau plan** préparé avec `--effort low` avant résultats.
 Même si le catalogue valide l'effort, toute erreur réelle du CLI arrête le pilote.
 
 L'adaptateur utilise exclusivement l'authentification Codex déjà existante,
-aucune clé API, aucune lecture/copie d'auth.json. Chaque appel est neuf, éphémère,
+avec `forced_login_method="chatgpt"` (connexion API refusée), aucune clé API,
+aucune lecture/copie d'auth.json. Version et SHA-256 du binaire CLI figés ;
+le slug demandé est fixe, mais les poids/version distants ne sont pas attestés
+par `exec` : limite supplémentaire de reproductibilité. Chaque appel est neuf, éphémère,
 cwd temporaire hors dépôt, read-only, sans config utilisateur, règles, MCP,
 apps/plugins/hooks, shell ou web ; chargement AGENTS désactivé. Les événements
 de tout outil ou les schémas inconnus font échouer la preuve d'isolation.

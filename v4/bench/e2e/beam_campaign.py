@@ -17,7 +17,7 @@ import uuid
 from .baselines import BM25
 from .beam import CATEGORIES, DATA_SHA, audit, conversations, identity
 from .client import ToolClient, project_for
-from .codex_reader import CodexReader, PilotStop, capability
+from .codex_reader import CodexReader, PilotStop, capability, runtime_record
 from .configuration import resolved_config
 from .data import sha256
 from .experiments import MODELS, private_path
@@ -108,6 +108,7 @@ def prepare(directory, revision, effort='minimal'):
             'answer_confirmation_excluded_conversations': pilot_conversations,
             'retrieval_confirmatory_policy': 'all 20 conversations, fixed C4 before any pilot; no outcome-based tuning; pilot never authorizes retuning',
             'reader': {'model': 'gpt-5.6-luna', 'effort': effort, 'questions': 20, 'calls': MAX_PILOT_CALLS,
+                       'cli_record': runtime_record(),
                        'seconds': 2700, 'call_seconds': 90, 'tokens': 500_000, 'max_prompt_bytes': 24000,
                        'judge': 'same-model blind anonymous rubric judge; non-official, correlated reader/judge bias',
                        'utility_rule': 'all 4 judge controls correct; >=4 of 40 reader outputs judged correct; >=90% human agreement on first 10 anonymous judgments; all budgets respected; expansion requires Romain GO',
@@ -267,6 +268,8 @@ def reader_pilot(directory):
         write_json(output / 'report.json', {'complete': False, 'blocked': cap['reason'], 'model_calls': 0,
                                           'expansion_allowed': False})
         return 3
+    if runtime_record() != plan['reader']['cli_record']:
+        raise PilotStop('CLI runtime changed since preregistration; prepare an explicit amendment')
     ensure_priority(Limits())
     def check():
         return sample(directory)

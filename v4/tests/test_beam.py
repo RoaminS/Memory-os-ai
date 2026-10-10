@@ -128,6 +128,7 @@ def test_cli_exact_model_effort_and_isolation():
     for flag in ('--ephemeral', '--strict-config', '--ignore-user-config'):
         assert flag in argv
     assert 'mcp_servers={}' in argv and 'web_search="disabled"' in argv
+    assert 'forced_login_method="chatgpt"' in argv and 'history.persistence="none"' in argv
     assert 'shell_tool' in argv and 'plugins' in argv and 'hooks' in argv
 
 

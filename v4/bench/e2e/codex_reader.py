@@ -9,6 +9,7 @@ import tempfile
 import time
 
 from .run import kill_group
+from .data import sha256
 
 CLI = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'
 MODEL = 'gpt-5.6-luna'
@@ -45,6 +46,16 @@ def capability(effort='minimal', catalogue=None):
             'quota_remaining': None, 'quota_note': 'Subscription quota not exposed by exec usage; tokens are NOT quota percentages'}
 
 
+def runtime_record():
+    """Local executable attestation only; --version performs no inference."""
+    result = subprocess.run([CLI, '--version'], capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise PilotStop('Cannot attest installed Codex CLI')
+    return {'path': CLI, 'sha256': sha256(Path(CLI)), 'version': result.stdout.strip(),
+            'auth': 'forced chatgpt; API-key login forbidden',
+            'model_snapshot': None, 'model_note': 'Requested slug fixed; remote weights/version not attested by exec'}
+
+
 def command(work, schema, effort):
     if effort not in {'minimal', 'low'}:
         raise ValueError('No automatic effort/model substitution')
@@ -53,7 +64,7 @@ def command(work, schema, effort):
             '--skip-git-repo-check', '--sandbox', 'read-only', '--json', '--color', 'never',
             '--cd', str(work), '--output-schema', str(schema), '-c', 'approval_policy="never"',
             '-c', 'web_search="disabled"', '-c', 'mcp_servers={}', '-c', 'project_doc_max_bytes=0',
-            '-c', 'notify=[]']
+            '-c', 'notify=[]', '-c', 'forced_login_method="chatgpt"', '-c', 'history.persistence="none"']
     argv.extend(['--enable', 'skip_host_skill_discovery'])
     for feature in DISABLED:
         argv.extend(['--disable', feature])
