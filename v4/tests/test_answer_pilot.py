@@ -33,6 +33,8 @@ def test_stronger_judge_is_pinned_without_api_or_fallback(tmp_path):
     argv = command(tmp_path, tmp_path / 'schema', 'high', JUDGE_MODEL)
     assert argv[3] == 'gpt-6-astra' and argv[5] == 'model_reasoning_effort=high'
     assert 'forced_login_method="chatgpt"' in argv and 'model_provider="openai"' in argv
+    for feature in ('goals', 'tool_suggest', 'auth_elicitation', 'workspace_dependencies', 'unbounded_connection_retries'):
+        assert feature in argv and argv[argv.index(feature) - 1] == '--disable'
     with pytest.raises(ValueError):
         command(tmp_path, tmp_path / 'schema', 'low', JUDGE_MODEL)
     catalogue = tmp_path / 'models.json'
