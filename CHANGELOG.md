@@ -1,6 +1,17 @@
 # Changelog
 
-## 4.0.3 — candidate ALPHA (2026-10-10), non publiée / non déployée
+## 4.0.4 — en préparation, non publiée / non déployée
+
+- Le relais MCP préserve `serverInfo.version` de l'amont au lieu d'annoncer
+  la version du SDK MCP ; tests d'initialisation et assertion TCP dynamique.
+- Diagnostic BEAM : annotations manquantes distinguées des IDs inexistants ;
+  refus pour groupes indépendants insuffisants avant lecture des annotations.
+  Aucun seuil, score, paramètre C4 ou profil de production modifié.
+
+## 4.0.3 — ALPHA (2026-10-10), non publiée / déployée localement
+
+- Bascule exécutée par Claude à 22:36 avec le GO de Romain : sauvegarde qualifiée
+  de 1050 éléments, `/ready` 4.0.3, doctor 15 PASS / 0 FAIL. Publication PyPI non autorisée.
 
 - Défauts conservés : C4 scoped_literal + garde 3 ; device auto (MPS sur le Mac
   déployé), précision native, batch 32 ; JSONL par défaut, SQLite S2/S3 opt-in.

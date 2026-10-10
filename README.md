@@ -101,8 +101,9 @@ or precision changes require operator approval and compatible/rebuilt vectors. S
 The production audit and corrected recommendation are documented in
 [`MPS_PRODUCTION_ALIGNMENT_V1.md`](v4/docs/MPS_PRODUCTION_ALIGNMENT_V1.md).
 
-The **4.0.3 artifacts are qualified on a private copy**. Romain authorized the local
-switchover on 2026-10-10; Claude executes the runbook. PyPI publication requires
+The **4.0.3 artifacts are qualified on a private copy**. Claude completed the local
+switchover on 2026-10-10 at 22:36 with Romain's GO (doctor 15 PASS / 0 FAIL).
+PyPI publication requires
 a separate GO. The candidate preserves
 `auto/native/batch32` and records loaded parameter dtype/device, model revision,
 runtime versions and encoder source hash in `memory_status` and authenticated
@@ -112,7 +113,10 @@ Luna low + Astra high through ChatGPT-authenticated Codex only, on observed BEAM
 C4 accuracy 0.40 vs BM25 0.20, 40 calls, 362,348 tokens, zero API spend. This is
 descriptive: no official judge comparison or leaderboard claim. The broader
 [campaign protocol](v4/docs/ANSWER_HELDOUT_CAMPAIGN_v1.md) is preregistered;
-BEAM 500K download approval and independence audit are still required before execution.
+BEAM 500K was downloaded with approval but **refused before inference**: only 15
+fresh independent groups survived the audit (minimum 30). Its first annotation
+failure is a missing `source_chat_ids` field, not a demonstrated dangling ID.
+See [held-out alternatives and diagnosis](v4/docs/HELDOUT_OPTIONS_V2.md).
 See [copy qualification and later rollout](v4/docs/QUALIFY_4_0_3.md).
 
 
