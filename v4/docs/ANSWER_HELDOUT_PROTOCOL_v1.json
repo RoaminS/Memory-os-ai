@@ -1,0 +1,31 @@
+{
+  "version": "heldout-answer-beam-500k-v1",
+  "frozen_before_download_or_results": true,
+  "candidate": "Mohammadta/BEAM 500K revision 3205395e897e7318c7b094ef4e6047b9b82dbb03; download GO separate",
+  "independence": "Exclude entire conversations sharing seed/category id, title, theme, narrative, normalized question or >=160-char turn/64-word shingle selected by 32-window winnowing (shared95-word sequence guaranteed) with observed BEAM100K or LongMemEval-S; group remaining shared signatures as dependent components. No semantic/pretraining independence assertion.",
+  "selection": "One question per category per eligible conversation by SHA256 heldout-answer-v1 + observable qid; deterministic hash order; no answer/outcome selection; 300-350 questions, >=30 components; otherwise stop before retrieval/inference and seek a new corpus GO.",
+  "primary": "Question-weighted paired binary answer correctness C4 minus same-arm BM25; include abstention and all 10 categories; 10000 whole-conversation/dependence-component bootstrap samples, seed 20261011, percentile CI95; no partial-denominator result.",
+  "criterion": "Complete denominator, zero unresolved/blocked call, >=30 independent components, lower bound CI95(delta accuracy) > 0. Missing CI fails; no category-specific selection, no optional significance stopping.",
+  "claim": "Only end-to-end C4 superiority over this reproduced BM25 on audited, project-unobserved BEAM500K under the fixed Codex reader/judge if the criterion passes. NOT official GPT-4o judgment, published-score comparability, competitor ranking or top 1. Model slug fixed but remote snapshot unverified; CI is sampling uncertainty, not judge validity.",
+  "models": "Reader gpt-5.6-luna low; judge gpt-6-astra high; one isolated exec per task, anonymous arm, ChatGPT login only, no API/key/fallback; prompts unchanged from descriptive pilot.",
+  "capture": "Only chat/content/observable time_anchor, quote chunks1024; no question/rubric/reference/category/seed/narrative into ingestion. Top10, 12000 context bytes, same quote corpus for both arms. No oracle annotations, inferred recency or supersession tuning. Synthetic capture timestamp2000-01-01; recency disabled; dedup cosine1.01 confinement and exact-text dedup only, as in the pilot; production encoder profile matches, not every live ingestion policy.",
+  "encoder": "Qualified 4.0.3 source identical to copy proof; Granite97m cached revision835ad14087e140460703cf0fae09f97d469d65c2; auto must resolve MPS, native parameters, batch32, max_seq512, actual device/dtypes/runtime attested before capture; no CPU fallback/download.",
+  "resume": "Sequential batch <=40 calls, stop after quota reject; next batch/day starts only with explicit operator --resume and same plan/source/CLI/model/encoder/context hashes. Reuse completed reader/judge receipts, never replay a pending/uncertain/tool/error/schema/time/guard call. Only pre-generation usage-limit event without item/completed-turn is quota-resumable; unknown tokens remain unknown. Additional 200 quota attempts shared globally, not per day.",
+  "caps": {
+    "cli_seconds": 60000,
+    "retrieval_seconds": 14400,
+    "batch_seconds": 3600,
+    "batch_calls": 40,
+    "observed_tokens_stop_threshold": 16000000,
+    "tokens_hard_cap": false,
+    "reader_call_seconds": 90,
+    "judge_call_seconds": 180,
+    "prompt_bytes": 24000,
+    "incremental_api_usd": 0,
+    "concurrency": 1,
+    "nice": 15,
+    "swap_bytes": 8500000000,
+    "free_bytes": 5000000000,
+    "model_downloads": 0
+  }
+}

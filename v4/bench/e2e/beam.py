@@ -39,8 +39,8 @@ def reject_constant(value):
     raise ValueError('Non-finite JSON constant')
 
 
-def decode(text, literal=False):
-    if not isinstance(text, str) or len(text.encode()) > MAX_ROW:
+def decode(text, literal=False, *, max_bytes=MAX_ROW, max_nodes=100_000):
+    if not isinstance(text, str) or len(text.encode()) > max_bytes:
         raise ValueError('Bounded string required')
     try:
         value = json.loads(text, object_pairs_hook=pairs, parse_constant=reject_constant)
@@ -49,7 +49,7 @@ def decode(text, literal=False):
         while pending:
             node, depth = pending.pop()
             count += 1
-            if count > 100_000 or depth > 30:
+            if count > max_nodes or depth > 30:
                 raise ValueError('JSON node/depth budget exceeded')
             if isinstance(node, dict):
                 pending.extend((v, depth + 1) for v in node.values())
@@ -68,7 +68,7 @@ def decode(text, literal=False):
     while pending:
         node, depth = pending.pop()
         count += 1
-        if count > 100_000 or depth > 30 or not isinstance(node, allowed):
+        if count > max_nodes or depth > 30 or not isinstance(node, allowed):
             raise ValueError('Invalid/budget-exceeding BEAM literal')
         if isinstance(node, ast.Constant) and (type(node.value) not in (str, int, bool, type(None))):
             raise ValueError('Invalid literal scalar')
@@ -108,14 +108,14 @@ class Conversation:
     probes: tuple[Probe, ...]
 
 
-def conversations(path: Path, check=lambda: None):
+def conversations(path: Path, check=lambda: None, *, max_row=MAX_ROW, max_nodes=100_000):
     seen = set()
     with path.open('rb') as stream:
-        while raw := stream.readline(MAX_ROW + 1):
+        while raw := stream.readline(max_row + 1):
             check()
-            if len(raw) > MAX_ROW or not raw.endswith(b'\n'):
+            if len(raw) > max_row or not raw.endswith(b'\n'):
                 raise ValueError('Oversized or unterminated JSONL row')
-            row = decode(raw.decode('utf-8'))
+            row = decode(raw.decode('utf-8'), max_bytes=max_row, max_nodes=max_nodes)
             expected = {'conversation_id', 'conversation_seed', 'narratives', 'user_profile',
                         'conversation_plan', 'user_questions', 'chat', 'probing_questions'}
             if not isinstance(row, dict) or set(row) != expected:

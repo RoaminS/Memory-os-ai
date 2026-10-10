@@ -224,7 +224,8 @@ async def retrieval(plan, output):
         profile = validate_encoder(await client.call('memory_status', {}), plan)
         write_json(output / 'encoder-attestation.json', profile)  # BEFORE retrieval/answers
         adapter = AddSearchAdapter(client, 'beam-c4-v1-capture')
-        for c in conversations(Path(plan['data'])):
+        for c in conversations(Path(plan['data']), max_row=plan.get('beam_max_row', 8_000_000),
+                           max_nodes=plan.get('beam_max_nodes', 100_000)):
             if c.id not in plan['conversations']:
                 continue
             opened = await client.call('eval_open_conversation', {'conversation_id': c.id})
