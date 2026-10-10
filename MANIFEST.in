@@ -9,3 +9,4 @@ recursive-include scripts *.py *.sh
 recursive-include v4/tests *.py
 recursive-include v4/bench/protocols *.md *.json
 include v4/bench/evaluation_manifest.py
+recursive-include v4/bench *.py
