@@ -141,3 +141,18 @@ réel `~/Memory-os-ai/.venv/bin/python`, sans charger de modèle ni modifier `.v
 Aucun autre réglage, critère, garde, bras, snapshot ou budget ne change. Les
 commandes ci-dessus utilisent un nouveau dossier ; les preuves du refus initial
 restent intactes. Le plan et les empreintes sont régénérés avant toute mesure.
+
+## Résultat Claude et suite — 2026-10-10
+
+Lot `indexing-mps-v2-runtime-fix` complet : **performance réussie**, MPS p50
+38,94 s, p95/max 41,01 s, accélérations médianes appariées 22,01–23,28×.
+**Équivalence échouée** : 52 questions/3 conversations, ΔRecall −0,006593,
+IC97,5 % [−0,011111 ; 0], ΔMRR −0,000267 [−0,000868 ; 0].
+Le critère reste faux ; aucune activation de production. Les exigences et
+commandes ci-dessus décrivent désormais le lot historique terminé.
+
+Le prochain protocole [MPS_BEAM_REUSE_V1.md](MPS_BEAM_REUSE_V1.md) conserve
+le candidat et la marge, élargit à 20 conversations et réutilise le CPU BEAM
+archivé après contrôles. LongMemEval-S utilise MiniLM/256, donc ses résultats
+CPU ne constituent pas un témoin Granite/512. Le prochain test reste une
+évaluation de développement face à un témoin historique, avec limites explicites.
