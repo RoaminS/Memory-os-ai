@@ -1,0 +1,10 @@
+{
+  "scope": "Known local observed base corpora; append any other previously used public sources before audit. Not model-training coverage.",
+  "corpora": [
+    {"name": "beam-100k", "format": "beam", "path": "/Users/romain/Memory-os-ai/v4/bench/data/beam/beam_100k.jsonl", "sha256": "613b85b9e5eca98b88de25bedb7490f1dbf61ae4c361d544452feea19bfa18a3"},
+    {"name": "beam-500k", "format": "beam", "path": ".local-qualification/datasets/beam-500k-v1/beam_500k.jsonl", "sha256": "3f18f51f9a02e3e2104c77826b0915852f48be9517f33c09f297872eef8871f6"},
+    {"name": "lme-s", "format": "longmemeval", "path": "/Users/romain/Memory-os-ai/v4/bench/data/longmemeval_s.json", "sha256": "08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894"},
+    {"name": "lme-oracle", "format": "longmemeval", "path": "/Users/romain/Memory-os-ai/v4/bench/data/longmemeval_oracle.json", "sha256": null},
+    {"name": "locomo", "format": "locomo", "path": "/Users/romain/Memory-os-ai/v4/bench/data/locomo10.json", "sha256": null}
+  ]
+}
