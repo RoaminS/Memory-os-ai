@@ -25,9 +25,11 @@ def digest(p):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dependency-pool', type=Path, required=True)
+    parser.add_argument('--output-dir', type=Path,
+                        help='Fresh local qualification directory; existing evidence is never overwritten')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    out = root / '.local-qualification/release-4.0.3'
+    out = (args.output_dir or root / '.local-qualification/release-4.0.3').resolve()
     if out.exists():
         raise ValueError('Fresh qualification directory required')
     out.mkdir(mode=0o700)

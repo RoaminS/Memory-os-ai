@@ -16,6 +16,7 @@ import httpx
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from memory_os_v4 import __version__
 
 pytestmark = pytest.mark.asyncio
 TEST_TOKEN = "synthetic-test-token-" + "x" * 32
@@ -128,7 +129,7 @@ async def test_authenticated_ready_reports_engine_and_build_identity(http_server
         health = await client.get(url.replace("/mcp/", "/health"))
     assert ready.status_code == health.status_code == 200
     assert ready.json()["ready"] is True and ready.json()["commit"] == "a" * 40
-    assert ready.json()["version"] == health.json()["version"] == "4.0.2"
+    assert ready.json()["version"] == health.json()["version"] == __version__
 
 
 async def test_ready_requires_authorization_over_tcp(http_server):

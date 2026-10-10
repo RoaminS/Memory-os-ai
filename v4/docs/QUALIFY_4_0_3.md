@@ -7,6 +7,13 @@ pas d'API, pas de GitHub/PyPI. Dossier de livraison : `releases/4.0.3/QUALIFICAT
 
 ## Qualification après import du bundle
 
+Tentative v1 conservée intégralement dans `.local-qualification/release-4.0.3/` :
+9/10 TCP verts, assertion de version figée à4.0.2. Correction v2 : comparaison
+avec `memory_os_v4.__version__`, version de la façade legacy alignée4.0.3,
+smoke des deux paquets comparé à la distribution. Aucun résultat v1 ne vaut
+preuve v2 ; reprendre à STEP1, dans le nouveau dossier ci-dessous. Ne pas
+renommer, effacer ou réutiliser les preuves échouées.
+
 Les artefacts et les deux venv privés doivent rester ceux du manifeste ; ils
 sont hors bundle mais présents dans le clone partagé. Ne pas reconstruire pour
 les publier. Les scripts vérifient les SHA et provenance installée. Une copie
@@ -15,16 +22,16 @@ nouvelle doit être utilisée, jamais la copie d'une autre tentative.
 ```sh
 cd /Users/romain/Documents/Codex/2026-10-09/v/work/implementation
 release_python=/Users/romain/.memory-os-runtime/venv-4.0.2/bin/python
-release_dir=.local-qualification/release-4.0.3
+release_dir=.local-qualification/release-4.0.3-v2
 "$release_python" scripts/source_release_checks.py \
   --manifest "$release_dir/manifest.json" --output "$release_dir/source-proof.json"
 "$release_python" scripts/verify_release_manifest.py "$release_dir/manifest.json" \
   --record-source-proof "$release_dir/source-proof.json"
 "$release_python" scripts/qualify_release_copy.py \
   --manifest "$release_dir/manifest.json" --environments "$release_dir/environments.json" \
-  --output-root .local-qualification/copy-4.0.3-v1
+  --output-root .local-qualification/copy-4.0.3-v2
 "$release_python" scripts/verify_release_manifest.py "$release_dir/manifest.json" \
-  --record-copy-proof .local-qualification/copy-4.0.3-v1/report.json
+  --record-copy-proof .local-qualification/copy-4.0.3-v2/report.json
 "$release_python" scripts/installed_relay_e2e.py \
   --manifest "$release_dir/manifest.json" --environments "$release_dir/environments.json" \
   --output "$release_dir/installed-relay-proof.json"
@@ -92,7 +99,7 @@ Puis remplacer **seulement** la commande d'enregistrement copie par :
 
 ```sh
 "$release_python" scripts/verify_release_manifest.py "$release_dir/manifest.json" \
-  --record-copy-proof .local-qualification/copy-4.0.3-v1/report.json \
+  --record-copy-proof .local-qualification/copy-4.0.3-v2/report.json \
   --copy-review /Users/romain/memory-os-local/reviews/copy-review.json
 ```
 
@@ -112,12 +119,12 @@ facturation/quota restant ne sont pas observables par ce harness.
 pilot_commit=$(/Users/romain/.memory-os-runtime/venv-4.0.2/bin/python -c \
  'import json; print(json.load(open("releases/4.0.3/qualification.json"))["source_commit"])')
 ./scripts/run_answer_pilot.sh prepare \
-  --plan-dir .local-qualification/answer-pilot-production-v1 --source-commit "$pilot_commit" \
-  --copy-proof .local-qualification/copy-4.0.3-v1/report.json
+  --plan-dir .local-qualification/answer-pilot-production-v2 --source-commit "$pilot_commit" \
+  --copy-proof .local-qualification/copy-4.0.3-v2/report.json
 ./scripts/run_answer_pilot.sh retrieve \
-  --plan-dir .local-qualification/answer-pilot-production-v1
+  --plan-dir .local-qualification/answer-pilot-production-v2
 ./scripts/run_answer_pilot.sh answer \
-  --plan-dir .local-qualification/answer-pilot-production-v1
+  --plan-dir .local-qualification/answer-pilot-production-v2
 ```
 
 Arrêt à la première erreur ; aucun relancement d'`answer` ni effacement/renommage

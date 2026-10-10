@@ -460,8 +460,9 @@ class TestMainModule:
 
     def test_importable(self):
         import memory_os_ai
+        from memory_os_v4 import __version__
         assert hasattr(memory_os_ai, "__version__")
-        assert memory_os_ai.__version__ == "4.0.2"
+        assert memory_os_ai.__version__ == __version__
 
     def test_all_exports(self):
         import memory_os_ai

@@ -67,6 +67,8 @@ def main() -> None:
     for module in ("memory_os_ai", "memory_os_v4", "memory_os_v4.ops"):
         imported = __import__(module, fromlist=["__file__"])
         assert package_root in Path(imported.__file__).resolve().parents, imported.__file__
+        if args.version == "4.0.3" and module != "memory_os_v4.ops":
+            assert imported.__version__ == args.version, (module, imported.__version__)
     docs = Path(sys.executable).parent.parent / "share/doc/memory-os-ai"
     for document in ("AGENTS.md", "CLAUDE.md", "CHANGELOG.md", f"v{args.version}.md", "v4/OPERATIONS.md",
                      "v4/A6_REVIEW_966eca5.md"):
