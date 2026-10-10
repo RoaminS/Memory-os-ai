@@ -18,6 +18,7 @@ class Config:
     device: str = 'cpu'
     embed_max_seq_length: int = 256
     embed_batch_size: int = 4
+    embed_dtype: str = 'native'
     hash_dim: int = 32
     rerank_model: str | None = None
 

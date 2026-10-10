@@ -641,6 +641,7 @@ def _build_http_app(host: str, port: int):
         if ok and (identity["commit"] is None or identity["source_dirty"]):
             ok, reason = False, "build_unqualified"
         return JSONResponse({"ok": ok, "ready": ok, "reason": reason,
+                             "encoding_profile": _engine._compute_profile() if ok else None,
                              "server": "memory-os-v4", **identity}, status_code=200 if ok else 503)
 
     @contextlib.asynccontextmanager

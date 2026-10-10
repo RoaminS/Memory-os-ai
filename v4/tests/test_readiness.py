@@ -38,7 +38,9 @@ async def test_authenticated_ready_after_write_and_dirty_access_counter(app_engi
     result = await response(app)
     assert result.status_code == 200
     assert result.json()["ready"] is True
-    assert result.json()["version"] == "4.0.2" and result.json()["commit"] == COMMIT
+    from memory_os_v4 import __version__
+    assert result.json()["version"] == __version__ and result.json()["commit"] == COMMIT
+    assert result.json()["encoding_profile"] == engine.status()["encoding_profile"]
     assert result.json()["commit_source"] == "deployment_manifest"
 
 

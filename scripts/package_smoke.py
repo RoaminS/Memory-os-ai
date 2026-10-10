@@ -98,10 +98,12 @@ def main() -> None:
         setup = subprocess.run([str(admin), "setup", "--write-launchd", str(root / "plists")],
                                env=env, check=True, capture_output=True, text=True, timeout=10)
         assert token not in setup.stdout + setup.stderr and len(list((root / "plists").glob("*.plist"))) == 3
-        if args.version == '4.0.2':
+        if args.version in {'4.0.2', '4.0.3'}:
             from memory_os_v4 import Config
             assert Config().bm25_profile == 'scoped_literal' and Config().lexical_guard_k == 3
             assert Config().store_backend == 'jsonl'
+            if args.version == '4.0.3':
+                assert (Config().device, Config().embed_dtype, Config().embed_batch_size) == ('auto', 'native', 32)
             assert 'doctor' in subprocess.run([str(admin), '--help'], check=True, capture_output=True,
                                               text=True, timeout=10).stdout
         hook = subprocess.run([str(admin), "hook", "stop-nudge"], input=json.dumps({}), env=env,

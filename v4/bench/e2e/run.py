@@ -63,11 +63,18 @@ def code_record() -> dict:
 
 
 def verify_source(clone: Path, revision: str, code: dict) -> None:
-    metadata = clone / ".local-qualification/git-state"
-    git = ["git", "--git-dir", str(metadata)] if metadata.is_dir() else ["git", "-C", str(clone)]
-    result = subprocess.run([*git, "archive", revision, "v4/src", "v4/bench/e2e"],
-                            capture_output=True, timeout=10, cwd=clone)
-    if result.returncode:
+    candidates = [["git", "-C", str(clone)]]
+    for name in ("git-state", "lexical-dev-git"):
+        metadata = clone / ".local-qualification" / name
+        if metadata.is_dir():
+            candidates.append(["git", "--git-dir", str(metadata)])
+    result = None
+    for git in candidates:
+        result = subprocess.run([*git, "archive", revision, "v4/src", "v4/bench/e2e"],
+                                capture_output=True, timeout=10, cwd=clone)
+        if result.returncode == 0:
+            break
+    if result is None or result.returncode:
         raise ValueError("Cannot attest declared source commit in local Git metadata")
     records = {}
     with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:

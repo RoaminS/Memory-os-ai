@@ -101,6 +101,16 @@ or precision changes require operator approval and compatible/rebuilt vectors. S
 The production audit and corrected recommendation are documented in
 [`MPS_PRODUCTION_ALIGNMENT_V1.md`](v4/docs/MPS_PRODUCTION_ALIGNMENT_V1.md).
 
+The **4.0.3 development candidate is not published or deployed**. It preserves
+`auto/native/batch32` and records loaded parameter dtype/device, model revision,
+runtime versions and encoder source hash in `memory_status` and authenticated
+`/ready`. Unattested or changed caches rebuild before queries; this first rebuild
+must be qualified on a private copy. The approved ten-question answer pilot uses
+Luna low + Astra high through ChatGPT-authenticated Codex only, on observed BEAM:
+no API, no official judge comparison, no leaderboard claim.
+See [copy qualification and later rollout](v4/docs/QUALIFY_4_0_3.md).
+
+
 ## Architecture
 
 ```

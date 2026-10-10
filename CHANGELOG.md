@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.0.3 — candidate ALPHA (2026-10-10), non publiée / non déployée
+
+- Défauts conservés : C4 scoped_literal + garde 3 ; device auto (MPS sur le Mac
+  déployé), précision native, batch 32 ; JSONL par défaut, SQLite S2/S3 opt-in.
+- Profil d'encodage attesté : dtypes/devices des paramètres, révision modèle
+  connue, versions runtime, empreinte du code encodeur ; visible dans status/ready.
+  Un profil inconnu/incomplet/différent reconstruit tous les vecteurs avant lecture.
+  Une révision non attestable interdit la réutilisation entre instances.
+- Encodage et ajout groupés disponibles explicitement ; aucun résultat CPU/MPS
+  historique ne démontre l'équivalence stricte. Pas d'accélération nouvelle activée.
+- Pilote de réponses descriptif BEAM observé, C4/BM25 : Luna low lecteur, Astra high
+  juge, ChatGPT via codex exec uniquement ; 10 questions, 40 appels maximum, aucun
+  score publié avant exécution. Ce juge n'est pas le GPT-4o des publications.
+- Qualification des distributions et reconstruction sur copies privées exigées,
+  garde fermée jusqu'aux preuves TCP, relais installé et copie/profil/doctor.
+  Publication et bascule restent deux GO distincts de Romain.
+
 ## 4.0.2 — ALPHA (2026-10-10), publiée sur PyPI
 
 - Doctor installation + registre neuf clients + setup auto-jeton ; erreurs de configuration

@@ -99,6 +99,9 @@ class ToolClient:
             if self.encoding and self.encoding['device'] == 'mps':
                 env.update(PYTORCH_ENABLE_MPS_FALLBACK='0', PYTORCH_MPS_HIGH_WATERMARK_RATIO='0.25',
                            PYTORCH_MPS_LOW_WATERMARK_RATIO='0.20')
+            if self.config_profile == 'beam-c4-production-4.0.3':
+                env.update(MEMORY_EVAL_REQUIRE_MPS='1', PYTORCH_ENABLE_MPS_FALLBACK='0', PYTORCH_MPS_HIGH_WATERMARK_RATIO='0.4',
+                           PYTORCH_MPS_LOW_WATERMARK_RATIO='0.3')
             env["MEMORY_EVAL_CONFIG_FILE"] = str(config_path)
             # Absolute source roots, no production editable-package dependency.
             v4 = Path(__file__).resolve().parents[2]

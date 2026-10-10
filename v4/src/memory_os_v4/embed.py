@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import importlib.metadata
+from pathlib import Path
 
 import numpy as np
 
@@ -118,6 +120,34 @@ class Embedder:
             if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
                 torch.mps.empty_cache()
         return np.asarray(vecs, dtype=np.float32)
+
+    def encoding_profile(self) -> dict:
+        """Attest loaded parameters, not the dtype of exported numpy arrays.
+
+        No additional forward pass. A missing model revision is explicitly
+        reported: this receipt attests local runtime, not remote weights.
+        """
+        model = self._ensure_model()
+        parameters = list(model.parameters())
+        revision = None
+        try:
+            revision = getattr(model[0].auto_model.config, "_commit_hash", None)
+        except (AttributeError, KeyError, TypeError, IndexError):
+            pass
+        path = Path(self.model_name)
+        if path.is_dir() and path.parent.name == "snapshots":
+            revision = path.resolve().name
+        runtime = {}
+        for name in ("torch", "sentence-transformers", "transformers", "numpy"):
+            try:
+                runtime[name] = importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                runtime[name] = None
+        return {"parameter_dtypes": sorted({str(p.dtype) for p in parameters}),
+                "parameter_devices": sorted({p.device.type for p in parameters}),
+                "model_revision": revision, "runtime": runtime,
+                "encoder_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "normalized": True, "output_dtype": "float32"}
 
 
 class HashEmbedder:

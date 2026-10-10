@@ -35,6 +35,10 @@ from memory_os_v4.server import run, set_engine  # noqa: E402
 if __name__ == "__main__":
     sys.argv.remove(f"--eval-owner={owner}")
     cfg = Config(**raw_cfg)
+    if os.environ.get('MEMORY_EVAL_REQUIRE_MPS') == '1':
+        from memory_os_v4.embed import _resolve_device
+        if _resolve_device(cfg.device) != 'mps':
+            raise RuntimeError('Production-profile pilot requires MPS before model load; no CPU fallback')
     if os.environ.get("MEMORY_EVAL_RESIDENT") == "1":
         from memory_os_v4 import memory as memory_module, server as server_module
         from .resident import ResidentPool

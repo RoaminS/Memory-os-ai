@@ -196,3 +196,21 @@ def test_verify_source_from_untracked_private_worker_directory(tmp_path, monkeyp
     untracked.mkdir(parents=True)
     monkeypatch.chdir(untracked)
     verify_source(clone, revision, code)
+
+
+def test_source_attestation_ignores_stale_private_git_metadata(tmp_path):
+    clone = tmp_path / 'clone'
+    (clone / 'v4/src').mkdir(parents=True)
+    (clone / 'v4/bench/e2e').mkdir(parents=True)
+    (clone / 'v4/src/core.py').write_text('VALUE = 1\n')
+    (clone / 'v4/bench/e2e/worker.py').write_text('VALUE = 2\n')
+    subprocess.run(['git', 'init', str(clone)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(clone), 'add', 'v4'], check=True)
+    subprocess.run(['git', '-C', str(clone), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '-m', 'fixture'], check=True, capture_output=True)
+    revision = subprocess.check_output(['git', '-C', str(clone), 'rev-parse', 'HEAD'], text=True).strip()
+    stale = clone / '.local-qualification/git-state'
+    stale.mkdir(parents=True)
+    subprocess.run(['git', 'init', '--bare', str(stale)], check=True, capture_output=True)
+    verify_source(clone, revision, {'src/core.py': sha256(clone / 'v4/src/core.py'),
+                                  'bench/e2e/worker.py': sha256(clone / 'v4/bench/e2e/worker.py')})

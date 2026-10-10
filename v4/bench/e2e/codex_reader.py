@@ -13,6 +13,7 @@ from .data import sha256
 
 CLI = '/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex'
 MODEL = 'gpt-5.6-luna'
+JUDGE_MODEL = 'gpt-6-astra'
 DISABLED = ('shell_tool', 'unified_exec', 'shell_snapshot', 'apps', 'plugins', 'hooks',
             'multi_agent', 'code_mode', 'code_mode_host', 'browser_use', 'computer_use',
             'image_generation', 'view_image', 'memories', 'skill_search', 'sleep_tool',
@@ -32,16 +33,16 @@ class PilotStop(RuntimeError):
     pass
 
 
-def capability(effort='minimal', catalogue=None):
+def capability(effort='minimal', catalogue=None, *, model=MODEL):
     # Read metadata only, never auth.json or credentials. Fail closed if unknown.
     catalogue = catalogue or Path.home() / '.codex/models_cache.json'
     try:
         data = json.loads(catalogue.read_text())
-        models = [m for m in data['models'] if m.get('slug') == MODEL]
+        models = [m for m in data['models'] if m.get('slug') == model]
         levels = [v['effort'] for v in models[0]['supported_reasoning_levels']] if len(models) == 1 else []
     except (OSError, KeyError, TypeError, ValueError):
         levels = []
-    return {'model': MODEL, 'effort': effort, 'supported_efforts': levels,
+    return {'model': model, 'effort': effort, 'supported_efforts': levels,
             'supported': effort in levels, 'reason': None if effort in levels else 'Requested effort unavailable/unknown; no inference authorized',
             'quota_remaining': None, 'quota_note': 'Subscription quota not exposed by exec usage; tokens are NOT quota percentages'}
 
@@ -51,20 +52,26 @@ def runtime_record():
     result = subprocess.run([CLI, '--version'], capture_output=True, text=True, timeout=10)
     if result.returncode:
         raise PilotStop('Cannot attest installed Codex CLI')
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('OPENAI_', 'ANTHROPIC_', 'MEMORY_', 'CODEX_'))}
+    login = subprocess.run([CLI, 'login', 'status'], capture_output=True, text=True, timeout=10, env=env)
+    # Never print/store login output (API-key login may mention a masked key).
+    if login.returncode or 'logged in using chatgpt' not in (login.stdout + login.stderr).lower():
+        raise PilotStop('Existing ChatGPT login required; no API credential fallback')
     return {'path': CLI, 'sha256': sha256(Path(CLI)), 'version': result.stdout.strip(),
             'auth': 'forced chatgpt; API-key login forbidden',
             'model_snapshot': None, 'model_note': 'Requested slug fixed; remote weights/version not attested by exec'}
 
 
-def command(work, schema, effort):
-    if effort not in {'minimal', 'low'}:
+def command(work, schema, effort, model=MODEL):
+    if (model, effort) not in {(MODEL, 'minimal'), (MODEL, 'low'), (JUDGE_MODEL, 'high')}:
         raise ValueError('No automatic effort/model substitution')
-    argv = [CLI, 'exec', '-m', MODEL, '-c', f'model_reasoning_effort={effort}',
+    argv = [CLI, 'exec', '-m', model, '-c', f'model_reasoning_effort={effort}',
             '--ignore-user-config', '--ignore-rules', '--strict-config', '--ephemeral',
             '--skip-git-repo-check', '--sandbox', 'read-only', '--json', '--color', 'never',
             '--cd', str(work), '--output-schema', str(schema), '-c', 'approval_policy="never"',
             '-c', 'web_search="disabled"', '-c', 'mcp_servers={}', '-c', 'project_doc_max_bytes=0',
             '-c', 'notify=[]', '-c', 'forced_login_method="chatgpt"', '-c', 'history.persistence="none"']
+    argv.extend(['-c', 'model_provider="openai"'])
     argv.extend(['--enable', 'skip_host_skill_discovery'])
     for feature in DISABLED:
         argv.extend(['--disable', feature])
@@ -103,8 +110,10 @@ def parse_events(stdout, field):
 
 
 class CodexReader:
-    def __init__(self, root, effort, check, seconds=1800, max_calls=68, max_tokens=400_000):
+    def __init__(self, root, effort, check, seconds=1800, max_calls=68, max_tokens=400_000,
+                 judge_model=None, judge_effort=None):
         self.root, self.effort, self.check = root, effort, check
+        self.judge_model, self.judge_effort = judge_model, judge_effort
         self.deadline = time.monotonic() + seconds
         self.max_calls, self.max_tokens = max_calls, max_tokens
         self.calls, self.tokens = [], 0
@@ -115,7 +124,10 @@ class CodexReader:
         self.check()
         if self.attempts >= self.max_calls or self.tokens >= self.max_tokens or time.monotonic() >= self.deadline:
             raise PilotStop('Frozen pilot call/token/time budget reached')
-        if not capability(self.effort)['supported']:
+        model = self.judge_model if field == 'correct' and self.judge_model else MODEL
+        effort = self.judge_effort if field == 'correct' and self.judge_effort else self.effort
+        available = capability(effort) if model == MODEL else capability(effort, model=model)
+        if not available['supported']:
             raise PilotStop('Requested effort unavailable; zero model calls')
         prompt = (READER_PROMPT if field == 'answer' else JUDGE_PROMPT) + json.dumps(payload, ensure_ascii=False)
         if len(prompt.encode()) > 24_000:
@@ -141,12 +153,12 @@ class CodexReader:
             # A regular stdin file avoids blocking the guard on a full pipe
             # while CLI startup/auth waits; the supervisor stays responsive.
             with prompt_path.open() as input_file, log_path.open('x') as log, error_path.open('x') as err:
-                child = subprocess.Popen(command(work, schema, self.effort), stdin=input_file,
+                child = subprocess.Popen(command(work, schema, effort, model), stdin=input_file,
                                          stdout=log, stderr=err, text=True, env=env, start_new_session=True)
                 try:
                     while child.poll() is None:
                         self.check()
-                        if time.monotonic() - start > 90 or time.monotonic() >= self.deadline:
+                        if time.monotonic() - start > (180 if model == JUDGE_MODEL else 90) or time.monotonic() >= self.deadline:
                             raise PilotStop('CLI/pilot wall-time budget exceeded')
                         if log_path.stat().st_size + error_path.stat().st_size > 2_000_000:
                             raise PilotStop('CLI output budget exceeded')
@@ -157,7 +169,8 @@ class CodexReader:
                     kill_group(child)
             value, usage = parse_events(log_path.read_text(), field)
         self.tokens += usage['input_tokens'] + usage['output_tokens']
-        record = {'index': index, 'kind': field, 'seconds': time.monotonic() - start, 'usage': usage}
+        record = {'index': index, 'kind': field, 'model': model, 'effort': effort,
+                  'seconds': time.monotonic() - start, 'usage': usage}
         self.calls.append(record)
         (self.root / 'usage.json').write_text(json.dumps({'cli_attempts': self.attempts, 'completed_calls': self.calls,
                                                         'tokens_total': self.tokens, 'pending_usage_unknown': False}, indent=2) + '\n')

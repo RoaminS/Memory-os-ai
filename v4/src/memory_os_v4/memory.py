@@ -284,6 +284,7 @@ class MemoryV4:
         self.facet_index = FacetIndex()
         self._reembed_all()
         self._rebuild_bm25_entities()
+        self.store.meta["embed_compute_profile"] = self._compute_profile()
         if hasattr(self, "retriever"):
             self.retriever.vector_index = self.vector_index
             self.retriever.bm25 = self.bm25
@@ -307,7 +308,28 @@ class MemoryV4:
                    "implementation": __version__, "namespace": self.config.sqlite_embedding_namespace}
         if self.config.embed_dtype != "native":
             profile["dtype"] = self.config.embed_dtype
+        profile["attestation"] = self._compute_profile()
         return self._embedding_cache.encode(texts, self.embedder.encode, self.embedder.dim, profile)
+
+    def _compute_profile(self):
+        if not hasattr(self, "_attested_encoding_profile"):
+            profile = {"device": getattr(self.embedder, "device", "hash"),
+                       "dtype": self.config.embed_dtype,
+                       "batch_size": self.config.embed_batch_size,
+                       "max_seq_length": self.config.embed_max_seq_length}
+            attest = getattr(self.embedder, "encoding_profile", None)
+            if attest is not None:
+                profile.update(attest())
+                if profile.get("model_revision") is None:
+                    # Unknown weights cannot justify reuse across processes.
+                    # Keep one stable namespace within this engine/rollback.
+                    import uuid
+                    profile["unattested_revision_nonce"] = uuid.uuid4().hex
+            else:
+                profile.update(parameter_dtypes=["hash-float32"], parameter_devices=["hash"],
+                               model_revision="hash-v1")
+            self._attested_encoding_profile = profile
+        return dict(self._attested_encoding_profile)
 
     # ------------------------------------------------------------- startup
     def _init_indexes(self) -> None:
@@ -318,10 +340,7 @@ class MemoryV4:
         stored_model = self.store.meta.get("embed_model")
         stored_dim = self.store.meta.get("dim")
         need_reembed = stored_model is not None and stored_model != self.config.embed_model
-        compute_profile = {"device": getattr(self.embedder, "device", "hash"),
-                           "dtype": self.config.embed_dtype,
-                           "batch_size": self.config.embed_batch_size,
-                           "max_seq_length": self.config.embed_max_seq_length}
+        compute_profile = self._compute_profile()
         old_profile = self.store.meta.get("embed_compute_profile")
         if old_profile != compute_profile:
             # Even native precision cannot attest the backend of a legacy
@@ -987,6 +1006,7 @@ class MemoryV4:
             "total": sum(counts.values()),
             "embed_model": getattr(self.embedder, "model_name", "unknown"),
             "dim": self.embedder.dim,
+            "encoding_profile": self._compute_profile(),
             "data_dir": str(self.data_dir),
             "bm25_docs": sum(iid in ids for iid in self.bm25.doc_len),
             "entity_terms": entity_terms,

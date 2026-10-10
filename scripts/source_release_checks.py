@@ -53,8 +53,8 @@ def main():
     root = Path(__file__).resolve().parents[1]
     directory = args.manifest.resolve().parent
     manifest = json.loads(args.manifest.read_text())
-    if manifest['version'] != '4.0.2':
-        raise ValueError('This source qualification targets 4.0.2')
+    if manifest['version'] not in {'4.0.2', '4.0.3'}:
+        raise ValueError('This source qualification targets 4.0.2/4.0.3')
     files = manifest['qualification_source_sha256']
     if any(digest(root / name) != sha for name, sha in files.items()):
         raise ValueError('Source files differ from qualified artifacts')
@@ -64,9 +64,12 @@ def main():
            'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'OMP_NUM_THREADS': '1',
            'OPENBLAS_NUM_THREADS': '1', 'VECLIB_MAXIMUM_THREADS': '1',
            'PYTHONPATH': str(root / 'src') + ':' + str(root / 'v4/src') + ':' + str(root / 'v4'),
+           'MEMORY_TEST_HASH_V3': '0', 'KMP_DUPLICATE_LIB_OK': 'TRUE',
            'MEMORY_WORKSPACE': str(root), 'MEMORY_V4_BUILD_COMMIT': manifest['source_commit']}
     suites = [('source_tcp', ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py'], 10),
               ('cached_semantic', ['v4/tests/test_core_slow_integration.py'], 1)]
+    if manifest['version'] == '4.0.3':
+        suites.append(('v3_cached', ['tests'], manifest['source_expected_v3_tests']))
     try:
         for name, paths, count in suites:
             xml = directory / (name + '.xml')
