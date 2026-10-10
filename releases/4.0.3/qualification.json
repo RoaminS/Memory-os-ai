@@ -1,0 +1,185 @@
+{
+  "version": "4.0.3",
+  "source_commit": "4b3df5941a2a0c8c1b5fab0d3f481b6c44768b94",
+  "source_date_epoch": 1791654728,
+  "release_ready": false,
+  "open_blockers": [],
+  "checks": {
+    "adversarial_probe": "passed",
+    "a6_review": "passed",
+    "v3": "passed",
+    "v4": "passed",
+    "lint": "passed",
+    "lint_correctness": "passed",
+    "build": "passed",
+    "twine_strict": "passed",
+    "wheel_install": "passed",
+    "wheel_pip_check": "passed",
+    "wheel_smoke": "passed",
+    "sdist_install": "passed",
+    "sdist_pip_check": "passed",
+    "sdist_smoke": "passed",
+    "sdist_source_v3": "passed",
+    "sdist_source_v4": "passed",
+    "source_tcp": "pending",
+    "cached_semantic": "pending",
+    "v3_cached": "pending",
+    "production_copy": "pending"
+  },
+  "source_expected_v3_tests": 566,
+  "artifacts": [
+    {
+      "name": "memory_os_ai-4.0.3-py3-none-any.whl",
+      "bytes": 435034,
+      "sha256": "499be63e656720ded9c1847cf715128975da05139f5c0b8084c21ab0d1b472dc"
+    },
+    {
+      "name": "memory_os_ai-4.0.3.tar.gz",
+      "bytes": 783616,
+      "sha256": "1ce52377c5540f91dca68163337923ed10afe941d776c3af344bd769d611c2c5"
+    }
+  ],
+  "qualification_source_sha256": {
+    "pyproject.toml": "eb26a973665313fda569d5893197996c06d82c9f4cdb32db61bbf0ceabe2fd2b",
+    "src/memory_os_ai/__init__.py": "57f3092e3fba6f858f77770259fd2a0b4910b0136de3a0d447fcd81e7c6803a7",
+    "src/memory_os_ai/__main__.py": "30c055a1c7ed90fb25db8f4f4e4bb0cf1cdbd64b743b769abbd48028bf32bc47",
+    "src/memory_os_ai/chat_extractor.py": "8133b945ec6162bb5682c8185ccbcb0ac7b750e7b379faa31b7f300ccc9227d8",
+    "src/memory_os_ai/cloud_storage.py": "7037395e9309b81ec906f9d06700ff062f2327d8224612745deb807aa3821d7b",
+    "src/memory_os_ai/engine.py": "22c0f92f6ad351fee9127afdd782f84971a5b50208df588a02f1a2ea7d0c8350",
+    "src/memory_os_ai/instructions.py": "d76e98886202bd92b455f597bbf8b95859d1eb0384a8b37225d29daea4f32111",
+    "src/memory_os_ai/models.py": "ba12adfd164273050300b27e146bb72dd3e2f2fd7451c2c00fa93761f9399361",
+    "src/memory_os_ai/server.py": "760d596137bce2cf87ca195635ab93fe6cc6d30f1e62bb66811bb1750ffaabb3",
+    "src/memory_os_ai/setup.py": "f7e0bbdf07a84490578e52d7c34478d9ef856bca6af91b4ee61878b9f2e9efaf",
+    "src/memory_os_ai/storage_router.py": "aa996f4e21f224ff675253a570a1fcd83aaa0cf81b7acb91d79c71b5b07a52fe",
+    "v4/src/memory_os_v4/__init__.py": "35bc2867dd0e5da2591422318d5db8dbc60f9cda9e1d54aa88f2ff722ff32035",
+    "v4/src/memory_os_v4/__main__.py": "8be122c6ee275497ae73d3796f5aaac66287e4835d3877b701ffe3df0ff44813",
+    "v4/src/memory_os_v4/blocks.py": "45d1deb4e12fd022f0559543a60732d974445a70b41ef49d12880c33c08f6826",
+    "v4/src/memory_os_v4/bm25.py": "01493292885d8ab1b1aa1f33f5c0358aa59f7cf8b2f7c3a854fabf1ca0e2801b",
+    "v4/src/memory_os_v4/config.py": "ccc967ec5e64ae6663f3e2bd71c4b78b6a41e14ddfdb4c53e081bc337997c319",
+    "v4/src/memory_os_v4/consolidate.py": "04ca1ef616ca5e984aa56a1f5817eff40db4a1905d1e3579af6fd288ab686529",
+    "v4/src/memory_os_v4/embed.py": "c2c335c468d7dedf7cff0ca2ce281c83d7c12fc9c65fd2c5b93adbbfcc5d60a7",
+    "v4/src/memory_os_v4/entities.py": "bef4360228b21501ae8f83c8d46949daedd2f47c58b2bc51682d449de5bae567",
+    "v4/src/memory_os_v4/extract.py": "32ef6c260ab9fb55af05bf6a1cef8404bf2359952fa1cb223b7c3189ba8ed61b",
+    "v4/src/memory_os_v4/facets.py": "0faa505bcab7f7dc70a7797ee36d3d4e07531a4aea66e82b231f4af548ffc41b",
+    "v4/src/memory_os_v4/fact_updates.py": "40a2f4a9769326be7ed0c7ba17a99fa887280bdf637aba39bdf4f4f489ade2e5",
+    "v4/src/memory_os_v4/http_security.py": "c3859a666aa26e54f131768b2423c0fa38154088e9326d86a610d848b58aeb21",
+    "v4/src/memory_os_v4/idempotency.py": "a6cee53feaa2d32658396105ab236289f2594e0e4c5c311bdbc419741a4f1fcf",
+    "v4/src/memory_os_v4/instructions.py": "c43eca2deafff0769009e3c86ece717e6f2882f175f703db643c13e70396ae09",
+    "v4/src/memory_os_v4/llm.py": "e791616bbffe9357c03b9fb33777cfecb3a265b305a02fb953402a448770ac27",
+    "v4/src/memory_os_v4/memory.py": "ceb019b81deefa8c67dcedb1f75c535c6247042d80d358fba7bf611290c0cde1",
+    "v4/src/memory_os_v4/migrate.py": "f8ac12a34632f6289dc79449eb3b00e78039e6edafca3e422fd38d08025bdb53",
+    "v4/src/memory_os_v4/models.py": "38b4f9aaae9e466fd39dfe393ecb06472cdf2e15f77f934f03867e18051f9069",
+    "v4/src/memory_os_v4/ops/__init__.py": "d318aee98257decba3543e3fe48861f8a3c90ba6a5055c1c2bbbfd85c9d1f7b8",
+    "v4/src/memory_os_v4/ops/auth.py": "24f73f8a53f2797fb926de474b0720527e702329411ce780e6b8c7f2a5953b9e",
+    "v4/src/memory_os_v4/ops/backup.py": "19e8c5fc8d9845a77a222e528a1ff6db352ce7a5bdbce67f5a3918ec6b215473",
+    "v4/src/memory_os_v4/ops/cli.py": "9bdd044bea8065cbcba23de63d76b386c16220d53ab68b9e011f1f213188e2e9",
+    "v4/src/memory_os_v4/ops/clients.py": "525499ff198a1b906775e0a75f97b79440a94e56daf87fc0a6fd399ba3087a99",
+    "v4/src/memory_os_v4/ops/doctor.py": "51d325d05691f6d811a63236ef11a84d7b35f2165a3be4aa5c8e7bc6a2c7f9d9",
+    "v4/src/memory_os_v4/ops/health.py": "e01fd4d04669679af00383982b8a6104ea5e5a77b9fd003940e7e883cb8990ef",
+    "v4/src/memory_os_v4/ops/hooks.py": "98b3cbdde93663e25b2fd5279870caacd4179b784a14c56d3f9eeb507db70490",
+    "v4/src/memory_os_v4/ops/relay.py": "d9d387c1a40daebceb1e16a691b632d14ff7c939bb5bd568627430f1ca6c6e1c",
+    "v4/src/memory_os_v4/ops/settings.py": "71c05c9d714b0251e2a8a107209590eef84072c92df8be507795088813636389",
+    "v4/src/memory_os_v4/ops/storecheck.py": "5386f04bf29c36e76852464ed611433f4ae1f6421d055083dc1ecd8917f57b47",
+    "v4/src/memory_os_v4/readiness.py": "476985f9700de9fa87ed8020a494af7f4124bba54f1eb7a31675828f3daf05d3",
+    "v4/src/memory_os_v4/rerank.py": "d8c5c0e968fc972b517c887246dd26357b2d915aa2a36230ad7ecd865008bc6d",
+    "v4/src/memory_os_v4/retrieval.py": "55a946a46fc007fe977255e5b72609bd4ebbc5661a1a58148cec74628ac29d4b",
+    "v4/src/memory_os_v4/server.py": "85e106f16c5cdb0178679b69adbd46c0ff01368ec7edb9b44c610af3d08f37bc",
+    "v4/src/memory_os_v4/sqlite_embeddings.py": "7fd024121ebed695f51f9f40da92659c65b712d1a7f415b961cbcd13f09694d6",
+    "v4/src/memory_os_v4/sqlite_engine.py": "54cc1a162eaa89c2ca2e8deb2aaa5195483f3727e7264057fe5b27fc44dfdaee",
+    "v4/src/memory_os_v4/sqlite_migrate.py": "072cbea0c555bb03747fcc8ed52dd1d52666526815eb807cf2ef336494e360fa",
+    "v4/src/memory_os_v4/sqlite_stats.py": "f82e392b893907e9f048de9c13e919bd97fb8234f5ce4cec63f9b1756002bafb",
+    "v4/src/memory_os_v4/sqlite_store.py": "6a72d9855dbc3a5dbacf24d228ac11e5be9f899fd392406c3dbbfde3096eea89",
+    "v4/src/memory_os_v4/store.py": "eb94dba72f84ed3a0e13b4835d175aa7964aa3f6b21196281ffd7c3a6c52f19b",
+    "v4/src/memory_os_v4/temporal.py": "65d7199acacda4e387e26316f2f787eb5c8ee2f6542d3e43ea1ca3afaf0ba0cb",
+    "v4/src/memory_os_v4/text.py": "196dafd461d8d5b4e6d4d7e1b5e9cfad8aaa9804554824af715723a117e92072",
+    "v4/src/memory_os_v4/vector_index.py": "3610061123efb102e6d18d5404cde85512315a97119a32c311cb99cb3506138d",
+    "v4/src/memory_os_v4/writer_lock.py": "8f318e7aa789d64dafd72da94eca4b703110b5483c6f819404365420a136718d",
+    "v4/tests/test_server_http_e2e.py": "23c02e753f6c578b2e98987da82d838f2989725391b1bb2705116da40da2148b",
+    "v4/tests/test_ops_e2e.py": "62b66749b977009bee2307b6ff8f905e8e32424c27f989cff81def6f42178ab2",
+    "v4/tests/test_core_slow_integration.py": "84208e64acc60f821e65b8a3bef2002f99c7698d747d33bc646a6a701dc72d8b"
+  },
+  "installed_relay_scripts_sha256": {
+    "runner": "222814c9d5c510227194bf5817afc8febf907248ea031fcae5858119ab520425",
+    "case": "e8489cc28cb5381dc8bb76e8c6491fd2662857389f0e63ecf4934f0338e58179"
+  },
+  "copy_scripts_sha256": {
+    "runner": "f58d1042c2bae83e9c17b9e44ac938efabfc5dcb4f1f1ab33ff9d61b378cf5a4",
+    "worker": "e3dfdee2bb84d1b9be43180f2810d0e27aa0e7c3c7bf177552ef360e2d4e53f7"
+  },
+  "evidence": {
+    "python": "3.11.14",
+    "dependency_downloads": false,
+    "models_downloaded": false,
+    "production_modified": false,
+    "real_encoder_runs": 0,
+    "v3_unit_encoder": "explicit synthetic; not semantic qualification",
+    "sqlite_opt_in": true
+  },
+  "pending_at_build": [
+    "10 source TCP tests",
+    "1 cached MiniLM test",
+    "full v3 cached actual encoder suite",
+    "copy/native-profile/cache/timing/search/doctor",
+    "installed wheel relay TCP",
+    "installed sdist relay TCP"
+  ],
+  "status": "local-unit-qualification-green; external proofs pending",
+  "bundle_base": "0e1b77386940ef60d4a2d1b9f0853df323f46cd0",
+  "unit_results": {
+    "v3": {
+      "passed": 566,
+      "coverage_percent": 81.83,
+      "encoder": "explicit synthetic"
+    },
+    "v4": {
+      "passed": 1041,
+      "coverage_percent": 87.0,
+      "excluded": [
+        "10 TCP",
+        "1 real MiniLM slow test"
+      ]
+    },
+    "sdist_v3": {
+      "passed": 566,
+      "encoder": "explicit synthetic"
+    },
+    "sdist_v4": {
+      "passed": 1037,
+      "deselected": 5,
+      "reason": "four Git-archive checks inapplicable without history + one real MiniLM slow test"
+    }
+  },
+  "commands_receipt_sha256": "ddf00290257fc46a0fc2562bf50ada3432cfd3caf9e6a800b6d40b5bad5628ca",
+  "pilot": {
+    "status": "not run",
+    "questions": 10,
+    "arms": [
+      "C4",
+      "BM25"
+    ],
+    "max_cli_attempts": 40,
+    "reader": "gpt-5.6-luna low",
+    "judge": "gpt-6-astra high",
+    "api_calls": 0,
+    "observed_data_only": true,
+    "encoding": "MPS/native/batch32/max_seq512; exact installed-copy receipt required"
+  },
+  "limitations": [
+    "no production change/publication",
+    "no inference on Codex side",
+    "API billing zero by route; ChatGPT quota/credits not observable",
+    "no official answer score or rank",
+    "native model precision attested only on copy before pilot",
+    "Python 3.11.14/macOS ARM64 only; Python 3.12 absent; dependencies reused offline, no fresh network resolution"
+  ],
+  "cli_metadata_preflight": {
+    "accepted_feature_flags": true,
+    "shell_tool": false,
+    "goals": false,
+    "tool_suggest": false,
+    "unbounded_connection_retries": false,
+    "host_skills_skipped": true,
+    "unified_exec_backend_metadata": true,
+    "note": "Shell tools disabled; backend metadata remains true. This metadata check is not proof of zero tools during inference; pilot events must attest that."
+  }
+}
