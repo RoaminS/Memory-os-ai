@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "run": "beam-c4-retrieval-v2",
+  "source_commit": "95276a8123838bfe9f7937f6325307d6be88ac39",
+  "files": {
+    "plan.json": "5878e5b54d71a6d6437a42f6e637e6a79552f7fda8d99828ace427dbbb5e604e",
+    "retrieval/report.json": "20402ce7d28bf6b1891bb9abeff13a97de7002ba35afb2951debcf9ef863e372",
+    "retrieval/predictions.jsonl": "f25fc2326e209a0f6c9635b3c3c48bd214b9bab4385acc9f80a519d5e07036b9",
+    "retrieval/contexts.jsonl": "b1b9d74ee7f3b127378683945d9ee21456972359d5759e03b50611a10dc733f1"
+  },
+  "complete": true,
+  "questions": 400,
+  "recall_questions": 355,
+  "clusters": 20,
+  "bootstrap_replicates": 2000,
+  "systems": {
+    "memory": {"recall": 0.4619048127146719, "mrr": 0.4442734182875028},
+    "bm25": {"recall": 0.44466404487531247, "mrr": 0.4358618376928236}
+  },
+  "paired": {
+    "recall": {"mean": 0.017240767839359388, "ci95": [-0.004249710183698948, 0.04004195011337869]},
+    "mrr": {"mean": 0.008411580594679186, "ci95": [0.0028010552451893235, 0.014545780647475562]}
+  },
+  "numerical_criterion_met": false,
+  "usage": {
+    "encoder_calls": 16075,
+    "encoder_texts": 21717,
+    "encoder_ms": 14792165.419720579,
+    "llm_calls": 0,
+    "api_usd": 0.0
+  },
+  "timing": {
+    "conversation_ingest_total_seconds": 14813.252574915998,
+    "conversation_ingest_median_seconds": 678.056108062854,
+    "conversation_ingest_max_seconds": 1013.3726495839655,
+    "memory_search_p50_ms": 41.34239605627954,
+    "memory_search_p95_ms": 68.745959084481
+  },
+  "claim": "local retrieval criterion only; not official BEAM answer accuracy or leaderboard rank"
+}

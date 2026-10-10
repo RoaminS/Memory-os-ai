@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.0.2 — candidate ALPHA (2026-10-10), non publiée
+## 4.0.2 — ALPHA (2026-10-10), publiée sur PyPI
 
 - Doctor installation + registre neuf clients + setup auto-jeton ; erreurs de configuration
   contrôlées, diagnostic SQLite conservé via `doctor --store-only`.
@@ -14,6 +14,9 @@
   du relais installé. Activation de production réservée à Romain.
 - Voir `docs/releases/v4.0.2.md`, `v4/docs/RELEASE_4_0_2_DECISIONS.md`
   et `releases/4.0.2/QUALIFICATION.md`.
+- Évaluation post-publication BEAM 100K : le critère préenregistré C4 contre BM25
+  n'est pas atteint (ΔRecall +0,017, IC95 [-0,004;+0,040] ; ΔMRR +0,008
+  [+0,003;+0,015]). Aucun score d'exactitude ni rang leaderboard revendiqué.
 
 ## 4.0.1 — ALPHA intermédiaire, publication soumise à qualification finale
 
