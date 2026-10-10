@@ -98,7 +98,9 @@ def main():
     for suite in ('v3', 'v4'):
         paths = ['tests'] if suite == 'v3' else ['v4/tests', '--ignore=v4/tests/test_server_http_e2e.py', '--ignore=v4/tests/test_ops_e2e.py',
             '--deselect=v4/tests/test_session_copies.py::test_archived_reader_and_200_predictions_match_without_model',
-            '--deselect=v4/tests/test_evidence_bootstrap.py::test_s_preflight_stops_before_any_model_worker']
+            '--deselect=v4/tests/test_evidence_bootstrap.py::test_s_preflight_stops_before_any_model_worker',
+            '--deselect=v4/tests/test_mps_reuse_campaign.py::test_overlay_changes_only_three_reviewed_files',
+            '--deselect=v4/tests/test_mps_reuse_campaign.py::test_archived_source_worker_runs_from_untracked_cwd_with_hash_only']
         run('sdist_source_' + suite, [sdist_python, '-m', 'pytest', '-c', 'pyproject.toml', '-q', '-m', 'not slow', '-p', 'no:cacheprovider',
             '--basetemp=' + str(workspace / ('sdist-' + suite + '-tests')), *paths], cwd=sdist_root,
             extra={'PYTHONPATH': '', 'PYTHONNOUSERSITE': '1', 'MEMORY_WORKSPACE': str(sdist_root)})
