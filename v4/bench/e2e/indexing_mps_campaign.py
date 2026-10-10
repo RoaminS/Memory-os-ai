@@ -39,7 +39,7 @@ ENCODING = {a: {'device': a, 'embed_dtype': 'native' if a == 'cpu' else 'float32
 
 
 def runtime():
-    packages = ('torch', 'transformers', 'sentence-transformers', 'numpy', 'mcp', 'rank-bm25')
+    packages = ('torch', 'transformers', 'sentence-transformers', 'numpy', 'mcp')
     return {'node': platform.node(), 'machine': platform.machine(), 'platform': platform.platform(),
             'python': sys.version, 'packages': {p: importlib.metadata.version(p) for p in packages}}
 

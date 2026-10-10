@@ -17,6 +17,31 @@ from bench.e2e.configuration import resolved_config
 EQ = {'minimum_clusters': 3, 'bootstrap': 1000, 'seed': 4, 'ci': .975, 'margin': .01}
 
 
+def test_runtime_attests_used_packages_without_external_bm25(monkeypatch):
+    queried = []
+
+    def version(package):
+        queried.append(package)
+        if package == 'rank-bm25':
+            raise campaign.importlib.metadata.PackageNotFoundError(package)
+        return 'test-version'
+
+    monkeypatch.setattr(campaign.importlib.metadata, 'version', version)
+    recorded = campaign.runtime()['packages']
+    expected = {'torch', 'transformers', 'sentence-transformers', 'numpy', 'mcp'}
+    assert set(queried) == set(recorded) == expected
+    assert all(v == 'test-version' for v in recorded.values())
+
+
+def test_runtime_still_refuses_missing_required_package(monkeypatch):
+    def version(package):
+        raise campaign.importlib.metadata.PackageNotFoundError(package)
+
+    monkeypatch.setattr(campaign.importlib.metadata, 'version', version)
+    with pytest.raises(campaign.importlib.metadata.PackageNotFoundError):
+        campaign.runtime()
+
+
 def quality(delta=0):
     return [{'qid': str(i), 'conversation': str(i // 2),
              'cpu': {'recall': .5, 'mrr': .5},
