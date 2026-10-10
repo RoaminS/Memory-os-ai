@@ -119,6 +119,12 @@ def screening(data, observed_beam, observed_lme, check=lambda: None):
 def selection(data, audit):
     """One hash-selected question/category/conversation, no answer or outcome."""
     eligible = set(audit['eligible'])
+    eligible_clusters = {audit['clusters'][cid] for cid in eligible}
+    # Refuse insufficient independent roots before parsing gold annotations,
+    # including annotations in conversations already excluded by screening.
+    if not 30 <= len(eligible) <= 35 or len(eligible_clusters) < 30:
+        raise ValueError(f'Freshness/CI preflight refused: {len(eligible)} eligible conversations, '
+                         f'{len(eligible_clusters)} clusters; need 30–35 and >=30. No inference authorized.')
     chosen = []
     for c in conversations(Path(data), max_row=MAX_ROW, max_nodes=MAX_NODES):
         if c.id not in eligible:

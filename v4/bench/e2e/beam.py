@@ -156,7 +156,7 @@ def conversations(path: Path, check=lambda: None, *, max_row=MAX_ROW, max_nodes=
                 entries = questions[category]
                 if not isinstance(entries, list) or not entries:
                     raise ValueError('Nonempty probing list required')
-                for entry in entries:
+                for probe_index, entry in enumerate(entries):
                     if not isinstance(entry, dict) or not isinstance(entry.get('question'), str) or not entry['question'].strip():
                         raise ValueError('Nonempty question required')
                     question = entry['question']
@@ -165,8 +165,13 @@ def conversations(path: Path, check=lambda: None, *, max_row=MAX_ROW, max_nodes=
                     question_texts.add(question)
                     qid = identity(cid, question)  # no answer/category in identity
                     refs = evidence_ids(entry.get('source_chat_ids', []))
-                    if (category != 'abstention' and 'source_chat_ids' not in entry) or not set(refs) <= chat_ids:
-                        raise ValueError('Missing/dangling evidence annotation')
+                    location = f'conversation={cid}, category={category}, probe={probe_index}'
+                    if category != 'abstention' and 'source_chat_ids' not in entry:
+                        raise ValueError(f'Missing source_chat_ids evidence annotation ({location}); '
+                                         'textual references cannot substitute for verified chat ids')
+                    if not set(refs) <= chat_ids:
+                        raise ValueError(f'Dangling evidence annotation ({location}): '
+                                         f'{sorted(set(refs) - chat_ids)}')
                     if category == 'abstention' and refs:
                         raise ValueError('Abstention unexpectedly has positive evidence')
                     answer_key = {'abstention': 'ideal_response', 'contradiction_resolution': 'ideal_answer',

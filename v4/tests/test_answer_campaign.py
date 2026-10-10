@@ -65,6 +65,17 @@ def test_insufficient_independent_conversations_refuses_before_inference(tmp_pat
         selection(data, audit)
 
 
+def test_cluster_preflight_precedes_parsing_excluded_gold(tmp_path):
+    # BEAM 500K can have unusable annotations in an already excluded row.
+    # Independence refusal must be intelligible without changing the criterion.
+    data = tmp_path / 'invalid-annotations'
+    data.write_text('not parsed')
+    audit = {'eligible': [str(i) for i in range(15)],
+             'clusters': {str(i): str(i) for i in range(15)}}
+    with pytest.raises(ValueError, match='15 clusters.*No inference authorized'):
+        selection(data, audit)
+
+
 def test_shared_longmem_question_excludes_whole_conversation(tmp_path):
     data = write_rows(tmp_path / 'new', [row(1)])
     observed = write_rows(tmp_path / 'old', [row(99)])

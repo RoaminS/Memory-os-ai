@@ -88,6 +88,43 @@ def test_explicit_empty_not_fabricated(tmp_path):
     assert c.probes[8].gold.category == 'summarization'
 
 
+@pytest.mark.parametrize('missing', [True, False])
+def test_annotation_error_distinguishes_missing_field_from_dangling_id(tmp_path, missing):
+    r = row()
+    probes = decode(r['probing_questions'], literal=True)
+    entry = probes['knowledge_update'][0]
+    if missing:
+        del entry['source_chat_ids']
+        entry['conversation_references'] = ['A natural-language reference']
+    else:
+        entry['source_chat_ids'] = [999]
+    r['probing_questions'] = repr(probes)
+    error = 'Missing source_chat_ids' if missing else 'Dangling evidence'
+    with pytest.raises(ValueError, match=error) as exc:
+        list(conversations(write(tmp_path, [r])))
+    assert 'category=knowledge_update, probe=0' in str(exc.value)
+
+
+def test_annotation_diagnostic_is_read_only_and_never_emits_gold(tmp_path):
+    from bench.e2e.beam_annotation_audit import audit_file
+    r = row()
+    probes = decode(r['probing_questions'], literal=True)
+    del probes['knowledge_update'][0]['source_chat_ids']
+    probes['knowledge_update'][0]['conversation_references'] = ['SCORER_REFERENCE_SECRET']
+    probes['event_ordering'][0]['source_chat_ids'] = [999]
+    r['probing_questions'] = repr(probes)
+    path = write(tmp_path, [r])
+    original = path.read_bytes()
+    report = audit_file(path, sha256(path), lambda: None)
+    assert report['counts']['missing_ids'] == report['counts']['dangling_ids'] == 1
+    assert report['inference_calls'] == 0 and path.read_bytes() == original
+    assert 'SCORER' not in json.dumps(report)
+    missing = next(i for i in report['issues'] if i['status'] == 'missing_ids')
+    assert missing['conversation_references_element_types'] == ['str']
+    with pytest.raises(ValueError, match='SHA-256'):
+        audit_file(path, '0' * 64, lambda: None)
+
+
 def test_pilot_whole_conversations_deterministic(tmp_path):
     cs = list(conversations(write(tmp_path, [row(str(i)) for i in range(20)])))
     convs, ids = select_pilot(cs)
