@@ -98,12 +98,16 @@ def test_attested_runtime_change_rebuilds_corpus_once(tmp_path, monkeypatch, bac
     assert calls == []
 
 
-def test_complete_pilot_is_40_calls_without_reader_gold_leak(tmp_path, monkeypatch):
+@pytest.mark.parametrize('recovery', [False, True])
+def test_complete_pilot_is_40_calls_without_reader_gold_leak(tmp_path, monkeypatch, recovery):
     import bench.e2e.answer_pilot as pilot
     from bench.e2e.data import sha256
     plan = {'question_ids': [str(i) for i in range(10)], 'arms': ['memory', 'bm25'],
             'claim': 'descriptive', 'reader': {'model': 'gpt-5.6-luna', 'effort': 'low'},
             'judge': {'model': 'gpt-6-astra', 'effort': 'high'}}
+    if recovery:
+        plan['historical'] = {'qid': '0', 'arm': 'memory', 'answer': 'descriptive answer',
+                              'call': {'seconds': 90}, 'reserved_cli_seconds': 90}
     (tmp_path / 'plan.json').write_text(json.dumps(plan))
     rdir = tmp_path / 'retrieval'
     rdir.mkdir()
@@ -121,14 +125,21 @@ def test_complete_pilot_is_40_calls_without_reader_gold_leak(tmp_path, monkeypat
                             gold=SimpleNamespace(answers=('SCORER_SECRET',), category='category'), rubric=('RUBRIC_SECRET',)) for i in range(10)]
     monkeypatch.setattr(pilot, 'conversations', lambda data: [SimpleNamespace(probes=probes)])
     plan['data'] = str(tmp_path / 'fake')
+    actual_calls = []
     class FakeReader:
         def __init__(self, root, effort, check, **kw):
             assert effort == 'low' and kw['judge_model'] == 'gpt-6-astra' and kw['judge_effort'] == 'high'
             assert kw['max_calls'] == 40 and kw['seconds'] == 3600
             self.calls, self.attempts, self.tokens = [], 0, 0
+            self.deadline = 3600
+        def seed(self, record):
+            self.attempts = 1
+            self.tokens = 9186
+            self.calls.append(record)
         def record(self):
             self.attempts += 1
             self.calls.append({'seconds': 1})
+            actual_calls.append(1)
         def answer(self, question, context):
             assert 'SECRET' not in repr((question, context))
             self.record()
@@ -141,6 +152,8 @@ def test_complete_pilot_is_40_calls_without_reader_gold_leak(tmp_path, monkeypat
     pilot.read_and_judge(tmp_path)
     result = json.loads((tmp_path / 'answers/report.json').read_text())
     assert result['model_calls'] == 40 and result['accuracy'] == {'memory': 1, 'bm25': 1}
+    assert result['new_cli_calls'] == len(actual_calls) == (39 if recovery else 40)
+    assert result['historical_reader_calls'] == (1 if recovery else 0)
     assert result['ci95'] is None and result['api_usd'] == 0
     with pytest.raises(FileExistsError):
         pilot.read_and_judge(tmp_path)

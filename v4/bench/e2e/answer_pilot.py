@@ -10,6 +10,7 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+import shutil
 from statistics import mean
 import subprocess
 import sys
@@ -20,7 +21,8 @@ from .baselines import BM25
 from .beam import CATEGORIES, DATA_SHA, conversations
 from .beam_campaign import DATA, select_pilot
 from .client import ToolClient, offline_env, project_for
-from .codex_reader import CodexReader, JUDGE_MODEL, MODEL, JUDGE_PROMPT, READER_PROMPT, capability, runtime_record
+from .codex_reader import (CodexReader, JUDGE_MODEL, MODEL, JUDGE_PROMPT, READER_PROMPT,
+                           capability, parse_events, runtime_record)
 from .configuration import resolved_config
 from .data import sha256
 from .experiments import MODELS, private_path
@@ -30,8 +32,9 @@ from .pipeline import extract, pack
 from .processes import cleanup
 from .run import code_record, kill_group, model_record, verify_source, write_json
 
-VERSION = 'answer-pilot-production-v1'
+VERSION = 'answer-pilot-production-v2'
 PROFILE = 'beam-c4-production-4.0.3'
+RECOVERY_CHANGED_FILES = {'bench/e2e/answer_pilot.py', 'bench/e2e/codex_reader.py'}
 
 
 def local_runtime():
@@ -46,15 +49,71 @@ def select(items):
                   for i, category in enumerate(CATEGORIES)]
 
 
-def prepare(directory, revision, copy_proof):
+def previous_evidence(clone, previous):
+    """Revalidate one completed reader and immutable retrieval, never replay it."""
+    _, previous = private_path(previous)
+    original = json.loads((previous / 'plan.json').read_text())
+    receipt = json.loads((previous / 'receipt.json').read_text())
+    if (original['version'] != 'answer-pilot-production-v1' or 'historical' in original
+            or sha256(previous / 'plan.json') != receipt['plan_sha256']):
+        raise ValueError('Only the immutable first v1 infrastructure stop can be amended')
+    verify_source(clone, original['source_commit'], original['code_files'])
+    now = code_record()
+    changed = {n for n in now if now[n] != original['code_files'].get(n)}
+    if set(now) != set(original['code_files']) or not changed <= RECOVERY_CHANGED_FILES:
+        raise ValueError('Recovery may change only the reader/harness; engine/retrieval unchanged')
+    stopped = json.loads((previous / 'answers/stopped.json').read_text())
+    usage_record = json.loads((previous / 'answers/calls/usage.json').read_text())
+    if (stopped.get('reason') != 'Forbidden tool/event: isolation proof failed'
+            or stopped.get('restart') is not False or stopped.get('cli_attempts') != 1
+            or stopped.get('complete_calls') != 0 or usage_record.get('cli_attempts') != 1
+            or usage_record.get('completed_calls') != []
+            or list((previous / 'answers/calls').glob('*.events.jsonl')) != [previous / 'answers/calls/000.events.jsonl']
+            or (previous / 'answers/predictions.jsonl').read_text().strip()):
+        raise ValueError('Recovery requires exactly one stopped attempt, no judge/prediction/extra call')
+    first, usage = parse_events((previous / 'answers/calls/000.events.jsonl').read_text(), 'answer')
+    report = json.loads((previous / 'retrieval/report.json').read_text())
+    if (report.get('complete') is not True or report.get('model_calls') != 0
+            or report['plan_sha256'] != receipt['plan_sha256']
+            or report['contexts_sha256'] != sha256(previous / 'retrieval/contexts.jsonl')
+            or report['encoder_sha256'] != sha256(previous / 'retrieval/encoder-attestation.json')):
+        raise ValueError('Historical retrieval incomplete or modified')
+    contexts = [json.loads(line) for line in (previous / 'retrieval/contexts.jsonl').read_text().splitlines()]
+    if len(contexts) != 10 or {r['qid'] for r in contexts} != set(original['question_ids']):
+        raise ValueError('Historical contexts denominator changed')
+    qid, arm = original['question_ids'][0], original['arms'][0]
+    ctx = next(r for r in contexts if r['qid'] == qid)
+    prompt = original['prompts']['reader'] + json.dumps({'question': ctx['question'], 'observations': ctx['contexts'][arm]}, ensure_ascii=False)
+    import hashlib
+    record = {'index': 0, 'kind': 'answer', 'model': original['reader']['model'],
+              'effort': original['reader']['effort'], 'usage': usage, 'accepted': True,
+              'seconds': 90, 'seconds_is_reserved_upper_bound': True,
+              'events_sha256': sha256(previous / 'answers/calls/000.events.jsonl'),
+              'prompt_sha256': hashlib.sha256(prompt.encode()).hexdigest(),
+              'prompt_attestation': 'Reconstructed from frozen source/plan/contexts; original temporary input was not persisted',
+              'origin': 'revalidated historical completed reader; not a new CLI call'}
+    files = ('plan.json', 'receipt.json', 'retrieval/report.json', 'retrieval/contexts.jsonl',
+             'retrieval/encoder-attestation.json', 'answers/stopped.json', 'answers/predictions.jsonl',
+             'answers/calls/usage.json', 'answers/calls/000.events.jsonl', 'answers/calls/000.stderr')
+    historical = {'directory': str(previous), 'source_commit': original['source_commit'],
+                  'files_sha256': {str(previous / f): sha256(previous / f) for f in files},
+                  'qid': qid, 'arm': arm, 'answer': first, 'call': record,
+                  'previous_attempts': 1, 'new_calls_max': 39, 'reserved_cli_seconds': 90,
+                  'note': 'One response already observed; descriptive only. No restart of the old directory.'}
+    return original, historical
+
+
+def prepare(directory, revision, copy_proof, previous=None):
     clone, directory = private_path(directory)
     if directory.exists():
         raise ValueError('Fresh pilot directory required, no restart')
     verify_source(clone, revision, code_record())
+    original, historical = previous_evidence(clone, previous) if previous is not None else (None, None)
     _, copy_proof = private_path(copy_proof)
     copied = json.loads(copy_proof.read_text())
     if (copied.get('ok') is not True or copied.get('version') != '4.0.3'
-            or copied.get('source_commit') != revision or copied.get('production_modified') is not False):
+            or copied.get('source_commit') != (original['source_commit'] if original else revision)
+            or copied.get('production_modified') is not False):
         raise ValueError('Matching installed production-copy attestation required before pilot')
     if sha256(DATA) != DATA_SHA:
         raise ValueError('Observed BEAM dataset changed')
@@ -87,9 +146,35 @@ def prepare(directory, revision, copy_proof):
             'claim': 'Descriptive feasibility/accuracy only; no CI, ranking, superiority or comparison to published judge scores',
             'quota': 'Unknown remaining quota; usage tokens are NOT quota percentage; any limit/error stops, no API fallback'}
     validate_encoder({'encoding_profile': copied['encoding_profile']}, plan)
+    if original is not None:
+        invariant = set(plan) - {'version', 'source_commit', 'code_files'}
+        if any(plan[k] != original.get(k) for k in invariant):
+            raise ValueError('Recovery cannot change questions/models/prompts/caps/config/copy/CLI/runtime')
+        validate_encoder({'encoding_profile': json.loads((Path(historical['directory']) / 'retrieval/encoder-attestation.json').read_text())}, plan)
+        plan['historical'] = historical
+        # A second amended directory from the same stopped pilot would violate
+        # the global quota cap. Keep this exclusive ledger outside v1 evidence.
+        ledger = clone / '.local-qualification' / ('answer-pilot-recovery-' + sha256(Path(historical['directory']) / 'plan.json') + '.json')
+        if ledger.exists():
+            raise ValueError('Historical pilot already amended; no second quota budget')
     directory.mkdir(mode=0o700)
     write_json(directory / 'plan.json', plan)
-    write_json(directory / 'receipt.json', {'plan_sha256': sha256(directory / 'plan.json'), 'prepared_before_inference': True})
+    write_json(directory / 'receipt.json', {'plan_sha256': sha256(directory / 'plan.json'),
+                                          'prepared_before_inference': historical is None,
+                                          'prepared_before_further_inference': True})
+    if historical is not None:
+        with ledger.open('x') as f:
+            json.dump({'new_directory': str(directory), 'plan_sha256': sha256(directory / 'plan.json')}, f)
+        rdir = directory / 'retrieval'
+        rdir.mkdir(mode=0o700)
+        for name in ('contexts.jsonl', 'encoder-attestation.json'):
+            shutil.copyfile(Path(historical['directory']) / 'retrieval' / name, rdir / name)
+        report = json.loads((Path(historical['directory']) / 'retrieval/report.json').read_text())
+        report.update(plan_sha256=sha256(directory / 'plan.json'),
+                      reused_from=historical['directory'], new_encoder_runs=0,
+                      original_report_sha256=sha256(Path(historical['directory']) / 'retrieval/report.json'))
+        write_json(rdir / 'report.json', report)
+        write_json(directory / 'historical-usage.json', historical)
     return plan
 
 
@@ -104,6 +189,8 @@ def frozen(directory, *, check_cli=True):
         raise ValueError('Source/data changed')
     if sha256(Path(plan['copy_proof'])) != plan['copy_proof_sha256']:
         raise ValueError('Production-copy attestation changed')
+    if any(sha256(Path(p)) != sha for p, sha in plan.get('historical', {}).get('files_sha256', {}).items()):
+        raise ValueError('Preserved historical evidence changed; no further calls')
     observed = model_record(plan['encoder']['id'])
     observed.update(device='auto -> mps required', precision='native; actual parameter dtype attested before capture',
                     batch_size=32, max_seq_length=512)
@@ -231,13 +318,18 @@ def read_and_judge(directory):
     output.mkdir(mode=0o700, exist_ok=False)  # no rerun of paid/quota calls
     runner = CodexReader(output / 'calls', 'low', lambda: sample(directory), seconds=3600,
                          max_calls=40, max_tokens=400000, judge_model=JUDGE_MODEL, judge_effort='high')
+    historical = plan.get('historical')
+    if historical:
+        runner.seed(historical['call'])
+        runner.deadline -= historical['reserved_cli_seconds']
     results = []
     try:
         with (output / 'predictions.jsonl').open('x') as stream:
             for i, qid in enumerate(plan['question_ids']):
                 probe, ctx = golds[qid], by_id[qid]
                 for system in (plan['arms'] if i % 2 == 0 else list(reversed(plan['arms']))):
-                    answer = runner.answer(probe.question, ctx['contexts'][system])
+                    answer = (historical['answer'] if historical and qid == historical['qid'] and system == historical['arm']
+                              else runner.answer(probe.question, ctx['contexts'][system]))
                     correct = runner.judge(probe.question, answer, probe.gold.answers[0], list(probe.rubric))
                     row = {'qid': qid, 'arm': system, 'answer': answer, 'correct': correct, 'category': probe.gold.category}
                     results.append(row)
@@ -248,6 +340,9 @@ def read_and_judge(directory):
             raise RuntimeError('Incomplete paired answer pilot')
         write_json(output / 'report.json', {'complete': True, 'questions': 10, 'model_calls': len(runner.calls),
                    'reader_calls': 20, 'judge_calls': 20, 'tokens': runner.tokens,
+                   'new_cli_calls': runner.attempts - (1 if historical else 0),
+                   'historical_reader_calls': 1 if historical else 0,
+                   'historical_cli_seconds_reserved': historical['reserved_cli_seconds'] if historical else 0,
                    'cli_seconds': sum(c['seconds'] for c in runner.calls), 'quota_remaining': None,
                    'accuracy': {s: mean(r['correct'] for r in results if r['arm'] == s) for s in plan['arms']},
                    'api_usd': 0, 'ci95': None, 'claim': plan['claim'], 'models': [plan['reader'], plan['judge']],
@@ -265,12 +360,14 @@ def main(argv=None):
     parser.add_argument('--plan-dir', required=True, type=Path)
     parser.add_argument('--source-commit')
     parser.add_argument('--copy-proof', type=Path)
+    parser.add_argument('--previous-plan', type=Path,
+                        help='Explicit v1 infrastructure-stop amendment; reuse retrieval and first completed reader')
     args = parser.parse_args(argv)
     _, directory = private_path(args.plan_dir)
     if args.operation == 'prepare':
         if not args.source_commit or not args.copy_proof:
             parser.error('--source-commit and --copy-proof required')
-        prepare(directory, args.source_commit, args.copy_proof)
+        prepare(directory, args.source_commit, args.copy_proof, args.previous_plan)
     elif args.operation == 'retrieve':
         run_retrieval(directory)
     elif args.operation == '_retrieve':

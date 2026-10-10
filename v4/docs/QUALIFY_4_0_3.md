@@ -107,34 +107,39 @@ Un profil différent, une écriture source, un corpus réencodé au reopen ou un
 classement différent wheel/sdist/reopen sont des blocages non dérogeables.
 Une revue de copie ne vaut jamais GO de bascule ni preuve de supériorité.
 
-## Pilote réponses via ChatGPT (deuxième gros job, après copie relue)
+## Pilote réponses via ChatGPT — amendement explicite v2
 
-Le dossier `releases/4.0.3/qualification.json` donne le **source_commit** figé.
-Le helper sélectionne le Git local qui contient ce commit et vérifie toutes
-les sources moteur/banc. Aucun résultat historique n'est rejoué. Avant answer,
-Claude vérifie l'usage du quota inclus sans achat/recharge côté compte ; la
-facturation/quota restant ne sont pas observables par ce harness.
+La qualification complète4.0.3 v2 est terminée par Claude. Les artefacts et leur
+source53030c2 restent figés. Le pilote v1 a consommé un appel lecteur terminé,
+refusé à tort pour deux avertissements de démarrage ; les preuves restent
+immuables dans `.local-qualification/answer-pilot-production-v1/`.
+
+Le nouveau harness réutilise les contextes attestés et la première réponse
+revalidée, sans refaire ce CLI :39 appels nouveaux maximum,40 cumulés. Le nouveau
+reçu fournit sa source distincte de celle des artefacts. Exécuter hors sandbox,
+stop au premier échec ; **ne pas lancer retrieve**, déjà réutilisé par prepare :
 
 ```sh
+cd /Users/romain/Documents/Codex/2026-10-09/v/work/implementation
 pilot_commit=$(/Users/romain/.memory-os-runtime/venv-4.0.2/bin/python -c \
- 'import json; print(json.load(open("releases/4.0.3/qualification.json"))["source_commit"])')
+ 'import json; print(json.load(open("releases/answer-pilot-warnings-v2/qualification.json"))["source_commit"])')
 ./scripts/run_answer_pilot.sh prepare \
-  --plan-dir .local-qualification/answer-pilot-production-v2 --source-commit "$pilot_commit" \
-  --copy-proof .local-qualification/copy-4.0.3-v2/report.json
-./scripts/run_answer_pilot.sh retrieve \
-  --plan-dir .local-qualification/answer-pilot-production-v2
+  --plan-dir .local-qualification/answer-pilot-warnings-v2 --source-commit "$pilot_commit" \
+  --copy-proof .local-qualification/copy-4.0.3-v2/report.json \
+  --previous-plan .local-qualification/answer-pilot-production-v1
 ./scripts/run_answer_pilot.sh answer \
-  --plan-dir .local-qualification/answer-pilot-production-v2
+  --plan-dir .local-qualification/answer-pilot-warnings-v2
 ```
 
-Arrêt à la première erreur ; aucun relancement d'`answer` ni effacement/renommage
-pour contourner l'arrêt. `prepare` : zéro appel modèle ; `retrieve` : deux
-conversations privées, MPS/native/batch32 attested, zéro appel LLM ; `answer` :
-maximum40 tentatives, aucun API/clé, pas de sous-agent/outils/mémoire live.
-Le profil et les dépendances du pilote doivent correspondre au reçu copie.
-[Protocole figé](../bench/protocols/answer-pilot-production-v1.md). Publier seulement
-les chiffres descriptifs et limites ; relire les20 réponses pour les refus
-sémantiques (un JSON valide n'atteste pas l'utilité). Pas de GO dépenses implicite.
+Préparation : zéro modèle/LLM ; vérification Git/runtime/modèles/CLI/copie/preuves
+originaux, SHA des contextes conservé, ledger exclusif interdisant un deuxième
+budget. Aucun rename/delete/restart de v1. Avant answer, Claude vérifie le quota
+inclus sans achat/recharge : quota restant/facturation non observables par harness.
+Aucun appel d'API ni relancement automatique. Même Luna low/Astra high, plafonds,
+questions et configuration d'encodage ;**3510s CLI nouvelles +90s réservées**.
+[Amendement figé](../bench/protocols/answer-pilot-production-v2.md).
+Les scores restent descriptifs, sans comparaison officielle/claim ; relire les
+réponses pour refus/abstentions. Publication/bascule4.0.3 restent des GO distincts.
 
 ## Bascule et retour arrière : procédure pour un GO ultérieur seulement
 
