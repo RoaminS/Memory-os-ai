@@ -1,5 +1,10 @@
 # Encodage de faits par lots — préenregistrement du 2026-10-10
 
+**Verdict après exécution : ÉCHEC**, plus lent et rangs/vecteurs différents.
+Ce document décrit le lot v1 archivé ; voir [diagnostic](INDEXING_DIAG_V1.md)
+et [prochain protocole MPS](INDEXING_MPS_V2.md). Le batching des faits redevient
+opt-in dans la candidate suivante. Aucun critère v1 n'est révisé rétroactivement.
+
 GO Romain : code/tests locaux, mesures lourdes par Claude uniquement, deux jobs
 maximum. Aucun nouveau score BEAM, aucun appel LLM ni changement de production.
 
