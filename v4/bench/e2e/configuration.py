@@ -11,7 +11,7 @@ ALLOWED = {"fusion", "w_dense", "w_bm25", "w_entity", "candidates", "dense_norm"
 
 
 def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
-                    reranker: str | None = None) -> dict:
+                    reranker: str | None = None, *, profile: str = 'historical') -> dict:
     path = Path(__file__).resolve().parents[2] / "src/memory_os_v4/config.py"
     name = "_memory_eval_stdlib_config"
     module = sys.modules.get(name)
@@ -20,9 +20,15 @@ def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
+    if profile not in {'historical', 'beam-c4-4.0.2'}:
+        raise ValueError('Unknown frozen evaluation configuration profile')
     cfg = module.Config(data_dir=data_dir, embed_model=model, device="cpu",
-                        embed_batch_size=4, embed_max_seq_length=256, use_recency=False,
-                        rerank_model=None, store_backend="jsonl", bm25_profile="legacy", lexical_guard_k=0)
+                        embed_batch_size=4, embed_max_seq_length=512 if profile == 'beam-c4-4.0.2' else 256,
+                        use_recency=False, rerank_model=None, store_backend="jsonl")
+    if profile == 'historical':
+        cfg.bm25_profile, cfg.lexical_guard_k = 'legacy', 0
+    elif cfg.bm25_profile != 'scoped_literal' or cfg.lexical_guard_k != 3:
+        raise ValueError('BEAM requires approved 4.0.2 C4 retrieval defaults')
     result = asdict(cfg)
     overrides = overrides or {}
     if not isinstance(overrides, dict) or not set(overrides) <= ALLOWED:

@@ -58,9 +58,11 @@ def offline_env() -> dict:
 
 class ToolClient:
     def __init__(self, root: Path, model: str, transport: str = "stdio",
-                 overrides: dict | None = None, reranker: str | None = None, resident: bool = False):
+                 overrides: dict | None = None, reranker: str | None = None, resident: bool = False,
+                 config_profile: str = 'historical'):
         self.root, self.model, self.transport = root, model, transport
         self.overrides, self.reranker, self.resident = overrides, reranker, resident
+        self.config_profile = config_profile
         if resident and transport != "stdio":
             raise ValueError("Resident campaigns require real private MCP stdio")
         self.stack = AsyncExitStack()
@@ -72,7 +74,7 @@ class ToolClient:
             install(self.root / "usage.json", self.model)
             from memory_os_v4 import Config, MemoryV4
             from memory_os_v4 import server
-            cfg = Config(**resolved_config(self.model, str(self.root / "store"), self.overrides, self.reranker))
+            cfg = Config(**resolved_config(self.model, str(self.root / "store"), self.overrides, self.reranker, profile=self.config_profile))
             self.engine = MemoryV4(config=cfg)
             server.set_engine(self.engine)
         elif self.transport == "stdio":
@@ -89,7 +91,7 @@ class ToolClient:
             env["MEMORY_EVAL_USAGE_FILE"] = str(self.root / "usage.json")
             config_path = self.root / "engine-config.json"
             config_path.write_text(json.dumps(resolved_config(self.model, str(self.root / "store"),
-                                                              self.overrides, self.reranker)))
+                                                              self.overrides, self.reranker, profile=self.config_profile)))
             env["MEMORY_EVAL_CONFIG_FILE"] = str(config_path)
             # Absolute source roots, no production editable-package dependency.
             v4 = Path(__file__).resolve().parents[2]
