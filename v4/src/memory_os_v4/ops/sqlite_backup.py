@@ -192,7 +192,7 @@ def inventory(con, guard=lambda: None):
             digest.update((_json([_cell(value) for value in row]) + '\n').encode())
             count += 1
         tables[name] = {"columns": columns, "rows": count, "sha256": digest.hexdigest()}
-    head = con.execute("SELECT value_json FROM store_metadata WHERE key='meta'").fetchone()
+    head = con.execute("SELECT value_json FROM store_metadata WHERE key='metadata'").fetchone()
     meta = loads_strict(head[0].encode()) if head else {}
     identity = meta.get("store_instance_id")
     if not isinstance(identity, str) or not identity:
@@ -235,7 +235,7 @@ def snapshot(source, destination, guard=lambda: None, fault=lambda point: None):
     try:
         src.set_progress_handler(lambda: (guard(), 0)[1], 2000)
         src.execute("BEGIN")
-        src.execute("SELECT value_json FROM store_metadata WHERE key='meta'").fetchone()  # Pin before cut/identity.
+        src.execute("SELECT value_json FROM store_metadata WHERE key='metadata'").fetchone()  # Pin before cut/identity.
         fault("after_pin")
         before = inventory(src, guard)
         fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

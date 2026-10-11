@@ -117,7 +117,7 @@ def main():
                 if args.suite == 'full' and counts['tcp_cases'] != 23:
                     raise RuntimeError('The 23 physical TCP cases are required')
             report['commands'][-1]['counts'] = counts
-            minimum = 585 if name == 'v3' else (1572 if args.suite == 'full' else 1549)
+            minimum = 585 if name == 'v3' else (1573 if args.suite == 'full' else 1550)
             if counts['tests'] < minimum or any(counts[k] for k in ('failures', 'errors', 'skipped')):
                 raise RuntimeError(name + ' incomplete; evidence preserved')
         report['ok'] = True

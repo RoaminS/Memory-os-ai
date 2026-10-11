@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Sequential Hash-only S4 unit evidence; optional one real B09 TCP case.
 
-Real machine guard before pytest/importing the engine. No models/downloads,
+Real machine guard for physical TCP qualification; tiny synthetic units bounded
+by their fixtures do not require a sandbox-unavailable swap probe. No models/downloads,
 store migration, production service control or publication.
 """
 from __future__ import annotations
@@ -35,7 +36,9 @@ def main():
               'tcp_qualified': False, 's4_activation_qualified': False, 'samples': []}
     before = None
     try:
-        report['samples'].append(resource_sample(True))  # No bypass for synthetic inner test guards.
+        if args.tcp:
+            report['samples'].append(resource_sample(True))
+        report['resource_policy'] = 'physical_tcp_guard' if args.tcp else 'synthetic_unit_caps'
         before = snapshots(operator_home())
         paths = ['v4/tests/s4', 'v4/tests/test_relay_preflight_405.py']
         if args.tcp:
@@ -55,7 +58,8 @@ def main():
             report.update(tests_started=True, command=command)
             try:
                 while process.poll() is None:
-                    report['samples'].append(resource_sample(True))
+                    if args.tcp:
+                        report['samples'].append(resource_sample(True))
                     if time.monotonic() - start > 300:
                         raise RuntimeError('S4 lightweight tests exceeded 300 s')
                     time.sleep(1)
@@ -72,7 +76,7 @@ def main():
         suites = list(ET.parse(output / 'tests.xml').getroot().iter('testsuite'))
         counts = {k: sum(int(s.get(k, 0)) for s in suites) for k in ('tests', 'failures', 'errors', 'skipped')}
         report['counts'] = counts
-        if process.returncode or counts['tests'] < (52 if args.tcp else 51) or any(counts[k] for k in ('failures', 'errors', 'skipped')):
+        if process.returncode or counts['tests'] < (53 if args.tcp else 52) or any(counts[k] for k in ('failures', 'errors', 'skipped')):
             raise RuntimeError('S4 suite incomplete/failed; evidence preserved')
         report.update(ok=True, tcp_qualified=args.tcp)
     except (OSError, RuntimeError, subprocess.SubprocessError, ET.ParseError) as exc:

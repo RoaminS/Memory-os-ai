@@ -58,6 +58,13 @@ def logical(path, *, sealed=False):
         con.close()
 
 
+def test_inventory_reads_identity_from_real_store_metadata(case):
+    settings, engine = case
+    assert engine.store._connection.execute(
+        "SELECT value_json FROM store_metadata WHERE key='metadata'").fetchone()
+    assert logical(settings.store_dir / s4.DB)['store_instance_id'] == engine.store.meta['store_instance_id']
+
+
 def test_simulation_creates_no_ops_or_archive(case):
     settings, _ = case
     before = logical(settings.store_dir / s4.DB)
