@@ -64,6 +64,7 @@ class Config:
     no reproducible, above-noise gain on their own (see docs/ABLATIONS.md).
     """
 
+    project_registry: str | None = None  # approved snapshot, optional; never auto-created
     data_dir: str = "~/.memory-os-v4"
     embed_model: str = "ibm-granite/granite-embedding-97m-multilingual-r2"  # promoted 2026-09-13: wins LoCoMo 0.538 vs 0.527 and LME 0.8369 vs 0.832; multilingual (FR/EN); MiniLM remains valid via MEMORY_V4_EMBED_MODEL
     device: str = "auto"  # Preserve deployed 4.0.2 behavior; pin backend explicitly after operator GO
@@ -330,6 +331,7 @@ class Config:
         # An explicitly supplied nonzero guard still fails validation if incompatible.
         guard_default = d.lexical_guard_k if profile == "scoped_literal" and bm25 and not lexical_first else 0
         return cls(
+            project_registry=_env_opt_str("MEMORY_V4_PROJECT_REGISTRY", d.project_registry),
             data_dir=_env_str("MEMORY_V4_DIR", d.data_dir),
             maintenance_mode=_env_str("MEMORY_V4_MAINTENANCE_MODE", d.maintenance_mode),
             store_backend=_env_str("MEMORY_V4_STORE_BACKEND", d.store_backend),

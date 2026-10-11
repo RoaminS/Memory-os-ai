@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "Context": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "root": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Root",
+          "type": "string"
+        },
+        "git_root_hint": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Root Hint"
+        },
+        "remote_hint": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remote Hint"
+        }
+      },
+      "required": [
+        "id",
+        "root"
+      ],
+      "title": "Context",
+      "type": "object"
+    },
+    "Project": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^prj_[a-z0-9][a-z0-9._-]{0,75}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "contexts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Context"
+          },
+          "title": "Contexts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "Project",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "projects": {
+      "items": {
+        "$ref": "#/$defs/Project"
+      },
+      "title": "Projects",
+      "type": "array"
+    }
+  },
+  "required": [
+    "projects"
+  ],
+  "title": "RegistryDocument",
+  "type": "object"
+}

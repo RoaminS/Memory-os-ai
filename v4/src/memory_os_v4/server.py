@@ -11,6 +11,8 @@ traceback: they are logged server-side and returned as
 
 from __future__ import annotations
 
+from .projects import ProjectError, matches as project_matches
+
 import argparse
 import asyncio
 import json
@@ -86,15 +88,15 @@ def _project_of(value: str | None) -> str | None:
     project -> ``None``, which the engine already treats as "no filter".
     A shared server serves many projects, so it runs with MEMORY_V4_PROJECT=*."""
     scope = value if value is not None else default_project()
-    return None if scope == ALL_PROJECTS else scope
+    return None if scope == ALL_PROJECTS else get_engine().projects.resolve(scope, read=True)
 
 
 def _write_project_of(value: str | None) -> str:
     """Write target: always a concrete label, never the ``"*"`` wildcard."""
     if value is not None and value != ALL_PROJECTS:
-        return value
+        return get_engine().projects.resolve(value)
     fallback = default_project()
-    return "default" if fallback == ALL_PROJECTS else fallback
+    return get_engine().projects.resolve("default" if fallback == ALL_PROJECTS else fallback)
 
 
 # ------------------------------------------------------------------- helpers
@@ -315,7 +317,7 @@ def _h_timeline(engine: MemoryV4, args: models.TimelineIn) -> dict:
 
 
 def _h_block_get(engine: MemoryV4, args: models.BlockGetIn) -> dict:
-    blocks = engine.blocks.all(project=_project_of(args.project), scope=args.scope)
+    blocks = engine.blocks.all(project=None if args.scope == "global" else _project_of(args.project), scope=args.scope)
     if args.name:
         blocks = {key: text for key, text in blocks.items() if key == args.name or key.endswith("/" + args.name)}
         if not blocks:
@@ -324,7 +326,7 @@ def _h_block_get(engine: MemoryV4, args: models.BlockGetIn) -> dict:
 
 
 def _h_block_set(engine: MemoryV4, args: models.BlockSetIn) -> dict:
-    project = _write_project_of(args.project)
+    project = "default" if args.scope == "global" else _write_project_of(args.project)
     kwargs = {"project": project, "scope": args.scope}
     limit = engine.blocks.char_limit
     if args.mode == "append":
@@ -369,7 +371,7 @@ def _h_forget(engine: MemoryV4, args: models.ForgetIn) -> dict:
     forgotten: list[str] = []
     if args.item_id:
         item = engine.store.get(args.item_id)
-        if item is None or (project is not None and item.project != project):
+        if item is None or (not project_matches(item.project, project)):
             raise ValueError(f"unknown item_id in project scope: {args.item_id}")
         if engine.forget(args.item_id, reason=args.reason, project=project):
             forgotten.append(args.item_id)
@@ -436,7 +438,7 @@ def _h_list_documents(engine: MemoryV4, args: models.ListDocumentsIn) -> dict:
     project = _project_of(args.project)
     docs: dict[str, dict] = {}
     for it in engine.store.all(include_deleted=False):
-        if it.kind != "doc" or (project is not None and it.project != project):
+        if it.kind != "doc" or (not project_matches(it.project, project)):
             continue
         ref = it.doc_ref or it.id
         entry = docs.setdefault(ref, {"doc_ref": ref, "project": it.project, "name": None, "chunks": 0})
@@ -455,7 +457,7 @@ def _h_search_occurrences(engine: MemoryV4, args: models.SearchOccurrencesIn) ->
     matches = [
         it
         for it in engine.store.all(include_deleted=False)
-        if (project is None or it.project == project) and keyword_tokens.issubset(set(tokenize(it.text)))
+        if (project_matches(it.project, project)) and keyword_tokens.issubset(set(tokenize(it.text)))
     ]
     matches.sort(key=lambda it: it.event_time, reverse=True)
     top = matches[: args.limit]
@@ -581,13 +583,17 @@ def _request_scope(name: str, payload: dict) -> str:
     """Canonicalize actual operation targets, preserving all-project reads/writes."""
     # Resolve omitted projects before fingerprinting: changing the server default
     # changes the actual target, while explicit and implicit equal targets retry.
+    if payload.get("scope") == "global":
+        payload.pop("project", None)
+        return json.dumps(["global", "global"])
     project_field = "project_label" if name == "memory_chat_save" else "project"
     if name in {"memory_chat_save", "memory_add_facts", "memory_ingest", "memory_block_set"}:
         target = _write_project_of(payload.get(project_field))
     elif name == "memory_migrate_v3":
         target = ALL_PROJECTS  # Migration affects the whole store, preserving record projects.
     else:
-        target = payload.get(project_field) or default_project()
+        target = _project_of(payload.get(project_field))
+        target = ALL_PROJECTS if target is None else str(target)
     if project_field in payload:
         payload[project_field] = target
     if payload.get("scope") == "global":
@@ -644,6 +650,8 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         return engine.execute_request(operation, scope, payload, getattr(parsed, "request_id", None),
                                       lambda: handler(engine, parsed),
                                       raw_args_sha256=raw_args_sha256(arguments))
+    except ProjectError as exc:
+        return {"ok": False, "error": str(exc), "code": str(exc).split(":", 1)[0], "outcome": "not_started"}
     except MaintenanceDenied as exc:
         return {"ok": False, "error": str(exc), "code": exc.code, "outcome": "not_started"}
     except Exception as exc:  # noqa: BLE001 - deliberately broad: never leak a traceback to the client

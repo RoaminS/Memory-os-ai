@@ -5,6 +5,8 @@ rerank, and MMR diversification.
 
 from __future__ import annotations
 
+from .projects import matches
+
 import logging
 import math
 import re
@@ -61,7 +63,7 @@ def _passes_filters(
         return False
     if kinds is not None and item.kind not in kinds:
         return False
-    if project is not None and item.project != project:
+    if not matches(item.project, project):
         return False
     if at_time is not None and not is_valid_at(item, at_time):
         return False
@@ -532,7 +534,7 @@ class HybridRetriever:
                         continue
                     if kinds is not None and nitem.kind not in kinds:
                         continue
-                    if project is not None and nitem.project != project:
+                    if not matches(nitem.project, project):
                         continue
                     if at_time is not None and not is_valid_at(nitem, at_time):
                         continue
@@ -635,7 +637,7 @@ class HybridRetriever:
                     continue
                 if kinds is not None and nitem.kind not in kinds:
                     continue
-                if project is not None and nitem.project != project:
+                if not matches(nitem.project, project):
                     continue
                 if at_time is not None and not is_valid_at(nitem, at_time):
                     continue

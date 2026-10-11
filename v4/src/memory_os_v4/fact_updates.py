@@ -6,6 +6,8 @@ subject id and predicate describe one state; multi-valued identities coexist.
 """
 from __future__ import annotations
 
+from .projects import matches
+
 from collections import defaultdict
 import unicodedata
 
@@ -63,7 +65,7 @@ def validate_replacements(item: MemoryItem, store: Store) -> None:
 
 def replacement_sweep(store: Store, *, project: str | None = None, dry_run: bool = False,
                       focus: MemoryItem | None = None) -> list[tuple[str, str]]:
-    facts = [it for it in store.all(False) if it.kind == "fact" and (project is None or it.project == project)]
+    facts = [it for it in store.all(False) if it.kind == "fact" and (matches(it.project, project))]
     if focus is not None:
         targets = set(focus.replaces) | {focus.id}
         facts = [it for it in facts if it.id in targets or

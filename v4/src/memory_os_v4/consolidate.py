@@ -8,6 +8,8 @@ lowers importance.
 
 from __future__ import annotations
 
+from .projects import matches
+
 import math
 from collections import Counter, defaultdict
 
@@ -27,7 +29,7 @@ def dedup_sweep(
     validity windows are preserved. Returns (kept, removed)."""
     candidates = [it for it in store.all(include_deleted=False) if it.kind in {"fact", "belief", "summary"}
                   and it.valid_until is None and it.invalidated_by is None
-                  and (project is None or it.project == project)]
+                  and (matches(it.project, project))]
     candidates.sort(key=lambda it: it.created_at)
     removed: set[str] = set()
     pairs: list[tuple[str, str]] = []
@@ -61,7 +63,7 @@ def decay(store: Store, config: Config, now: float, dry_run: bool = False, proje
     deleted). Returns the number of items updated."""
     updated = 0
     for item in store.all(include_deleted=False):
-        if project is not None and item.project != project:
+        if not matches(item.project, project):
             continue
         if item.kind == "episode":
             age_days = (now - item.event_time) / 86400.0
@@ -102,7 +104,7 @@ def summary_proposals(
     so a client LLM can write a summary via ``add_facts(kind="summary")``."""
     by_project: dict[str, list] = defaultdict(list)
     for item in store.all(include_deleted=False):
-        if item.kind == "episode" and (project is None or item.project == project):
+        if item.kind == "episode" and (matches(item.project, project)):
             by_project[item.project].append(item)
 
     proposals: list[dict] = []

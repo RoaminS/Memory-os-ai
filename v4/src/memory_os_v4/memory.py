@@ -20,6 +20,7 @@ from . import consolidate as consolidate_mod
 from .blocks import BlockStore
 from .bm25 import BM25Index
 from .config import Config
+from .projects import ProjectRegistry, matches
 from .embed import Embedder, HashEmbedder
 from .entities import EntityIndex, extract_entities
 from .extract import normalize_client_facts
@@ -110,6 +111,7 @@ class MemoryV4:
         self.config = config or Config.from_env()
         if data_dir is not None:
             self.config.data_dir = data_dir
+        self.projects = ProjectRegistry.load(self.config.project_registry)
         self._lock = RLock()
 
         self.config.validate_lexical_policy()
@@ -762,7 +764,7 @@ class MemoryV4:
         """
         with self._lock:
             item = self.store.get(item_id)
-            if item is None or item.deleted or (project is not None and item.project != project):
+            if item is None or item.deleted or (not matches(item.project, project)):
                 return False
             item.deleted = True
             self.store.append(item)
@@ -907,7 +909,7 @@ class MemoryV4:
         with self._lock:
             now = time.time()
             live = [
-                it for it in self.store.all(include_deleted=False) if project is None or it.project == project
+                it for it in self.store.all(include_deleted=False) if matches(it.project, project)
             ]
 
             episodes = sorted(
@@ -1023,7 +1025,7 @@ class MemoryV4:
 
     @_requires_open
     def status(self, project: str | None = None) -> dict:
-        items = [it for it in self.store.all(False) if project is None or it.project == project]
+        items = [it for it in self.store.all(False) if matches(it.project, project)]
         ids = {it.id for it in items}
         counts: dict[str, int] = {}
         for it in items:

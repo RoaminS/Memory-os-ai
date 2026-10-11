@@ -12,6 +12,8 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .projects import ProjectScope
+
 logger = logging.getLogger("memory_os_v4")
 DEFAULT_BLOCKS = ("user_profile", "project_state", "working_rules")
 
@@ -66,6 +68,8 @@ class BlockStore:
         return None if scope == "global" else ("default" if project == "*" else project)
 
     def get(self, name: str, project: str = "default", scope: str = "project") -> str:
+        if isinstance(project, ProjectScope) and scope == "project":
+            return self.all(project=project).get(name, "")
         target = self._target(project, scope)
         block = self._blocks.get((target, name))
         if block is None and scope == "project":
@@ -104,6 +108,20 @@ class BlockStore:
         if project is None or project == "*":
             result.update({f"{target}/{name}": block.text for (target, name), block in self._blocks.items()
                            if target is not None})
+        elif isinstance(project, ProjectScope):
+            # A canonical block is an explicit new state. Otherwise preserve unique
+            # alias content; conflicting legacy values require operator resolution.
+            names = {name for (target, name) in self._blocks if target in project.labels}
+            for name in names:
+                current = self._blocks.get((str(project), name))
+                values = {b.text for (target, key), b in self._blocks.items()
+                          if target in project.labels and key == name}
+                if current is not None:
+                    result[name] = current.text
+                elif len(values) == 1:
+                    result[name] = next(iter(values))
+                else:
+                    raise ValueError("project_alias_block_conflict: set an explicit canonical block")
         else:
             result.update({name: block.text for (target, name), block in self._blocks.items() if target == project})
         return result
