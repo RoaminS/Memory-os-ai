@@ -220,6 +220,7 @@ class Relay:
     def __init__(self, send: MemoryObjectSendStream) -> None:
         self._send = send
         self.last_error = None
+        self.handshake = None
 
     async def control(self, op: Operation) -> Any:
         """Bound only control reads, not slow searches or mutations. Cancellation
@@ -306,6 +307,7 @@ async def serve(settings: OpsSettings) -> None:
             await send.aclose()
             raise SystemExit(1)
         relay = Relay(send)
+        relay.handshake = {"name": init.serverInfo.name, "version": init.serverInfo.version}
         durable = DurableRelay(relay, settings)
         server = Server(init.serverInfo.name, version=init.serverInfo.version,
                         instructions=init.instructions)

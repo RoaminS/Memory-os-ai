@@ -86,6 +86,8 @@ def _server(settings: OpsSettings) -> list[Check]:
     else:
         checks.append(Check("ready", "FAIL", f"/ready → {status}",
                             "build_unqualified: set MEMORY_V4_BUILD_COMMIT; indexes_not_ready: see RB-02"))
+    if status == 200:
+        checks += _capabilities(info)
     return checks
 
 
@@ -198,6 +200,8 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
                         f"{journal['bytes']} bytes; oldest {journal['oldest_age_s']:.0f} s",
                         "memory_request_status without ID via each relay; never repeat an unresolved mutation"))
     checks += _clients(home)
+    from .connection_proof import inspect_proofs
+    checks += [Check(**row) for row in inspect_proofs(settings)]
     return checks
 
 
@@ -212,3 +216,31 @@ def render(checks: list[Check]) -> str:
     warns = sum(c.status == "WARN" for c in checks)
     lines.append(f"\n{len(checks)} checks: {len(checks) - fails - warns} pass, {warns} warn, {fails} fail")
     return "\n".join(lines)
+
+
+def _capabilities(info: dict) -> list[Check]:
+    """Compare explicit deployment expectations, not this host's default Config."""
+    from .. import __version__
+    caps = info.get("capabilities")
+    if not isinstance(caps, dict) or caps.get("schema_version") != 1:
+        return [Check("capabilities", "WARN", "deployed capabilities unknown (older server)")]
+    try:
+        values = {"SERVER_VERSION": caps["engine"]["version"], "BACKEND": caps["store"]["backend"],
+                  "DEVICE": caps["encoding"]["profile"]["device"],
+                  "REGISTRY_SHA256": caps["projects"]["registry_sha256"]}
+        consistent = (values["SERVER_VERSION"] == info["version"]
+                      and caps["engine"]["commit"] == info["commit"]
+                      and caps["encoding"]["profile"] == info["encoding_profile"]
+                      and values["BACKEND"] in {"jsonl", "sqlite_s1"})
+        mismatches = [key for key, value in values.items()
+                      if os.environ.get("MEMORY_V4_EXPECT_" + key) is not None
+                      and os.environ["MEMORY_V4_EXPECT_" + key] != value]
+        status = "PASS" if consistent and not mismatches else "FAIL"
+        checks = [Check("capabilities", status,
+                        "server capabilities consistent" if status == "PASS" else
+                        "deployed contract mismatch: " + ",".join(mismatches or ["response_identity"])),
+                  Check("relay-artifact", "PASS" if __version__ == values["SERVER_VERSION"] else "WARN",
+                        f"doctor environment package={__version__}; client relay artifacts are separate")]
+    except (KeyError, TypeError):
+        return [Check("capabilities", "FAIL", "malformed deployed capability contract")]
+    return checks

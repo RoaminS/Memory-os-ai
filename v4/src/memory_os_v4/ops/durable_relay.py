@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import uuid
+import time
 
 import mcp.types as types
 
@@ -40,6 +41,7 @@ class DurableRelay:
         self.transport, self.settings = transport, settings
         self.journal = None
         self.identity = None
+        self.connection_observation = None
 
     def ledger(self):
         if self.journal is None:
@@ -77,6 +79,7 @@ class DurableRelay:
             if not args.get("request_id"):
                 return response({**journal.status(), "connection": {
                     "last_error": getattr(self.transport, "last_error", None),
+                    "observation": self.connection_observation,
                     "live_probe": False, "control_deadline_s": 4,
                     "catalog": "session_snapshot", "relay_version": __version__}})
             # Includes resolved local entries so an explicit retry is a status read, never a replay.
@@ -95,6 +98,16 @@ class DurableRelay:
         if not mutation:
             if name == "memory_status":
                 result = await self.control(lambda s: s.call_tool(name, args))
+                data = body(result)
+                caps = data.get("capabilities")
+                if isinstance(caps, dict):
+                    from .connection_proof import artifact
+                    self.connection_observation = {
+                        "client_id": os.environ.get("MEMORY_V4_CLIENT_ID", "unknown"),
+                        "endpoint_sha256": hashlib.sha256(self.settings.url.encode()).hexdigest(),
+                        "observed_at": time.time(), "successful_control": True,
+                        "relay": artifact(), "server": caps.get("engine", {})}
+
             else:
                 result = await self.transport.submit(lambda s: s.call_tool(name, args), replay=name in READS)
             if name == "memory_session_brief":

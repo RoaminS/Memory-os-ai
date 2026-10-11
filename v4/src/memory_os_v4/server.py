@@ -177,6 +177,9 @@ def _hit_dict(hit) -> dict:
 def _h_status(engine: MemoryV4, args: models.StatusIn) -> dict:
     s = dict(engine.status(project=_project_of(args.project)))
     s["maintenance"] = engine.maintenance_status()
+    from .capabilities import deployed
+    from .readiness import build_identity
+    s["capabilities"] = deployed(engine, build_identity())
     if _qualification.enabled:
         s["qualification"] = _qualification.snapshot()
     s["last_consolidated"] = _iso(s.get("last_consolidated"))
@@ -706,7 +709,8 @@ def _build_http_app(host: str, port: int):
     from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
     from .http_security import LocalHTTPGuard, load_http_token, local_security_settings
-    from .readiness import build_identity, engine_readiness
+    from .readiness import build_identity
+    from .capabilities import readiness_snapshot
 
     settings = local_security_settings(host, port)
     token = load_http_token(os.environ.get("MEMORY_V4_TOKEN_FILE"))
@@ -721,11 +725,12 @@ def _build_http_app(host: str, port: int):
                              "engine_loaded": _engine is not None, **identity})
 
     async def ready(request):
-        ok, reason = await anyio.to_thread.run_sync(engine_readiness, _engine)
+        ok, reason, capabilities = await anyio.to_thread.run_sync(readiness_snapshot, _engine, identity)
         if ok and (identity["commit"] is None or identity["source_dirty"]):
             ok, reason = False, "build_unqualified"
         return JSONResponse({"ok": ok, "ready": ok, "reason": reason,
-                             "encoding_profile": _engine._compute_profile() if ok else None,
+                             "encoding_profile": capabilities["encoding"]["profile"] if ok else None,
+                             "capabilities": capabilities if ok else None,
                              "server": "memory-os-v4", **identity}, status_code=200 if ok else 503)
 
     @contextlib.asynccontextmanager
