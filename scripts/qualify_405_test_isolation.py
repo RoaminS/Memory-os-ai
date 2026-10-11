@@ -80,7 +80,7 @@ def main():
     try:
         for name, paths in cases:
             command = [sys.executable, '-B', '-m', 'pytest', '-c', str(ROOT / 'pyproject.toml'),
-                       '-q', '-p', 'no:cacheprovider',
+                       '-q', '-p', 'no:cacheprovider', '-o', 'faulthandler_timeout=60',
                        '--basetemp=' + str(output / (name + '-tmp')),
                        '--junitxml=' + str(output / (name + '.xml')), *paths]
             report['samples'].append(resource_sample(args.suite == 'full'))
@@ -91,8 +91,9 @@ def main():
                 try:
                     while process.poll() is None:
                         report['samples'].append(resource_sample(args.suite == 'full'))
-                        if time.monotonic() - start > 900:
-                            raise RuntimeError(name + ' exceeded 900 s')
+                        limit = 900 if args.suite == 'full' else 300
+                        if time.monotonic() - start > limit:
+                            raise RuntimeError(name + f' exceeded {limit} s')
                         time.sleep(1)
                 finally:
                     if process.poll() is None:
@@ -114,16 +115,18 @@ def main():
                 counts['tcp_cases'] = sum(c.get('classname', '').split('.')[-1] in
                                          {'test_server_http_e2e', 'test_ops_e2e', 'test_l3_tcp'}
                                          for c in cases_xml)
-                if args.suite == 'full' and counts['tcp_cases'] != 23:
-                    raise RuntimeError('The 23 physical TCP cases are required')
+                if args.suite == 'full' and counts['tcp_cases'] != 24:
+                    raise RuntimeError('The 24 physical TCP cases are required')
             report['commands'][-1]['counts'] = counts
-            minimum = 585 if name == 'v3' else (1573 if args.suite == 'full' else 1550)
+            minimum = 585 if name == 'v3' else (1606 if args.suite == 'full' else 1582)
             if counts['tests'] < minimum or any(counts[k] for k in ('failures', 'errors', 'skipped')):
                 raise RuntimeError(name + ' incomplete; evidence preserved')
         report['ok'] = True
         report['tcp_qualified'] = args.suite == 'full'
     except (OSError, RuntimeError, subprocess.SubprocessError, ET.ParseError) as exc:
         report['error'] = str(exc)
+    except KeyboardInterrupt:
+        report['error'] = 'Interrupted; incomplete evidence preserved'
     finally:
         after = snapshots(operator_home())
         report['configs_after'] = after

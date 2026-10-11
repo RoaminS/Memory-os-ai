@@ -80,10 +80,10 @@ def cmd_restore_drill(args, s: OpsSettings) -> int:
     if args.backend == "sqlite":
         from .sqlite_backup import restore_drill as sqlite_drill
         r = sqlite_drill(s, Path(args.archive) if args.archive else None,
-                         apply=args.apply, start_server=not args.no_server)
+                         apply=args.apply, start_server=not args.no_server, reconcile=args.reconcile_forgets)
         _print_json(r)
         return 0 if r["ok"] else 1
-    if args.apply:
+    if args.apply or args.reconcile_forgets:
         _print_json({"ok": False, "code": "invalid_options", "error": "--apply requires SQLite S4"})
         return 2
     from .backup import restore_drill
@@ -160,6 +160,18 @@ def cmd_setup(args, s: OpsSettings) -> int:
     from .auth import create_token
     from .clients import CLIENTS, snippet
 
+    sqlite_jobs = getattr(args, 'sqlite_s4_jobs', False)
+    if sqlite_jobs:
+        import os
+        import re
+        from ..config import Config
+        cfg = Config.from_env()
+        commit = os.environ.get('MEMORY_V4_BUILD_COMMIT', '')
+        if cfg.store_backend != 'sqlite_s1' or not re.fullmatch(r'[0-9a-f]{40}', commit):
+            _print_json({'ok': False, 'code': 'sqlite_s4_not_configured',
+                         'error': 'Inactive SQLite templates require explicit sqlite_s1 and qualified build commit; token unchanged'})
+            return 2
+
     try:  # one-command installation: the token is created when missing (never printed, never overwritten)
         created = create_token(s.token_file)
     except (ValueError, OSError) as exc:
@@ -180,6 +192,15 @@ def cmd_setup(args, s: OpsSettings) -> int:
         "HF_HUB_OFFLINE": "1",
         "TOKENIZERS_PARALLELISM": "false",
     }
+    if sqlite_jobs:
+        env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1', MEMORY_V4_BUILD_COMMIT=commit,
+                   MEMORY_V4_EMBED_MODEL=cfg.embed_model, MEMORY_V4_DEVICE=cfg.device,
+                   MEMORY_V4_HASH_DIM=str(cfg.hash_dim), MEMORY_V4_EMBED_DTYPE=cfg.embed_dtype,
+                   MEMORY_V4_EMBED_BATCH_SIZE=str(cfg.embed_batch_size),
+                   MEMORY_V4_EMBED_MAX_SEQ_LENGTH=str(cfg.embed_max_seq_length),
+                   MEMORY_V4_SQLITE_EMBEDDING_NAMESPACE=cfg.sqlite_embedding_namespace,
+                   MEMORY_V4_BM25_PROFILE=cfg.bm25_profile,
+                   MEMORY_V4_LEXICAL_GUARD_K=str(cfg.lexical_guard_k))
     label = s.service_label or "local.memory-os-v4"
     host = urlsplit(s.url).hostname or "127.0.0.1"
     try:
@@ -271,10 +292,10 @@ def cmd_setup(args, s: OpsSettings) -> int:
             [py, "-m", "memory_os_v4.ops.cli", "backup", "--backend", "sqlite", "--online", "--apply"],
             hour=4, nice=15, env=env, log=s.ops_dir / "logs/backup.err")
         jobs[f"{label}.restore-drill"] = _plist(f"{label}.restore-drill",
-            [py, "-m", "memory_os_v4.ops.cli", "restore-drill", "--backend", "sqlite", "--apply", "--no-server"],
+            [py, "-m", "memory_os_v4.ops.cli", "restore-drill", "--backend", "sqlite", "--apply", "--reconcile-forgets"],
             hour=3, minute=30, weekday=1, nice=15, env=env, log=s.ops_dir / "logs/restore-drill.err")
-        print("# SQLite S4 templates only: no activation/migration. Weekly drill is FILES/QUARANTINE, "
-              "not proof of service reopening; qualifying R5/identity recovery remains mandatory.")
+        print("# SQLite S4 templates only: no activation/migration. Weekly private drill requires current "
+              "authority, qualified build commit and existing offline encoder; no production promotion.")
     if args.write_launchd:
         out = Path(args.write_launchd).expanduser()
         out.mkdir(parents=True, exist_ok=True)
@@ -324,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("restore-drill")
     r.add_argument("--backend", choices=("jsonl", "sqlite"), default="jsonl")
     r.add_argument("--apply", action="store_true", help="SQLite only: execute a quarantined file drill")
+    r.add_argument("--reconcile-forgets", action="store_true", help="SQLite only: current-authority reconciliation and new copy identity; required for private server")
     r.add_argument("--archive")
     r.add_argument("--no-server", action="store_true")
     k = sub.add_parser("hook")

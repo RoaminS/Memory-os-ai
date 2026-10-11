@@ -1,6 +1,12 @@
 """Small Hash/SQLite fixtures: pinned cut, failure boundaries, crypto/quarantine."""
 import io
 import gzip
+import datetime as dt
+import hashlib
+import json
+import signal
+import subprocess
+import sys
 import os
 from pathlib import Path
 import plistlib
@@ -14,7 +20,7 @@ from memory_os_v4.ops import sqlite_backup as s4
 from memory_os_v4.ops import storage
 from memory_os_v4.ops.auth import write_secret_file
 from memory_os_v4.ops.backup import BackupError, encrypt, verified_archives
-from memory_os_v4.ops.cli import _plist
+from memory_os_v4.ops.cli import _plist, cmd_setup
 from memory_os_v4.ops.health import last_drill
 from memory_os_v4.ops.settings import OpsSettings
 
@@ -201,3 +207,120 @@ def test_weekly_template_is_nice_and_does_not_activate_anything(tmp_path):
     assert value['Nice'] == 15
     assert value['StartCalendarInterval'] == {'Weekday': 1, 'Hour': 3, 'Minute': 30}
     assert not (tmp_path / 'drill.err').exists()
+
+
+@pytest.mark.parametrize('backend,commit', [('jsonl', 'a' * 40), ('sqlite_s1', 'invalid')])
+def test_s4_job_templates_refuse_unqualified_backend_build_before_token(case, monkeypatch, backend, commit):
+    settings, _ = case
+    monkeypatch.setenv('MEMORY_V4_STORE_BACKEND', backend)
+    monkeypatch.setenv('MEMORY_V4_BUILD_COMMIT', commit)
+    assert cmd_setup(SimpleNamespace(sqlite_s4_jobs=True), settings) == 2
+    assert not settings.token_file.exists()
+
+
+def test_reconciled_drill_requires_authority_and_keeps_production_quarantined(case, budget, monkeypatch):
+    from memory_os_v4.ops import sqlite_probe
+    settings, engine = case
+    record = s4.backup(settings, apply=True)
+    assert record['ok'], record
+    engine.forget(engine.store.all()[0].id, project='p')
+    calls = []
+
+    def fake_private_probe(root, supplied, recovery, *, guard):
+        calls.append(recovery['store_instance_id'])
+        assert recovery['forget_reconciliation'] == 'complete'
+        return {'match': True, 'private_only': True, 'corpus_reencodings': 0}
+    monkeypatch.setattr(sqlite_probe, 'probe', fake_private_probe)
+    result = s4.restore_drill(settings, apply=True, start_server=True, reconcile=True)
+    assert result['ok'] and result['level'] == 'service' and result['private_reopen_verified'], result
+    assert result['quarantined'] and not result['reopening_allowed']
+    assert result['forgets_replayed'][0]['outcome'] == 'deleted'
+    assert calls == [result['store_instance_id']]
+    assert last_drill(settings)['private_reopen_verified']
+
+
+def test_late_authority_mutation_does_not_report_private_drill_success(case, budget, monkeypatch):
+    from memory_os_v4.ops import sqlite_probe
+    settings, engine = case
+    assert s4.backup(settings, apply=True)['ok']
+
+    def fake_private_probe(root, supplied, recovery, *, guard):
+        engine.add_episode('Synthetic concurrent late mutation', project='p')
+        return {'match': True}
+    monkeypatch.setattr(sqlite_probe, 'probe', fake_private_probe)
+    result = s4.restore_drill(settings, apply=True, start_server=True, reconcile=True)
+    assert not result['ok'] and not result['private_reopen_verified']
+    assert 'Authority changed' in result['error'] and Path(result['preserved_partial']).exists()
+
+
+def test_rotation_keeps_pinned_unknown_and_modified_archives(case):
+    settings, _ = case
+    settings.backup_dir.mkdir()
+    records = []
+    for i in range(45):
+        day = dt.datetime(2025, 1, 1) + dt.timedelta(days=i)
+        stamp = day.strftime('%Y%m%d-%H%M%S')
+        name = s4.PREFIX + stamp + '.mosb'
+        path = settings.backup_dir / name
+        path.write_bytes(b'synthetic archive ' + str(i).encode())
+        records.append({'ok': True, 'qualified': True, 'verified': True, 'archive': name,
+                        'archive_sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'stamp': stamp})
+    log = settings.ops_dir / 'logs/backup.jsonl'
+    log.parent.mkdir(parents=True)
+    log.write_text(''.join(json.dumps(r) + '\n' for r in records))
+    unknown = settings.backup_dir / (s4.PREFIX + 'unknown.mosb')
+    unknown.write_bytes(b'keep unqualified')
+    modified = settings.backup_dir / records[0]['archive']
+    modified.write_bytes(b'keep altered evidence')
+    pinned = records[-1]['archive']
+    removed = s4.rotate_archives(settings, pinned=pinned)
+    assert removed and (settings.backup_dir / pinned).exists() and unknown.exists() and modified.exists()
+    # A vanished pinned archive must never trigger a second round of rotation.
+    before = {p.name for p in settings.backup_dir.iterdir()}
+    with pytest.raises(BackupError, match='Pinned'):
+        s4.rotate_archives(settings, pinned=s4.PREFIX + 'missing.mosb')
+    assert {p.name for p in settings.backup_dir.iterdir()} == before
+
+
+BACKUP_WORKER = '''
+import json,os,pathlib,signal,sys
+from types import SimpleNamespace
+from memory_os_v4.ops import sqlite_backup as s4
+from memory_os_v4.ops.settings import OpsSettings
+data,point,witness=sys.argv[1:]
+values=json.loads(data)
+for key in ('token_file','store_dir','backup_dir','backup_key','ops_dir'): values[key]=pathlib.Path(values[key])
+settings=OpsSettings(**values)
+s4.Budget=lambda _:SimpleNamespace(check=lambda:None)  # Synthetic fixed tiny fixture only.
+def fault(boundary):
+    if boundary==point: os.kill(os.getpid(),signal.SIGKILL)
+result=s4.backup(settings,apply=True,fault=fault)
+if not result['ok']: raise RuntimeError(result)
+with open(witness,'x') as stream:
+    stream.write(json.dumps(result));stream.flush();os.fsync(stream.fileno())
+os.kill(os.getpid(),signal.SIGKILL)
+'''
+
+
+@pytest.mark.parametrize('boundary', ['before_source_open', 'after_pin', 'before_backup', 'after_backup',
+                                      'after_snapshot_verify', 'before_archive_verify', 'before_publish', 'after_publish',
+                                      'before_registration', 'after_registration', 'after_acknowledgement'])
+def test_backup_sigkill_no_source_loss_and_only_intact_registered_snapshots(case, boundary, tmp_path):
+    settings, _ = case
+    before = logical(settings.store_dir / s4.DB)
+    witness = tmp_path / 'backup-ack.json'
+    process = subprocess.run([sys.executable, '-B', '-c', BACKUP_WORKER,
+                              json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in settings.__dict__.items()}),
+                              boundary, str(witness)], env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+                              capture_output=True, timeout=15)
+    assert process.returncode == -signal.SIGKILL, process.stderr.decode()[-1000:]
+    assert logical(settings.store_dir / s4.DB) == before
+    qualified = verified_archives(settings)
+    assert bool(qualified) is (boundary in {'after_registration', 'after_acknowledgement'})
+    for name, (sha, _) in qualified.items():
+        archive = settings.backup_dir / name
+        assert s4.sha256(archive) == sha and archive.stat().st_nlink == 1
+        target = tmp_path / ('verified-' + boundary)
+        manifest = s4.verify_archive(archive, b'k' * 32, target)
+        assert manifest['logical_inventory'] == before
+    assert witness.exists() is (boundary == 'after_acknowledgement')

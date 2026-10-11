@@ -42,7 +42,8 @@ def main():
         before = snapshots(operator_home())
         paths = ['v4/tests/s4', 'v4/tests/test_relay_preflight_405.py']
         if args.tcp:
-            paths += ['v4/tests/test_l3_tcp.py::test_S4_B09_read_only_window_keeps_reads_and_never_sends_mutation']
+            paths += ['v4/tests/test_l3_tcp.py::test_S4_B09_read_only_window_keeps_reads_and_never_sends_mutation',
+                      'v4/tests/test_l3_tcp.py::test_S4_B10_real_private_sqlite_restore_reconciles_forgets_and_reopens']
         command = [sys.executable, '-B', '-m', 'pytest', '-c', str(ROOT / 'pyproject.toml'), '-q',
                    '-p', 'no:cacheprovider', '--basetemp=' + str(output / 'pytest-tmp'),
                    '--junitxml=' + str(output / 'tests.xml'), *paths]
@@ -76,7 +77,7 @@ def main():
         suites = list(ET.parse(output / 'tests.xml').getroot().iter('testsuite'))
         counts = {k: sum(int(s.get(k, 0)) for s in suites) for k in ('tests', 'failures', 'errors', 'skipped')}
         report['counts'] = counts
-        if process.returncode or counts['tests'] < (53 if args.tcp else 52) or any(counts[k] for k in ('failures', 'errors', 'skipped')):
+        if process.returncode or counts['tests'] < (86 if args.tcp else 84) or any(counts[k] for k in ('failures', 'errors', 'skipped')):
             raise RuntimeError('S4 suite incomplete/failed; evidence preserved')
         report.update(ok=True, tcp_qualified=args.tcp)
     except (OSError, RuntimeError, subprocess.SubprocessError, ET.ParseError) as exc:
@@ -88,7 +89,7 @@ def main():
             if before != after:
                 report.update(ok=False, error='Client config changed')
         report['source_sha256'] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
-                                   for base in ('v4/src', 'v4/tests/s4', 'scripts')
+                                   for base in ('v4/src', 'v4/tests', 'scripts')
                                    for p in sorted((ROOT / base).rglob('*.py'))}
         (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({k: report.get(k) for k in ('ok', 'tests_started', 'tcp_qualified', 'error')}))

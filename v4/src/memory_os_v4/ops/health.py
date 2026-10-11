@@ -100,7 +100,8 @@ def last_drill(settings):
         if archive.is_file() and sha256(archive) == row["archive_sha256"]:
             return {"level": row.get("level"), "quarantined": row.get("quarantined"),
                     "duration_s": row.get("duration_s"), "archive": archive.name,
-                    "completed_at": row.get("completed_at"), "reopening_allowed": row.get("reopening_allowed", False)}
+                    "completed_at": row.get("completed_at"), "reopening_allowed": row.get("reopening_allowed", False),
+                    "private_reopen_verified": row.get("private_reopen_verified", False)}
     return None
 
 
@@ -177,7 +178,9 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
                 age = None
             if age is None or age > 7 * 24:
                 anomalies.append("no intact SQLite restore drill within 7 days")
-            if drill and not drill["reopening_allowed"]:
+            if drill and drill['private_reopen_verified']:
+                info.append("private SQLite reopening verified; production promotion requires separate operator approval")
+            elif drill:
                 info.append("last SQLite drill validates files in quarantine; semantic reopening is not qualified")
     except (OSError, ValueError) as exc:
         anomalies.append(f"disk check failed: {type(exc).__name__}")

@@ -2,7 +2,7 @@
 
 No source Store/engine construction, migration, launchd control or production
 restore. Simulation by default. Semantic reopening/forget reconciliation is a
-separate gate, deliberately unavailable in this increment.
+separate explicit gate; production promotion is never performed here.
 """
 from __future__ import annotations
 
@@ -369,6 +369,8 @@ def backup(settings, *, apply=False, fault=lambda point: None):
         final = settings.backup_dir / name
         os.link(partial, final)  # Never overwrite; both paths kept if a later fsync fails.
         sync_directory(settings.backup_dir)
+        partial.unlink()  # Final archive must be single-link before qualification is logged.
+        sync_directory(work)
         fault("after_publish")
         record.update(ok=True, qualified=True, verified=True, archive=name, archive_sha256=sha256(final),
                       snapshot_receipt_sequence=logical["snapshot_receipt_sequence"],
@@ -380,9 +382,16 @@ def backup(settings, *, apply=False, fault=lambda point: None):
             record["preserved_partial"] = str(work)
     try:
         if work is not None:
+            fault('before_registration')
             register(settings, "backup.jsonl", record)
+            fault('after_registration')
             if record["ok"]:
                 shutil.rmtree(work)  # Successful disposable work only; archives and failures are kept.
+                try:
+                    record['rotated'] = rotate_archives(settings, pinned=record['archive'])
+                except Exception as exc:
+                    # Rotation failure cannot invalidate a fully verified durable snapshot.
+                    record['rotation_warning'] = type(exc).__name__
     except Exception as exc:
         record.update(ok=False, error=f"Backup registration/cleanup failed: {type(exc).__name__}", preserved_partial=str(work))
     finally:
@@ -391,7 +400,22 @@ def backup(settings, *, apply=False, fault=lambda point: None):
     return record
 
 
-def restore_drill(settings, archive=None, *, apply=False, start_server=False):
+def rotate_archives(settings, *, pinned):
+    from .backup import rotate, verified_archives
+    eligible = {name: value for name, value in verified_archives(settings).items()
+                if name.startswith(PREFIX) and Path(name).name == name
+                and (settings.backup_dir / name).is_file()
+                and not (settings.backup_dir / name).is_symlink()
+                and (settings.backup_dir / name).stat().st_nlink == 1}
+    if pinned not in eligible or sha256(settings.backup_dir / pinned) != eligible[pinned][0]:
+        raise BackupError('Pinned qualified SQLite archive missing/divergent; no rotation')
+    removed = rotate(settings.backup_dir, eligible, pinned=pinned)
+    sync_directory(settings.backup_dir)
+    register(settings, 'sqlite_rotation.jsonl', {'ok': True, 'pinned': pinned, 'removed': removed})
+    return removed
+
+
+def restore_drill(settings, archive=None, *, apply=False, start_server=False, reconcile=False):
     disjoint(settings)
     result = {"ok": True, "mode": "simulation", "backend": "sqlite", "level": "files",
               "quarantined": True, "reopening_allowed": False, "forgets_replayed": [],
@@ -402,8 +426,8 @@ def restore_drill(settings, archive=None, *, apply=False, start_server=False):
     work = lock = None
     start = time.monotonic()
     try:
-        if start_server:
-            raise BackupError("Service reopening unavailable until S4 forget reconciliation and identity recovery are qualified")
+        if start_server and not reconcile:
+            raise BackupError("Service reopening unavailable without explicit --reconcile-forgets")
         budget = Budget(settings)
         lock = lease(settings)
         key = load_key(settings.backup_key)
@@ -418,10 +442,22 @@ def restore_drill(settings, archive=None, *, apply=False, start_server=False):
         settings.ops_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         work = Path(tempfile.mkdtemp(prefix="sqlite-drill-", dir=settings.ops_dir))
         manifest = verify_archive(archive, key, work / "restored", budget.check)
-        result.update(ok=True, verified=True, archive=archive.name, archive_sha256=sha256(archive),
+        result.update(verified=True, archive=archive.name, archive_sha256=sha256(archive),
                       snapshot_receipt_sequence=manifest["logical_inventory"]["snapshot_receipt_sequence"],
                       store_instance_id=manifest["logical_inventory"]["store_instance_id"])
+        if reconcile:
+            from .sqlite_recovery import prepare_recovery, authority_cut
+            recovered = prepare_recovery(work / 'restored' / DB, settings.store_dir / DB,
+                                         manifest, guard=budget.check)
+            result.update(recovered, level='reconciled')
+            if start_server:
+                from .sqlite_probe import probe
+                result['server_check'] = probe(work / 'restored', settings, recovered, guard=budget.check)
+                result.update(level='service', private_reopen_verified=True)
+            authority_cut(settings.store_dir / DB, recovered['reconciliation'], budget.check)
+        result['ok'] = True
     except Exception as exc:
+        result.update(ok=False, private_reopen_verified=False)
         result["error"] = f"{type(exc).__name__}: {exc}"
         if work is not None:
             result["preserved_partial"] = str(work)

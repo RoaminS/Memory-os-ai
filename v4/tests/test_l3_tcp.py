@@ -183,6 +183,38 @@ def test_S4_B09_read_only_window_keeps_reads_and_never_sends_mutation(harness):
     anyio.run(run)
 
 
+def test_S4_B10_real_private_sqlite_restore_reconciles_forgets_and_reopens(harness, monkeypatch):
+    from types import SimpleNamespace
+    from memory_os_v4 import Config, MemoryV4
+    from memory_os_v4.ops import sqlite_backup as s4
+    from memory_os_v4.ops.auth import write_secret_file
+    from memory_os_v4.ops.settings import OpsSettings
+    root = harness.root
+    settings = OpsSettings(url='http://127.0.0.1:9/mcp/', token_file=root / 'unused.token',
+                           store_dir=root / 's4-source', backup_dir=root / 's4-backups',
+                           backup_key=root / 's4-key', ops_dir=root / 's4-ops', service_label=None)
+    write_secret_file(settings.backup_key, b'k' * 32)
+    monkeypatch.setenv('MEMORY_V4_BUILD_COMMIT', 'a' * 40)  # Synthetic build identity, not release attestation.
+    monkeypatch.setattr(s4, 'Budget', lambda _: SimpleNamespace(check=lambda: None))
+    with MemoryV4(config=Config(data_dir=str(settings.store_dir), embed_model='hash', hash_dim=16,
+                              store_backend='sqlite_s1')) as source:
+        source.add_episode('Synthetic retained private restore witness', project='p', item_id='keep')
+        source.add_episode('Synthetic forgotten private restore witness', project='p', item_id='erase')
+        backup = s4.backup(settings, apply=True)
+        assert backup['ok'], backup
+        source.forget('erase', project='p')
+        result = s4.restore_drill(settings, apply=True, start_server=True, reconcile=True)
+        assert result['ok'] and result['private_reopen_verified'], result
+        assert result['server_check']['ready_status'] == 200
+        assert result['server_check']['status_total'] == 1
+        assert result['server_check']['corpus_reencodings'] == 0
+        assert result['server_check']['witnesses'] == ['keep']
+        assert result['store_instance_id'] != source.store.meta['store_instance_id']
+        assert result['forgets_replayed'][0]['item_id'] == 'erase'
+        assert result['quarantined'] and not result['reopening_allowed']
+        assert source.store.get('erase').deleted
+
+
 def test_C07_thirty_restart_rotation_cycles(harness):
     h = harness
     h.start()
