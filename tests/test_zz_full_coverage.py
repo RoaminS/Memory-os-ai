@@ -1396,13 +1396,17 @@ class TestSetupMainCLI:
                 setup_main()
 
     def test_main_all_target(self, tmp_path):
-        with patch.object(sys, "argv", ["setup", "all"]):
-            with patch("memory_os_ai.setup.setup_claude_desktop", return_value="✅ Claude"):
-                with patch("memory_os_ai.setup.setup_claude_code", return_value="✅ Code"):
-                    with patch("memory_os_ai.setup.setup_codex", return_value="✅ Codex"):
-                        with patch("memory_os_ai.setup.setup_vscode", return_value="✅ VSCode"):
-                            with patch("memory_os_ai.setup.setup_chatgpt", return_value="✅ ChatGPT"):
-                                setup_main()  # Should not raise
+        from memory_os_ai import setup
+        from unittest.mock import Mock
+
+        targets = {name: Mock(return_value="configured") for name in
+                   ("claude-desktop", "claude-code", "codex", "vscode")}
+        # main dispatches through TARGETS, whose references predate attribute mocks.
+        with patch.object(sys, "argv", ["setup", "all"]), patch.dict(setup.TARGETS, targets):
+            with patch.object(setup, "setup_chatgpt", return_value="ChatGPT"):
+                setup_main()
+        for target in targets.values():
+            target.assert_called_once_with()
 
     def test_main_status_target(self):
         with patch.object(sys, "argv", ["setup", "status"]):

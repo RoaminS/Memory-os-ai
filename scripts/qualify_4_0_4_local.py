@@ -146,7 +146,7 @@ def main():
                 'source_expected_v3_tests': sum(int(s.get('tests', '0')) for s in ET.parse(out / 'v3-unit.xml').getroot().iter('testsuite')),
                 'artifacts': artifacts,
                 'qualification_source_sha256': {str(p.relative_to(root)): digest(p) for p in
-                    [root / 'pyproject.toml', root / 'MANIFEST.in', *sorted((root / 'src').rglob('*.py')), *sorted((root / 'tests').rglob('*.py')), *sorted((root / 'v4/src').rglob('*.py')),
+                    [root / 'pyproject.toml', root / 'MANIFEST.in', root / 'conftest.py', *sorted((root / 'src').rglob('*.py')), *sorted((root / 'tests').rglob('*.py')), *sorted((root / 'v4/src').rglob('*.py')),
                      *sorted((root / 'v4/tests').rglob('*.py')), *sorted((root / 'scripts').glob('*.py')),
                      *sorted((root / 'v4/tests/fixtures/brief_l1a').glob('*.json*')),
                      *sorted((root / 'v4/docs/contracts').glob('*.json'))]},
