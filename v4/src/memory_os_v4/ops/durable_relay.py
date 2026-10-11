@@ -8,6 +8,7 @@ import uuid
 
 import mcp.types as types
 
+from .. import __version__
 from ..idempotency import _json, raw_args_sha256
 from .request_journal import RelayJournal, directory, key
 
@@ -52,6 +53,11 @@ class DurableRelay:
         if self.journal is not None:
             self.journal.close()
 
+    async def control(self, op):
+        if hasattr(self.transport, "control"):
+            return await self.transport.control(op)
+        return await self.transport.submit(op, replay=True)
+
     async def _status(self, session, row):
         arguments = {k: row[k] for k in ("request_id", "scope", "operation", "raw_args_sha256", "store_instance_id")}
         data = body(await session.call_tool("memory_request_status", arguments))
@@ -69,7 +75,10 @@ class DurableRelay:
         journal = self.ledger()
         if name == "memory_request_status":
             if not args.get("request_id"):
-                return response(journal.status())
+                return response({**journal.status(), "connection": {
+                    "last_error": getattr(self.transport, "last_error", None),
+                    "live_probe": False, "control_deadline_s": 4,
+                    "catalog": "session_snapshot", "relay_version": __version__}})
             # Includes resolved local entries so an explicit retry is a status read, never a replay.
             from .request_journal import scan
             records = scan(journal.path.parent, exclude=journal.path)["entries"] + list(journal.records.values())
@@ -79,12 +88,15 @@ class DurableRelay:
             if len(matches) != 1:
                 return response({"status": "unknown", "reason": "local_identity_missing_or_ambiguous", "replay_permitted": False})
             row = next(iter(matches.values()))
-            return response(await self.transport.submit(lambda s: self._status(s, row), replay=True))
+            return response(await self.control(lambda s: self._status(s, row)))
         mutation = name in MUTATIONS
         if name in {"memory_consolidate", "memory_compact"} and args.get("dry_run", True) is True:
             mutation = False
         if not mutation:
-            result = await self.transport.submit(lambda s: s.call_tool(name, args), replay=name in READS)
+            if name == "memory_status":
+                result = await self.control(lambda s: s.call_tool(name, args))
+            else:
+                result = await self.transport.submit(lambda s: s.call_tool(name, args), replay=name in READS)
             if name == "memory_session_brief":
                 report = journal.status()
                 if report["unresolved_count"] or report["errors"] or report["journal_poisoned"]:
@@ -113,7 +125,7 @@ class DurableRelay:
                         checked_data = json.loads("".join(c.text for c in checked.content if isinstance(c, types.TextContent)))
                     except ValueError:
                         checked_data = None
-                if isinstance(checked_data, dict) and checked_data.get("code") == "maintenance_denied":
+                if isinstance(checked_data, dict) and checked_data.get("code") in {"maintenance_denied", "project_unknown"}:
                     return checked
             captured["code"] = "legacy_unattested"
             preflight = body(checked)

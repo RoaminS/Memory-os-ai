@@ -28,7 +28,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from .auth import http_client, read_token
+from .auth import SecretFileError, http_client, read_token
 from .durable_relay import DurableRelay
 from .settings import OpsSettings
 
@@ -47,6 +47,7 @@ class _Request:
     op: Operation
     reply: MemoryObjectSendStream = field(repr=False)
     rotations: int = 0
+    abandoned: anyio.Event = field(default_factory=anyio.Event, repr=False)
 
 
 class _Failed:
@@ -65,7 +66,8 @@ async def _port_alive(settings: OpsSettings) -> bool:
         return False
 
 
-async def _guarded(op: Operation, session: ClientSession, settings: OpsSettings) -> Any:
+async def _guarded(op: Operation, session: ClientSession, settings: OpsSettings,
+                   abandoned: anyio.Event | None = None) -> Any:
     """Run ``op``; abort it if the server stops accepting connections (the MCP client would otherwise wait
     forever for a response that will never come). Two consecutive refusals, 1 s apart, mean the server is gone."""
     box: dict[str, Any] = {}
@@ -82,19 +84,29 @@ async def _guarded(op: Operation, session: ClientSession, settings: OpsSettings)
             if refusals >= 2:
                 raise ConnectionError("memory server stopped accepting connections")
 
+    async def cancelled() -> None:
+        if abandoned is None:
+            await anyio.sleep_forever()
+        else:
+            await abandoned.wait()
+            raise TimeoutError("caller abandoned operation; outcome may be uncertain")
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(run, tg.cancel_scope)
         tg.start_soon(watch)
+        tg.start_soon(cancelled)
     return box["value"]
 
 
 async def _open(stack: AsyncExitStack, settings: OpsSettings) -> tuple[ClientSession, types.InitializeResult]:
     if read_token(settings.token_file) is None:
-        raise ValueError("Missing token file; nothing sent")
+        raise SecretFileError("token_missing: nothing sent")
     client = await stack.enter_async_context(http_client(settings))
     read, write, _ = await stack.enter_async_context(streamable_http_client(settings.url, http_client=client))
     session = await stack.enter_async_context(ClientSession(read, write))
-    return session, await session.initialize()
+    with anyio.fail_after(3):
+        init = await session.initialize()
+    return session, init
 
 
 async def owner(
@@ -107,16 +119,20 @@ async def owner(
     served; if that attempt fails the request is answered "unavailable" (nothing was sent)."""
     first = True
     initial_identity = None
+    identity_blocked = False
     carry: _Request | None = None  # received, not yet sent upstream
     inflight: _Request | None = None  # sent upstream, no answer yet
     async with requests:
         while True:
             try:
                 async with AsyncExitStack() as stack:  # entered AND exited in this task only
+                    if identity_blocked:
+                        raise RuntimeError("identity_changed: client restart required")
                     token = read_token(settings.token_file)
                     session, init = await _open(stack, settings)
                     identity = (init.serverInfo.name, getattr(init.serverInfo, "version", None))
                     if initial_identity is not None and identity != initial_identity:
+                        identity_blocked = True
                         raise RuntimeError("identity_changed: server handshake changed; restart client after review")
                     initial_identity = identity
                     if first:
@@ -126,6 +142,9 @@ async def owner(
                         req, carry = (carry, None) if carry is not None else (await _next_or_none(requests), None)
                         if req is None:
                             return  # channel closed: relay shutting down
+                        if req.abandoned.is_set():
+                            await req.reply.aclose()
+                            continue
                         carry = req  # not sent; preserve across token validation failure.
                         if read_token(settings.token_file) != token:
                             if req.rotations >= 1:
@@ -135,7 +154,7 @@ async def owner(
                         carry = None
                         inflight = req
                         try:
-                            result = await _guarded(req.op, session, settings)
+                            result = await _guarded(req.op, session, settings, req.abandoned)
                         except Exception as exc:  # transport failure while the request was in flight
                             inflight = None
                             await _reply(req, _Failed(exc, sent=True))
@@ -177,24 +196,61 @@ def _identity_changed(exc):
     return "identity_changed" in str(exc) or any(_identity_changed(e) for e in getattr(exc, "exceptions", ()))
 
 
+def error_code(exc):
+    """Stable redacted diagnostics, including nested transport exception groups."""
+    import httpx
+    if _identity_changed(exc):
+        return "identity_changed"
+    if isinstance(exc, SecretFileError):
+        return "token_missing" if str(exc).startswith("token_missing:") else "token_invalid"
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):
+        return "authentication_rejected"
+    if isinstance(exc, TimeoutError):
+        return "control_timeout"
+    for child in getattr(exc, "exceptions", ()):
+        code = error_code(child)
+        if code != "upstream_unavailable":
+            return code
+    return "upstream_unavailable"
+
+
 class Relay:
     """Handler-side facade: submit an operation to the owner and wait for its result."""
 
     def __init__(self, send: MemoryObjectSendStream) -> None:
         self._send = send
+        self.last_error = None
+
+    async def control(self, op: Operation) -> Any:
+        """Bound only control reads, not slow searches or mutations. Cancellation
+        wakes the owner even if a silent upstream still accepts TCP connections."""
+        try:
+            with anyio.fail_after(4):
+                return await self.submit(op, replay=True)
+        except TimeoutError:
+            self.last_error = {"code": "control_timeout", "sent": None, "replay_permitted": False}
+            raise RuntimeError("control_timeout: no mutation replay; inspect local request status") from None
 
     async def submit(self, op: Operation, *, replay: bool) -> Any:
         for attempt in (0, 1):
             reply_send, reply_recv = anyio.create_memory_object_stream(1)
-            await self._send.send(_Request(op, reply_send))
-            async with reply_recv:
-                value = await reply_recv.receive()
+            request = _Request(op, reply_send)
+            try:
+                await self._send.send(request)
+                async with reply_recv:
+                    value = await reply_recv.receive()
+            finally:
+                request.abandoned.set()
             if not isinstance(value, _Failed):
+                self.last_error = None
                 return value
+            code = error_code(value.exc)
+            self.last_error = {"code": code, "sent": value.sent,
+                               "replay_permitted": False}
             if not value.sent:
                 if _identity_changed(value.exc):
                     raise RuntimeError("identity_changed: restart the client after operator review") from value.exc
-                raise RuntimeError(UNAVAILABLE) from value.exc
+                raise RuntimeError(f"{code}: {UNAVAILABLE}") from value.exc
             if not replay or attempt == 1:
                 raise RuntimeError(UNCERTAIN) from value.exc
         raise AssertionError("unreachable")
@@ -246,7 +302,7 @@ async def serve(settings: OpsSettings) -> None:
         await init_event.wait()
         init = init_box["value"]
         if isinstance(init, BaseException):
-            print(f"memory-os relay: cannot reach {settings.url}: {type(init).__name__}", file=sys.stderr)
+            print(f"memory-os relay: cannot reach {settings.url}: {error_code(init)}", file=sys.stderr)
             await send.aclose()
             raise SystemExit(1)
         relay = Relay(send)
