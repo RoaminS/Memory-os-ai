@@ -125,9 +125,10 @@ def main():
                 'source_expected_v3_tests': sum(int(s.get('tests', '0')) for s in ET.parse(out / 'v3-unit.xml').getroot().iter('testsuite')),
                 'artifacts': artifacts,
                 'qualification_source_sha256': {str(p.relative_to(root)): digest(p) for p in
-                    [root / 'pyproject.toml', *sorted((root / 'src').rglob('*.py')), *sorted((root / 'v4/src').rglob('*.py')),
+                    [root / 'pyproject.toml', root / 'MANIFEST.in', *sorted((root / 'src').rglob('*.py')), *sorted((root / 'v4/src').rglob('*.py')),
                      *sorted((root / 'v4/tests').rglob('*.py')), *sorted((root / 'scripts').glob('*.py')),
-                     *sorted((root / 'v4/tests/fixtures/brief_l1a').glob('*.json*'))]},
+                     *sorted((root / 'v4/tests/fixtures/brief_l1a').glob('*.json*')),
+                     *sorted((root / 'v4/docs/contracts').glob('*.json'))]},
                 'installed_relay_scripts_sha256': {n: digest(root / 'scripts' / f) for n, f in [('runner', 'installed_relay_e2e.py'), ('case', 'installed_relay_case.py')]},
                 'copy_scripts_sha256': {n: digest(root / 'scripts' / f) for n, f in [('runner', 'qualify_release_copy.py'), ('worker', 'release_copy_worker.py')]},
                 'evidence': {'python': sys.version.split()[0], 'dependency_downloads': False, 'models_downloaded': False,

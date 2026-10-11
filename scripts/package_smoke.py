@@ -73,6 +73,9 @@ def main() -> None:
     for document in ("AGENTS.md", "CLAUDE.md", "CHANGELOG.md", f"v{args.version}.md", "v4/OPERATIONS.md",
                      "v4/A6_REVIEW_966eca5.md"):
         assert (docs / document).is_file(), document
+    if args.version == '4.0.4':
+        schema = json.loads((docs / 'v4/contracts/l3-l4-v1.schema.json').read_text())
+        assert '$schema' in schema
     for name in ("memory-os-ai", "memory-os-v4", "memory-os-ai-v3"):
         command = Path(sys.executable).parent / name
         assert command.is_file(), command
