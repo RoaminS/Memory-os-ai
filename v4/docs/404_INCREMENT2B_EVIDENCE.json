@@ -1,0 +1,39 @@
+{
+  "base_commit": "474b09bcff15f74d9e109213da2a530dff735739",
+  "runtime_commit": "31ff798",
+  "unit_ok": true,
+  "pytest": {
+    "tests": 1238,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "tcp_cases": 0
+  },
+  "tcp_qualified": false,
+  "tcp_to_run": 15,
+  "production_modified": false,
+  "neural_inference": false,
+  "release_qualified": false,
+  "swap_guard": "unavailable_in_sandbox",
+  "unit_report": ".local-qualification/404-increment2b-unit-final/report.json",
+  "unit_report_sha256": "a83af5328cb32d5d174bd371edce61b584085f78e0b22040a659e09fdd48472e",
+  "source_manifest_sha256": "83fba2316c86d3ed9d462eeb4442086a75e8851b720d36dfb0395c591611146b",
+  "evidence_sha256": {
+    "baseline.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lint-project.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "lint-v4.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "pytest.log": "c4d923aa0bf2505c50623681b3fb596f96da3e9b944f915c2dea4004ffc62abf"
+  },
+  "preserved_failed_claude_report": ".local-qualification/404-increment2-claude-v1/report.json",
+  "preserved_failed_report_sha256": "c554b9a5336c423d3b49629c0bd1f5f180bd00941d0c1e5ea80b7ac681f68140",
+  "reviewed_claude_patch_sha256": "c87eb100060fea9c7014d3595a13ad56091574e031305cb19e9dede17a409acf",
+  "reviewed_l11_v2_sha256_NOT_A_FREEZE": "14e220321ab8a674d970f6d5fbf06c6c7d568857a1d6af017e22140087b8c09a",
+  "A4_countersigned_by_claude": true,
+  "l11_frozen": false,
+  "next_increment": [
+    "L4 rest",
+    "L7a",
+    "L5",
+    "L1a"
+  ]
+}

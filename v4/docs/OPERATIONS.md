@@ -192,3 +192,12 @@ latences append/fsync/rotation par phase, sans conversations ni réponses.
 
 Contrat complet, limites JSONL/restauration et matrice :
 [CONTRACTS_L3_L4_v2.md](CONTRACTS_L3_L4_v2.md).
+
+
+Correctif candidate incrément2b : une session de relais conserve désormais le
+catalogue d'outils chargé au démarrage (attente maximale5s). Les redécouvertes
+MCP nécessaires à la validation d'un statut local n'appellent plus le serveur.
+Le statut local reste annoncé même si le préchargement échoue ; un catalogue
+caché n'est pas une preuve de santé/authentification du serveur. Redémarrer la
+session cliente pour adopter de nouvelles définitions d'outils. Les écritures
+restent soumises aux contrôles habituels, sans rejeu automatique.

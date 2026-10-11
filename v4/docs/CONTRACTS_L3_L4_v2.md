@@ -1,6 +1,6 @@
 # L3/L4 — contrat v2, incrément 2 de la candidate 4.0.4
 
-2026-10-11. A1–A5 acceptés, avec la précision opérationnelle A4 ci-dessous.
+2026-10-11. A1–A5 acceptés, avec la précision opérationnelle A4 ci-dessous, contresignée par Claude le 2026-10-11.
 Remplace le contrat proposé v1 pour cette implémentation ; v1 reste une archive.
 Pas de nouvelle release, activation, campagne ou changement de production.
 
@@ -65,7 +65,7 @@ Aucun statut absent, inconnu ou conflit ne résout une incertitude.
 A4 : rotation du journal actif à 30 jours ou 10 MiB par défaut ; bornes via
 `MEMORY_V4_RELAY_JOURNAL_MAX_DAYS` et `MEMORY_V4_RELAY_JOURNAL_MAX_BYTES`.
 Les états non résolus ne sont jamais purgés et peuvent dépasser le plafond.
-**Précision à contresigner :** la rétention des journaux clos est un entretien
+**Précision contresignée par Claude le 2026-10-11 :** la rétention des journaux clos est un entretien
 séparé, sous verrou exclusif, exécuté par l'opérateur ; l'adoption reste réellement
 en lecture seule. Commande de simulation puis `--apply` dans OPERATIONS.md.
 Son raccordement à un job local appartient à Claude, après qualification/GO ;
@@ -154,3 +154,26 @@ Précision livraison stdio : `recent_completed` (20 identités au maximum) perme
 mais avant la livraison au client. Ces entrées ne gonflent pas le compteur
 incertain. Le statut serveur reste requis pour récupérer la réponse originale.
 La mesure fsync ne simule pas une coupure secteur.
+
+
+## Correctif incrément 2b — découverte locale pendant une panne
+
+La qualification TCP de474b09b a échoué sur2/1248 cas : le SDK reliste les outils
+pour valider un résultat. Le handler local de statut fonctionnait, mais cette
+redécouverte dépendait du serveur arrêté. La première livraison n'est donc pas
+qualifiée pour ce scénario ; son rapport `ok=false` reste conservé.
+
+Le catalogue est désormais préchargé une fois après le handshake amont et reste
+figé pour la session cliente. `tools/list` est ensuite entièrement local, y
+compris si une opération bloque le propriétaire amont. Le descripteur de
+`memory_request_status` appartient toujours au relais ; un outputSchema amont
+ne doit pas invalider son inventaire local. Les descripteurs retournés sont des
+copies indépendantes. En cas d'échec du premier préchargement : seul le statut
+local est annoncé ; aucune capacité distante n'est inventée.
+
+L'attente du préchargement est bornée à5s. Cette borne ne prétend pas annuler une
+opération déjà prise par le propriétaire amont ni qualifier toutes les latences
+L4. Un nouveau catalogue amont nécessite une nouvelle session cliente. Les
+contrôles d'identité/version, d'authentification et de non-rejeu restent actifs
+sur les appels ; consulter un catalogue caché n'atteste pas la disponibilité du
+serveur. Le démarrage sans handshake initial reste une limite de L4.
