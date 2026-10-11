@@ -91,12 +91,14 @@ Depuis le clone, après import du bundle, utiliser un dossier neuf :
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:v4/src:v4 \
+  MEMORY_V4_CL100K_PATH=/Users/romain/.config/memory-os/cl100k_base.tiktoken \
   .local-qualification/brief-test-runtime-claude-3c-v1/bin/python -B \
   scripts/qualify_405_test_isolation.py --suite full \
   --output .local-qualification/405-test-isolation-claude-v1
 ```
 
 Le runtime de test est déjà provisionné (tiktoken + extension), pas modifié.
+La table existante est utilisée en lecture seule ; aucun téléchargement.
 Le lanceur exécute séquentiellement v3 synthétique puis v4 non-slow incluant les
 20 TCP. Minimum 585 v3 / 1512 v4, zéro échec/erreur/skip, aucune configuration
 client modifiée. Garde disque 5 Go/swap 8,5 Go avant et pendant chaque suite ;
