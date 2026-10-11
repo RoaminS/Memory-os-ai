@@ -1,0 +1,53 @@
+{
+  "ok": true,
+  "scope": "tooling + synthetic Hash, no production activation; real copy/drill pending Claude",
+  "unit_counts": {
+    "tests": 714,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "shell_blocks_syntax_checked": 11,
+  "client_configs_unchanged": true,
+  "qualified_runtime_source": "e7d5abbbc41972359497a922b788e798b5b4c1cf",
+  "installed_runtime_attestation": {
+    "version": "4.0.5",
+    "commit": "e7d5abbbc41972359497a922b788e798b5b4c1cf",
+    "runtime_files": 67,
+    "wheel_sha256": "be303b286096281522aa9e21d8792975ab572fbb0e23e5bc911d7cef9fc70396"
+  },
+  "api_calls": 0,
+  "neural_inference": false,
+  "production_activation": false,
+  "preserved_failed_run": {
+    "xml": ".local-qualification/sqlite-activation-final-unit-v1.xml",
+    "reason": "Missing MEMORY_TEST_HASH_V3=1; 26 model-resolution attempts blocked by Evaluation forbids DNS; no inference result"
+  },
+  "evidence_sha256": {
+    ".local-qualification/sqlite-activation-final-unit-v2.xml": "bff0d81ed5019a86eed30481dac64232bd1008040fd5057ea5cb66050d05b7ad",
+    ".local-qualification/sqlite-activation-final-configs-v2.json": "8e6b45312666f688767e2f781e0a25c868fc9141331de5c2e3133b475f26a04b",
+    ".local-qualification/sqlite-activation-final-unit-v2.log": "5f9a9dd598f6a9e9b8378d50f4d9586f7621924c5fa48df95244dec75b58121b",
+    ".local-qualification/sqlite-activation-installed-attestation.json": "4471b6e95e91b3e96330fe75e72ce1cdf723bb1cbb2eca4aa554dfd9637a418f"
+  },
+  "tooling_source_commit": "798d741e53479f36a26ea952512c803bde931f9b",
+  "targeted_final_tests": 12,
+  "lint": {
+    "project": "passed",
+    "correctness": "passed"
+  },
+  "implementation_sha256": {
+    "scripts/migrate_sqlite_activation.py": "a7fec0791dc70ff89211184892b736dc43c11388dd65bf31b876cd59828d338f",
+    "scripts/qualify_sqlite_activation.py": "61c55e750560336a790d78f21f7a731e836af8973f3ff82ddedd9ce568cce62f",
+    "scripts/sqlite_activation_worker.py": "2e5568e60366bd15310b7e59ecfd03e4e1b2bae8d36498fc08e99ffbb6a95140",
+    "scripts/qualify_sqlite_prepared_store.py": "37d7b6158567a4396bd120725b47a0a428c4b721eef0094ea20599b4d572bcd0",
+    "scripts/prepare_sqlite_activation_plists.py": "abee3d88fba24294a9e2987ee56487dda07a3de2b7fe224121591530d2221dbc",
+    "tests/test_sqlite_activation_tools.py": "4d95733795dc5306cf196e848a1460b33da7294b4cf1b3954b4a6993a011af54",
+    "v4/docs/SQLITE_ACTIVATION_4_0_5.md": "359bbb549fdb3f16912d51de2b782cee5ec51eab365a2a2b7cd2f4f0c9f6b5d9"
+  },
+  "pending_claude": [
+    "Adverse review of migration adapter store factory override + runbook",
+    "Installed production-profile copy dry run including private TCP drill",
+    "Patch window_v1 ready=false timeout handling",
+    "Separate Romain maintenance/SQLite/L7b/backup-policy GOs; no deployment in this bundle"
+  ]
+}
