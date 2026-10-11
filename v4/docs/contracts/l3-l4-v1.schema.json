@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:memory-os:l3-l4:contract:v1",
+  "title": "L3/L4 contract only; not yet a runtime endpoint",
+  "x-implementation-status": "contract-only",
+  "$defs": {
+    "scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target"
+          ],
+          "properties": {
+            "kind": {
+              "const": "project"
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target"
+          ],
+          "properties": {
+            "kind": {
+              "const": "global"
+            },
+            "target": {
+              "const": "global"
+            }
+          }
+        }
+      ]
+    },
+    "request_status_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "operation": {
+          "enum": [
+            "memory_chat_save",
+            "memory_add_facts",
+            "memory_block_set",
+            "memory_consolidate",
+            "memory_forget",
+            "memory_ingest",
+            "memory_migrate_v3"
+          ]
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "store_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "request_id",
+        "scope",
+        "operation",
+        "payload_sha256",
+        "store_instance_id"
+      ]
+    },
+    "request_status_output": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "operation": {
+          "enum": [
+            "memory_chat_save",
+            "memory_add_facts",
+            "memory_block_set",
+            "memory_consolidate",
+            "memory_forget",
+            "memory_ingest",
+            "memory_migrate_v3"
+          ]
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "store_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "state": {
+          "enum": [
+            "completed",
+            "pending",
+            "not_found",
+            "unknown",
+            "conflict"
+          ]
+        },
+        "replay_permitted": {
+          "const": false
+        },
+        "result": {
+          "type": "object"
+        },
+        "reason": {
+          "enum": [
+            "receipt_complete",
+            "outcome_uncertain",
+            "absence_is_not_nonexecution",
+            "journal_unavailable",
+            "different_store",
+            "legacy_unattested",
+            "fingerprint_conflict"
+          ]
+        },
+        "backend": {
+          "enum": [
+            "jsonl",
+            "sqlite_s1"
+          ]
+        }
+      },
+      "required": [
+        "request_id",
+        "scope",
+        "operation",
+        "payload_sha256",
+        "store_instance_id",
+        "state",
+        "reason",
+        "backend",
+        "replay_permitted"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "completed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "result"
+            ],
+            "properties": {
+              "reason": {
+                "const": "receipt_complete"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "result"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "pending"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "outcome_uncertain"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "not_found"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "absence_is_not_nonexecution"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "conflict"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "const": "fingerprint_conflict"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "journal_unavailable",
+                  "different_store",
+                  "legacy_unattested"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "client_ledger_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "operation": {
+          "enum": [
+            "memory_chat_save",
+            "memory_add_facts",
+            "memory_block_set",
+            "memory_consolidate",
+            "memory_forget",
+            "memory_ingest",
+            "memory_migrate_v3"
+          ]
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "store_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "client_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "sending",
+            "completed",
+            "blocked"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "result_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "request_id",
+        "scope",
+        "operation",
+        "payload_sha256",
+        "store_instance_id",
+        "schema_version",
+        "client_instance_id",
+        "state",
+        "revision"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "completed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "result_sha256"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "result_sha256"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "relay_diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "relay_package_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "announced_server_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observed_upstream_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "connection_state": {
+          "enum": [
+            "ready",
+            "unavailable",
+            "identity_changed"
+          ]
+        },
+        "inflight_outcome": {
+          "enum": [
+            "none",
+            "not_sent",
+            "completed",
+            "uncertain"
+          ]
+        },
+        "retry_mutation_automatically": {
+          "const": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "relay_package_version",
+        "announced_server_version",
+        "observed_upstream_version",
+        "connection_state",
+        "inflight_outcome",
+        "retry_mutation_automatically"
+      ]
+    }
+  }
+}
