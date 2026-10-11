@@ -1,0 +1,100 @@
+........................................................................ [  6%]
+........................................................................ [ 12%]
+........................................................................ [ 18%]
+........................................................................ [ 24%]
+........................................................................ [ 30%]
+........................................................................ [ 36%]
+........................................................................ [ 42%]
+........................................................................ [ 48%]
+........................................................................ [ 54%]
+........................................................................ [ 60%]
+........................................................................ [ 66%]
+...........................................................F............ [ 72%]
+........................................................................ [ 78%]
+........................................................................ [ 84%]
+........................................................................ [ 90%]
+........................................................................ [ 96%]
+....................................                                     [100%]
+=================================== FAILURES ===================================
+______ test_archived_source_worker_runs_from_untracked_cwd_with_hash_only ______
+
+    def test_archived_source_worker_runs_from_untracked_cwd_with_hash_only():
+        from bench.e2e.beam import CATEGORIES, conversations
+        clone = Path(campaign.__file__).resolve().parents[3]
+        private = clone / '.local-qualification'
+        private.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='reuse-archived-hash-', dir=private) as name:
+            root = Path(name)
+            payload = campaign.archive(clone, campaign.CPU_SOURCE)
+            files = campaign.overlay(payload, (clone / 'v4/bench/e2e/usage.py').read_bytes())
+            for name, content in files.items():
+                p = root / 'source' / name
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(content)
+            probes = {}
+            for cat in CATEGORIES:
+                key = {'abstention': 'ideal_response', 'contradiction_resolution': 'ideal_answer',
+                       'instruction_following': 'expected_compliance', 'preference_following': 'expected_compliance',
+                       'summarization': 'ideal_summary'}.get(cat, 'answer')
+                probes[cat] = [{'question': f'Observed preference for {cat}?', key: 'scorer-only',
+                               'rubric': ['scorer-only'], **({} if cat == 'abstention' else {'source_chat_ids': [0]})}]
+            row = {'conversation_id': 'synthetic', 'conversation_seed': 'SECRET', 'narratives': 'SECRET',
+                   'user_profile': 'SECRET', 'conversation_plan': 'SECRET', 'user_questions': 'SECRET',
+                   'chat': [[{'content': 'A recorded preference.', 'role': 'user', 'id': 0,
+                             'index': 'SECRET', 'question_type': 'SECRET', 'time_anchor': None}]],
+                   'probing_questions': repr(probes)}
+            data = root / 'data.jsonl'
+            data.write_text(json.dumps(row) + '\n')
+            c = next(conversations(data))
+            cfg = resolved_config('hash', '<private-store>', profile='beam-c4-4.0.2')
+            cfg.pop('embed_dtype')
+            cfg.pop('batch_facts')
+            campaign.write(root / 'plan.json', {'model': {'id': 'hash'}, 'cpu_config': cfg,
+                'data': str(data), 'namespace': 'beam-c4-v1-capture', 'chunk_chars': 1024,
+                'top_k': 10, 'context_bytes': 12000, 'selected': [{'id': c.id, 'probes': [p.id for p in c.probes]}]})
+            output = root / 'source/.local-qualification/measurement'
+            output.mkdir(parents=True)
+            registry = output / 'server-registry'
+            env = campaign.offline_env()
+            env.update(EVAL_PROCESS_OWNER=uuid.uuid4().hex, EVAL_SERVER_REGISTRY=str(registry),
+                       PYTHONPATH=os.pathsep.join([str(root / 'source/v4/src'), str(root / 'source/v4')]))
+            try:
+                result = subprocess.run([sys.executable, campaign.__file__, '_worker', '--plan-dir', str(root)],
+                                        env=env, cwd=output, capture_output=True, text=True, timeout=30)
+>               assert result.returncode == 0, result.stderr
+E               AssertionError: Traceback (most recent call last):
+E                   File "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/v4/bench/e2e/mps_reuse_campaign.py", line 431, in <module>
+E                     main()
+E                   File "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/v4/bench/e2e/mps_reuse_campaign.py", line 418, in main
+E                     asyncio.run(worker(plan, directory / 'source/.local-qualification/measurement'))
+E                   File "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/asyncio/runners.py", line 190, in run
+E                     return runner.run(main)
+E                            ^^^^^^^^^^^^^^^^
+E                   File "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/asyncio/runners.py", line 118, in run
+E                     return self._loop.run_until_complete(task)
+E                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E                   File "/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+E                     return future.result()
+E                            ^^^^^^^^^^^^^^^
+E                   File "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/v4/bench/e2e/mps_reuse_campaign.py", line 253, in worker
+E                     raise ValueError('Archived MPS config differs beyond device')
+E                 ValueError: Archived MPS config differs beyond device
+E                 
+E               assert 1 == 0
+E                +  where 1 = CompletedProcess(args=['/Users/romain/Memory-os-ai/.venv/bin/python', '/Users/romain/Documents/Codex/2026-10-09/v/work...se ValueError(\'Archived MPS config differs beyond device\')\nValueError: Archived MPS config differs beyond device\n').returncode
+
+v4/tests/test_mps_reuse_campaign.py:164: AssertionError
+=============================== warnings summary ===============================
+tests/test_answer_pilot.py::test_attested_runtime_change_rebuilds_corpus_once[jsonl]
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+tests/test_answer_pilot.py::test_attested_runtime_change_rebuilds_corpus_once[jsonl]
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+tests/test_answer_pilot.py::test_attested_runtime_change_rebuilds_corpus_once[jsonl]
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED v4/tests/test_mps_reuse_campaign.py::test_archived_source_worker_runs_from_untracked_cwd_with_hash_only
+1 failed, 1187 passed, 1 deselected, 3 warnings in 36.08s
