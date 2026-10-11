@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "status": "SEALED BEFORE L5/L1a IMPLEMENTATION OR MEASUREMENT",
+  "sealed_at": "2026-10-11T08:43:32.767873+00:00",
+  "base_commit": "f88a41df0ce5ff713004e2668f876c6f5c31eeea",
+  "cases": 100,
+  "fr": 50,
+  "en": 50,
+  "families": 10,
+  "now": "2026-10-11T12:00:00Z",
+  "proposed_sha256": "e93e9662d38393f9e327addc362e4c4303065b8b442e0aaf18e49227c744093a",
+  "scenarios_sha256": "8d005cf0fa6de55ec75e1f023a4fa02f802a99dc73589fe5e38241914baa2209",
+  "generator_sha256": "b0a45c363cc4c6661996c2efa4358c613b47e9711357a19f0182f1f8a9300587",
+  "amendments": [
+    {
+      "id": "L1A-001",
+      "amendments": [
+        "existing L7a code"
+      ]
+    },
+    {
+      "id": "L1A-004",
+      "amendments": [
+        "outage belongs to relay path"
+      ]
+    },
+    {
+      "id": "L1A-006",
+      "amendments": [
+        "existing L7a code"
+      ]
+    },
+    {
+      "id": "L1A-009",
+      "amendments": [
+        "outage belongs to relay path"
+      ]
+    },
+    {
+      "id": "L1A-035",
+      "amendments": [
+        "focus is a section, not stored kind"
+      ]
+    },
+    {
+      "id": "L1A-040",
+      "amendments": [
+        "focus is a section, not stored kind"
+      ]
+    },
+    {
+      "id": "L1A-074",
+      "amendments": [
+        "foreign reference indistinguishable from absent"
+      ]
+    },
+    {
+      "id": "L1A-079",
+      "amendments": [
+        "foreign reference indistinguishable from absent"
+      ]
+    },
+    {
+      "id": "L1A-081",
+      "amendments": [
+        "journal notice is relay-local"
+      ]
+    },
+    {
+      "id": "L1A-082",
+      "amendments": [
+        "journal notice is relay-local"
+      ]
+    },
+    {
+      "id": "L1A-084",
+      "amendments": [
+        "explicit sensitive tag, not DLP"
+      ]
+    },
+    {
+      "id": "L1A-086",
+      "amendments": [
+        "journal notice is relay-local"
+      ]
+    },
+    {
+      "id": "L1A-087",
+      "amendments": [
+        "journal notice is relay-local"
+      ]
+    },
+    {
+      "id": "L1A-089",
+      "amendments": [
+        "explicit sensitive tag, not DLP"
+      ]
+    }
+  ],
+  "fixture_semantics": {
+    "timestamps": "missing created_at/event_time = valid_from, otherwise fixed now",
+    "blocks": "load historical records without applying current 2000-char write limit",
+    "expansion": "requested IDs + direct children, scoped/valid; missing or foreign indistinguishable",
+    "no_directive_execution": "zero mutation/tool execution; no claim about downstream LLM obedience",
+    "paths": "path_errors/relay_notice_codes only apply to relay, other expectations shared",
+    "budget": "whole serialized CallToolResult, exclude_none=True, JSON compact ensure_ascii=False; exact offline cl100k_base; missing resource refuses qualification"
+  }
+}
