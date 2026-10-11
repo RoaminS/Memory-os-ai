@@ -1,0 +1,90 @@
+{
+  "version": "4.0.4",
+  "source_commit": "621f5b8d89abd0f994e8946f2382146c094a7801",
+  "local_t05_complete": true,
+  "release_ready": false,
+  "publication_authorized": false,
+  "switchover_authorized": false,
+  "artifacts": [
+    {
+      "name": "memory_os_ai-4.0.4-py3-none-any.whl",
+      "bytes": 572651,
+      "sha256": "1c2dfc5a0ce415016bd3490a553ca142928fd68fab1fff8a82dead6f3f862fc8"
+    },
+    {
+      "name": "memory_os_ai-4.0.4.tar.gz",
+      "bytes": 1043064,
+      "sha256": "51c4ca048ebc043e61a76037d91049937e10354c4f56a0ec357847f2efcaa216"
+    }
+  ],
+  "initial_manifest_sha256": "bdafbb79f6ed3c8fc5cb7453a569d8a5f391ee351272f520b597f6d4f9cb2bd2",
+  "pending": [
+    "20 source TCP tests",
+    "L1a exact offline 400 measurements + TCP envelope",
+    "1 cached MiniLM test",
+    "full v3 cached actual encoder suite",
+    "copy/native-profile/cache/timing/search/doctor",
+    "installed wheel relay TCP",
+    "installed sdist relay TCP"
+  ],
+  "checks": {
+    "adversarial_probe": "passed",
+    "a6_review": "passed",
+    "v3": "passed",
+    "v4": "passed",
+    "lint": "passed",
+    "lint_correctness": "passed",
+    "build": "passed",
+    "twine_strict": "passed",
+    "wheel_install": "passed",
+    "wheel_pip_check": "passed",
+    "wheel_smoke": "passed",
+    "sdist_install": "passed",
+    "sdist_pip_check": "passed",
+    "sdist_smoke": "passed",
+    "sdist_source_v3": "passed",
+    "sdist_source_v4": "passed",
+    "source_tcp": "pending",
+    "cached_semantic": "pending",
+    "v3_cached": "pending",
+    "production_copy": "pending",
+    "brief_exact": "pending"
+  },
+  "proofs": {
+    "adversarial_probe": "ab47d3014a436baba8cbe59212d00cd742f80c369f7b71a7f0d7177391bf14f2",
+    "v3": "ba1fcc2687c4898932706fc48a8ae342c58c58cecbaab1a6c2736aecd4e00529",
+    "v4": "e2c39b6779140405bea2c6971f35373148662f445840ee82b0f0e3c9022321be",
+    "lint": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "lint_correctness": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "build": "a50aad2daaa2667b6b7abc1f0d068252980d3c68f9f69e5fb36e27e3799dfcee",
+    "twine_strict": "fe539deeffc0a7413bed977dbaf76b6512f887bdf434f77b8016f482733d5949",
+    "wheel_install": "34b7211fad004a963d554c4223aeefb8817e310b9091381607efcbadd547b9be",
+    "wheel_pip_check": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
+    "wheel_smoke": "66f9f54b02ae1c86930dd8cf93ff5b1abaf6d19032c1d8b68ec7d97861538a0a",
+    "sdist_install": "532ad59efefb2d0aada324e81ed4eec2fadd1e69227c55b2a2a9bcd605e66586",
+    "sdist_pip_check": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
+    "sdist_smoke": "c8be6e67ec31bcd08711364106350f71c274d2f4691a2fd71061689b5d2f6964",
+    "sdist_source_v3": "c14e5229277e2cdbce625307dc12da5df06b0ec9ad5eccfa0e8bcf34622c1f56",
+    "sdist_source_v4": "cbea6c7d68612479d50035213b35b832917cbc01954fff44dca2dd0746bfb6be"
+  },
+  "production_modified_by_qualification": false,
+  "inference_calls": 0,
+  "source_v3_passed": 572,
+  "source_v4_passed": 1490,
+  "sdist_v3_passed": 572,
+  "sdist_v4_passed": 1486,
+  "explicit_sdist_deselections": 4,
+  "slow_neural_deselected": 1,
+  "registry_inactive": true,
+  "encoding_defaults_unchanged": [
+    "auto",
+    "native",
+    32,
+    512
+  ],
+  "c4_defaults_unchanged": [
+    "scoped_literal",
+    3
+  ],
+  "qualification_directory": "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/release-4.0.4-v5"
+}
