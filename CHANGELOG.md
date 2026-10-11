@@ -5,6 +5,7 @@
 - Préflight du relais : panne/initialisation distinctes d'un contrat ancien,
   résultat « cette mutation non envoyée », reprise manuelle seulement et aucun
   raccourci pour les request_id déjà incertains. Qualification machine en attente.
+  Arguments invalides signalés distinctement ; alias canonique compact conservé.
 - Configurations MCP personnelles retirées du suivi Git, fichiers privés
   conservés ; template explicite v4 relayé à la place du serveur v3 autochargé.
 - Archivage vérifié des preuves sans retrait des originaux (donc sans gain disque)

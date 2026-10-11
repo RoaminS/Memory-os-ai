@@ -507,7 +507,13 @@ def _h_request_status(engine: MemoryV4, args: models.RequestStatusIn) -> dict:
                 cls = TOOL_MODELS.get(args.operation)
                 if cls is None or not issubclass(cls, models.MutationIn):
                     raise ValueError("Preflight requires a supported mutation")
-                parsed = cls(**args.arguments)
+                try:
+                    parsed = cls(**args.arguments)
+                except ValidationError as exc:
+                    return {"ok": False, "code": "invalid_arguments", "outcome": "not_started",
+                            "error": "Mutation arguments do not match the declared schema",
+                            "validation_errors": [{"path": list(e["loc"]), "type": e["type"]}
+                                                  for e in exc.errors(include_input=False)[:8]]}
                 if args.operation in {"memory_consolidate", "memory_compact"}:
                     engine.require_maintenance(parsed.dry_run)
                 payload = parsed.model_dump(mode="json", exclude={"request_id"})

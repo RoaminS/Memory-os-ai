@@ -131,6 +131,16 @@ def test_raw_fingerprint_only_excludes_id():
         raw_args_sha256({"x": float("nan")})
 
 
+def test_invalid_chat_save_preflight_is_not_legacy_and_never_creates_receipt(engine):
+    args = {"request_id": "invalid-empty-chat", "messages": [], "project_label": "synthetic"}
+    before = dict(engine.requests.records)
+    result = preflight(args, "memory_chat_save")
+    assert result["ok"] is False and result["code"] == "invalid_arguments"
+    assert result["outcome"] == "not_started"
+    assert result["validation_errors"] == [{"path": ["messages"], "type": "too_short"}]
+    assert engine.requests.records == before and engine.store.all() == []
+
+
 def test_C05_corrupt_jsonl_receipts_fail_closed(tmp_path):
     (tmp_path / "requests.jsonl").write_text('{"truncated"')
     with pytest.raises(RuntimeError, match="damaged"):

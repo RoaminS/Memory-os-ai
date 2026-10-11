@@ -12,9 +12,9 @@ aucun nouveau run au même emplacement. Observation initiale Codex : environ3,79
 La revue statique finale relève 5,33 Go, mais sysctl du swap est refusé dans le
 sandbox (rc1). Les deux gardes ne sont donc pas attestables ici ; aucune suite lancée.
 Lint projet (`--config pyproject.toml`) et lint E9/F sur src/tests/v4/scripts :
-verts ; parsing AST des 7 fichiers Python modifiés/ajoutés et compilation du
+verts ; parsing AST des 9 fichiers Python modifiés/ajoutés et compilation du
 child TCP synthétique : valides. `git diff --check` : vert. Preuve locale
-`.local-qualification/405-safety-p1-codex-v1/static-proof-v2.json` ; ce n'est pas
+`.local-qualification/405-safety-p1-codex-v1/static-proof-v3.json` ; ce n'est pas
 une preuve de justesse/exécution du correctif, ni une qualification de release.
 Les 585v3/1492v4 du correctif antérieur ne qualifient pas les nouveaux changements.
 Nouveaux tests fournis mais **non exécutés**, qualification machine toujours manquante.
@@ -41,6 +41,7 @@ ou un résultat invalide ne prouve pas qu'un contrat ancien est installé.
 | upstream_not_ready | code explicite engine_not_ready/engine_initializing/upstream_not_ready | même règle ; aucune attente/reprise automatique |
 | legacy_unattested | réponse de contrôle réussie, contrat l3-v2 absent/ancien | aucune mutation envoyée ; corriger le contrat, pas un retry aveugle |
 | preflight_invalid | l3-v2 déclaré mais identité/empreinte/portée/opération invalide | aucune mutation envoyée ; diagnostic requis |
+| invalid_arguments | validation du payload par le serveur | aucune mutation envoyée ; corriger le payload, retryable=false |
 | token_missing/token_invalid/authentication_rejected/identity_changed | préflight refusé pour authentification/identité | aucune mutation envoyée ; corriger/relire identité avant nouvelle action |
 | outcome_uncertain/completion_not_durable | mutation commencée / reçu non confirmé | statut L3 obligatoire ; aucun rejeu |
 
@@ -52,13 +53,25 @@ reçu. Une ancienne requête locale du même ID ou un journal douteux désactive
 l'indication retryable. Un message « rien envoyé » concerne **cette tentative**,
 pas l'histoire complète d'un ID ; les incertains antérieurs restent protégés.
 
-10 cas unitaires fournis : timeout/erreur/JSON, warming vrai/faux, contrat ancien,
+14 cas unitaires préflight fournis : timeout/erreur/JSON, warming vrai/faux, contrat ancien,
 attestation d'opération erronée, authentification, reprise manuelle après ready,
-ancien ID incertain sans effet/rejeu supplémentaire. Deux cas TCP ajoutés dans
+ancien ID incertain sans effet/rejeu supplémentaire, refus de validation,
+alias canonique compact→consolidate uniquement simulé, et rejet messages vides
+sur JSONL/SQLite jetables. Deux cas TCP ajoutés dans
 `test_l3_tcp.py` : contrôle synthetic engine_not_ready et panne réelle, résultat
 structuré transmis par le SDK → statut local sans incertain → reprise manuelle
 après ready → un effet exactement. Ils sont eux aussi **non exécutés** ici.
 Les 20TCP existants restent obligatoires, soit désormais 22, sans réduire L3/L4.
+
+En fin de session, Codex a appelé chat_save avec `messages=[]` par erreur. Le
+schéma exige min1 : le préflight serveur valide ce payload avant toute mutation.
+Le relais déployé a répondu legacy_unattested, puis statut unknown ; aucun rejeu
+effectué. Le serveur observé juste après est bien 4.0.4/621f5b8, l3-v2 et MPS,
+et le journal local annonce zéro incertain. Ce cas n'atteste donc pas un serveur
+legacy et ne suffit pas à attribuer la précédente erreur au démarrage. Le nouveau
+code distingue invalid_arguments avec chemins/types de validation, sans recopier
+les valeurs d'entrée. Request_id à garder pour examen :
+`codex-20261011-405-safety-p1-3e4cd82`. Compte rendu durable dans Git en attendant.
 
 ## 3. Configurations du dépôt
 
@@ -136,8 +149,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:v4/src:v4 \
   --output .local-qualification/405-safety-p1-claude-v1
 ```
 
-Attendus : ≥585v3 / ≥1528v4 (22TCP), zéro échec/skip, configurations inchangées.
-Les 14 nouveaux cas unitaires préflight/archives et 2 TCP sont inclus. Ni seuil abaissé ni reprise
+Attendus : ≥585v3 / ≥1532v4 (22TCP), zéro échec/skip, configurations inchangées.
+Les 18 nouveaux cas unitaires préflight/archives et 2 TCP sont inclus. Ni seuil abaissé ni reprise
 automatique après garde machine. T05/release4.0.5 séparés, aucun wheel fabriqué ici.
 
 Lint complémentaire, mêmes règles que les qualifications précédentes :

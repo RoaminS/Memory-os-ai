@@ -54,6 +54,7 @@ def call(relay, name='memory_block_set', args=None):
     ('legacy', 'legacy_unattested', False),
     ('wrong_operation', 'preflight_invalid', False),
     ('authentication', 'authentication_rejected', False),
+    ('invalid_arguments', 'invalid_arguments', False),
 ])
 def test_preflight_failure_has_no_mutation_or_pending_entry(tmp_path, monkeypatch, failure, code, retryable):
     monkeypatch.setenv('MEMORY_V4_RELAY_JOURNAL_DIR', str(tmp_path / 'relay'))
@@ -67,6 +68,9 @@ def test_preflight_failure_has_no_mutation_or_pending_entry(tmp_path, monkeypatc
                     return types.CallToolResult(isError=True, content=[types.TextContent(type='text', text='warming')])
                 if failure == 'malformed':
                     return types.CallToolResult(content=[types.TextContent(type='text', text='{')])
+                if failure == 'invalid_arguments':
+                    return types.CallToolResult(content=[types.TextContent(type='text',
+                        text=json.dumps({'ok': False, 'code': 'invalid_arguments'}))])
                 if failure in {'warming', 'warming_ok'}:
                     return response({'ok': failure == 'warming_ok', 'code': 'engine_not_ready'})
                 if failure == 'legacy':
@@ -93,6 +97,27 @@ def test_preflight_failure_has_no_mutation_or_pending_entry(tmp_path, monkeypatc
         local = call(relay, 'memory_request_status', {}).structuredContent
         assert local['unresolved_count'] == 0
         assert local['connection']['preflight_failure']['code'] == code
+    finally:
+        relay.close()
+
+
+def test_compact_preflight_uses_canonical_operation_without_running_maintenance(tmp_path, monkeypatch):
+    monkeypatch.setenv('MEMORY_V4_RELAY_JOURNAL_DIR', str(tmp_path / 'relay'))
+
+    class Canonical(Session):
+        async def call_tool(self, name, args):
+            result = await super().call_tool(name, args)
+            if name == 'memory_request_status':
+                result.structuredContent['operation'] = 'memory_consolidate'
+            return result
+
+    session = Canonical()
+    relay = DurableRelay(Transport(session), settings(tmp_path))
+    try:
+        # Fake session only: no engine import, real consolidation or production call.
+        assert call(relay, 'memory_compact', {'request_id': 'alias', 'dry_run': False}).structuredContent == {'effect': 1}
+        assert session.effects == 1
+        assert list(relay.journal.records.values())[0]['operation'] == 'memory_consolidate'
     finally:
         relay.close()
 

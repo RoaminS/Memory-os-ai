@@ -172,6 +172,9 @@ class DurableRelay:
                     return checked
             # A timeout, error result or malformed body does not attest an old
             # contract. Only a successful control response can prove its absence.
+            if isinstance(checked_data, dict) and checked_data.get("code") == "invalid_arguments":
+                captured["code"] = "invalid_arguments"
+                raise RuntimeError("Mutation arguments invalid; nothing sent")
             if isinstance(checked_data, dict) and checked_data.get("code") in {
                 "upstream_not_ready", "engine_not_ready", "engine_initializing"
             }:
@@ -182,9 +185,10 @@ class DurableRelay:
                 captured["code"] = "legacy_unattested"
                 raise RuntimeError("Server does not advertise l3-v2")
             captured["code"] = "preflight_invalid"
+            operation = "memory_consolidate" if name == "memory_compact" else name
             if (not preflight.get("store_instance_id")
                     or preflight.get("raw_args_sha256") != raw or not preflight.get("scope")
-                    or preflight.get("operation") != name
+                    or preflight.get("operation") != operation
                     or preflight.get("replay_permitted") is not False):
                 raise RuntimeError("Invalid l3-v2 attestation; mutation not sent")
             identity = preflight["store_instance_id"]
@@ -240,7 +244,7 @@ class DurableRelay:
                 if transport_code in {"authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
                     captured["code"] = transport_code
             if captured["code"] in {"preflight_unavailable", "upstream_not_ready", "legacy_unattested", "preflight_invalid",
-                                    "authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
+                                    "invalid_arguments", "authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
                 from .request_journal import scan
                 report = scan(journal.path.parent, exclude=journal.path)
                 prior = report["entries"] + list(journal.records.values())
