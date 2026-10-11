@@ -22,18 +22,30 @@ TCP = ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py', 'v4/tests
 
 
 def snapshots(home):
-    # Fingerprints only: never serialize config contents or credentials.
-    from memory_os_v4.ops.clients import CLIENTS
-    paths = [home / client.path for client in CLIENTS]
-    paths += [home / '.codex/mcp.json', home / 'AGENTS.md', ROOT / '.mcp.json',
-              ROOT / '.vscode/mcp.json', ROOT / 'CLAUDE.md', ROOT / 'AGENTS.md']
+    # App-owned files change continuously. Attest the MCP entry, not app state.
+    # Hashes only: never serialize commands, environment values or credentials.
+    from memory_os_v4.ops.clients import CLIENTS, Client, read_entry
     result = {}
+    for client in (*CLIENTS, Client('codex-legacy', 'Codex legacy', '.codex/mcp.json', 'mcpServers')):
+        path = home / client.path
+        state, entry = read_entry(client, home)
+        if state == 'unreadable':
+            # Fail closed on malformed or transiently unreadable configurations.
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                digest = 'unreadable'
+            result[str(path)] = {'kind': 'unreadable', 'sha256': digest}
+        else:
+            canonical = json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+            result[str(path)] = {'kind': 'semantic_mcp_entry',
+                                 'sha256': hashlib.sha256(canonical.encode()).hexdigest()}
+    paths = [home / 'AGENTS.md', ROOT / '.mcp.json', ROOT / '.vscode/mcp.json',
+             ROOT / 'CLAUDE.md', ROOT / 'AGENTS.md']
     for path in paths:
         try:
-            stat = path.stat()
-            result[str(path)] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
-                                 'mtime_ns': stat.st_mtime_ns, 'inode': stat.st_ino,
-                                 'size': stat.st_size}
+            result[str(path)] = {'kind': 'strict_file',
+                                 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
         except FileNotFoundError:
             result[str(path)] = None
     return result
@@ -131,8 +143,10 @@ def main():
         after = snapshots(operator_home())
         report['configs_after'] = after
         report['changed_configs'] = [p for p in before if before[p] != after[p]]
-        report['client_configs_unchanged'] = not report['changed_configs']
-        if report['changed_configs']:
+        report['unreadable_configs'] = [p for p in before if any(
+            isinstance(s.get(p), dict) and s[p].get('kind') == 'unreadable' for s in (before, after))]
+        report['client_configs_unchanged'] = not (report['changed_configs'] or report['unreadable_configs'])
+        if not report['client_configs_unchanged']:
             report['ok'] = False
             report['error'] = 'Client config changed; attribution must be investigated before release'
         paths = [ROOT / 'conftest.py', ROOT / 'MANIFEST.in',

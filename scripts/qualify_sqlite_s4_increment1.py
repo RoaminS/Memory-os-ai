@@ -85,8 +85,10 @@ def main():
     finally:
         if before is not None:
             after = snapshots(operator_home())
-            report['client_configs_unchanged'] = before == after
-            if before != after:
+            report['unreadable_configs'] = [p for p in before if any(
+                isinstance(s.get(p), dict) and s[p].get('kind') == 'unreadable' for s in (before, after))]
+            report['client_configs_unchanged'] = before == after and not report['unreadable_configs']
+            if not report['client_configs_unchanged']:
                 report.update(ok=False, error='Client config changed')
         report['source_sha256'] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                                    for base in ('v4/src', 'v4/tests', 'scripts')

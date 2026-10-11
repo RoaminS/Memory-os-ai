@@ -168,6 +168,11 @@ def test_relay_survives_server_restart_without_replaying(tmp_path):
     finally:
         stop(holder["server"])
     assert not first.isError and not after.isError
-    # clean failure, no hang, never replayed: the relay cannot know whether the dead server applied it
-    assert down.isError and ("uncertain" in down.content[0].text or "unreachable" in down.content[0].text)
+    # Server is down BEFORE sending: preflight refuses, rather than inventing an
+    # uncertain mutation. Cut-after-send uncertainty is covered by test_l3_tcp.
+    assert down.isError
+    refusal = json.loads(down.content[0].text)
+    assert refusal['code'] == 'preflight_unavailable'
+    assert refusal['outcome'] == 'not_started'
+    assert refusal['mutation_sent'] is False and refusal['automatic_retry'] is False
     assert status["counts"].get("fact") == 2  # exactly the acknowledged facts: no replay, no loss
