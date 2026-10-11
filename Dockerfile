@@ -1,3 +1,8 @@
+# LEGACY V3 ONLY — NOT A QUALIFIED MEMORY OS V4 IMAGE.
+# This historical recipe launches memory_os_ai.server, not the shared v4
+# server/relay. It also predates the current packaging layout. Do not use it
+# for the 4.0.x onboarding, backup, or security guarantees. A v4 image is D6
+# work and requires separate install/persistence/upgrade qualification.
 FROM python:3.11-slim
 
 WORKDIR /app

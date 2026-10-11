@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "memory-os-ai"
 version = "4.0.5"
-description = "Adaptive memory system for AI agents — universal MCP server for Claude, Codex, VS Code, ChatGPT"
+description = "Local project memory shared by MCP clients, with dated decisions and work state"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
 license-files = ["LICENSE", "LICENSE.GPL-3.0"]
@@ -13,10 +13,15 @@ requires-python = ">=3.11"
 authors = [
     {name = "Kocupyr Romain", email = "romainsantoli@gmail.com"},
 ]
-keywords = ["mcp", "memory", "faiss", "semantic-search", "vscode", "copilot", "claude", "codex", "chatgpt", "ai-agents"]
+keywords = ["mcp", "memory", "local-first", "semantic-search", "vscode", "copilot", "claude", "codex", "ai-agents"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -35,6 +40,15 @@ dependencies = [
     "huggingface_hub>=0.25",
     "requests>=2.32",
 ]
+
+# Source/Issues remain the historical public repository while GitHub is frozen.
+# Documentation points to the existing public package description; replace with
+# the versioned documentation site only after its publication is authorized.
+[project.urls]
+Homepage = "https://pypi.org/project/memory-os-ai/"
+Documentation = "https://pypi.org/project/memory-os-ai/#description"
+Source = "https://github.com/romainsantoli-web/Memory-os-ai"
+Issues = "https://github.com/romainsantoli-web/Memory-os-ai/issues"
 
 [project.optional-dependencies]
 brief = ["tiktoken==0.12.0"]
