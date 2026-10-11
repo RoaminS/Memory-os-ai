@@ -339,3 +339,17 @@ def test_every_server_mutation_has_durable_relay_policy():
     mutations = {name for name, cls in server.TOOL_MODELS.items() if issubclass(cls, models.MutationIn)}
     assert mutations == MUTATIONS
     assert set(server.TOOL_MODELS) - mutations == READS
+
+
+def test_unknown_project_preflight_preserves_code_without_preparing_mutation(settings):
+    class Rejected:
+        async def call_tool(self, name, args):
+            assert name == "memory_request_status"
+            return response({"ok": False, "code": "project_unknown", "outcome": "not_started"})
+    relay = DurableRelay(Transport(Rejected()), settings)
+    try:
+        result = anyio.run(relay.call, "memory_block_set", {"project": "unknown", "name": "project_state", "text": "bad"})
+        assert result.structuredContent["code"] == "project_unknown"
+        assert relay.ledger().records == {}
+    finally:
+        relay.close()

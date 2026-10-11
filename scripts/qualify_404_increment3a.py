@@ -30,16 +30,17 @@ def test_counts(xml_path: Path, suite: str) -> dict:
     if suite != "unit":
         required = {"test_C07_thirty_restart_rotation_cycles",
                     "test_L4_identity_changed_survives_outage_catalog",
+                    "test_L4_rejected_token_is_explicit_then_recovers",
                     "test_L7a_registry_scopes_through_packaged_relay",
                     "test_C02_C04_C08_disconnect_and_new_relay_adopts_journal[partial-pending]",
                     "test_C02_C04_C08_disconnect_and_new_relay_adopts_journal[committed-completed]"}
         present = {c.attrib.get("name") for c in cases if c.attrib.get("classname", "").endswith("test_l3_tcp")}
         if not required <= present:
             raise RuntimeError("L3 physical TCP scenarios missing; qualification refused")
-    minimum = {"unit": 1270, "tcp": 17, "full": 1287}[suite]
+    minimum = {"unit": 1273, "tcp": 18, "full": 1291}[suite]
     if (counts["tests"] < minimum or counts["tests"] != len(cases)
             or any(counts[k] for k in ("failures", "errors", "skipped"))
-            or (suite != "unit" and counts["tcp_cases"] < 17)):
+            or (suite != "unit" and counts["tcp_cases"] < 18)):
         raise RuntimeError("Required tests failed, skipped or incomplete; qualification refused")
     return counts
 

@@ -206,9 +206,31 @@ def test_L7a_registry_scopes_through_packaged_relay(harness):
             assert payload(await session.call_tool("memory_block_get", {"project": "prj_test"}))["blocks"]["project_state"] == "SCOPED"
             assert payload(await session.call_tool("memory_block_get", {"project": "prj_other"}))["blocks"]["project_state"] == ""
             result = await session.call_tool("memory_block_set", {**args, "project": "unknown", "request_id": "rejected"})
-            assert result.isError
+            assert json.loads(result.content[0].text)["code"] == "project_unknown"
             status = payload(await session.call_tool("memory_request_status", {"request_id": "canonical"}))
             assert status["status"] == "completed"
             inventory = payload(await session.call_tool("memory_request_status", {}))
             assert json.loads(inventory["recent_completed"][0]["scope"]) == ["project", "prj_test"]
+    anyio.run(run)
+
+
+def test_L4_rejected_token_is_explicit_then_recovers(harness):
+    h = harness
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            original = h.token.read_bytes()
+            h.rotate()  # Server still accepts original: deliberate 401, not a server outage.
+            with anyio.fail_after(5):
+                result = await session.call_tool("memory_status", {})
+                assert result.isError and "authentication_rejected" in result.content[0].text
+                local = payload(await session.call_tool("memory_request_status", {}))
+                assert local["connection"]["last_error"]["code"] == "authentication_rejected"
+            replacement = h.root / "restored-token"
+            replacement.write_bytes(original)
+            replacement.chmod(0o600)
+            replacement.replace(h.token)
+            with anyio.fail_after(5):
+                assert payload(await session.call_tool("memory_status", {}))["embed_model"] == "hash"
     anyio.run(run)
