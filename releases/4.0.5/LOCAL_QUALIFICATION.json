@@ -3,18 +3,18 @@
   "local_qualified": true,
   "release_qualified": false,
   "release_ready": false,
-  "source_commit": "0becca215d038314c2d08c009c456c0f7b8e21a8",
-  "manifest_initial_sha256": "c87a652480b6615e366914b01a06e8bec8cba92e0704dffb729355a1f0b58cc8",
+  "source_commit": "e7d5abbbc41972359497a922b788e798b5b4c1cf",
+  "manifest_initial_sha256": "3ca510986698f381dddf12cd8ad583209a385109f88473c3e36e86826282f82a",
   "artifacts": [
     {
       "name": "memory_os_ai-4.0.5-py3-none-any.whl",
-      "bytes": 647639,
-      "sha256": "b71c8c12a22c8d3bb04fef175fd9ef4be41ff0966ef1a3de84fd987e59056889"
+      "bytes": 648207,
+      "sha256": "be303b286096281522aa9e21d8792975ab572fbb0e23e5bc911d7cef9fc70396"
     },
     {
       "name": "memory_os_ai-4.0.5.tar.gz",
-      "bytes": 1149802,
-      "sha256": "5aad8f95b30094901121ca9dcc7b820a75b2fdb7925cef3e9ee84d1157498ef6"
+      "bytes": 1150698,
+      "sha256": "e9767f4be195229227a1f3e24a0d8783d87e3c6ea4ad9bf08434cd233e3b31cc"
     }
   ],
   "checks": {
@@ -40,47 +40,43 @@
     "production_copy": "pending",
     "brief_exact": "pending"
   },
-  "logs_sha256": {
-    "adversarial_probe.log": "ab47d3014a436baba8cbe59212d00cd742f80c369f7b71a7f0d7177391bf14f2",
-    "build.log": "26d2a2e339b0486b997b2dc3155e3b120676b13d2c11a3ed8bf4d1354b4d16ca",
-    "lint.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
-    "lint_correctness.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
-    "sdist_install.log": "8cf1c067405050ee838febb88df475dfc546dd30bca8088b56673ceb964b779a",
-    "sdist_pip_check.log": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
-    "sdist_smoke.log": "80ec773477353b3eb1008818396fdb086da8893cb2ead839ea6d09d44243dd2a",
-    "sdist_source_v3.log": "2cf6b42b2bfa8b7ab76e5380d54ed96fcb43ba727b68b503f459efb675fabb39",
-    "sdist_source_v4.log": "231462689427b44680a93fee45c868fbc958424a148bfce6a13b38c9cca438a3",
-    "twine_strict.log": "8569ed7a4611437e03c6e556190bd1a483e0082d59d0dbfd92488e03e927f26f",
-    "v3.log": "4c6de02ca2b619bd809e49d2969e09093490d06ef1c6cb596214a1826ca268bd",
-    "v4.log": "d16161e28c490340509aa9790bd8c886a2da21ee56469db595a9455de0b734ff",
-    "wheel_install.log": "20646a4bbd08be7904d4406034933edcb68f87349c792c7d9b0470bb09524d12",
-    "wheel_pip_check.log": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
-    "wheel_smoke.log": "baa69bba44db8ae559441279b08a18bd84d691ba6194c19ad5f0b43001e3dc42"
-  },
   "counts": {
-    "source_v3": 588,
+    "source_v3": 602,
     "source_v4": 1631,
-    "sdist_v3": 588,
+    "sdist_v3": 602,
     "sdist_v4": 1627
   },
   "coverage_percent": {
     "v3": 81.46422628951747,
     "v4": 86.01198461676057
   },
+  "logs_sha256": {
+    "adversarial_probe.log": "ab47d3014a436baba8cbe59212d00cd742f80c369f7b71a7f0d7177391bf14f2",
+    "build.log": "4270d1d1f11bfcac10096fd94b3b507602e17d9f4a01986e39afcde89659c82a",
+    "lint.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "lint_correctness.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "sdist_install.log": "b02e09c9beac4989ab5e0887b568b0573c747443c5422046f82d9f7bde106070",
+    "sdist_pip_check.log": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
+    "sdist_smoke.log": "29eaca6ca3da139ae600b18b58454910bb31ad2e7e7583fc056351a1b7c25ea9",
+    "sdist_source_v3.log": "536f446eac0ad473c6b6fd82d892ac4ee580562ee7b1392bfe25f2ee700f92cd",
+    "sdist_source_v4.log": "29693d98cee09d3ea341f7606d7904c506f31a29dfd721e7763f3555b13d3406",
+    "twine_strict.log": "db4f47e279fcc9068fced461e77a3f8df0f0690f86302b9a8fb50c93371f17d9",
+    "v3.log": "01a9afebdb1b3b14b1570f7b032c1088d36b24e6bf075d0ec3b2c3ad8252bd9d",
+    "v4.log": "0f8b61172da370d787b857b8b630456cc6becd07d8277b4c336d3ff0e1ee4a12",
+    "wheel_install.log": "8af9575b6a3f80228266d50c266efedc7f787103e40f699e47203943c88d8d40",
+    "wheel_pip_check.log": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
+    "wheel_smoke.log": "c5f4cbaa694b0695958cc79e655d9d2672567ff7f728d01ed5487d3a721de35e"
+  },
   "local_configs_unchanged": true,
-  "local_config_proof_sha256": "20fde778c48a7c3117b8cf7a29385d12c8a12fc046316d662db0c2c541723c06",
+  "local_config_proof_sha256": "8e6b45312666f688767e2f781e0a25c868fc9141331de5c2e3133b475f26a04b",
   "api_calls": 0,
   "neural_inference": false,
   "production_change": false,
   "pending": [
-    "27 source TCP tests",
-    "L1a exact offline 400 measurements + TCP envelope",
-    "1 cached MiniLM test",
-    "full v3 cached actual encoder suite",
-    "copy/native-profile/cache/timing/search/doctor",
-    "installed wheel relay TCP",
-    "installed sdist relay TCP",
-    "schema7 S4/L7b 10k"
+    "27 source TCP tests + 1 cached semantic + 602 v3 cached (new source proof)",
+    "record previously qualified brief proofs (fingerprints checked)",
+    "new copied store qualification vs 4.0.4",
+    "new installed wheel/sdist relay proofs"
   ],
   "sdist_exclusions": [
     "1 neural slow test",
@@ -99,5 +95,19 @@
       "scoped_literal",
       3
     ]
+  },
+  "supersedes": ".local-qualification/release-4.0.5-v4 (kept)",
+  "runtime_python_identical_to_v4": true,
+  "runtime_python_file_count": 67,
+  "runtime_and_v4_tests_source_fingerprints_unchanged": true,
+  "previous_brief_source_and_exact_fingerprints_validated": true,
+  "read_only_diagnostic_sha256": "23e92373c7d3d9e6724a4d1f24b7f0234f1aacf1b9c468f51c0183adc5767acb",
+  "failed_copy_report_preserved_sha256": "27d598f5ee6b8de2ba8af1b17d30a451df12859625312979e8515a5d4fdaf003",
+  "diagnostic_is_release_copy_proof": false,
+  "historical_claude_measurements": {
+    "source": "Claude report 2026-10-11, unchanged engine; not a new measurement",
+    "s4_schema7_10k_seconds": 6.7,
+    "l7b_cas_p95_ms": 5.5,
+    "l7b_list50_p95_ms": 0.52
   }
 }

@@ -1,50 +1,67 @@
-# Candidate 4.0.5 — qualification locale complète, garde fermée
+# Candidate 4.0.5 v5 — correctif baseline, garde fermée
 
-2026-10-11. Construction source `0becca215d038314c2d08c009c456c0f7b8e21a8` ; le reçu final peut être
-un descendant sans changement des empreintes. Aucun push, publication ou bascule.
-Production JSONL 4.0.4, SQLite/L7b/registre inactifs, C4 et auto/MPS/native/batch32
-conservés. Runbook et commandes exactes : `v4/docs/QUALIFY_4_0_5.md`.
+2026-10-11. Source de construction `e7d5abbbc41972359497a922b788e798b5b4c1cf`.
+Le reçu final peut être un descendant sans changement des empreintes source.
+Aucun push, appel API, modèle chargé, publication, bascule ou activation.
+Runbook : `v4/docs/QUALIFY_4_0_5.md`, reprise précise en §5.
 
-## Artefacts exacts
+## Défaut et correction
 
-Dossier privé du clone `.local-qualification/release-4.0.5-v4/` : artefacts,
-manifest/SHA256SUMS/logs/environments. Les venv wheel/sdist sont hors dépôt ;
-dépendances présentes, sans installation globale ni téléchargement. Ne pas
-reconstruire pour poursuivre les preuves.
+Le lanceur refusait la baseline de production 4.0.4 avant sa comparaison finale.
+Il accepte maintenant explicitement 4.0.2/4.0.3/4.0.4, sans accepter une baseline
+future non qualifiée. Pour 4.0.4, son UUID préexistant valide doit rester identique
+dans wheel/sdist/cold/warm ; aucun enrolment permis. L'enrolment éventuel reste
+réservé à 4.0.3. Profils natifs, intégrité, zéro réencodage warm et classements
+entre distributions restent obligatoires. Quatorze régressions ajoutées.
 
-- `memory_os_ai-4.0.5-py3-none-any.whl` : `b71c8c12a22c8d3bb04fef175fd9ef4be41ff0966ef1a3de84fd987e59056889`
-- `memory_os_ai-4.0.5.tar.gz` : `5aad8f95b30094901121ca9dcc7b820a75b2fdb7925cef3e9ee84d1157498ef6`
+Le diagnostic en lecture seule des cinq rapports historiques confirme, avec la
+véritable baseline 4.0.4 : recherche identique, changed_queries=[], zéro encodage
+warm, UUID 286dfcb0357940468aedb9617a2ccd9c conservé. Ceci **n'est pas une nouvelle
+preuve de copie**. Le rapport refusé copy-4.0.5-v1/report.json reste intact :
+SHA-256 `27d598f5ee6b8de2ba8af1b17d30a451df12859625312979e8515a5d4fdaf003`.
 
-Manifeste initial SHA-256 : `c87a652480b6615e366914b01a06e8bec8cba92e0704dffb729355a1f0b58cc8`.
-Le manifeste évoluera uniquement lors de l'enregistrement des preuves physiques.
-Ce hash initial ne vaut pas hash du manifeste finalement qualifié.
+## Artefacts exacts renouvelés
 
-## Preuves et limites
+Scripts et tests étant inclus dans le sdist, il fallait reconstruire. Dossier
+`.local-qualification/release-4.0.5-v5/`, installs wheel/sdist hors dépôt, aucune
+installation globale ni téléchargement. Les dossiers v1–v4 sont conservés.
 
-- 588 tests v3 et 1631 v4 source, zéro échec ; couvertures dans le reçu JSON.
-- Source v4 : un slow neuronal exclu, réservé à Claude. Sdist installée :
-  588 v3 et 1627 v4, cinq désélections = ce slow + quatre tests dépendant des
-  archives Git, explicitement listés dans le lanceur. Aucun défaut runtime masqué.
+- Wheel : `be303b286096281522aa9e21d8792975ab572fbb0e23e5bc911d7cef9fc70396`
+- Sdist : `e9767f4be195229227a1f3e24a0d8783d87e3c6ea4ad9bf08434cd233e3b31cc`
+- Manifeste initial : `3ca510986698f381dddf12cd8ad583209a385109f88473c3e36e86826282f82a`
+
+Le manifeste évoluera uniquement par enregistrement des preuves physiques ; son
+hash initial ne vaut pas hash final qualifié. Ne plus reconstruire ces artefacts
+pour continuer la qualification. Les 67 fichiers Python runtime du wheel sont
+identiques à ceux du candidat v4. Les inventaires/empreintes src, v4/src et v4/tests
+sont identiques ; C4, auto/MPS/native/batch32 et les défauts JSONL/tasks-off/registry-off
+restent inchangés.
+
+## Preuves locales
+
+- 41 tests ciblés copie/gates/release passent, dont les 14 nouvelles régressions.
+- Source : 602 v3 et 1631 v4 ; sdist : 602 v3 et 1627 v4, zéro échec.
+- Couverture : v3 81,46 %, v4 86,01 %.
+- Un slow neuronal et les 27 TCP exclus des unités ; sdist exclut en plus quatre
+  cas archives/Git nommés par le lanceur. Ce ne sont pas des preuves TCP/neuronales.
 - Probe adverse, deux lints, wheel+sdist, twine check --strict, pip check,
-  imports/commandes installées et tests de démarrage passent. Aucun réseau/modèle/API.
-- Configurations MCP locales après ces étapes identiques sémantiquement au
-  snapshot pré-unités ; fichiers dépôt/consignes à SHA strict inchangés.
-  SHA/logs/proof dans LOCAL_QUALIFICATION.json et le dossier privé.
-- Régression SQL sur 10k : seulement 50 JSON décodés/page, index sans tri
-  temporaire, p95<30ms. Fixture locale de la phase SQL : 0,36ms ; la mesure
-  officielle complète doit être rejouée. Critère 30ms scellé avant Claude.
-- Cold : construction d'encodeur interdite, CRUD/CAS/brief/rollback/réouverture
-  passent, cache/profil préservés ; échec de recherche laisse tasks ready.
-  Hashstub de lazy hydration ne qualifie pas la sémantique Granite. Nouveau TCP
-  cold/T1 à exécuter ; les deux W06 précédents confirmaient déjà le clientInfo.
+  imports et commandes installées passent dans deux environnements hors dépôt.
+- Configs client inchangées : contrôle sémantique des entrées MCP et SHA strict
+  des fichiers dépôt/consignes. Preuve locale/logs/empreintes dans le reçu JSON.
+- Les preuves brief source/exact précédentes ont été vérifiées contre les
+  nouveaux inventaires SHA stricts et sont réutilisables sans nouvelle mesure.
+- Mesures Claude antérieures, sources moteur inchangées : S4 schema7 10k 6,7 s,
+  L7b CASp95 5,5 ms/list50p95 0,52 ms. Aucun nouveau chiffre mesuré par Codex.
 
-`release_ready=false`. Restent : 27 TCP, un cached MiniLM, 588 v3 cached réels,
-400 mesures exactes/enveloppe MCP, copies JSONL comparées au runtime 4.0.4,
-profils/cache/timing/search/doctor, relais installés et deux mesures S4/L7b 10k.
-Commandes dans QUALIFY_4_0_5.md ; séquentielles après fin du tour Codex. Cette
-preuve locale n'acquitte ni TCP ni copie industrielle ni activation.
+## Reprise externe et limites
 
-Dossiers conservés : v1 refus note de version absente, v2/v3 local verts mais
-supersédés par les correctifs de métadonnée de seuil et d'export du helper de garde.
-Seuls les artefacts v4 ci-dessus sont candidats. Aucun seuil modifié après mesure.
-GOs distincts pour publication/bascule, SQLite/tâches, jobs/RPO/destination externe.
+`release_ready=false`. **Rejouer les étapes 7–8 source**, puis 9–13 copie/relais
+avec ce manifeste/artéfacts v5 : 27 TCP, 1 MiniLM cached et les 602 v3 cached,
+copy-4.0.5-v2 neuf comparé au runtime 4.0.4, doctor privé, relais installés.
+Préalablement, enregistrer les preuves brief déjà vertes via le vérificateur (§5).
+Le source-proof v4 ne peut pas être transféré au nouveau commit/compteur v3.
+Ne jamais réétiqueter les rapports historiques comme des exécutions nouvelles.
+
+Commandes complètes : QUALIFY_4_0_5.md §5 ; arrêt au premier échec, dossiers neufs,
+concurrence 1 et gardes disque/swap. Publications, bascule, SQLite/tasks et jobs
+restent soumis à des GOs séparés de Romain ; aucun de ces actes n'est exécuté ici.
