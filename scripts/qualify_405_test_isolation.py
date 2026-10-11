@@ -51,6 +51,11 @@ def snapshots(home):
     return result
 
 
+def unreadable(snapshot):
+    return any(isinstance(value, dict) and value.get('kind') == 'unreadable'
+               for value in snapshot.values())
+
+
 def resource_sample(require_swap):
     free = shutil.disk_usage(ROOT).free
     swap = None

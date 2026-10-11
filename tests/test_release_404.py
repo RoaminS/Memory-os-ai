@@ -101,3 +101,46 @@ def test_405_copy_requires_404_baseline_write_mode_and_inactive_optins():
     del bad['doctor']['ready']['capabilities']['policies']['write_mode']
     with pytest.raises(ValueError, match='politiques'):
         gate.validate_copy(bad, manifest)
+
+
+def test_405_source_checks_import_and_sequence_without_tcp_or_model(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import sys
+    import xml.etree.ElementTree as ET
+    sys.path.insert(0, str(Path(__file__).parents[1] / 'scripts'))
+    import source_release_checks as checks
+    import qualify_405_test_isolation as isolation
+    manifest = {'version': '4.0.5', 'source_commit': 'a'*40,
+                'qualification_source_sha256': {'pyproject.toml': hashlib.sha256((Path(__file__).parents[1]/'pyproject.toml').read_bytes()).hexdigest()},
+                'source_expected_v3_tests': 588}
+    path = tmp_path/'manifest.json'
+    path.write_text(json.dumps(manifest))
+    output = tmp_path/'source-proof.json'
+    monkeypatch.setattr(sys, 'argv', ['source_release_checks', '--manifest', str(path), '--output', str(output)])
+    monkeypatch.setattr(checks, 'resources', lambda *_: {'synthetic': True})
+    monkeypatch.setattr(isolation, 'snapshots', lambda *_: {'fixture': {'kind': 'semantic_mcp_entry', 'sha256': 'x'}})
+    assert isolation.unreadable({'bad': {'kind': 'unreadable'}})
+    launched = []
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            launched.append(command)
+            xml = Path(next(c.split('=',1)[1] for c in command if c.startswith('--junitxml=')))
+            count = {'source_tcp':27,'cached_semantic':1,'v3_cached':588}[xml.stem]
+            suite = ET.Element('testsuite', tests=str(count), failures='0', errors='0', skipped='0')
+            for i in range(count):
+                ET.SubElement(suite, 'testcase', name=str(i))
+            ET.ElementTree(suite).write(xml)
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(checks.subprocess, 'Popen', Process)
+    assert checks.main() == 0
+    proof = json.loads(output.read_text())
+    assert proof['ok'] and proof['client_configs_unchanged'] and len(launched) == 3
+    assert proof['checks']['source_tcp']['passed'] == 27
+    # This is harness integration only: fake JUnit is never a physical proof.

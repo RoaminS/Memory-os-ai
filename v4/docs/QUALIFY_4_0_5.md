@@ -40,7 +40,7 @@ export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src:$PWD/v4/src:$PWD/v4"
 export MEMORY_V4_CL100K_PATH=/Users/romain/.config/memory-os/cl100k_base.tiktoken
 unset MEMORY_V4_PROJECT_REGISTRY
 P405_PY="$PWD/.local-qualification/brief-test-runtime-claude-3c-v1/bin/python"
-P405_RELEASE=.local-qualification/release-4.0.5-v3
+P405_RELEASE=.local-qualification/release-4.0.5-v4
 "$P405_PY" -B scripts/qualify_405_test_isolation.py --suite full \
  --output .local-qualification/405-full-claude-v1
 "$P405_PY" -B scripts/qualify_404_increment3c.py --suite full \
@@ -49,7 +49,7 @@ P405_RELEASE=.local-qualification/release-4.0.5-v3
  --output .local-qualification/405-brief-exact-claude-v1
 ```
 
-Attendu :587v3,1658v4 (27TCP), zéro échec/skipped, configs MCP inchangées ;
+Attendu :588v3,1658v4 (27TCP), zéro échec/skipped, configs MCP inchangées ;
 400mesures exactes + enveloppe MCP. Nouveau TCP cold inclus ; W06 avant/après
 commit et owner clientInfo inclus. Unités locales ne sont jamais une preuve TCP.
 
@@ -75,8 +75,11 @@ Tentative locale release-4.0.5-v1 conservée : suites source587/1631, lint,
 build/twine verts, wheel refusée car la note de version n'était pas packagée.
 Ajout de la note/inclusion ; v2 a passé toutes les étapes locales. Dernière revue : le lanceur appliquait bien
 list50<30ms mais inscrivait encore100ms dans le champ criterion du rapport.
-Métadonnée corrigée avant toute nouvelle mesure ; seuls les artefacts **v3** sont
+Métadonnée corrigée avant toute nouvelle mesure ; seuls les artefacts **v4** sont
 candidats à qualifier. Aucun seuil changé après résultat ni mesure lourde lancée.
+v3 local vert conservé ; ajout d'un test d'intégration zéro TCP du lanceur source,
+qui couvre son import du garde unreadable et l'ensemble des étapes simulées.
+Export du helper manquant corrigé avant qualification externe. Sources588v3.
 
 ## 3. Artefacts exacts — copie JSONL et relais installés
 
