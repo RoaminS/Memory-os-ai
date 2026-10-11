@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import datetime as dt
 import json
 import time
 
@@ -107,10 +106,21 @@ def build(engine, project, focus_query=None, expand=()):
         by_id = {it.id: it for it in live}
         requested = set(expand)
         from . import work_state as work
-        tasks = [work.view(engine, task) for task in work.all_tasks(engine, project)] if work.enabled(engine) and project is not None else []
-        tasks = [t for t in tasks if t['status'] != 'done' or 'task:' + t['task_id'] in requested]
-        tasks.sort(key=lambda t: ('task:' + t['task_id'] not in requested, t['stale'],
-                                  t['status'] != 'blocked', -dt.datetime.fromisoformat(t['updated_at']).timestamp(), t['task_id']))
+        tasks = []
+        if work.enabled(engine) and project is not None:
+            from .models import TaskListIn
+            page = work.listing(engine, TaskListIn(project=str(project), limit=10), project)
+            tasks = page['tasks']
+            if page['cursor']:
+                notices.append('budget_saturated')
+            expanded_tasks = []
+            for reference in sorted(requested):
+                if reference.startswith('task:'):
+                    task = work.head(engine, reference[5:], project)
+                    if task is not None:
+                        expanded_tasks.append(work.view(engine, task))
+            expanded_ids = {t['task_id'] for t in expanded_tasks}
+            tasks = expanded_tasks + [t for t in tasks if t['task_id'] not in expanded_ids]
         task_refs = {'task:' + t['task_id'] for t in tasks}
         found = requested & by_id.keys()
         if requested - found - task_refs:

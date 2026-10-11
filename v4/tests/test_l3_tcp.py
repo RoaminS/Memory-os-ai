@@ -429,3 +429,31 @@ def test_L1a_real_tcp_compact_and_offline_counter_failure(harness):
             huge=await session.call_tool('memory_session_brief',{'expand':['x'*10000]})
             assert len(json.dumps(huge.model_dump(mode='json',exclude_none=True)).encode())<1000
     anyio.run(run)
+
+
+def test_L7b_cold_model_free_ready_write_mode_and_relay_owner(harness):
+    from mcp.types import Implementation
+    h = harness
+    h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1', MEMORY_V4_WORK_STATE='1',
+                 MEMORY_V4_EMBED_MODEL='deliberately-unavailable-no-download')
+    h.start()
+    req = urllib.request.Request(f'http://127.0.0.1:{h.port}/ready',
+                                 headers={'Authorization': 'Bearer ' + read_token(h.token)})
+    with urllib.request.urlopen(req, timeout=5) as reply:
+        ready = json.load(reply)
+    assert ready['reason'] == 'ready_work_only'
+    assert ready['capabilities']['work_state'] and not ready['capabilities']['retrieval_ready']
+    assert not ready['capabilities']['encoding']['loaded']
+    assert ready['capabilities']['policies']['write_mode'] == 'read_write'
+
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(
+                r, w, client_info=Implementation(name='cold-codex', version='1')) as session:
+            await session.initialize()
+            task = payload(await session.call_tool('memory_task_create', {
+                'project': 'p', 'title': 'Cold task', 'owner': {'client_id': 'spoofed'}, 'request_id': 'cold'}))
+            assert task['owner']['client_id'] == 'cold-codex'
+            assert not task['owner_authenticated']
+            tasks = payload(await session.call_tool('memory_task_list', {'project': 'p', 'limit': 8}))
+            assert tasks['tasks'][0]['task_id'] == task['task_id']
+    anyio.run(run)

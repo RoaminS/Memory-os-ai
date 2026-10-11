@@ -49,7 +49,7 @@ def engine_readiness(engine) -> tuple[bool, str]:
         engine._ensure_open()
         if engine._writer_lock._file is None:
             return False, "writer_lease_missing"
-        if engine.config.embed_model != "hash" and getattr(engine.embedder, "_model", None) is None:
+        if engine._retrieval_ready and engine.config.embed_model != "hash" and getattr(engine.embedder, "_model", None) is None:
             return False, "model_not_loaded"
         if not engine.store.check_integrity():
             return False, "store_integrity"
@@ -62,6 +62,10 @@ def engine_readiness(engine) -> tuple[bool, str]:
             sources_ok, sources_reason = _jsonl_sources_ready(engine)
             if not sources_ok:
                 return False, sources_reason
+        if not engine._retrieval_ready:
+            if engine.config.store_backend == 'sqlite_s1' and engine.config.work_state:
+                return True, 'ready_work_only'
+            return False, 'model_not_loaded'
         live_ids = {item.id for item in engine.store.all(False)}
         indexed = {engine.store.chunk_owner.get(key, key) for key in engine.vector_index.ids()}
         if (indexed != live_ids or set(engine.bm25.doc_len) != live_ids

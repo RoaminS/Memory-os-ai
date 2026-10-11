@@ -41,7 +41,7 @@ def main():
         report['resource_policy'] = 'physical_tcp_guard' if args.tcp else 'synthetic_unit_caps'
         before = snapshots(operator_home())
         paths = ['v4/tests/s4', 'v4/tests/test_relay_preflight_405.py', 'v4/tests/test_sqlite_engine.py',
-                 'v4/tests/test_sqlite_migration.py', 'v4/tests/test_work_state.py', 'v4/tests/test_config_attestation.py',
+                 'v4/tests/test_sqlite_migration.py', 'v4/tests/test_work_state.py', 'v4/tests/test_work_pagination.py', 'v4/tests/test_work_cold.py', 'v4/tests/test_config_attestation.py',
                  'v4/tests/test_relay_journal_l3.py::test_work_refusal_resolved_only_by_receipt_never_replayed']
         if args.tcp:
             paths += ['v4/tests/test_l3_tcp.py::test_S4_B09_read_only_window_keeps_reads_and_never_sends_mutation',

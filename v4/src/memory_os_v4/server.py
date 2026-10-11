@@ -44,6 +44,8 @@ from .store import MemoryItem
 from .text import tokenize
 from . import __version__, models
 
+from .memory import RetrievalUnavailable
+
 logger = logging.getLogger("memory_os_v4.server")
 
 DEFAULT_INGEST_EXTENSIONS = {".txt", ".md", ".markdown", ".rst", ".json", ".py", ".csv", ".log"}
@@ -736,6 +738,11 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         if name in {"memory_consolidate", "memory_compact"} and _engine is None:
             # Refuse a cold disabled server without opening its store or loading an encoder.
             MaintenancePolicy(Config.from_env().maintenance_mode).require(parsed.dry_run)
+        if _engine is None and name in WORK_MODELS:
+            cfg = Config.from_env()
+            if cfg.store_backend != 'sqlite_s1' or not cfg.work_state:
+                return {'ok': False, 'code': 'backend_unsupported' if cfg.store_backend != 'sqlite_s1' else 'capability_disabled',
+                        'backend': cfg.store_backend, 'outcome': 'not_started'}
         engine = get_engine()
         if name == 'memory_block_set' and engine.store.meta.get('inactive_block_cas'):
             return {'ok': False, 'code': 'backend_unsupported', 'outcome': 'not_started'}
@@ -759,6 +766,9 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         return engine.execute_request(operation, scope, payload, getattr(parsed, "request_id", None),
                                       lambda: handler(engine, parsed),
                                       raw_args_sha256=raw_args_sha256(arguments))
+    except RetrievalUnavailable:
+        return {'ok': False, 'code': 'retrieval_unavailable', 'outcome': 'not_started',
+                'error': 'Retrieval encoder unavailable; tasks remain usable.'}
     except TokenizerUnavailable:
         return {"ok": False, "mode": "compact", "code": "tokenizer_unavailable", "error": "Exact offline tokenizer unavailable; provision it explicitly or request mode=detailed."}
     except ProjectError as exc:

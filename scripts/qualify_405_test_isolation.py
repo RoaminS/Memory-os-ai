@@ -127,10 +127,10 @@ def main():
                 counts['tcp_cases'] = sum(c.get('classname', '').split('.')[-1] in
                                          {'test_server_http_e2e', 'test_ops_e2e', 'test_l3_tcp'}
                                          for c in cases_xml)
-                if args.suite == 'full' and counts['tcp_cases'] != 26:
-                    raise RuntimeError('The 26 physical TCP cases are required')
+                if args.suite == 'full' and counts['tcp_cases'] != 27:
+                    raise RuntimeError('The 27 physical TCP cases are required')
             report['commands'][-1]['counts'] = counts
-            minimum = 585 if name == 'v3' else (1648 if args.suite == 'full' else 1622)
+            minimum = 585 if name == 'v3' else (1657 if args.suite == 'full' else 1630)
             if counts['tests'] < minimum or any(counts[k] for k in ('failures', 'errors', 'skipped')):
                 raise RuntimeError(name + ' incomplete; evidence preserved')
         report['ok'] = True

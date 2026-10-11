@@ -41,6 +41,11 @@ from .vector_index import VectorIndex
 
 logger = logging.getLogger("memory_os_v4")
 
+
+class RetrievalUnavailable(RuntimeError):
+    code = 'retrieval_unavailable'
+
+
 _PENDING_RE = re.compile(r"\bTODO\b|\ba faire\b|\bà faire\b|\bnext step\b|\bprochaine etape\b", re.IGNORECASE)
 
 
@@ -89,6 +94,8 @@ def _requires_open(method):
     def guarded(self, *args, **kwargs):
         with self._lock:
             self._ensure_open()
+            if method.__name__ not in {'status', 'flush', 'session_brief'}:
+                self.ensure_retrieval()
             return method(self, *args, **kwargs)
     return guarded
 
@@ -165,7 +172,13 @@ class MemoryV4:
             self.store.save_meta(dict(self.store.meta))
             if self.config.store_backend != "sqlite_s1":
                 sync_sources(self.data_dir)
-            self.embedder = _make_embedder(self.config)
+            # SQLite work authority must open without resolving a GPU, reading
+            # model weights or importing neural runtimes. Retrieval is explicit
+            # on its first operation; JSONL/default behavior is unchanged.
+            self._retrieval_ready = not (self.config.store_backend == 'sqlite_s1'
+                                          and self.config.work_state and self.config.embed_model != 'hash')
+            self._retrieval_initializing = False
+            self.embedder = _make_embedder(self.config) if self._retrieval_ready else None
             if self.config.store_backend == "sqlite_s1":
                 from .sqlite_embeddings import SQLiteEmbeddings
                 self._embedding_cache = SQLiteEmbeddings(self.store)
@@ -179,7 +192,11 @@ class MemoryV4:
             # below from the live items' own (already-durable) `.facets`.
             self.facet_index = FacetIndex()
 
-            self._init_indexes()
+            if not self._retrieval_ready:
+                self.vector_index = VectorIndex(self.store.meta.get('dim') or 1)
+                self._rebuild_bm25_entities()
+            else:
+                self._init_indexes()
 
             self.retriever = HybridRetriever(
                 self.store,
@@ -189,7 +206,7 @@ class MemoryV4:
                 self.entities,
                 self.config,
                 facet_index=self.facet_index,
-            )
+            ) if self._retrieval_ready else None
             self.last_consolidated: float | None = self.store.meta.get("last_consolidated")
         except BaseException:
             self._closed = True
@@ -199,6 +216,33 @@ class MemoryV4:
             finally:
                 self._writer_finalizer()
             raise
+
+    def ensure_retrieval(self):
+        """Initialize attested retrieval on demand; failure never disables tasks.
+
+        A stored profile describes historical vectors, not currently loaded
+        weights. Always attest/rebuild with the configured encoder before use.
+        """
+        with self._lock:
+            self._ensure_open()
+            if self._retrieval_ready:
+                return
+            self._retrieval_initializing = True
+            try:
+                self.embedder = _make_embedder(self.config)
+                self._init_indexes()
+                self.retriever = HybridRetriever(self.store, self.embedder, self.vector_index,
+                    self.bm25, self.entities, self.config, facet_index=self.facet_index)
+                self._retrieval_ready = True
+            except Exception as exc:
+                self.embedder, self.retriever = None, None
+                if hasattr(self, '_attested_encoding_profile'):
+                    del self._attested_encoding_profile
+                self.vector_index = VectorIndex(self.store.meta.get('dim') or 1)
+                self._rebuild_bm25_entities()
+                raise RetrievalUnavailable('Configured retrieval model unavailable; work authority remains ready') from exc
+            finally:
+                self._retrieval_initializing = False
 
     def _ensure_open(self) -> None:
         self._writer_lock.assert_owner()
@@ -314,7 +358,10 @@ class MemoryV4:
 
     def _flush_sql_sources(self):
         meta = dict(self.store.meta)
-        meta.update(embed_model=self.config.embed_model, dim=self.embedder.dim, version=_package_version())
+        meta['version'] = _package_version()
+        if self._retrieval_ready:
+            meta.update(embed_model=self.config.embed_model, dim=self.embedder.dim)
+        # Cold task/CAS mutations preserve prior vectors/profile/model metadata.
         if self.last_consolidated is not None:
             meta["last_consolidated"] = self.last_consolidated
         self.store.save_meta(meta)
@@ -324,10 +371,13 @@ class MemoryV4:
     def _rebuild_sql_indexes(self):
         """Rebuild indexes, reusing fingerprint-checked corpus embeddings."""
         self.facet_index = FacetIndex()
+        if not self._retrieval_ready and not self._retrieval_initializing:
+            self._rebuild_bm25_entities()
+            return
         self._reembed_all()
         self._rebuild_bm25_entities()
         self.store.meta["embed_compute_profile"] = self._compute_profile()
-        if hasattr(self, "retriever"):
+        if getattr(self, "retriever", None) is not None:
             self.retriever.vector_index = self.vector_index
             self.retriever.bm25 = self.bm25
             self.retriever.entities = self.entities
@@ -354,6 +404,9 @@ class MemoryV4:
         return self._embedding_cache.encode(texts, self.embedder.encode, self.embedder.dim, profile)
 
     def _compute_profile(self):
+        if not self._retrieval_ready and not self._retrieval_initializing:
+            old = self.store.meta.get('embed_compute_profile')
+            return dict(old) if isinstance(old, dict) else None
         if not hasattr(self, "_attested_encoding_profile"):
             profile = {"device": getattr(self.embedder, "device", "hash"),
                        "dtype": self.config.embed_dtype,
@@ -954,7 +1007,7 @@ class MemoryV4:
             procedures = [it for it in live if it.kind == "procedure"][:6]
 
             focus_hits: list[SearchHit] = []
-            if focus_query:
+            if focus_query and self._retrieval_ready:
                 if queries or hypotheses:
                     focus_hits = self.retriever.search_multi(
                         focus_query, queries=queries, hypotheses=hypotheses, top_k=8, project=project
@@ -1070,8 +1123,9 @@ class MemoryV4:
         result = {
             "counts": counts,
             "total": sum(counts.values()),
-            "embed_model": getattr(self.embedder, "model_name", "unknown"),
-            "dim": self.embedder.dim,
+            "embed_model": getattr(self.embedder, "model_name", self.config.embed_model),
+            "dim": self.embedder.dim if self._retrieval_ready else self.store.meta.get("dim"),
+            "retrieval_ready": self._retrieval_ready,
             "encoding_profile": self._compute_profile(),
             "data_dir": str(self.data_dir),
             "bm25_docs": sum(iid in ids for iid in self.bm25.doc_len),
