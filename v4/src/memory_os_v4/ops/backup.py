@@ -373,7 +373,7 @@ def verified_archives(settings: OpsSettings) -> dict[str, tuple[str, str]]:
 
 
 def rotate(dest: Path, eligible: dict[str, tuple[str, str]], *, pinned: str, days: int = 7,
-           weeks: int = 4) -> list[str]:
+           weeks: int = 4, fault_hook=None) -> list[str]:
     """Retention among archives logged as verified AND still intact on disk: keep the newest of the ``days`` most
     recent distinct days and of the ``weeks`` most recent distinct ISO weeks, plus ``pinned``. Unknown, unverified,
     altered or diagnostic files are never deleted (and never count as a backup)."""
@@ -399,8 +399,15 @@ def rotate(dest: Path, eligible: dict[str, tuple[str, str]], *, pinned: str, day
     removed = []
     for _, _, path in candidates:
         if path not in keep:
+            if fault_hook:
+                fault_hook('before_rotation_unlink')
+            # Revalidate immediately before deleting; altered evidence is retained.
+            if path.is_symlink() or path.stat().st_nlink != 1 or sha256(path) != eligible[path.name][0]:
+                continue
             path.unlink()
             removed.append(path.name)
+            if fault_hook:
+                fault_hook('after_rotation_unlink')
     return removed
 
 

@@ -19,7 +19,7 @@ import time
 import uuid
 
 from .ops.storecheck import _jsonl, check_files, loads_strict
-from .sqlite_engine import SQLiteBlocks, SQLiteRequests
+from .sqlite_engine import SQLiteBlocks, SQLiteRequests, fingerprint
 from .sqlite_store import APPLICATION_ID, SCHEMA_VERSION, SQLiteStore, _json, schema_checksums
 from .store import MemoryItem
 from .writer_lock import WriterLock
@@ -448,8 +448,10 @@ def _verify_archives(connection):
     return files
 
 
-def export(source, destination, *, original=False):
+def export(source, destination, *, original=False, rollback=False, fault_hook=None):
     """Original byte restore only while authority is unchanged; otherwise semantic export."""
+    if original and rollback:
+        raise ValueError('Rollback requires the current semantic authority, never an original byte restore')
     source, destination = _paths(source, destination)
     with offline_lease(source):
         if destination.exists():
@@ -503,8 +505,31 @@ def export(source, destination, *, original=False):
                         "automatic_downgrade": False,
                     }
                 ).encode()
+                if rollback:
+                    meta = loads_strict(files['meta.json'])
+                    old_id = meta.get('store_instance_id')
+                    if not isinstance(old_id, str) or not old_id:
+                        raise ValueError('Rollback requires an enrolled source identity')
+                    event = {'operation': 'sqlite_jsonl_rollback', 'at': time.time(),
+                             'store_instance_id': uuid.uuid4().hex, 'restored_from_instance_id': old_id,
+                             'source_authority_sha256': _authority_digest(connection),
+                             'source_receipt_sequence': connection.execute(
+                                 'SELECT value FROM receipt_counter WHERE id=1').fetchone()[0]}
+                    meta.update(store_instance_id=event['store_instance_id'], restored_from_instance_id=old_id)
+                    meta['recovery_history'] = [*meta.get('recovery_history', []), event]
+                    files['meta.json'] = _json(meta).encode()
+                    result = {**event, 'ok': True, 'automatic_downgrade': False,
+                              'work_state': False, 'block_cas': False, 'reopening_allowed': False}
+                    receipt = {'scope': 'operator:s4', 'request_id': 's4-rollback-' + event['store_instance_id'],
+                               'fingerprint': fingerprint('sqlite_jsonl_rollback', event),
+                               'operation': 'sqlite_jsonl_rollback', 'state': 'complete', 'explicit': True,
+                               'result': result, 'store_instance_id': event['store_instance_id']}
+                    files['requests.jsonl'] += _json(receipt).encode() + b'\n'
+                    files['rollback.json'] = _json(result).encode()
             stage.mkdir(mode=0o700)
             for name, data in files.items():
+                if fault_hook:
+                    fault_hook('before_export_file:' + name)
                 path = stage / name
                 path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -512,6 +537,8 @@ def export(source, destination, *, original=False):
                     fh.write(data)
                     fh.flush()
                     os.fsync(fh.fileno())
+                if fault_hook:
+                    fault_hook('after_export_file:' + name)
             if _file_manifest(_files(stage)) != _file_manifest(files):
                 raise ValueError("Export byte comparison failed")
             for directory in sorted(
@@ -521,8 +548,13 @@ def export(source, destination, *, original=False):
             _fsync_directory(stage)
             if _file_manifest(_files(source)) != before:
                 raise ValueError("SQLite export source changed; publication refused")
+            if fault_hook:
+                fault_hook('before_export_publish')
             _publish(stage, destination)
-            return {"original": original, "files": _file_manifest(files), "automatic_downgrade": False}
+            if fault_hook:
+                fault_hook('after_export_publish')
+            return {"original": original, "rollback": rollback, "files": _file_manifest(files),
+                    "automatic_downgrade": False, "reopening_allowed": False}
         except BaseException:
             if stage.exists():
                 shutil.rmtree(stage)
@@ -542,12 +574,13 @@ def main(argv=None):
     out.add_argument("source")
     out.add_argument("destination")
     out.add_argument("--original", action="store_true")
+    out.add_argument('--rollback', action='store_true', help='Current-authority export with a new store identity; no activation')
     args = parser.parse_args(argv)
     try:
         result = (
             migrate(args.source, args.destination, apply=args.apply)
             if args.operation == "import"
-            else export(args.source, args.destination, original=args.original)
+            else export(args.source, args.destination, original=args.original, rollback=args.rollback)
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

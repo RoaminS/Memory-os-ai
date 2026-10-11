@@ -282,6 +282,49 @@ def test_rotation_keeps_pinned_unknown_and_modified_archives(case):
     assert {p.name for p in settings.backup_dir.iterdir()} == before
 
 
+@pytest.mark.parametrize('boundary', ['before_rotation_unlink', 'after_rotation_unlink',
+                                     'before_rotation_fsync', 'before_rotation_registration',
+                                     'after_rotation_registration'])
+def test_rotation_sigkill_keeps_pinned_unknown_and_source_intact(case, boundary):
+    settings, _ = case
+    before = logical(settings.store_dir / s4.DB)
+    settings.backup_dir.mkdir()
+    records = []
+    for i in range(40):
+        stamp = (dt.datetime(2025, 1, 1) + dt.timedelta(days=i)).strftime('%Y%m%d-%H%M%S')
+        name = s4.PREFIX + stamp + '.mosb'
+        path = settings.backup_dir / name
+        path.write_bytes(('synthetic archive ' + str(i)).encode())
+        records.append({'ok': True, 'qualified': True, 'verified': True, 'archive': name,
+                        'archive_sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'stamp': stamp})
+    log = settings.ops_dir / 'logs/backup.jsonl'
+    log.parent.mkdir(parents=True)
+    log.write_text(''.join(json.dumps(r) + '\n' for r in records))
+    pinned = records[-1]['archive']
+    unknown = settings.backup_dir / 'unknown.mosb'
+    unknown.write_bytes(b'keep evidence')
+    code = '''
+import os,signal,sys
+from pathlib import Path
+from memory_os_v4.ops.settings import OpsSettings
+from memory_os_v4.ops.sqlite_backup import rotate_archives
+def fault(point):
+    if point==sys.argv[4]: os.kill(os.getpid(),signal.SIGKILL)
+root=Path(sys.argv[2])
+settings=OpsSettings(url='http://127.0.0.1:9/mcp/',token_file=root/'token',store_dir=root/'store',
+                     backup_key=root/'key',backup_dir=Path(sys.argv[1]),ops_dir=root,service_label=None)
+rotate_archives(settings,pinned=sys.argv[3],fault_hook=fault)
+'''
+    result = subprocess.run([sys.executable, '-B', '-c', code, str(settings.backup_dir),
+                             str(settings.ops_dir), pinned, boundary], capture_output=True, timeout=15)
+    assert result.returncode == -signal.SIGKILL, result.stderr.decode()
+    assert unknown.read_bytes() == b'keep evidence'
+    assert s4.sha256(settings.backup_dir / pinned) == records[-1]['archive_sha256']
+    assert logical(settings.store_dir / s4.DB) == before
+    s4.rotate_archives(settings, pinned=pinned)  # recovery is safe, unknown never purged
+    assert unknown.exists() and (settings.backup_dir / pinned).exists()
+
+
 BACKUP_WORKER = '''
 import json,os,pathlib,signal,sys
 from types import SimpleNamespace

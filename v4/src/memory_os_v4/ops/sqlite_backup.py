@@ -400,7 +400,7 @@ def backup(settings, *, apply=False, fault=lambda point: None):
     return record
 
 
-def rotate_archives(settings, *, pinned):
+def rotate_archives(settings, *, pinned, fault_hook=None):
     from .backup import rotate, verified_archives
     eligible = {name: value for name, value in verified_archives(settings).items()
                 if name.startswith(PREFIX) and Path(name).name == name
@@ -409,9 +409,15 @@ def rotate_archives(settings, *, pinned):
                 and (settings.backup_dir / name).stat().st_nlink == 1}
     if pinned not in eligible or sha256(settings.backup_dir / pinned) != eligible[pinned][0]:
         raise BackupError('Pinned qualified SQLite archive missing/divergent; no rotation')
-    removed = rotate(settings.backup_dir, eligible, pinned=pinned)
+    removed = rotate(settings.backup_dir, eligible, pinned=pinned, fault_hook=fault_hook)
+    if fault_hook:
+        fault_hook('before_rotation_fsync')
     sync_directory(settings.backup_dir)
+    if fault_hook:
+        fault_hook('before_rotation_registration')
     register(settings, 'sqlite_rotation.jsonl', {'ok': True, 'pinned': pinned, 'removed': removed})
+    if fault_hook:
+        fault_hook('after_rotation_registration')
     return removed
 
 
