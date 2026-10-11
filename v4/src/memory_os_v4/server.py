@@ -441,7 +441,7 @@ def _h_ingest(engine: MemoryV4, args: models.IngestIn) -> dict:
             try:
                 import fitz  # type: ignore  # pymupdf, optional
             except ImportError:
-                skipped.append(f"{f}: pdf skipped (pymupdf not installed)")
+                skipped.append(f"{f}: pdf skipped; install memory-os-ai[documents] (pymupdf missing)")
                 continue
             try:
                 doc = fitz.open(str(f))
@@ -851,13 +851,16 @@ def _build_http_app(host: str, port: int):
                              **identity})
 
     async def ready(request):
-        ok, reason, capabilities = await anyio.to_thread.run_sync(readiness_snapshot, _engine, identity)
-        if ok and (identity["commit"] is None or identity["source_dirty"]):
+        current = identity
+        if identity.get("identity_source") == "embedded_descriptor":
+            current = await anyio.to_thread.run_sync(build_identity)
+        ok, reason, capabilities = await anyio.to_thread.run_sync(readiness_snapshot, _engine, current)
+        if ok and (current["commit"] is None or current["source_dirty"]):
             ok, reason = False, "build_unqualified"
         return JSONResponse({"ok": ok, "ready": ok, "reason": reason,
                              "encoding_profile": capabilities["encoding"]["profile"] if ok else None,
                              "capabilities": capabilities if ok else None,
-                             "server": "memory-os-v4", **identity}, status_code=200 if ok else 503)
+                             "server": "memory-os-v4", **current}, status_code=200 if ok else 503)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):

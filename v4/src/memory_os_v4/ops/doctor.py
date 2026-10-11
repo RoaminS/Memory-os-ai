@@ -72,7 +72,7 @@ def _server(settings: OpsSettings) -> list[Check]:
     if status == 200:
         version, commit = info.get("version"), info.get("commit")
         attested = (info.get("ok") is True and info.get("ready") is True
-                    and (info.get("commit_source") == "deployment_manifest"
+                    and (info.get("commit_source") in {"deployment_manifest", "embedded_descriptor"}
                          or (info.get("commit_source") == "checkout" and info.get("source_dirty") is False))
                     and info.get("source_dirty") is not True and isinstance(version, str)
                     and re.fullmatch(r"\d+\.\d+\.\d+", version)
@@ -80,12 +80,16 @@ def _server(settings: OpsSettings) -> list[Check]:
         checks.append(Check("ready", "PASS" if attested else "FAIL",
                             f"/ready → ready, version {version}, commit {commit[:7]}" if attested
                             else "/ready → 200 with missing/invalid ready or build identity",
-                            "" if attested else "check the qualified server build and /ready contract"))
+                            ("identity_source: " + info.get("identity_source", "legacy") +
+                             "; MEMORY_V4_BUILD_COMMIT is no longer needed with a valid embedded descriptor")
+                            if attested and info.get("identity_source") == "embedded_descriptor"
+                            else ("" if attested else "check the qualified server build and /ready contract")))
     elif status == 404:
         checks.append(Check("ready", "WARN", "/ready not available (server < 4.0.1)", "upgrade the server"))
     else:
         checks.append(Check("ready", "FAIL", f"/ready → {status}",
-                            "build_unqualified: set MEMORY_V4_BUILD_COMMIT; indexes_not_ready: see RB-02"))
+                            "build_unqualified: reinstall a qualified artifact; an installed descriptor cannot be "
+                            "replaced by MEMORY_V4_BUILD_COMMIT. Source checkouts may use a declared release commit; indexes_not_ready: see RB-02"))
     if status == 200:
         checks += _capabilities(info)
     return checks

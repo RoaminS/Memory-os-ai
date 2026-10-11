@@ -16,8 +16,14 @@ __all__ = [
     "MEMORY_INSTRUCTIONS",
 ]
 
-from memory_os_ai.engine import MemoryEngine
-from memory_os_ai.chat_extractor import ChatExtractor
-from memory_os_ai.storage_router import StorageRouter
-from memory_os_ai.models import TOOL_MODELS
-from memory_os_ai.instructions import MEMORY_INSTRUCTIONS
+def __getattr__(name):
+    # Reading the package/version does not require optional v3 document libraries.
+    from importlib import import_module
+    modules = {"MemoryEngine": "engine", "ChatExtractor": "chat_extractor",
+               "StorageRouter": "storage_router", "TOOL_MODELS": "models",
+               "MEMORY_INSTRUCTIONS": "instructions"}
+    if name not in modules:
+        raise AttributeError(name)
+    value = getattr(import_module(f"memory_os_ai.{modules[name]}"), name)
+    globals()[name] = value
+    return value

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from urllib.parse import urlsplit
@@ -35,6 +36,20 @@ def cmd_token(args, s: OpsSettings) -> int:
         return 1
     print(f"{'created' if created else 'exists and is valid'}: {s.token_file} (mode 0600, content never printed)")
     return 0
+
+
+def cmd_provision(args, s: OpsSettings) -> int:
+    from .provision import ProvisionError, apply, plan
+    try:
+        preview = plan(resources=tuple(args.resources.split(",")), cache_dir=args.cache_dir,
+                       table_path=args.table_path)
+        result = apply(preview, download_approved=args.download_approved) if args.apply else preview
+        _print_json(result)
+        return 0 if result["ok"] else 1
+    except (OSError, ValueError, ProvisionError) as exc:
+        _print_json({"ok": False, "code": "provision_refused",
+                     "error": str(exc) if isinstance(exc, ProvisionError) else type(exc).__name__})
+        return 1
 
 
 def cmd_health(args, s: OpsSettings) -> int:
@@ -162,12 +177,13 @@ def cmd_setup(args, s: OpsSettings) -> int:
 
     sqlite_jobs = getattr(args, 'sqlite_s4_jobs', False)
     if sqlite_jobs:
-        import os
         import re
         from ..config import Config
+        from ..readiness import build_identity
         cfg = Config.from_env()
-        commit = os.environ.get('MEMORY_V4_BUILD_COMMIT', '')
-        if cfg.store_backend != 'sqlite_s1' or not re.fullmatch(r'[0-9a-f]{40}', commit):
+        declared = build_identity()
+        commit = declared.get('commit') or ''
+        if cfg.store_backend != 'sqlite_s1' or declared.get('source_dirty') or not re.fullmatch(r'[0-9a-f]{40}', commit):
             _print_json({'ok': False, 'code': 'sqlite_s4_not_configured',
                          'error': 'Inactive SQLite templates require explicit sqlite_s1 and qualified build commit; token unchanged'})
             return 2
@@ -210,12 +226,22 @@ def cmd_setup(args, s: OpsSettings) -> int:
     except Exception as exc:  # pragma: no cover - defensive
         identity = {"commit": None, "error": type(exc).__name__}
     qualified_build = bool(identity.get("commit")) and not identity.get("source_dirty")
-    if qualified_build:
+    if qualified_build and identity.get("identity_source") == "embedded_descriptor":
+        env.pop("MEMORY_V4_BUILD_COMMIT", None)
+        print("# Qualified embedded descriptor: MEMORY_V4_BUILD_COMMIT is unnecessary (remove old declarations).")
+    elif qualified_build:
         env["MEMORY_V4_BUILD_COMMIT"] = identity["commit"]  # non-secret; launchd does not inherit this process env
     else:
         print("# WARNING: no qualified build identity (commit unknown or modified checkout). The generated server "
-              "job is NOT qualified: /ready will answer 503 build_unqualified. Set MEMORY_V4_BUILD_COMMIT to the "
-              "attested release commit (see the release manifest) or install a qualified artifact, then rerun.")
+              "job is NOT qualified: /ready will answer 503 build_unqualified. Install a qualified artifact; "
+              "MEMORY_V4_BUILD_COMMIT is only a declarative option for source checkouts.")
+    table = os.environ.get("MEMORY_V4_CL100K_PATH")
+    if table:
+        env["MEMORY_V4_CL100K_PATH"] = table
+    for name in ("HF_HOME", "HF_HUB_CACHE"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
     relay_env = {k: env[k] for k in ("MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE")}
     hook_env = "env " + " ".join(
         shlex.quote(f"{k}={env[k]}") for k in ("MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE", "MEMORY_V4_OPS_DIR")
@@ -331,6 +357,12 @@ def main(argv: list[str] | None = None) -> int:
         prog="memory-os-admin", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+    pv = sub.add_parser("provision", help="preview pinned resources; no download without two explicit flags")
+    pv.add_argument("--resources", default="granite,cl100k")
+    pv.add_argument("--cache-dir", type=Path)
+    pv.add_argument("--table-path", type=Path)
+    pv.add_argument("--apply", action="store_true")
+    pv.add_argument("--download-approved", action="store_true")
     t = sub.add_parser("token")
     t.add_argument("action", choices=["create"])
     h = sub.add_parser("health")
@@ -359,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     s = OpsSettings.from_env()
     handler = {
+        "provision": cmd_provision,
         "token": cmd_token,
         "health": cmd_health,
         "backup": cmd_backup,

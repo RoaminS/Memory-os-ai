@@ -1,0 +1,76 @@
+{
+  "cl100k": {
+    "bytes": 1681126,
+    "licence": "MIT (tiktoken)",
+    "sha256": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+    "url": "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+  },
+  "files": [
+    {
+      "bytes": 313,
+      "path": "1_Pooling/config.json",
+      "sha256": "8bc5c9a40814fcf48d2fbe7cfeff4bee6736c3c2a823ba0ce098985c59d12ab7",
+      "upstream_blob": "95356aec72a5451eb362f23b30543efa547221e2"
+    },
+    {
+      "bytes": 20684,
+      "path": "README.md",
+      "sha256": "a73d22110e7e6d947f55cdd4f1a8b0b622e340fd09a66d302f5fe800899024bd",
+      "upstream_blob": "ee9e323ec8ac4ec76d46916ea43e96da8558b969"
+    },
+    {
+      "bytes": 1216,
+      "path": "config.json",
+      "sha256": "de948b0bdc6f356afad7a84b276d8dd7e7fe10fb9add1bb5e610621c28e41ebc",
+      "upstream_blob": "774645fd28bb27f79c33a67f7051256ed2fa9a09"
+    },
+    {
+      "bytes": 283,
+      "path": "config_sentence_transformers.json",
+      "sha256": "93a59cbc7d82a47a7148719d9b21c0f2f111121e495b3918143184f4cd0ea25e",
+      "upstream_blob": "3ab1bc63caa3ea50028214685fad2b278d49ca2b"
+    },
+    {
+      "bytes": 194889568,
+      "path": "model.safetensors",
+      "sha256": "f3ea88b230492811046145513710e76b4cc8c2ad49e8708da0e7247e548903be",
+      "upstream_blob": "f3ea88b230492811046145513710e76b4cc8c2ad49e8708da0e7247e548903be"
+    },
+    {
+      "bytes": 349,
+      "path": "modules.json",
+      "sha256": "84e40c8e006c9b1d6c122e02cba9b02458120b5fb0c87b746c41e0207cf642cf",
+      "upstream_blob": "952a9b81c0bfd99800fabf352f69c7ccd46c5e43"
+    },
+    {
+      "bytes": 60,
+      "path": "sentence_bert_config.json",
+      "sha256": "967ef958285e4a7a37d8ff1832473d967edd913b4e48572f31c3d3ea361d5327",
+      "upstream_blob": "4cf43a4f6f3e8493efb2bba6fbea420216221110"
+    },
+    {
+      "bytes": 871,
+      "path": "special_tokens_map.json",
+      "sha256": "013787ee251ff611722479197c00853b62113ad303cb0a36524231783c676c69",
+      "upstream_blob": "d1a49f7ece7a2cf8ba21f77d97b2413e142ab73b"
+    },
+    {
+      "bytes": 25301672,
+      "path": "tokenizer.json",
+      "sha256": "4f2842d568e2724370aec203652a42ac783c7937f8347a1a2cc7506d71f1582f",
+      "upstream_blob": "4f2842d568e2724370aec203652a42ac783c7937f8347a1a2cc7506d71f1582f"
+    },
+    {
+      "bytes": 12860,
+      "path": "tokenizer_config.json",
+      "sha256": "6ed69389e30a8ecabfce2f9ebcdf0c908b34056f24d994340f2f216521c057d5",
+      "upstream_blob": "6a228fd8b96ac3833a7878c92653c9dc4f85ac5d"
+    }
+  ],
+  "hash_origin": "Read-only qualified operator snapshot; apply must cross-check upstream pinned revision metadata before any missing model file download.",
+  "licence": "Apache-2.0",
+  "model_id": "ibm-granite/granite-embedding-97m-multilingual-r2",
+  "revision": "835ad14087e140460703cf0fae09f97d469d65c2",
+  "schema_version": 1,
+  "upstream": "https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2"
+}

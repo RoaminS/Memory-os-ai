@@ -2,6 +2,8 @@ include LICENSE LICENSE.GPL-3.0
 include CONTRIBUTING.md
 include AGENTS.md CLAUDE.md CHANGELOG.md
 include conftest.py
+include setup.py memory_os_build.py
+recursive-include v4/src/memory_os_v4/resources *.json
 exclude .mcp.json .vscode/mcp.json
 include v4/pyproject.toml
 recursive-include docs *.md

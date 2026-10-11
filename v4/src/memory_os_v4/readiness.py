@@ -11,14 +11,28 @@ import subprocess
 def build_identity() -> dict:
     from . import __version__
 
-    result = {"version": __version__, "commit": None, "commit_source": "unknown", "source_dirty": None}
+    result = {"version": __version__, "commit": None, "commit_source": "unknown", "source_dirty": None,
+              "identity_source": "unqualified"}
     configured = os.environ.get("MEMORY_V4_BUILD_COMMIT")
-    if configured:
-        if re.fullmatch(r"[0-9a-f]{40}", configured) is None:
-            raise ValueError("MEMORY_V4_BUILD_COMMIT must be a complete lowercase Git SHA")
-        return {**result, "commit": configured, "commit_source": "deployment_manifest"}
+    if configured and re.fullmatch(r"[0-9a-f]{40}", configured) is None:
+        raise ValueError("MEMORY_V4_BUILD_COMMIT must be a complete lowercase Git SHA")
     root = Path(__file__).resolve().parents[3]
-    if not (root / ".git").exists() or not (root / "v4/src/memory_os_v4").is_dir():
+    source_layout = (Path(__file__).resolve() == root / "v4/src/memory_os_v4/readiness.py"
+                     and (root / "pyproject.toml").is_file())
+    if not source_layout:
+        from .build_descriptor import verify
+        checked = verify(Path(__file__).resolve().parent.parent, __version__)
+        if not checked["ok"]:
+            return {**result, "identity_error": checked["error"]}
+        if configured and configured != checked["commit"]:
+            raise ValueError("MEMORY_V4_BUILD_COMMIT contradicts the embedded descriptor; remove the old declaration")
+        return {**result, "commit": checked["commit"], "source_dirty": False,
+                "commit_source": "embedded_descriptor", "identity_source": "embedded_descriptor",
+                "descriptor_sha256": checked["descriptor_sha256"], "payload_sha256": checked["payload_sha256"]}
+    # Explicit source/archive operator mode remains declarative, never embedded.
+    if configured:
+        return {**result, "commit": configured, "commit_source": "deployment_manifest", "identity_source": "env_declared"}
+    if not (root / ".git").exists():
         return result
     try:
         commit = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -27,7 +41,8 @@ def build_identity() -> dict:
                                 "v4/src", "src", "pyproject.toml"], timeout=2,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
         if re.fullmatch(r"[0-9a-f]{40}", commit) and dirty in {0, 1}:
-            return {**result, "commit": commit, "commit_source": "checkout", "source_dirty": bool(dirty)}
+            return {**result, "commit": commit, "commit_source": "checkout", "source_dirty": bool(dirty),
+                    "identity_source": "git_checkout" if not dirty else "unqualified"}
     except (OSError, subprocess.SubprocessError):
         pass
     return result

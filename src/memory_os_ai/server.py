@@ -19,6 +19,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from .legacy_cli import require_v3
+
 import numpy as np
 
 from mcp.server import Server
@@ -60,6 +62,13 @@ from .storage_router import StorageRouter
 from .instructions import MEMORY_INSTRUCTIONS
 
 logger = logging.getLogger("memory_os_ai")
+
+if __name__ == "__main__":
+    try:
+        require_v3()
+    except ImportError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from None
 
 # ---------------------------------------------------------------------------
 # Global engine instance (singleton per process)
