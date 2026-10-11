@@ -73,15 +73,17 @@ def runtime_record():
 
 
 def command(work, schema, effort, model=MODEL):
-    if (model, effort) not in {(MODEL, 'minimal'), (MODEL, 'low'), (JUDGE_MODEL, 'high')}:
+    if (model, effort) not in {(MODEL, 'minimal'), (MODEL, 'low'), (MODEL, 'high'), (JUDGE_MODEL, 'high')}:
         raise ValueError('No automatic effort/model substitution')
     argv = [CLI, 'exec', '-m', model, '-c', f'model_reasoning_effort={effort}',
             '--ignore-user-config', '--ignore-rules', '--strict-config', '--ephemeral',
             '--skip-git-repo-check', '--sandbox', 'read-only', '--json', '--color', 'never',
-            '--cd', str(work), '--output-schema', str(schema), '-c', 'approval_policy="never"',
+            '--cd', str(work), '-c', 'approval_policy="never"',
             '-c', 'web_search="disabled"', '-c', 'mcp_servers={}', '-c', 'project_doc_max_bytes=0',
             '-c', 'notify=[]', '-c', 'forced_login_method="chatgpt"', '-c', 'history.persistence="none"']
     argv.extend(['-c', 'model_provider="openai"'])
+    if schema is not None:
+        argv.extend(['--output-schema', str(schema)])
     # Keep host skills undiscovered. Suppress their documented startup warning,
     # and use the nested code-mode setting rather than its legacy boolean flag.
     argv.extend(['-c', 'suppress_unstable_features_warning=true', '-c', 'features.code_mode.enabled=false'])
@@ -124,7 +126,7 @@ def recover_usage(stdout):
         return None
 
 
-def parse_events(stdout, field):
+def parse_events(stdout, field, *, raw_yes_no=False):
     answer, usage, completed = None, None, False
     thread_started, turn_started, warnings = False, False, set()
     for line in stdout.splitlines():
@@ -148,7 +150,13 @@ def parse_events(stdout, field):
             if item.get('type') == 'agent_message' and kind == 'item.completed':
                 if answer is not None:
                     raise PilotStop('Multiple final answers forbidden')
-                answer = json.loads(item['text'])
+                if raw_yes_no:
+                    label = item['text'].strip().lower()
+                    if label not in {'yes', 'no'} or field != 'correct':
+                        raise PilotStop('Official grader must return yes or no only')
+                    answer = {'correct': label == 'yes'}
+                else:
+                    answer = json.loads(item['text'])
         elif kind == 'turn.completed':
             if completed or not turn_started:
                 raise PilotStop('Multiple model turns forbidden')
@@ -172,9 +180,10 @@ def parse_events(stdout, field):
 
 class CodexReader:
     def __init__(self, root, effort, check, seconds=1800, max_calls=68, max_tokens=400_000,
-                 judge_model=None, judge_effort=None):
+                 judge_model=None, judge_effort=None, raw_judge_prompt=None):
         self.root, self.effort, self.check = root, effort, check
         self.judge_model, self.judge_effort = judge_model, judge_effort
+        self.raw_judge_prompt = raw_judge_prompt
         self.deadline = time.monotonic() + seconds
         self.max_calls, self.max_tokens = max_calls, max_tokens
         self.calls, self.records, self.tokens = [], [], 0
@@ -208,7 +217,9 @@ class CodexReader:
         available = capability(effort) if model == MODEL else capability(effort, model=model)
         if not available['supported']:
             raise PilotStop('Requested effort unavailable; zero model calls')
-        prompt = (READER_PROMPT if field == 'answer' else JUDGE_PROMPT) + json.dumps(payload, ensure_ascii=False)
+        raw_judge = field == 'correct' and self.raw_judge_prompt is not None
+        prompt = (self.raw_judge_prompt(payload) if raw_judge else
+                  (READER_PROMPT if field == 'answer' else JUDGE_PROMPT) + json.dumps(payload, ensure_ascii=False))
         if len(prompt.encode()) > 24_000:
             raise PilotStop('Prompt byte budget exceeded')
         start = time.monotonic()
@@ -234,12 +245,12 @@ class CodexReader:
                 record['prompt_sha256'] = sha256(prompt_path)
                 self.persist_usage()
                 with prompt_path.open() as input_file, log_path.open('x') as log, error_path.open('x') as err:
-                    child = subprocess.Popen(command(work, schema, effort, model), stdin=input_file,
+                    child = subprocess.Popen(command(work, None if raw_judge else schema, effort, model), stdin=input_file,
                                              stdout=log, stderr=err, text=True, env=env, start_new_session=True)
                     try:
                         while child.poll() is None:
                             self.check()
-                            if time.monotonic() - start > (180 if model == JUDGE_MODEL else 90) or time.monotonic() >= self.deadline:
+                            if time.monotonic() - start > (180 if field == 'correct' else 90) or time.monotonic() >= self.deadline:
                                 raise PilotStop('CLI/pilot wall-time budget exceeded')
                             if log_path.stat().st_size + error_path.stat().st_size > 2_000_000:
                                 raise PilotStop('CLI output budget exceeded')
@@ -250,7 +261,7 @@ class CodexReader:
                         kill_group(child)
                 if log_path.stat().st_size + error_path.stat().st_size > 2_000_000:
                     raise PilotStop('CLI output budget exceeded')
-                value, _ = parse_events(log_path.read_text(), field)
+                value, _ = parse_events(log_path.read_text(), field, raw_yes_no=raw_judge)
             record['accepted'] = True
             self.calls.append(record)
         except BaseException as exc:

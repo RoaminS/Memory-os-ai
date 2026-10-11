@@ -21,7 +21,7 @@ def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
         spec.loader.exec_module(module)
-    if profile not in {'historical', 'beam-c4-4.0.2', 'beam-c4-production-4.0.3'}:
+    if profile not in {'historical', 'beam-c4-4.0.2', 'beam-c4-production-4.0.3', 'lme-s-production-4.0.3'}:
         raise ValueError('Unknown frozen evaluation configuration profile')
     cfg = module.Config(data_dir=data_dir, embed_model=model, device="cpu",
                         embed_batch_size=4, embed_max_seq_length=256 if profile == 'historical' else 512,
@@ -30,8 +30,10 @@ def resolved_config(model: str, data_dir: str, overrides: dict | None = None,
         cfg.bm25_profile, cfg.lexical_guard_k = 'legacy', 0
     elif cfg.bm25_profile != 'scoped_literal' or cfg.lexical_guard_k != 3:
         raise ValueError('BEAM requires approved 4.0.2 C4 retrieval defaults')
-    if profile == 'beam-c4-production-4.0.3':
+    if profile in {'beam-c4-production-4.0.3', 'lme-s-production-4.0.3'}:
         cfg.device, cfg.embed_dtype, cfg.embed_batch_size = 'auto', 'native', 32
+    if profile == 'lme-s-production-4.0.3':
+        cfg.dedup_cos, cfg.supersede_cos = 1.01, 1.01
     result = asdict(cfg)
     if encoding is not None:
         allowed = {'device', 'embed_dtype', 'embed_batch_size', 'batch_facts'}

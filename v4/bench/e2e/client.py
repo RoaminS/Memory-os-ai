@@ -99,13 +99,18 @@ class ToolClient:
             if self.encoding and self.encoding['device'] == 'mps':
                 env.update(PYTORCH_ENABLE_MPS_FALLBACK='0', PYTORCH_MPS_HIGH_WATERMARK_RATIO='0.25',
                            PYTORCH_MPS_LOW_WATERMARK_RATIO='0.20')
-            if self.config_profile == 'beam-c4-production-4.0.3':
+            if self.config_profile in {'beam-c4-production-4.0.3', 'lme-s-production-4.0.3'}:
                 env.update(MEMORY_EVAL_REQUIRE_MPS='1', PYTORCH_ENABLE_MPS_FALLBACK='0', PYTORCH_MPS_HIGH_WATERMARK_RATIO='0.4',
                            PYTORCH_MPS_LOW_WATERMARK_RATIO='0.3')
             env["MEMORY_EVAL_CONFIG_FILE"] = str(config_path)
             # Absolute source roots, no production editable-package dependency.
             v4 = Path(__file__).resolve().parents[2]
-            env["PYTHONPATH"] = os.pathsep.join([str(v4), str(v4 / "src")])
+            source = os.environ.get('MEMORY_EVAL_ENGINE_SOURCE')
+            if source is not None:
+                source = Path(source).resolve()
+                if not source.is_relative_to(v4.parent / '.local-qualification') or not (source / 'memory_os_v4/config.py').is_file():
+                    raise ValueError('Frozen engine must be an extracted private source tree')
+            env["PYTHONPATH"] = os.pathsep.join([str(source or v4 / 'src'), str(v4)])
             params = StdioServerParameters(command=sys.executable,
                                           args=["-m", "bench.e2e.offline_server",
                                                 f"--eval-owner={env['EVAL_PROCESS_OWNER']}",

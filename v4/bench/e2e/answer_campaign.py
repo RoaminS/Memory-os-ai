@@ -335,7 +335,8 @@ def tasks(plan):
                 yield f'{qid}/{arm}/{kind}', qid, arm, kind
 
 
-def execute_batch(directory, plan, ctx, golds, batch_calls, resume, runner_factory=CodexReader, check=None):
+def execute_batch(directory, plan, ctx, golds, batch_calls, resume, runner_factory=CodexReader, check=None,
+                  payload_builder=None):
     """Injectable lightweight runner for tests; production always CodexReader."""
     check = check or (lambda: sample(directory))
     check()
@@ -379,13 +380,16 @@ def execute_batch(directory, plan, ctx, golds, batch_calls, resume, runner_facto
             payload = ({'question': probe.question, 'observations': ctx[qid]['contexts'][arm]} if kind == 'answer'
                        else {'question': probe.question, 'candidate': accepted[f'{qid}/{arm}/answer'],
                              'reference': probe.gold.answers[0], 'rubric': list(probe.rubric)})
+            if payload_builder is not None:
+                payload = payload_builder(probe, ctx[qid], arm, kind,
+                                          accepted.get(f'{qid}/{arm}/answer'))
             index = ledger.begin(task)  # reserve BEFORE any possible quota consumption
             call_root = directory / 'calls' / f'{index:05d}'
             call_root.parent.mkdir(mode=0o700, exist_ok=True)
             runner = runner_factory(call_root, 'low', check, seconds=min(plan['caps']['batch_seconds'] - (time.monotonic() - start),
                                                 plan['caps']['cli_seconds'] - usage['cli_seconds']), max_calls=1,
                                     max_tokens=plan['caps']['observed_tokens_stop_threshold'],
-                                    judge_model=JUDGE_MODEL, judge_effort='high')
+                                    judge_model=plan.get('judge', {}).get('model', JUDGE_MODEL), judge_effort='high')
             try:
                 value = runner.invoke(payload, kind)
             except Exception:
