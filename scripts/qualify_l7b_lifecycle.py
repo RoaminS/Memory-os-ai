@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude-only 10k synthetic work-state measurement: sealed 100 ms p95 targets.
+"""Claude-only 10k synthetic work-state measurement: sealed CAS<=100 ms / list50<30 ms p95 targets.
 
 nice15, concurrency1, 300 s, real swap/disk guard; no model/API/production writes.
 Seed bulk writes are fixture setup, NOT a claim about task-create throughput.
@@ -34,7 +34,7 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     result = {'ok': False, 'production_modified': False, 'neural_inference': False, 'api_calls': 0,
               'activation_qualified': False, 'tasks': 10000, 'source_commit': args.source_commit,
-              'criterion': {'cas_p95_ms': 100, 'list50_p95_ms': 100, 'brief_bytes': 6000, 'brief_tokens': 1500}}
+              'criterion': {'cas_p95_ms': 100, 'list50_p95_ms': 30, 'list50_operator': '<', 'brief_bytes': 6000, 'brief_tokens': 1500}}
     begin = time.monotonic()
     def guard():
         result['last_resource_sample'] = resource_sample(True)

@@ -40,7 +40,7 @@ export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src:$PWD/v4/src:$PWD/v4"
 export MEMORY_V4_CL100K_PATH=/Users/romain/.config/memory-os/cl100k_base.tiktoken
 unset MEMORY_V4_PROJECT_REGISTRY
 P405_PY="$PWD/.local-qualification/brief-test-runtime-claude-3c-v1/bin/python"
-P405_RELEASE=.local-qualification/release-4.0.5-v2
+P405_RELEASE=.local-qualification/release-4.0.5-v3
 "$P405_PY" -B scripts/qualify_405_test_isolation.py --suite full \
  --output .local-qualification/405-full-claude-v1
 "$P405_PY" -B scripts/qualify_404_increment3c.py --suite full \
@@ -73,7 +73,10 @@ le garde du hook SessionStart (limit8, statutsblocked/open).
 
 Tentative locale release-4.0.5-v1 conservée : suites source587/1631, lint,
 build/twine verts, wheel refusée car la note de version n'était pas packagée.
-Ajout de la note/inclusion ; seuls les artefacts **v2** sont candidats à qualifier.
+Ajout de la note/inclusion ; v2 a passé toutes les étapes locales. Dernière revue : le lanceur appliquait bien
+list50<30ms mais inscrivait encore100ms dans le champ criterion du rapport.
+Métadonnée corrigée avant toute nouvelle mesure ; seuls les artefacts **v3** sont
+candidats à qualifier. Aucun seuil changé après résultat ni mesure lourde lancée.
 
 ## 3. Artefacts exacts — copie JSONL et relais installés
 
