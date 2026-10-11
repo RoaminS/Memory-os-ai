@@ -577,7 +577,7 @@ def _run_owner(monkeypatch, settings, opens, scenario):
                 closed.append(item)
 
         session = await stack.enter_async_context(cm())
-        return session, type("Init", (), {"serverInfo": type("I", (), {"name": "x"}), "instructions": None})()
+        return session, type("Init", (), {"serverInfo": type("I", (), {"name": "x", "version": getattr(session, "version", "test")}), "instructions": None})()
 
     monkeypatch.setattr(relay, "_open", fake_open)
 
@@ -677,7 +677,7 @@ def test_relay_answers_inflight_request_when_transport_dies(settings, monkeypatc
             session = await stack.enter_async_context(transport())
         else:
             session = kind
-        return session, type("Init", (), {"serverInfo": type("I", (), {"name": "x"}), "instructions": None})()
+        return session, type("Init", (), {"serverInfo": type("I", (), {"name": "x", "version": getattr(session, "version", "test")}), "instructions": None})()
 
     monkeypatch.setattr(relay, "_open", fake_open)
 
@@ -696,3 +696,45 @@ def test_relay_answers_inflight_request_when_transport_dies(settings, monkeypatc
         return ok
 
     assert anyio.run(main) == {"name": "memory_status"}
+
+
+def test_C07_atomic_token_rotation_reconnects_before_send(settings, monkeypatch):
+    first, second = _FakeSession(False), _FakeSession(False)
+    tokens = iter(["old", "new", "new", "new"])
+    monkeypatch.setattr(relay, "read_token", lambda path: next(tokens))
+    async def scenario(r):
+        return await r.submit(lambda s: s.call_tool("control", {}), replay=False)
+    value, opened, closed = _run_owner(monkeypatch, settings, [first, second], scenario)
+    assert value == {"name": "control"}
+    assert first.calls == 0 and second.calls == 1 and opened == closed == [first, second]
+
+
+def test_C07_invalid_token_refuses_before_send(settings, monkeypatch):
+    first = _FakeSession(False)
+    calls = 0
+    def token(path):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise ValueError("unsafe token permissions")
+        return "old"
+    monkeypatch.setattr(relay, "read_token", token)
+    async def scenario(r):
+        with pytest.raises(RuntimeError, match="nothing was sent"):
+            await r.submit(lambda s: s.call_tool("memory_add_facts", {}), replay=False)
+        return "refused"
+    value, _, _ = _run_owner(monkeypatch, settings, [first], scenario)
+    assert value == "refused" and first.calls == 0
+
+
+def test_C09_changed_version_blocks_new_calls(settings, monkeypatch):
+    first, second = _FakeSession(True), _FakeSession(False)
+    second.version = "different"
+    async def scenario(r):
+        with pytest.raises(RuntimeError, match="uncertain"):
+            await r.submit(lambda s: s.call_tool("mutation", {}), replay=False)
+        with pytest.raises(RuntimeError, match="identity_changed"):
+            await r.submit(lambda s: s.call_tool("control", {}), replay=True)
+        return "blocked"
+    value, _, _ = _run_owner(monkeypatch, settings, [first, second], scenario)
+    assert value == "blocked" and second.calls == 0

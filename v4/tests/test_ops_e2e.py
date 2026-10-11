@@ -53,6 +53,8 @@ def test_relay_with_token_against_secured_server(tmp_path):
     env = dict(
         os.environ,
         MEMORY_V4_DIR=str(tmp_path / "store"),
+        MEMORY_V4_OPS_DIR=str(tmp_path / "ops"),
+        MEMORY_V4_RELAY_JOURNAL_DIR=str(tmp_path / "ops/relay"),
         MEMORY_V4_EMBED_MODEL="hash",
         MEMORY_V4_PROJECT="*",
         MEMORY_V4_TOKEN_FILE=str(token),
@@ -110,6 +112,8 @@ def test_relay_survives_server_restart_without_replaying(tmp_path):
     env = dict(
         os.environ,
         MEMORY_V4_DIR=str(tmp_path / "store"),
+        MEMORY_V4_OPS_DIR=str(tmp_path / "ops"),
+        MEMORY_V4_RELAY_JOURNAL_DIR=str(tmp_path / "ops/relay"),
         MEMORY_V4_EMBED_MODEL="hash",
         MEMORY_V4_PROJECT="*",
         MEMORY_V4_TOKEN_FILE=str(token),

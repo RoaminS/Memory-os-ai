@@ -28,7 +28,8 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from .auth import http_client
+from .auth import http_client, read_token
+from .durable_relay import DurableRelay
 from .settings import OpsSettings
 
 UNCERTAIN = (
@@ -44,6 +45,7 @@ Operation = Callable[[ClientSession], Awaitable[Any]]
 class _Request:
     op: Operation
     reply: MemoryObjectSendStream = field(repr=False)
+    rotations: int = 0
 
 
 class _Failed:
@@ -86,6 +88,8 @@ async def _guarded(op: Operation, session: ClientSession, settings: OpsSettings)
 
 
 async def _open(stack: AsyncExitStack, settings: OpsSettings) -> tuple[ClientSession, types.InitializeResult]:
+    if read_token(settings.token_file) is None:
+        raise ValueError("Missing token file; nothing sent")
     client = await stack.enter_async_context(http_client(settings))
     read, write, _ = await stack.enter_async_context(streamable_http_client(settings.url, http_client=client))
     session = await stack.enter_async_context(ClientSession(read, write))
@@ -101,13 +105,19 @@ async def owner(
     first connection error). After a failure, the next request triggers one reconnection attempt before it is
     served; if that attempt fails the request is answered "unavailable" (nothing was sent)."""
     first = True
+    initial_identity = None
     carry: _Request | None = None  # received, not yet sent upstream
     inflight: _Request | None = None  # sent upstream, no answer yet
     async with requests:
         while True:
             try:
                 async with AsyncExitStack() as stack:  # entered AND exited in this task only
+                    token = read_token(settings.token_file)
                     session, init = await _open(stack, settings)
+                    identity = (init.serverInfo.name, getattr(init.serverInfo, "version", None))
+                    if initial_identity is not None and identity != initial_identity:
+                        raise RuntimeError("identity_changed: server handshake changed; restart client after review")
+                    initial_identity = identity
                     if first:
                         first = False
                         ready(init)
@@ -115,6 +125,13 @@ async def owner(
                         req, carry = (carry, None) if carry is not None else (await _next_or_none(requests), None)
                         if req is None:
                             return  # channel closed: relay shutting down
+                        carry = req  # not sent; preserve across token validation failure.
+                        if read_token(settings.token_file) != token:
+                            if req.rotations >= 1:
+                                raise ValueError("Token changed repeatedly; nothing sent")
+                            req.rotations += 1
+                            break  # atomic token rotation: reconnect before the next request, never replay.
+                        carry = None
                         inflight = req
                         try:
                             result = await _guarded(req.op, session, settings)
@@ -134,7 +151,8 @@ async def owner(
                 if carry is not None:
                     await _reply(carry, _Failed(exc, sent=False))
                     carry = None
-            carry = await _next_or_none(requests)
+            if carry is None:
+                carry = await _next_or_none(requests)
             if carry is None:
                 return
 
@@ -154,6 +172,10 @@ async def _reply(req: _Request, value: Any) -> None:
         pass
 
 
+def _identity_changed(exc):
+    return "identity_changed" in str(exc) or any(_identity_changed(e) for e in getattr(exc, "exceptions", ()))
+
+
 class Relay:
     """Handler-side facade: submit an operation to the owner and wait for its result."""
 
@@ -169,6 +191,8 @@ class Relay:
             if not isinstance(value, _Failed):
                 return value
             if not value.sent:
+                if _identity_changed(value.exc):
+                    raise RuntimeError("identity_changed: restart the client after operator review") from value.exc
                 raise RuntimeError(UNAVAILABLE) from value.exc
             if not replay or attempt == 1:
                 raise RuntimeError(UNCERTAIN) from value.exc
@@ -193,16 +217,22 @@ async def serve(settings: OpsSettings) -> None:
             await send.aclose()
             raise SystemExit(1)
         relay = Relay(send)
+        durable = DurableRelay(relay, settings)
         server = Server(init.serverInfo.name, version=init.serverInfo.version,
                         instructions=init.instructions)
 
         @server.list_tools()
         async def list_tools() -> list[types.Tool]:
-            return (await relay.submit(lambda s: s.list_tools(), replay=True)).tools
+            tools = (await relay.submit(lambda s: s.list_tools(), replay=True)).tools
+            if not any(t.name == "memory_request_status" for t in tools):
+                from ..models import RequestStatusIn
+                tools.append(types.Tool(name="memory_request_status", description="Local unresolved calls; no automatic replay.",
+                                        inputSchema=RequestStatusIn.model_json_schema()))
+            return tools
 
         @server.call_tool(validate_input=False)
         async def call_tool(name: str, arguments: dict):
-            res = await relay.submit(lambda s: s.call_tool(name, arguments), replay=False)
+            res = await durable.call(name, arguments)
             if res.isError:
                 text = "\n".join(c.text for c in res.content if isinstance(c, types.TextContent))
                 raise RuntimeError(text or f"{name} failed")
@@ -214,6 +244,7 @@ async def serve(settings: OpsSettings) -> None:
             async with stdio_server() as (r, w):
                 await server.run(r, w, server.create_initialization_options())
         finally:
+            durable.close()
             await send.aclose()  # the owner exits its connection in its own task
 
 
