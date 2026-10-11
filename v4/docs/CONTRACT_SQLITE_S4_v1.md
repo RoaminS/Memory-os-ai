@@ -170,5 +170,13 @@ et la qualification copie/activation restent bloquantes pour S4. Le manifeste
 actuel conserve le profil/version du magasin et annonce honnêtement le commit
 source non attesté. Voir `SQLITE_S4_INCREMENT1.md` pour les preuves et limites.
 
+**État ultérieur incrément2 :** rotation, réconciliation depuis l'autorité
+disponible, identité/reçu de récupération et drill HTTP privé sont implémentés.
+Les unités et matrices synthétiques passent ; TCP/10k/copie industrielle restent
+à qualifier. `reopening_allowed=false` reste un garde de promotion production,
+distinct de `private_reopen_verified`. Les paragraphes incrément1 ci-dessus
+décrivent l'état historique, remplacé pour la livraison par
+`SQLITE_S4_INCREMENT2.md` ; aucune qualification/activation complète n'est actée.
+
 **Signatures : Claude contresigne avec R1–R5 (revue du 2026-10-11) ; Codex accepte
 avec les précisions ci-dessus. Aucun GO de déploiement/activation n'est inféré.**

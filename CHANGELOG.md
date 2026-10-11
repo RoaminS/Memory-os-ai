@@ -10,12 +10,15 @@
   conservés ; template explicite v4 relayé à la place du serveur v3 autochargé.
 - Archivage vérifié des preuves sans retrait des originaux (donc sans gain disque)
   et contrats L7b/CAS amendés ; L7b non implémenté/non activé.
-- SQLite S4 incrément1, candidate non qualifiée : fenêtre serveur read_only,
+- SQLite S4 incrément2, candidate non qualifiée pour activation : fenêtre serveur read_only,
   sauvegarde en ligne par API SQLite, inventaire exhaustif et archive chiffrée,
   drill fichiers en quarantaine, marge disque health/doctor et modèles hebdomadaires
-  inactifs. Réconciliation des oublis/réouverture, rotation et matrice complète
-  restent à faire ; aucune activation SQLite ou changement de production.
-  Tests locaux bloqués par la garde disque ; revue statique seule à ce stade.
+  inactifs. Réconciliation des tombstones depuis l'autorité actuelle, nouvelle
+  identité et reçu atomiques sur copie, ouverture HTTP privée contrôlée, rotation
+  et matrices ENOSPC/SIGKILL synthétiques. Clé metadata corrigée, guard JSONL à
+  référence faible, compteurs hors brief. 585 v3 +1582 v4 unitaires passent ;
+  TCP et lifecycle10k à qualifier par Claude. Aucune activation SQLite/production.
+  Voir `v4/docs/SQLITE_S4_INCREMENT2.md` pour incidents et portes restantes.
 
 - Isolation commune des tests v3/v4 avant leur collecte : HOME/XDG/AppData
   jetables, garde des écritures Python dans le HOME réel, échec même si l'erreur
