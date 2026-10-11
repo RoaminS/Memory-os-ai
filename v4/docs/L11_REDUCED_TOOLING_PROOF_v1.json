@@ -1,0 +1,44 @@
+{
+  "schema": "l11-reduced-tooling-proof-v1",
+  "source_commit": "3a427e055b1ca459a297ed6095f6d4cbdea97e31",
+  "base": "166d365a148f524cdfe9b2673c016f568dc12481",
+  "named_ref": "feat/l11-reduced-harness-v1",
+  "real_cli_sessions": 0,
+  "api_calls": 0,
+  "production_modified": false,
+  "scope": "tooling only; installed runtime 4.0.5 unchanged",
+  "tests": {
+    "command": "PYTHONPATH=v4/src:src PYTHONDONTWRITEBYTECODE=1 MEMORY_TEST_HASH_V3=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 .local-qualification/brief-test-runtime-claude-3c-v1/bin/python -m pytest -q tests/test_l11_reduced.py v4/tests/test_relay_tools_cache.py v4/tests/test_relay_preflight_405.py -p no:cacheprovider --basetemp=.local-qualification/l11-reduced-unit-v8 --junitxml=.local-qualification/l11-reduced-unit-v8.xml",
+    "tests": 36,
+    "failures": 0,
+    "errors": 0,
+    "seconds": 3.166,
+    "junit_sha256": "8abd65365768e8eca97292faec7def961c9783d68f10d56d2ceea826f57aaf8c",
+    "new_tests": 18,
+    "neighbor_relay_tests": 18,
+    "note": "fake CLIs + Hash SQLite handlers only; no trained model encoding/TCP"
+  },
+  "lint": [
+    "ruff --config pyproject.toml src tests scripts: PASS",
+    "ruff --select E9,F v4/src v4/tests scripts: PASS"
+  ],
+  "shell_blocks_parsed": 3,
+  "tooling_sha256": {
+    "scripts/run_l11_reduced.py": "4436be2e3cad359d5f7436ee76e5bdb58a9e498f241ef987f66b269a82b749a9",
+    "scripts/l11_gateway.py": "9f1307f2e93cd3d847d32b76d991622ec43df87e5855856c22e9d3fecf33bfe3",
+    "tests/test_l11_reduced.py": "97dc66fdec6d9dd6be7e73f02a5d9511e9c352cdfe94739f4c2954849babe0c5",
+    "v4/docs/L11_REDUCED_HARNESS_v1.md": "aa37e3e37a324676a5205dba7465f12d5c7eeed559ae97d39c37da7b4eb4be49"
+  },
+  "preserved_failures": [
+    "l11-reduced-unit-v4.xml: expected regex outdated after balancing guard",
+    "l11-reduced-unit-v7.xml: test assertion assumed flat block_get; corrected to API blocks mapping"
+  ],
+  "pending": [
+    "Claude case/grids/model specifications and protocol countersign",
+    "Private real-server relay/catalogue qualification (zero LLM; uses local encoder)",
+    "Operator review of Grok discovery/global policies/private subscription auth",
+    "Manual 60-session batches and fixed luna/low scorer within approved quota",
+    "Romain 12-session sample + critical/disputed cases"
+  ],
+  "machine_note": "Last read-only df about 3.2 GB free; real qualification/campaign blocked until >=5 GB; synthetic unit tests exempt as agreed."
+}
