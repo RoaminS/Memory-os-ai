@@ -146,7 +146,16 @@ class MemoryV4:
                 self.store = Store(self.data_dir)
                 self.requests = RequestJournal(self.data_dir)
                 self.blocks = BlockStore(self.data_dir / "blocks.jsonl", self.config.block_char_limit)
-                self.blocks.write_guard = self.require_writes
+                owner = weakref.ref(self)
+
+                def block_write_guard():
+                    engine = owner()
+                    if engine is None:
+                        raise RuntimeError("Block handle outlived its memory engine")
+                    engine._ensure_open()
+                    engine.require_writes()
+
+                self.blocks.write_guard = block_write_guard
             # Enrolment identifies this store lineage, NOT freshness of a restored snapshot.
             self.store.meta.setdefault("store_instance_id", uuid.uuid4().hex)
             self.store.save_meta(dict(self.store.meta))
@@ -1070,6 +1079,9 @@ class MemoryV4:
         if self.config.store_backend == "sqlite_s1":
             from .sqlite_stats import receipt_statistics
             result["receipts"] = receipt_statistics(self.store._connection, self.store.db_path)
+            result["embedding_cache"] = {"hits": self._embedding_cache.hits,
+                                         "misses": self._embedding_cache.misses,
+                                         "namespace": self.config.sqlite_embedding_namespace}
         return result
 
     @_requires_open

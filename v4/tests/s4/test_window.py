@@ -1,5 +1,6 @@
 """B09: all engine/server write boundaries refuse before receipt; reads work."""
 import pytest
+import weakref
 
 from memory_os_v4 import Config, MemoryV4, server
 from memory_os_v4.maintenance import MaintenanceWindow
@@ -53,3 +54,17 @@ def test_invalid_window_fails_before_store_creation(tmp_path):
     with pytest.raises(ValueError, match='write_mode'):
         MemoryV4(config=Config(data_dir=str(tmp_path / 'missing'), embed_model='hash', write_mode='typo'))
     assert not (tmp_path / 'missing').exists()
+
+
+def test_jsonl_block_guard_does_not_retain_writer_after_engine_deleted(tmp_path):
+    cfg = Config(data_dir=str(tmp_path / 'store'), embed_model='hash')
+    engine = MemoryV4(config=cfg)
+    blocks, owner = engine.blocks, weakref.ref(engine)
+    engine.add_episode('Synthetic durable writer lease evidence', project='p')
+    engine.flush()
+    del engine
+    assert owner() is None  # No gc.collect workaround: release must be immediate.
+    with pytest.raises(RuntimeError, match='outlived'):
+        blocks.set('working_rules', 'Stale forbidden write', project='p')
+    with MemoryV4(config=cfg) as reopened:
+        assert reopened.status()['total'] == 1
