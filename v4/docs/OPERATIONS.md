@@ -142,3 +142,53 @@ GO nécessaire : [MPS_PRODUCTION_ALIGNMENT_V1.md](MPS_PRODUCTION_ALIGNMENT_V1.md
 La candidate reconstruit les vecteurs JSONL sans profil complet avant recherche ;
 qualification sur copie requise avant déploiement, même avec device inchangé.
 Aucun basculement automatique.
+
+## Candidate 4.0.4 — reçus et journaux du relais (L3 v2)
+
+Non déployé par cette documentation. Le serveur compatible doit précéder le nouveau
+relais : les mutations vers un serveur legacy sans `l3-v2` sont refusées, les
+lectures restent possibles. Ne pas substituer le relais candidat à la production
+4.0.3 avant qualification sur copie et GO. Une rotation de jeton ne rejoue jamais
+une mutation ; les contrôles de permissions 0600 restent obligatoires.
+
+Après une réponse incertaine : **ne pas répéter la mutation**, même si une recherche
+ne trouve rien. Appeler `memory_request_status` sans ID via le relais pour obtenir
+les identités locales non résolues, puis avec le `request_id`. Si plusieurs
+identités correspondent, préciser les champs retournés (scope/hash/instance).
+`completed` retourne le reçu sans réexécution ; `pending/not_found/unknown/conflict`
+exigent une réconciliation opérateur. L'absence n'autorise jamais le rejeu.
+Un appel direct sans ID au serveur expose seulement ses capacités : le serveur
+ne lit pas les journaux locaux. Après panne au démarrage initial du relais,
+utiliser `memory-os-admin doctor` pour consulter les journaux orphelins.
+
+Les journaux sont privés, sous `$MEMORY_V4_OPS_DIR/relay` (défaut
+`~/.local/state/memory-os/relay`), un fichier par instance. `MEMORY_V4_CLIENT_ID`
+étiquette le client, sans servir d'ACL. Setup fournit désormais cet identifiant,
+ainsi que les snippets Zed (`context_servers`, `source=custom`) et Devin Desktop
+(`mcpServers`). Le registre conserve séparément le chemin historique Windsurf.
+Doctor vérifie la **configuration**, pas une connexion/app authentifiée réelle.
+Zed JSONC avec commentaires/virgules finales est pris en charge en lecture.
+Aucun fichier client existant n'est réécrit par ces changements.
+
+Rétention du journal actif : résolus, 30jours ou10MiB par défaut, configurables
+par `MEMORY_V4_RELAY_JOURNAL_MAX_DAYS/MAX_BYTES`. Les entrées non résolues peuvent
+dépasser la borne et ne sont jamais supprimées. La rotation d'un journal vivant
+appartient uniquement à son propriétaire ; l'adopteur n'écrit jamais dans un
+journal mort. Pour les journaux clos, entretien séparé **sur copie d'abord** :
+
+```sh
+# Simulation (sans serveur, sans accès au magasin).
+python -m memory_os_v4.ops.request_journal --directory /chemin/copie-journaux
+# Après vérification : rétention sur cette copie, sous locks ; incertains conservés.
+python -m memory_os_v4.ops.request_journal --directory /chemin/copie-journaux --apply
+```
+
+Ne pas supprimer/réparer manuellement un journal incertain pour débloquer un ID.
+Les journaux actifs sont ignorés par l'entretien. Doctor montre taille, âge,
+orphelins incertains, erreurs et nombre de writers actifs non inspectés. Aucun
+job automatique de rétention n'est installé par cet incrément ; Claude proposera
+son raccordement local après qualification/GO. Le statut local expose aussi les
+latences append/fsync/rotation par phase, sans conversations ni réponses.
+
+Contrat complet, limites JSONL/restauration et matrice :
+[CONTRACTS_L3_L4_v2.md](CONTRACTS_L3_L4_v2.md).

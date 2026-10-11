@@ -1,0 +1,42 @@
+{
+  "base_commit": "7173dc70961e06eac6024bb7c454871eb82174ce",
+  "runtime_commit": "4b2d8cf",
+  "qualification": {
+    "tests": 1233,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "tcp_cases": 0
+  },
+  "unit_ok": true,
+  "tcp_qualified": false,
+  "tcp_cases_to_run": 15,
+  "neural_inference": false,
+  "production_modified": false,
+  "release_qualified": false,
+  "swap_guard": "unavailable_in_sandbox",
+  "source_tree_manifest_sha256": "09ca1cf3637923db32d544b7925a5ea2b4d5060da17543a02efd3444a79a0e79",
+  "report_path": ".local-qualification/404-increment2-unit-final/report.json",
+  "report_sha256": "37ca40f4bfe05b8e430c6bb8f827b32e25ae12ee2f6d9fb12febf62a29dab1bd",
+  "evidence_sha256": {
+    "baseline.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lint-project.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "lint-v4.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "pytest.log": "c0e4dd88c729be11bd3475fedb9b1d26f5bbe8c3df15a80c9f4c24c7d9280c50"
+  },
+  "fsync_report_path": ".local-qualification/404-increment2-fsync-v1/report.json",
+  "fsync_report_sha256": "c8f715f6aca56f75bbafe64210efcf945ee900f754b978cf9810be121f0499a5",
+  "prepared_sending_ms": {
+    "samples": 100,
+    "p50_ms": 0.08670799434185028,
+    "p95_ms": 0.10949978604912758,
+    "max_ms": 0.4352922551333904
+  },
+  "unmet_gates": [
+    "Claude TCP physical tests",
+    "A4 closed-journal retention precision countersign",
+    "L11 R1-R8 freeze",
+    "L4 complete client qualification",
+    "4.0.4 release/copy qualification and operator GOs"
+  ]
+}
