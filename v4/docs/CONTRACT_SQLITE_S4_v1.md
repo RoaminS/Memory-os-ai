@@ -1,6 +1,6 @@
 # L6 / ADR-001 S4 — backup en ligne, restore, crash — proposition
 
-2026-10-11. **DESIGN à relire par Claude avant implémentation.** SQLite reste
+2026-10-11. **Contrat amendé accepté ; incrément 1 en qualification, S4 incomplet.** SQLite reste
 opt-in ; JSONL et sauvegardes chiffrées actuelles restent en production. Codex
 implémente ; Claude qualifie sur copies. Estimation : 4–7 journées-agent.
 
@@ -112,6 +112,7 @@ read-only/inactifs côté ancien runtime si le schéma n'est pas compris.
 | B06 | writes + correction + oubli + blocs + reçus après migration | export retour exhaustif, ancienne source byte-restore refusée |
 | B07 | restauration historique puis vieux request_id/ETag | nouvelle identité, identity_changed, aucun rejeu |
 | B08 | 10 000 éléments, cache complet/incomplet | timings et encodages ; ready≤300 s sur fixture scellée |
+| B09 | fenêtre opérateur read_only, relais connecté | mutations refusées avant reçu/journal d'envoi, maintenance_window/not_started ; lectures disponibles |
 
 Toutes les pannes sur magasins jetables ; ENOSPC simulé, jamais remplissage du
 disque du Mac. Tests légers de transactions puis jobs lourds séquentiels par
@@ -122,4 +123,52 @@ mesures de cut/RPO, fenêtres de backup, conservation chiffrée et scripts clien
 pause des écritures, statut des incertains, redémarrage après changement d'identité.
 L9 reste brouillon validé manuellement ; aucune activation SQLite/registre maintenant.
 
-**Signature : Codex propose v1 ; Claude à relire et contresigner.**
+## 6. Amendements R1–R5 acceptés — 2026-10-11
+
+**R1.** `MEMORY_V4_WRITE_MODE=read_only` ou serveur `--read-only`, réservé à
+l'opérateur, figé au démarrage ; retour `read_write` par redémarrage contrôlé.
+Aucun outil LLM ne change la politique. Toute mutation métier, y compris blocs,
+flush et maintenance destructive, est refusée avant réservation/reçu ; résultat
+`code=maintenance_window, outcome=not_started`. Préflight du relais : rien envoyé,
+aucune nouvelle entrée incertaine, reprise manuelle possible seulement pour une
+requête sans incertitude antérieure. Les lectures/status restent disponibles,
+sans nouveaux reçus d'accès ni flush des accès à la fermeture. Ce mode est un
+gel **sémantique des mutations**, pas un montage filesystem immuable : ouverture
+normale, métadonnées d'enrôlement, caches dérivés et coordination WAL peuvent
+écrire lors du démarrage. Il ne remplace ni l'arrêt prouvé avant remplacement
+du magasin, ni la connexion strictement read-only du CLI de sauvegarde.
+
+**R2.** Health/doctor exposent empreinte disque, espace estimé DB+archive+drill,
+espace libre et marge par volume. Seuil conservateur : réserve 5 Go **plus**
+espace de travail, et jamais moins de deux fois cet espace ; backup/drill refusés
+en dessous, nice15 et swap≤8,5 Go attestés. Incrément1 borné : DB64 MiB,
+archive chiffrée68 MiB, manifeste2 MiB, tar décompressé borné, 300 s/30 s BUSY.
+Ces caps ne qualifient pas les bases plus grandes et ne constituent pas une
+réservation système empêchant un autre projet de remplir le disque.
+
+**R3.** Modèles launchd opt-in : backup quotidien, drill hebdomadaire lundi03:30,
+nice15 ; génération sans chargement. Health indique date, durée, archive et
+niveau de preuve. Dans l'incrément1, `level=files`, `quarantined=true`,
+`reopening_allowed=false` : le test hebdomadaire complet jusqu'à `/ready`
+reste à implémenter/qualifier. Ne pas activer ces modèles sur la production JSONL.
+
+**R4.** Destination chiffrée hors disque interne et RPO à décider par Romain
+(disque externe/iCloud Drive à qualifier, pas d'upload implicite). Option non
+implémentée/configurée dans cet incrément ; aucune garantie sinistre disque.
+
+**R5.** Avant toute ouverture d'un restore historique : rapprochement de tous
+les oublis après cut, preuve de la source du registre, liste obligatoire des
+`forgets_replayed` (IDs, reçus, séquences, résultat), y compris liste vide
+explicitement justifiée. Une liste vide par défaut n'est pas une preuve. Si
+l'autorité actuelle/registre est indisponible, quarantaine, jamais réouverture
+automatique. Incrément1 : `forget_reconciliation=pending`, lancement de serveur
+restauré refusé ; nouvelle identité/événement de récupération et réconciliation
+seront livrés ensemble dans l'incrément suivant.
+
+La rotation SQLite, l'attestation du commit source, la matrice complète B04–B08
+et la qualification copie/activation restent bloquantes pour S4. Le manifeste
+actuel conserve le profil/version du magasin et annonce honnêtement le commit
+source non attesté. Voir `SQLITE_S4_INCREMENT1.md` pour les preuves et limites.
+
+**Signatures : Claude contresigne avec R1–R5 (revue du 2026-10-11) ; Codex accepte
+avec les précisions ci-dessus. Aucun GO de déploiement/activation n'est inféré.**

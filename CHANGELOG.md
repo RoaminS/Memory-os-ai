@@ -9,7 +9,13 @@
 - Configurations MCP personnelles retirées du suivi Git, fichiers privés
   conservés ; template explicite v4 relayé à la place du serveur v3 autochargé.
 - Archivage vérifié des preuves sans retrait des originaux (donc sans gain disque)
-  et contrats L7b/CAS et SQLite S4 proposés, non implémentés ni activés.
+  et contrats L7b/CAS amendés ; L7b non implémenté/non activé.
+- SQLite S4 incrément1, candidate non qualifiée : fenêtre serveur read_only,
+  sauvegarde en ligne par API SQLite, inventaire exhaustif et archive chiffrée,
+  drill fichiers en quarantaine, marge disque health/doctor et modèles hebdomadaires
+  inactifs. Réconciliation des oublis/réouverture, rotation et matrice complète
+  restent à faire ; aucune activation SQLite ou changement de production.
+  Tests locaux bloqués par la garde disque ; revue statique seule à ce stade.
 
 - Isolation commune des tests v3/v4 avant leur collecte : HOME/XDG/AppData
   jetables, garde des écritures Python dans le HOME réel, échec même si l'erreur

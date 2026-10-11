@@ -1,7 +1,8 @@
 # L7b — état de travail et CAS — proposition à relire par Claude
 
-2026-10-11. **DESIGN, aucune API L7b implémentée/activée.** Codex propose ; Claude
-doit amender/contresigner avant implémentation. L7a reste livré mais inactif.
+2026-10-11. **DESIGN accepté avec T1–T5, aucune API L7b implémentée/activée.**
+Claude contresigne la revue ; Codex accepte avec précisions ci-dessous.
+L7a reste livré mais inactif.
 
 ## 1. Ordre, autorité et compatibilité
 
@@ -113,4 +114,38 @@ et scénario de handoff Claude→Codex→Cursor inclus dans la matrice L11 gelé
 - Fournir 20 scénarios de handoff et conflits avant implémentation/mesure ; ne pas
   modifier les configurations actives ni activer le registre dans cette étape.
 
-**Signature : Codex propose v1 ; Claude à relire et contresigner.**
+## 6. Amendements T1–T5 acceptés — 2026-10-11
+
+- **T1 :** à la création, le relais remplit `owner.client_id` depuis le
+  `clientInfo.name/version` **downstream** de MCP initialize ; le modèle ne
+  remplace pas cette valeur. `actor_label` reste libre. Une mise à jour ne
+  transfère jamais implicitement la propriété au dernier client ; tout transfert
+  reste un patch explicite avec CAS et provenance distincte de l'auteur.
+  ClientInfo est déclaratif, pas une authentification individuelle. Appel sans
+  relais : identité non attestée explicitement annoncée, pas inventée.
+- **T2 :** `stale=true` calculé en UTC si open/blocked sans mise à jour depuis
+  strictement plus de14 jours ; jamais de clôture ni écriture automatique.
+  Ordre du brief : tâches non stale bloquées, autres non stale récentes, puis
+  stale (bloquées puis autres, date décroissante, task_id pour départager).
+- **T3 :** avertissement `possible_duplicates[]` non bloquant dans la même
+  portée, open/blocked uniquement, maximum5 références. Normalisation déterministe
+  NFKC/casefold/espaces ; titre identique ou Jaccard de tokens≥0,85, sans encodeur
+  ni LLM. Une réponse de création arrive **après** commit : pour montrer les
+  doublons avant confirmation, ajouter une proposition/prévisualisation read-only
+  qui n'alloue ni tâche ni reçu. Les deux chemins utilisent la même règle ;
+  aucun rapprochement/merge automatique.
+- **T4 :** import facultatif des faits `todo` = propositions avec références
+  et dates, dans la même portée ; validation explicite agent/Romain avant création.
+  Aucun backfill automatique, aucun fait n'est présenté comme tâche existante.
+- **T5 :** dépendance de production : SQLite activé après S4 complet qualifié
+  et GO distinct. `work_state=false`, `block_cas=false` tant que les APIs ne sont
+  pas déployées/activées ; présence de SQLite seule ne suffit pas. L8/L9/L11 et
+  L1b doivent tester les capacités ; leur brouillon peut précéder l'activation,
+  leurs écritures et critères de handoff structurés ne peuvent pas la présumer.
+
+Ces règles sont des critères de l'implémentation suivante, pas des fonctionnalités
+livrées par l'incrément S4 actuel. Claude prépare les20 scénarios W/handoff et
+les parcours brouillon/conflit ; Codex les scellera avant mesures.
+
+**Signatures : Claude contresigne avec T1–T5 ; Codex accepte avec les précisions
+ci-dessus. SQLite, registre et L7b restent inactifs en production.**
