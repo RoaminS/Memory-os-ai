@@ -84,6 +84,26 @@ def last_good_backup_age(settings: OpsSettings) -> float | None:
     return None
 
 
+def last_drill(settings):
+    """Latest intact qualified file/service drill; levels must never be conflated."""
+    log = settings.ops_dir / "logs/restore_drill.jsonl"
+    if not log.exists():
+        return None
+    for line in reversed(log.read_text().splitlines()):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("ok") is not True or not row.get("archive_sha256"):
+            continue
+        archive = settings.backup_dir / row.get("archive", "")
+        if archive.is_file() and sha256(archive) == row["archive_sha256"]:
+            return {"level": row.get("level"), "quarantined": row.get("quarantined"),
+                    "duration_s": row.get("duration_s"), "archive": archive.name,
+                    "completed_at": row.get("completed_at"), "reopening_allowed": row.get("reopening_allowed", False)}
+    return None
+
+
 def report(settings: OpsSettings | None = None, confined: bool | None = None) -> dict:
     settings = settings or OpsSettings.from_env()
     if confined is None:
@@ -143,10 +163,23 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
     if age is None or age > BACKUP_MAX_AGE_H:
         anomalies.append(f"no verified qualified backup in the last {BACKUP_MAX_AGE_H:.0f} h (age {age})")
     try:
-        r["disk_free_gib"] = round(shutil.disk_usage(settings.store_dir).free / 2**30, 1)
-        if r["disk_free_gib"] < DISK_MIN_GIB:
-            anomalies.append(f"free disk {r['disk_free_gib']} GiB < {DISK_MIN_GIB}")
-    except OSError as exc:
+        from .storage import margin
+        r["storage_margin"] = margin(settings)
+        r["disk_free_gib"] = round(r["storage_margin"]["volumes"]["source"]["free_bytes"] / 2**30, 1)
+        if not r["storage_margin"]["ok"]:
+            anomalies.append("storage margin insufficient: reserve 5 GB plus DB/archive/drill; inspect storage_margin")
+        r["last_restore_drill"] = last_drill(settings)
+        if (settings.store_dir / "store.sqlite3").exists():
+            drill = r["last_restore_drill"]
+            try:
+                age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(drill["completed_at"])).total_seconds() / 3600 if drill else None
+            except (ValueError, TypeError, KeyError):
+                age = None
+            if age is None or age > 7 * 24:
+                anomalies.append("no intact SQLite restore drill within 7 days")
+            if drill and not drill["reopening_allowed"]:
+                info.append("last SQLite drill validates files in quarantine; semantic reopening is not qualified")
+    except (OSError, ValueError) as exc:
         anomalies.append(f"disk check failed: {type(exc).__name__}")
     r["info"], r["anomalies"] = info, anomalies
     reports = settings.ops_dir / "reports"
@@ -167,6 +200,8 @@ def render(r: dict) -> str:
         f"{r.get('superseded_total')} (new {len(r.get('superseded_new', []))})",
         f"- Last verified backup: {r.get('last_backup_age_h')} h · free disk {r.get('disk_free_gib')} GiB",
         f"- Receipts (SQLite): {r.get('receipts', 'not available')}",
+        f"- Storage margin: {r.get('storage_margin', 'not available')}",
+        f"- Last restore drill (level matters): {r.get('last_restore_drill', 'not available')}",
         "",
         "## Anomalies",
         *(f"- {a}" for a in r["anomalies"] or ["none"]),

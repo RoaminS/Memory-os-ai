@@ -58,6 +58,17 @@ def cmd_store_doctor(args, s: OpsSettings) -> int:
 
 
 def cmd_backup(args, s: OpsSettings) -> int:
+    if args.backend == "sqlite":
+        from .sqlite_backup import backup as sqlite_backup
+        if not args.online or args.no_stop:
+            _print_json({"ok": False, "code": "invalid_options", "error": "SQLite requires --online, never --no-stop"})
+            return 2
+        r = sqlite_backup(s, apply=args.apply)
+        _print_json(r)
+        return 0 if r["ok"] else 1
+    if args.online or args.apply:
+        _print_json({"ok": False, "code": "invalid_options", "error": "--online/--apply require SQLite S4"})
+        return 2
     from .backup import backup
 
     r = backup(s, stop_service=not args.no_stop)
@@ -66,6 +77,15 @@ def cmd_backup(args, s: OpsSettings) -> int:
 
 
 def cmd_restore_drill(args, s: OpsSettings) -> int:
+    if args.backend == "sqlite":
+        from .sqlite_backup import restore_drill as sqlite_drill
+        r = sqlite_drill(s, Path(args.archive) if args.archive else None,
+                         apply=args.apply, start_server=not args.no_server)
+        _print_json(r)
+        return 0 if r["ok"] else 1
+    if args.apply:
+        _print_json({"ok": False, "code": "invalid_options", "error": "--apply requires SQLite S4"})
+        return 2
     from .backup import restore_drill
 
     r = restore_drill(s, Path(args.archive) if args.archive else None, start_server=not args.no_server)
@@ -97,6 +117,8 @@ def _plist(
     keepalive: bool = False,
     hour: int | None = None,
     minute: int = 0,
+    weekday: int | None = None,
+    nice: int | None = None,
     log: Path,
 ) -> str:
     def esc(x: str) -> str:
@@ -119,8 +141,12 @@ def _plist(
     if hour is not None:
         parts.append(
             f"<key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer>"
-            f"<key>Minute</key><integer>{minute}</integer></dict>"
+            f"<key>Minute</key><integer>{minute}</integer>"
+            + (f"<key>Weekday</key><integer>{weekday}</integer>" if weekday is not None else "")
+            + "</dict>"
         )
+    if nice is not None:
+        parts.append(f"<key>Nice</key><integer>{nice}</integer>")
     parts.append(f"<key>StandardErrorPath</key><string>{esc(str(log))}</string>")
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -240,6 +266,15 @@ def cmd_setup(args, s: OpsSettings) -> int:
             log=s.ops_dir / "logs/health.err",
         ),
     }
+    if getattr(args, "sqlite_s4_jobs", False):
+        jobs[f"{label}.backup"] = _plist(f"{label}.backup",
+            [py, "-m", "memory_os_v4.ops.cli", "backup", "--backend", "sqlite", "--online", "--apply"],
+            hour=4, nice=15, env=env, log=s.ops_dir / "logs/backup.err")
+        jobs[f"{label}.restore-drill"] = _plist(f"{label}.restore-drill",
+            [py, "-m", "memory_os_v4.ops.cli", "restore-drill", "--backend", "sqlite", "--apply", "--no-server"],
+            hour=3, minute=30, weekday=1, nice=15, env=env, log=s.ops_dir / "logs/restore-drill.err")
+        print("# SQLite S4 templates only: no activation/migration. Weekly drill is FILES/QUARANTINE, "
+              "not proof of service reopening; qualifying R5/identity recovery remains mandatory.")
     if args.write_launchd:
         out = Path(args.write_launchd).expanduser()
         out.mkdir(parents=True, exist_ok=True)
@@ -280,10 +315,15 @@ def main(argv: list[str] | None = None) -> int:
     h = sub.add_parser("health")
     h.add_argument("--confined", action="store_true")
     b = sub.add_parser("backup")
+    b.add_argument("--backend", choices=("jsonl", "sqlite"), default="jsonl")
+    b.add_argument("--online", action="store_true")
+    b.add_argument("--apply", action="store_true", help="SQLite only: execute rather than simulate")
     b.add_argument(
         "--no-stop", action="store_true", help="copy without stopping the service (not consistent)"
     )
     r = sub.add_parser("restore-drill")
+    r.add_argument("--backend", choices=("jsonl", "sqlite"), default="jsonl")
+    r.add_argument("--apply", action="store_true", help="SQLite only: execute a quarantined file drill")
     r.add_argument("--archive")
     r.add_argument("--no-server", action="store_true")
     k = sub.add_parser("hook")
@@ -293,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     dr.add_argument("--store-only", action="store_true", help="local store counters only (no HTTP or client reads)")
     st = sub.add_parser("setup")
     st.add_argument("--write-launchd", metavar="DIR")
+    st.add_argument("--sqlite-s4-jobs", action="store_true", help="Generate inactive SQLite backup + weekly file-drill templates")
     args = p.parse_args(argv)
     s = OpsSettings.from_env()
     handler = {

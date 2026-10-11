@@ -159,6 +159,18 @@ def _backup(settings: OpsSettings) -> Check:
     return Check("backup", status, f"last verified qualified backup {age} h ago")
 
 
+def _storage(settings: OpsSettings) -> Check:
+    from .storage import margin
+    try:
+        space = margin(settings)
+        return Check("storage", "PASS" if space["ok"] else "WARN",
+                     f"DB/source {space['source_bytes']} bytes; working estimate {space['estimated_working_bytes']} bytes; "
+                     f"margins { {k: v['margin_bytes'] for k, v in space['volumes'].items()} }",
+                     "free operator-owned space or choose qualified storage; never bypass the backup guard")
+    except (OSError, ValueError) as exc:
+        return Check("storage", "WARN", f"storage margin unknown: {type(exc).__name__}")
+
+
 def _clients(home: Path) -> list[Check]:
     hints = {
         "direct-http": "HTTP authentication not checked: prefer the token-file relay (memory-os-admin setup)",
@@ -189,7 +201,7 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
     checks = [_secret(settings.token_file, "token", required=True),
               _secret(settings.backup_key, "backup-key", required=False, key=True)]
     checks += _server(settings)
-    checks += [_service(settings), _store(settings), _backup(settings)]
+    checks += [_service(settings), _store(settings), _backup(settings), _storage(settings)]
     from .request_journal import directory, scan, key, RESOLVED
     journal = scan(directory(settings))
     resolved = {key(r) for r in journal["entries"] if r["state"] in RESOLVED}
