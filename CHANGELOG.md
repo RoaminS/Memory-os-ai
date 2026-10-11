@@ -2,6 +2,14 @@
 
 ## 4.0.5 — correctifs en préparation, non publiée / non déployée
 
+- Préflight du relais : panne/initialisation distinctes d'un contrat ancien,
+  résultat « cette mutation non envoyée », reprise manuelle seulement et aucun
+  raccourci pour les request_id déjà incertains. Qualification machine en attente.
+- Configurations MCP personnelles retirées du suivi Git, fichiers privés
+  conservés ; template explicite v4 relayé à la place du serveur v3 autochargé.
+- Archivage vérifié des preuves sans retrait des originaux (donc sans gain disque)
+  et contrats L7b/CAS et SQLite S4 proposés, non implémentés ni activés.
+
 - Isolation commune des tests v3/v4 avant leur collecte : HOME/XDG/AppData
   jetables, garde des écritures Python dans le HOME réel, échec même si l'erreur
   est interceptée, protection des chemins via symlink et dir_fd.
@@ -20,7 +28,7 @@
   La configuration locale a été restaurée par Claude ; le service 4.0.4 n'est
   pas la cause. Voir `v4/docs/INCIDENT_TEST_HOME_2026_10_11.md`.
 - Qualification complète et bascule locale réalisées par Claude avec le GO de
-  Romain ; publication PyPI autorisée à Romain, non attestée ici.
+  Romain ; publication PyPI réalisée par Romain, empreintes vérifiées par Claude.
 
 - Verrou serveur de maintenance ; instructions clients alignées, opérations
   destructrices interdites sans activation explicite par l'opérateur.
