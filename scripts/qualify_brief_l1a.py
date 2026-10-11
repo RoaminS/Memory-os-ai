@@ -161,6 +161,9 @@ def main():
                         )  # disposable sources only; measured evidence stays
         assert len(report["cases"]) == 400
         compact = [r for r in report["cases"] if r["compact"]]
+        durations = sorted(r["ms"] for r in report["cases"])
+        report["latency_ms"] = {"p50": durations[len(durations)//2],
+                                "p95": durations[int(.95*(len(durations)-1))], "max": durations[-1]}
         report.update(
             ok=True,
             exact_tokens_qualified=True,

@@ -51,3 +51,5 @@ Memory-os-ai et implementation n'est pas autorisée par leur nom ou cette revue 
 Romain doit confirmer l'attribution des 9 éléments implementation et les autres
 aliases/contextes. Ne pas activer avant cette validation, qualification sur copie
 et vérification des empreintes client/serveur. Aucun registre privé copié au dépôt.
+
+Validation syntaxique effectuée : 55 projets, SHA-256 b92ab0380432e637162d5100986c78e2e3a4aeacebfcc3281c40d4fe73737f30. Les 54 entrées sans contexte ne suffisent pas à identifier automatiquement un workspace : ajouter/approuver le contexte des projets utilisés avant de brancher leurs hooks. Les projets historiques non utilisés peuvent rester sans contexte.
