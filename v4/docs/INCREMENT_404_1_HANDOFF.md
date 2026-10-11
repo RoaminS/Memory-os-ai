@@ -11,6 +11,7 @@ ne pas exiger leur import préalable ; ils ne sont ni modifiés ni exécutés ic
 | --- | --- |
 | `907d274` | L2 : verrou fermé avant reçus/transactions, simulation par défaut, policy figée, instructions corrigées, tests JSONL/SQLite. |
 | `e54905c` | Contrats L3/L4 : schémas et matrice C01–C12, pas de nouvel endpoint ni journal du relais ; fixture d'archive historique adaptée au nouveau champ Config sans toucher l'archive. |
+| `540b3bd` | Garde de qualification : ignore les filtres pytest hérités, refuse une sélection incomplète ou sans TCP ; deux tests supplémentaires. |
 | `55f4d54` | L13a : agrégats bornés opt-in en RAM, observation sans contenu, scripts de qualification hash-only, deux nouveaux tests TCP L2/L13a. |
 
 La signature de Claude et Q0 sont intégrés dans `PLAN_COMMUN_v4.md`. Le plan
@@ -27,8 +28,8 @@ SQLite restent inchangés. Aucune écriture de maintenance sur la production.
 
 ## Preuves locales
 
-`evidence/404-increment1/manifest.json` lie sources, scripts et preuves à
-`55f4d54`. Suite v4 légère : **1188 passed**, **0 skipped**, un test neuronal
+`evidence/404-increment1-final/manifest.json` lie sources, scripts et preuves à
+`540b3bd`. Suite v4 légère : **1190 passed**, **0 skipped**, un test neuronal
 `slow` désélectionné ; les fichiers TCP sont explicitement exclus de cette suite.
 Les deux commandes lint passent. Les tests ciblés avaient donné **98 passed**.
 
@@ -36,7 +37,7 @@ Un premier passage complet a échoué sur une fixture de campagne archivée :
 `resolved_config()` incluait désormais `maintenance_mode`, absent de l'ancien
 moteur CPU figé. La fixture retire ce champ comme les autres champs plus récents.
 L'archive et les campagnes n'ont pas été changées. Le journal initial est
-conservé ; la nouvelle exécution complète est dans un dossier neuf.
+conservé dans `evidence/404-increment1/initial-failed-pytest.log` ; les preuves finales sont dans un dossier neuf. La suite de 1 188 tests avait aussi été rejouée avec succès après import dans un clone neuf ; la suite finale ajoute deux tests de la garde de qualification.
 
 Baseline synthétique de vingt épisodes/hash : cinq briefs, cinq recherches,
 un refus, zéro panne d'observation. Maximum de contenu brief retourné :
@@ -68,8 +69,8 @@ PYTHONDONTWRITEBYTECODE=1 /Users/romain/Memory-os-ai/.venv/bin/python \
 Le clone de qualification et le dossier de sortie doivent être neufs. Le clone
 partagé dépend des objets Git de sa source : garder celle-ci intacte pendant les
 tests. Le script s'arrête au premier échec, conserve ses preuves et refuse les
-tests sélectionnés ignorés. Attendus : **1200 tests réussis** si la même sélection
-est collectée (1188 locaux + 12 TCP), lint vert, baseline hash complète ; contrôler
+tests sélectionnés ignorés. Attendus : **1202 tests réussis** si la même sélection
+est collectée (1190 locaux + 12 TCP), lint vert, baseline hash complète ; contrôler
 le XML et le rapport plutôt que le nombre seul. Aucun modèle téléchargé/chargé.
 
 Pour isoler uniquement les tests TCP après la revue, dans un autre dossier neuf :
