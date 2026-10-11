@@ -49,6 +49,15 @@ non-empty stores and unsafe configs are refused. Client configuration undo is se
 store/service/token/resources. These features and the complete onboarding still require installed-artifact
 and new-user qualification before release; they are absent from published 4.0.5.
 
+For **new 4.0.6 quickstart installs**, SQLite with work state/tasks is the default;
+`--backend jsonl` is the explicit alternative. Existing installations are never migrated implicitly.
+The fresh SQLite default directory is `~/.local/share/memory-os/store`; JSONL retains its historical directory.
+The candidate pins the qualified numerical stack (torch 2.10.0, sentence-transformers 5.2.3,
+transformers 5.2.0, numpy 2.4.2, plus its numerical/tokenizer dependencies).
+Quickstart refuses a different installed profile before activation. A matching version list is an attestation,
+not a guarantee of identical computation on every machine. Use the returned `ops_env` for administration
+in a fresh shell; quickstart does not change your shell defaults or schedule backup jobs.
+
 ## Supported assistants
 
 | Assistant | Configured | Connection verified | Real usage observed |

@@ -1,0 +1,25 @@
+{
+  "basis": "Qualified 4.0.3/4.0.5 encoder profile; ancillary versions read from the 4.0.5 runtime METADATA (no model import).",
+  "encoding_runtime_keys": [
+    "torch",
+    "sentence-transformers",
+    "transformers",
+    "numpy"
+  ],
+  "limits": "Version attestation only, not a signature, full dependency lock or cross-platform/numerical equivalence proof.",
+  "profile_id": "granite-macos-arm64-py311-v1",
+  "recorded_at": "2026-10-11",
+  "schema_version": 1,
+  "versions": {
+    "faiss-cpu": "1.13.2",
+    "huggingface-hub": "1.5.0",
+    "numpy": "2.4.2",
+    "safetensors": "0.7.0",
+    "scikit-learn": "1.8.0",
+    "scipy": "1.17.1",
+    "sentence-transformers": "5.2.3",
+    "tokenizers": "0.22.2",
+    "torch": "2.10.0",
+    "transformers": "5.2.0"
+  }
+}

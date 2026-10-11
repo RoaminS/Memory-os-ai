@@ -165,6 +165,7 @@ build-backend = {json.dumps(metadata["build-backend"])}
 [project]
 name = "memory-os-ai"
 version = "{VERSION}"
+dependencies = {json.dumps(tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['dependencies'])}
 [project.optional-dependencies]
 {chr(10).join(f'{json.dumps(k)} = {json.dumps(v)}' for k, v in tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['optional-dependencies'].items())}
 [tool.setuptools.packages.find]
@@ -221,6 +222,11 @@ include = ["memory_os_ai*", "memory_os_v4*"]
         proof = gate.wheel_markers(next(folder.glob("*.whl")))
         assert proof["ok"] and "legacy-v3" in proof["extras"] and "v3" not in proof["extras"]
         assert all(n > 0 for n in proof["marker_evaluations"].values())
+        from email.parser import BytesParser
+        from memory_os_v4.ops.qualified_runtime import check_requirements
+        with zipfile.ZipFile(next(folder.glob('*.whl'))) as archive:
+            metadata = BytesParser().parsebytes(archive.read(next(n for n in archive.namelist() if n.endswith('.dist-info/METADATA'))))
+            assert check_requirements(metadata.get_all('Requires-Dist'))['ok']
 
 
 def test_no_extra_name_can_parse_as_pep440_version():
@@ -298,7 +304,7 @@ def test_doctor_explains_embedded_identity(monkeypatch, tmp_path):
 def test_extras_and_v3_failure_are_explicit(monkeypatch, capsys):
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert not any(name.startswith(("pymupdf", "pytesseract", "python-pptx", "python-docx", "Pillow", "requests")) for name in meta["dependencies"])
-    assert "sentence-transformers>=3.0" in meta["dependencies"]
+    assert "sentence-transformers==5.2.3" in meta["dependencies"]
     assert "pymupdf>=1.24" in meta["optional-dependencies"]["documents"]
     monkeypatch.setattr(legacy_cli.importlib.util, "find_spec", lambda *a: None)
     assert legacy_cli.main() == 2

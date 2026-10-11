@@ -17,7 +17,7 @@ README et `docs/CLIENTS.md` intégrés avec corrections : `[ops,brief]`, 11 entr
 5. Sauvegardes/configs : mode 0700/0600 ; elles peuvent contenir des secrets d’autres entrées. Les diffs/rapports n’affichent que notre entrée, avec valeurs sensibles masquées, aucun bearer ou configuration étrangère. `--report` anonymise chemins personnels/identifiants, ne contient ni mémoire ni contenu des backups.
 6. Demo : projet unique `memory-os-demo-<id>` avec consentement, jamais collision/nettoyage d’un projet existant. Une écriture incertaine exige résolution du reçu, sans rejeu. Configuré, connecté et usage observé restent trois niveaux distincts.
 
-Périmètre Claude : développer dans `~/memory-os-local/distribution/quickstart/` les fichiers destinés à `v4/src/memory_os_v4/ops/quickstart.py` et `v4/tests/test_quickstart.py`, avec le contrat amendé. Ne pas modifier l’arbre Codex pendant un tour. Codex relira/intégrera et branchera la CLI. JSONL reste le défaut actuel ; SQLite/tâches pour nouveaux utilisateurs demeure un choix de Romain, aucun changement implicite.
+Périmètre Claude : développer dans `~/memory-os-local/distribution/quickstart/` les fichiers destinés à `v4/src/memory_os_v4/ops/quickstart.py` et `v4/tests/test_quickstart.py`, avec le contrat amendé. Ne pas modifier l’arbre Codex pendant un tour. Codex relira/intégrera et branchera la CLI. Mise à jour décision Romain du 2026-10-11 : le quickstart 4.0.6 neuf choisit SQLite+tâches par défaut, JSONL sur option ; aucune migration implicite ou modification du défaut Config des serveurs existants.
 
 ## 2. Interface pour quickstart et utilisateur du wheel
 

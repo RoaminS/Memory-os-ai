@@ -269,6 +269,16 @@ def _capabilities(info: dict) -> list[Check]:
     except (KeyError, TypeError):
         return [Check("capabilities", "FAIL", "malformed deployed capability contract")]
     tokenizer = caps.get("brief", {}).get("tokenizer", {})
+    from .qualified_runtime import compare
+    runtime = caps.get('encoding', {}).get('profile', {}).get('runtime')
+    if isinstance(runtime, dict):
+        proof = compare(runtime, encoding_only=True)
+        checks.append(Check('encoder-runtime', 'PASS' if proof['ok'] else 'FAIL',
+                            'qualified encoder package versions' if proof['ok'] else
+                            'deployed encoder version drift: ' + ', '.join(sorted(proof['mismatches'])),
+                            '' if proof['ok'] else 'review the qualified runtime; do not re-encode/mix vectors implicitly'))
+    else:
+        checks.append(Check('encoder-runtime', 'WARN', 'deployed package versions unavailable'))
     if caps.get("brief", {}).get("compact"):
         checks.append(Check("brief-tokenizer", "PASS" if tokenizer.get("ready") else "FAIL",
                             "exact offline cl100k_base available" if tokenizer.get("ready") else

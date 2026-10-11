@@ -881,7 +881,7 @@ def _run_http(host: str, port: int, *, warm: bool = False) -> None:
     # Validate credentials and transport before opening any data directory.
     app = _build_http_app(host, port)
     if warm:
-        get_engine()
+        get_engine().ensure_retrieval()  # SQLite task-only startup is intentionally lazy unless --warm
     logger.warning("memory-os-v4 streamable HTTP on http://%s:%d/mcp/", host, port)
     uvicorn.run(app, host=host, port=port, log_level="warning")
 

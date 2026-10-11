@@ -345,6 +345,8 @@ def report(plan: dict) -> dict:
     def anon(x):
         return x.replace(home, "~") if isinstance(x, str) else x
     return {"platform": plan["platform"], "port_state": plan["port_state"], "token": plan["token"]["state"],
+            "backend": plan.get('backend'), "work_state": plan.get('work_state'),
+            "runtime_qualified": plan.get('runtime_qualification', {}).get('ok'),
             "disk_free_gb": round(plan["disk_free_bytes"] / 1e9, 1), "downloads_required_bytes": plan["downloads_required_bytes"],
             "clients": [{"client": c["client"], "path": anon(c["path"]), "current_class": c["current_class"],
                          "action": c["action"]} for c in plan["clients"]]}
@@ -352,7 +354,41 @@ def report(plan: dict) -> dict:
 
 # ---------- orchestration: all mutations require explicit apply ----------
 
-def _service_plan(settings, home, python, resource_env):
+def _selected_backend(settings, home, requested=None):
+    """A persisted backend is a hint only: ownership still requires the full preflight."""
+    if requested is not None:
+        if requested not in {'sqlite', 'jsonl'}:
+            raise QuickstartError('Select sqlite or jsonl')
+        return requested
+    import plistlib
+    label = settings.service_label or 'local.memory-os-v4'
+    path = home / 'Library/LaunchAgents' / (label + '.plist')
+    _safe_path(path, home)
+    if path.exists():
+        try:
+            value = plistlib.loads(path.read_bytes()).get('EnvironmentVariables', {}).get('MEMORY_V4_STORE_BACKEND')
+            if value in {'sqlite_s1', 'jsonl'}:
+                return 'sqlite' if value == 'sqlite_s1' else 'jsonl'
+        except (ValueError, AttributeError):
+            pass  # full service preflight refuses an invalid/different plist
+    return 'sqlite'
+
+
+def settings_for_install(settings, *, backend=None, home=None):
+    """Only new default SQLite installs get a new directory; never migrate legacy data."""
+    from dataclasses import replace
+    home = home or Path.home()
+    chosen = _selected_backend(settings, home, backend)
+    legacy = home / '.memory-os-v4'
+    label = settings.service_label or 'local.memory-os-v4'
+    existing_plist = home / 'Library/LaunchAgents' / (label + '.plist')
+    if (chosen == 'sqlite' and settings.store_dir == legacy and 'MEMORY_V4_DIR' not in os.environ
+            and not existing_plist.exists() and not legacy.exists()):
+        settings = replace(settings, store_dir=home / '.local/share/memory-os/store')
+    return settings, chosen
+
+
+def _service_plan(settings, home, python, resource_env, *, backend=None):
     from .cli import _plist
     from .provision import catalog
     label = settings.service_label or "local.memory-os-v4"
@@ -360,9 +396,11 @@ def _service_plan(settings, home, python, resource_env):
         raise QuickstartError("Invalid service label")
     if settings.url != f"http://127.0.0.1:{settings.port}/mcp/":
         raise QuickstartError("Quickstart supports the explicit 127.0.0.1 loopback URL")
+    backend = _selected_backend(settings, home, backend)
     env = {"MEMORY_V4_DIR": str(settings.store_dir), "MEMORY_V4_TOKEN_FILE": str(settings.token_file),
            "MEMORY_V4_URL": settings.url, "MEMORY_V4_SERVICE_LABEL": label,
-           "MEMORY_V4_STORE_BACKEND": "jsonl", "MEMORY_V4_WORK_STATE": "false",
+           "MEMORY_V4_STORE_BACKEND": 'sqlite_s1' if backend == 'sqlite' else 'jsonl',
+           "MEMORY_V4_WORK_STATE": 'true' if backend == 'sqlite' else 'false',
            "MEMORY_V4_EMBED_MODEL": catalog()['model_id'], "MEMORY_V4_EMBED_MAX_SEQ_LENGTH": "512",
            "MEMORY_V4_MAINTENANCE_MODE": "disabled",
            "MEMORY_V4_DEVICE": "auto", "MEMORY_V4_EMBED_DTYPE": "native",
@@ -411,26 +449,32 @@ def _job_state(service, *, run):
     return "unknown"  # permissions/syntax/IPC failures are not evidence of absence
 
 
-def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, run=subprocess.run):
+def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backend=None, run=subprocess.run):
     """Pure read-only preflight. Does not invoke setup/create_token or use client auth."""
     from ..readiness import build_identity
     from . import provision
+    from .qualified_runtime import inspect_current
     from .auth import read_token
     import importlib.util
     home = home or Path.home()
     python = python or str(Path(sys.executable).absolute())
+    backend = _selected_backend(settings, home, backend)
     resource_plan = provision.plan()
     client_env = {"MEMORY_V4_URL": settings.url, "MEMORY_V4_TOKEN_FILE": str(settings.token_file),
                   "MEMORY_V4_OPS_DIR": str(settings.ops_dir)}
     result = preview(home=home, python=python, env=client_env, clients=clients, port=settings.port,
                      token_file=settings.token_file, provision_plan=resource_plan)
     identity = build_identity()
-    service = _service_plan(settings, home, python, resource_plan['env'])
+    service = _service_plan(settings, home, python, resource_plan['env'], backend=backend)
+    runtime = inspect_current()
     blockers = []
     if sys.platform != 'darwin' or platform.machine().lower() not in {'arm64', 'aarch64'}:
         blockers.append('macOS Apple Silicon launchd onboarding only; other platforms remain manual')
     if identity.get('identity_source') != 'embedded_descriptor' or not identity.get('commit') or identity.get('source_dirty'):
         blockers.append('build_unqualified: install a qualified wheel; source/env identity is insufficient')
+    if not runtime['ok']:
+        blockers.append('runtime_unqualified: package versions differ: ' + ', '.join(sorted(runtime['mismatches']))
+                        + '; install the exact qualified dependencies, then re-preview')
     if not Path(python).is_file() or not os.access(python, os.X_OK) or any(s in python for s in ('/cache/uv/', 'pip-build-env', 'uvx')):
         blockers.append('absolute durable Python executable required (no uvx ephemeral runtime)')
     if importlib.util.find_spec('tiktoken') is None:
@@ -456,8 +500,15 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, run=su
         blockers.append('existing service token missing; no replacement token')
     if service['state'] == 'absent' and settings.store_dir.exists() and any(settings.store_dir.iterdir()):
         blockers.append('non-empty store: use the qualified upgrade runbook, never reset/migrate here')
+    if backend == 'sqlite':
+        from ..sqlite_store import validate_sqlite_target
+        try:
+            validate_sqlite_target(settings.store_dir)
+        except ValueError:
+            blockers.append('SQLite target refused: choose a fresh non-legacy directory; no implicit migration')
     # Reject unexpected path redirects before any download/token write.
-    for path in (settings.token_file, settings.store_dir / 'items.jsonl', settings.ops_dir / 'logs/server.err'):
+    for path in (settings.token_file, settings.store_dir / ('store.sqlite3' if backend == 'sqlite' else 'items.jsonl'),
+                 settings.ops_dir / 'logs/server.err'):
         _safe_path(path, home)
     notices = []
     if 'claude-code' in clients and (Path.cwd() / '.mcp.json').exists():
@@ -465,10 +516,11 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, run=su
     if 'gemini-cli' in clients:
         notices.append('Gemini CLI folder trust is a separate user choice; configuration does not prove a connection')
     return {**result, 'ok': not blockers, 'identity': identity, 'service': service, 'blockers': blockers, 'notices': notices,
+            'backend': backend, 'work_state': backend == 'sqlite', 'runtime_qualification': runtime,
             'client_env': client_env, 'writes': 'none (preview)', 'stage': 'preview'}
 
 
-def _ready(settings, identity):
+def _ready(settings, identity, *, backend='sqlite'):
     from .auth import http_get
     status, body = http_get(settings.ready_url, settings, timeout=2)
     if status not in (200, 503):
@@ -483,10 +535,15 @@ def _ready(settings, identity):
         if response.get('ready') is not True or response.get('reason') != 'ready':
             raise QuickstartError('Retrieval not ready (work-only is insufficient)')
         caps = response.get('capabilities') or {}
-        if caps.get('store', {}).get('backend') != 'jsonl' or not caps.get('store', {}).get('instance_id'):
+        expected_backend = 'sqlite_s1' if backend == 'sqlite' else 'jsonl'
+        if (caps.get('store', {}).get('backend') != expected_backend or not caps.get('store', {}).get('instance_id')
+                or caps.get('work_state') is not (backend == 'sqlite')):
             raise QuickstartError('Existing store/profile differs; use qualified upgrade runbook')
         profile = caps.get('encoding', {}).get('profile') or {}
         from .provision import catalog
+        from .qualified_runtime import compare
+        if not compare(profile.get('runtime') or {}, encoding_only=True)['ok']:
+            raise QuickstartError('Server encoder runtime differs from qualified package versions')
         if (caps.get('encoding', {}).get('requested_device') != 'auto' or profile.get('dtype') != 'native'
                 or profile.get('batch_size') != 32 or profile.get('model_revision') != catalog()['revision']
                 or profile.get('max_seq_length') != 512 or caps.get('encoding', {}).get('model') != catalog()['model_id']
@@ -512,7 +569,10 @@ async def _relay_probe(python, env, *, demo=False, expected=None):
             if expected and init.serverInfo.version != expected['version']:
                 raise QuickstartError('Relay handshake version differs')
             tools = await session.list_tools()
-            if not {'memory_status', 'memory_chat_save', 'memory_search', 'memory_request_status'} <= {t.name for t in tools.tools}:
+            required = {'memory_status', 'memory_chat_save', 'memory_search', 'memory_request_status'}
+            if expected and expected['capabilities'].get('work_state'):
+                required |= {'memory_task_list', 'memory_task_create', 'memory_task_update'}
+            if not required <= {t.name for t in tools.tools}:
                 raise QuickstartError('Relay tool contract missing')
             status = await session.call_tool('memory_status', {'project': '*'})
             if status.isError:
@@ -523,6 +583,13 @@ async def _relay_probe(python, env, *, demo=False, expected=None):
             if expected and expected.get('_data_dir') and deployed.get('data_dir') != expected['_data_dir']:
                 raise QuickstartError('Relay store directory differs from selected installation')
             result = {'connected': True, 'tool_count': len(tools.tools), 'real_client_usage': 'unmeasured'}
+            if expected and expected['capabilities'].get('work_state'):
+                listed = await session.call_tool('memory_task_list',
+                    {'project': 'memory-os-quickstart-check-' + uuid.uuid4().hex, 'limit': 1})
+                task_result = json.loads(listed.content[0].text) if listed.content else {}
+                if listed.isError or task_result.get('ok') is not True or not isinstance(task_result.get('tasks'), list):
+                    raise QuickstartError('SQLite work state list failed; no automatic task mutation')
+                result['work_state_read_verified'] = True
             if not demo:
                 return result
             project = 'memory-os-demo-' + uuid.uuid4().hex
@@ -557,17 +624,22 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
         raise QuickstartError('Resource download needs --download-approved; no token/service/config changed')
     # Revalidate every mutable input before resources or setup writes.
     current = prepare(settings, clients=tuple(c['client'] for c in plan['clients']), home=home,
-                      python=plan['python'], run=run)
+                      python=plan['python'], backend=plan['backend'], run=run)
     if not current['ok'] or any(current[k] != plan[k] for k in ('identity', 'service', 'client_env')):
         raise QuickstartError('Preflight changed; re-preview, nothing activated')
     if any(a['file_sha256'] != b['file_sha256'] for a, b in zip(current['clients'], plan['clients'])):
         raise QuickstartError('Client file changed; re-preview before apply')
-    if plan['service']['state'] == 'owned' and _ready(settings, plan['identity']) is None:
+    if plan['service']['state'] == 'owned' and _ready(settings, plan['identity'], backend=plan['backend']) is None:
         raise QuickstartError('Existing owned service not ready: no repair or config writes')
     provision.guard(home)  # includes swap attestation even when all resources are already present
     journal = new_journal(home / '.local/state/memory-os/quickstart')
     progress = {'version': 1, 'stamp': journal.name, 'ok': False, 'stage': 'resources', 'steps': {},
-                'retained_on_undo': ['resources', 'token', 'service', 'store'], 'started_at': time.time()}
+                'retained_on_undo': ['resources', 'token', 'service', 'store'], 'started_at': time.time(),
+                'backend': plan['backend'], 'work_state': plan['work_state'],
+                'runtime_qualification': plan['runtime_qualification'],
+                'ops_env': {**plan['service']['env'], 'MEMORY_V4_BACKUP_DIR': str(settings.backup_dir),
+                            'MEMORY_V4_BACKUP_KEY': str(settings.backup_key)},
+                'ops_notice': 'Use ops_env for doctor/health/backup in a fresh shell; quickstart never changes shell defaults.'}
     def record():
         _atomic_write(journal / 'install.json', json.dumps(progress, indent=1))
         (journal / 'install.json').chmod(0o600)
@@ -617,7 +689,7 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
                                   capture_output=True, text=True, timeout=15)
                     progress['guard_stop'] = {'attempted': True, 'stopped': stopped.returncode == 0}
                 raise
-            ready = _ready(settings, plan['identity'])
+            ready = _ready(settings, plan['identity'], backend=plan['backend'])
             if ready:
                 break
             time.sleep(.25)

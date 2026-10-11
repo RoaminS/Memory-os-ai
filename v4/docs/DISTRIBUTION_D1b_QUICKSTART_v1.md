@@ -35,6 +35,8 @@ Le périmètre clients et les six tests de Claude sont conservés. Corrections :
 ```sh
 memory-os-admin quickstart --clients claude-code,codex
 memory-os-admin quickstart --clients claude-code,codex --report
+# Nouvelle installation : SQLite+tâches par défaut ; alternative explicite :
+memory-os-admin quickstart --clients claude-code,codex --backend jsonl
 # Seulement sur une nouvelle installation macOS après revue de l'aperçu :
 memory-os-admin quickstart --clients claude-code,codex --apply
 # Si ressources absentes, consentement distinct :
@@ -51,8 +53,13 @@ vérifie le cache/table existants et interroge seulement launchd/port local.
 `--apply` seul ne télécharge rien. Aucun installateur de dépendances implicite ;
 `[ops,brief]` doit être présent. Valeur du token jamais affichée/passée au CLI.
 
-Service : JSONL pour un nouvel utilisateur, auto/native/batch32, C4 inchangé,
-maintenance/supersession confinées. SQLite/tâches/registre ne sont pas activés.
+Décision Romain du 2026-10-11 : SQLite+tâches pour un **nouvel** utilisateur,
+JSONL disponible via `--backend jsonl`, auto/native/batch32, C4 inchangé,
+maintenance/supersession confinées. Le registre demeure inactif. Chemin neuf SQLite :
+`~/.local/share/memory-os/store` ; le chemin historique n'est jamais migré implicitement.
+Un backend de plist existant est conservé comme choix d'aperçu, sans autoriser une
+modification du service ; un changement explicite de backend est refusé par la
+vérification du plist. Détails du profil verrouillé dans `DISTRIBUTION_D1c_PROFILE_v1.md`.
 Exige un wheel à descripteur valide (env/source seuls refusés), Python durable,
 label/plist/argv/token/magasin concordants. Un job différent ou non attestable
 est refusé ; aucun `--repair`, kill ou remplacement de plist existant. Dossier

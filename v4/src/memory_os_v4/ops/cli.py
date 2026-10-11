@@ -61,7 +61,8 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
             _print_json(result)
             return 0 if all(r['undo'] in {'restored', 'nothing-to-undo'} for r in result['results']) else 1
         chosen = tuple(args.clients.split(',')) if args.clients else quickstart.DEFAULT_CLIENTS
-        plan = quickstart.prepare(s, clients=chosen)
+        s, backend = quickstart.settings_for_install(s, backend=args.backend)
+        plan = quickstart.prepare(s, clients=chosen, backend=backend)
         if args.apply:
             result = quickstart.apply_install(plan, s, download_approved=args.download_approved, demo=args.demo)
             if args.report:
@@ -389,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     qs = sub.add_parser('quickstart', help='macOS onboarding: preview by default; explicit apply/download/demo')
     qs.add_argument('--clients', help='comma-separated chosen clients (default: claude-code,codex)')
+    qs.add_argument('--backend', choices=('sqlite', 'jsonl'), default=None,
+                    help='new installs: sqlite + tasks by default; existing backend is preserved; never migrates')
     mode = qs.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--undo', metavar='STAMP')

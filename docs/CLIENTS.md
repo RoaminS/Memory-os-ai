@@ -2,6 +2,8 @@
 
 Current published version **4.0.5**; the 4.0.6 candidate implements `quickstart`,
 with synthetic tests. It is not yet qualified on a new user installation or published.
+New quickstart installations default to SQLite + tasks; `--backend jsonl` is available.
+An existing service/store is never migrated by quickstart. Relay configurations stay the same for both backends.
 Claude draft integrated after Codex review, 2026-10-11.
 
 ## Principle

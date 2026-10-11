@@ -152,13 +152,13 @@ def install_context(home, monkeypatch):
             loaded[0] = True
         return SimpleNamespace(returncode=0, stdout='', stderr='')
     ready = {'version': __version__, 'capabilities': {'store': {'instance_id': 'synthetic'}}}
-    monkeypatch.setattr(qs, '_ready', lambda *a: ready)
+    monkeypatch.setattr(qs, '_ready', lambda *a, **kw: ready)
     return SimpleNamespace(home=home, python=str(python), settings=settings, resource=resource,
                            identity=identity, run=run, calls=calls, loaded=loaded, ready=ready)
 
 
-def installation(c, clients=('cursor',)):
-    return qs.prepare(c.settings, home=c.home, python=c.python, clients=clients, run=c.run)
+def installation(c, clients=('cursor',), backend=None):
+    return qs.prepare(c.settings, home=c.home, python=c.python, clients=clients, backend=backend, run=c.run)
 
 
 def test_complete_preview_is_zero_write_and_no_activation(install_context):
@@ -167,7 +167,8 @@ def test_complete_preview_is_zero_write_and_no_activation(install_context):
     p = installation(c)
     assert p['ok'] and tree(c.home) == before
     assert all(argv[1] == 'print' for argv in c.calls)
-    assert p['service']['env']['MEMORY_V4_STORE_BACKEND'] == 'jsonl'
+    assert p['service']['env']['MEMORY_V4_STORE_BACKEND'] == 'sqlite_s1'
+    assert p['service']['env']['MEMORY_V4_WORK_STATE'] == 'true'
     assert p['service']['env']['MEMORY_V4_DEVICE'] == 'auto'
     assert p['service']['env']['MEMORY_V4_LEXICAL_GUARD_K'] == '3'
 
@@ -264,7 +265,7 @@ def test_stop_retains_progress_without_demo_or_replay(install_context, monkeypat
     if phase == 'resources':
         monkeypatch.setattr(provision, 'apply', lambda *a, **k: {'ok': False, 'ready': False})
     if phase == 'ready':
-        monkeypatch.setattr(qs, '_ready', lambda *a: None)
+        monkeypatch.setattr(qs, '_ready', lambda *a, **kw: None)
     checks = [Check('server', 'FAIL', 'synthetic')] if phase == 'doctor' else []
     result = qs.apply_install(plan, c.settings, home=c.home, run=c.run, probe=probe,
                              doctor_run=lambda s: checks, demo=True, timeout=.001)
@@ -433,7 +434,7 @@ def test_ready_requires_actual_retrieval_profile_and_identity(install_context, m
     from memory_os_v4.ops import auth, provision
     c = install_context
     info = {'version': c.identity['version'], 'commit': c.identity['commit'], 'ready': True, 'reason': 'ready',
-            'capabilities': {'store': {'backend': 'jsonl', 'instance_id': 'synthetic'},
+            'capabilities': {'store': {'backend': 'sqlite_s1', 'instance_id': 'synthetic'}, 'work_state': True,
                 'encoding': {'requested_device': 'auto', 'model': provision.catalog()['model_id'],
                     'profile': {'dtype': 'native', 'batch_size': 32, 'max_seq_length': 512,
                                'model_revision': provision.catalog()['revision']}},
@@ -446,7 +447,9 @@ def test_ready_requires_actual_retrieval_profile_and_identity(install_context, m
     elif damage == 'profile':
         info['capabilities']['encoding']['profile']['dtype'] = 'float32'
     elif damage == 'backend':
-        info['capabilities']['store']['backend'] = 'sqlite_s1'
+        info['capabilities']['store']['backend'] = 'jsonl'
+    from memory_os_v4.ops.qualified_runtime import catalog as runtime_catalog
+    info['capabilities']['encoding']['profile']['runtime'] = runtime_catalog()['versions']
     # Restore the real function replaced in install_context for this pure response test.
     import importlib.util
     spec = importlib.util.spec_from_file_location('memory_os_v4.ops._qs_ready_test', Path(qs.__file__))
@@ -462,7 +465,8 @@ def test_ready_requires_actual_retrieval_profile_and_identity(install_context, m
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('demo,write_failure', [(False, False), (True, False), (True, True)])
-async def test_relay_probe_real_contract_with_fake_transport(monkeypatch, demo, write_failure):
+@pytest.mark.parametrize('tasks_enabled', [False, True])
+async def test_relay_probe_real_contract_with_fake_transport(monkeypatch, demo, write_failure, tasks_enabled):
     from contextlib import asynccontextmanager
     from types import SimpleNamespace
     import mcp
@@ -485,7 +489,8 @@ async def test_relay_probe_real_contract_with_fake_transport(monkeypatch, demo, 
             return SimpleNamespace(serverInfo=SimpleNamespace(version='synthetic'))
         async def list_tools(self):
             return SimpleNamespace(tools=[SimpleNamespace(name=n) for n in
-                ('memory_status', 'memory_chat_save', 'memory_search', 'memory_request_status')])
+                ('memory_status', 'memory_chat_save', 'memory_search', 'memory_request_status',
+                 'memory_task_list', 'memory_task_create', 'memory_task_update')])
         async def call_tool(self, name, arguments):
             calls.append((name, arguments))
             if name == 'memory_status':
@@ -493,6 +498,8 @@ async def test_relay_probe_real_contract_with_fake_transport(monkeypatch, demo, 
             elif name == 'memory_chat_save':
                 key[0] = arguments['facts'][0]['text']
                 payload = {'ok': True}
+            elif name == 'memory_task_list':
+                payload = {'ok': True, 'tasks': [], 'count': 0}
             else:
                 payload = {'text': key[0]}
             result = SimpleNamespace(isError=write_failure and name == 'memory_chat_save',
@@ -501,7 +508,8 @@ async def test_relay_probe_real_contract_with_fake_transport(monkeypatch, demo, 
             return result
     monkeypatch.setattr(mcp, 'ClientSession', Session)
     monkeypatch.setattr(mcp.client.stdio, 'stdio_client', transport)
-    expected = {'version': 'synthetic', 'capabilities': {'store': {'instance_id': 'test-store'}}}
+    expected = {'version': 'synthetic', 'capabilities': {'store': {'instance_id': 'test-store'},
+                                                       'work_state': tasks_enabled}}
     if write_failure:
         with pytest.raises(qs.QuickstartError, match='never replay'):
             await qs._relay_probe(PY, ENV, demo=demo, expected=expected)
@@ -511,6 +519,7 @@ async def test_relay_probe_real_contract_with_fake_transport(monkeypatch, demo, 
         if demo:
             assert result['demo']['saved_and_found'] and result['demo']['project'].startswith('memory-os-demo-')
     assert sum(name == 'memory_chat_save' for name, _ in calls) == int(demo)
+    assert sum(name == 'memory_task_list' for name, _ in calls) == int(tasks_enabled)
     assert not any(name == 'memory_search' for name, _ in calls) if write_failure else True
 
 
@@ -541,3 +550,79 @@ def test_cli_undo_refusal_is_failure(monkeypatch, capsys):
         {'client': 'cursor', 'undo': 'refused-entry-changed-since-apply'}]})
     assert cli.main(['quickstart', '--undo', 'synthetic']) == 1
     assert 'refused-entry-changed-since-apply' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('backend', ['sqlite', 'jsonl'])
+def test_backend_choice_and_persisted_backend_no_implicit_switch(install_context, backend):
+    c = install_context
+    plan = installation(c, backend=backend)
+    assert plan['ok'] and plan['backend'] == backend
+    env = plan['service']['env']
+    assert env['MEMORY_V4_STORE_BACKEND'] == ('sqlite_s1' if backend == 'sqlite' else 'jsonl')
+    assert env['MEMORY_V4_WORK_STATE'] == ('true' if backend == 'sqlite' else 'false')
+    path = Path(plan['service']['path'])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan['service']['plist'])
+    assert qs._selected_backend(c.settings, c.home) == backend
+    # Asking to switch an existing service cannot match ownership and never migrates.
+    from memory_os_v4.ops.auth import create_token
+    create_token(c.settings.token_file)
+    other = installation(c, backend='jsonl' if backend == 'sqlite' else 'sqlite')
+    assert not other['ok'] and other['service']['state'] == 'foreign-or-different'
+    before = tree(c.home)
+    with pytest.raises(qs.QuickstartError):
+        qs.apply_install(other, c.settings, home=c.home, run=c.run)
+    assert tree(c.home) == before
+
+
+def test_new_default_sqlite_directory_avoids_reserved_legacy_path(install_context, monkeypatch):
+    from dataclasses import replace
+    c = install_context
+    monkeypatch.delenv('MEMORY_V4_DIR', raising=False)
+    original = replace(c.settings, store_dir=c.home / '.memory-os-v4')
+    before = tree(c.home)
+    chosen, backend = qs.settings_for_install(original, home=c.home)
+    assert backend == 'sqlite' and chosen.store_dir == c.home / '.local/share/memory-os/store'
+    assert tree(c.home) == before
+    jsonl, backend = qs.settings_for_install(original, backend='jsonl', home=c.home)
+    assert backend == 'jsonl' and jsonl.store_dir == original.store_dir
+    original.store_dir.mkdir()
+    (original.store_dir / 'items.jsonl').write_text('preserve legacy history')
+    preserved, backend = qs.settings_for_install(original, home=c.home)
+    assert preserved == original and backend == 'sqlite'  # preflight will refuse, never silently redirect history
+    assert (original.store_dir / 'items.jsonl').read_text() == 'preserve legacy history'
+
+
+def test_runtime_drift_blocks_preview_apply_before_all_mutations(install_context, monkeypatch):
+    from memory_os_v4.ops import qualified_runtime
+    c = install_context
+    expected = qualified_runtime.catalog()['versions']
+    drifted = {**expected, 'torch': '2.14.1', 'transformers': '5.19.0'}
+    monkeypatch.setattr(qualified_runtime, 'inspect_current', lambda: qualified_runtime.compare(drifted))
+    before = tree(c.home)
+    plan = installation(c)
+    assert not plan['ok'] and any('runtime_unqualified' in b for b in plan['blockers'])
+    with pytest.raises(qs.QuickstartError):
+        qs.apply_install(plan, c.settings, home=c.home, run=c.run, download_approved=True)
+    assert tree(c.home) == before
+
+
+def test_sqlite_plist_really_enables_private_task_api(install_context, monkeypatch):
+    from memory_os_v4 import Config, MemoryV4, server
+    c = install_context
+    plan = installation(c)
+    for name, value in plan['service']['env'].items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv('MEMORY_V4_EMBED_MODEL', 'hash')  # synthetic, no neural model or download
+    cfg = Config.from_env()
+    assert cfg.store_backend == 'sqlite_s1' and cfg.work_state is True
+    with MemoryV4(config=cfg) as engine:
+        monkeypatch.setattr(server, '_engine', engine)
+        result = server.dispatch('memory_task_create', {'project': 'synthetic', 'title': 'Private install proof',
+                                                       'request_id': 'new-task'})
+        assert result['ok'], result
+        listed = server.dispatch('memory_task_list', {'project': 'synthetic', 'limit': 1})
+        assert listed['ok'] and listed['count'] == 1
+        assert listed['tasks'][0]['title'] == 'Private install proof'
+    assert (c.settings.store_dir / 'store.sqlite3').is_file()
+    assert not (c.settings.store_dir / 'items.jsonl').exists()

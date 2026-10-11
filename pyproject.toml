@@ -25,14 +25,21 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+# Exact numerical/encoder pins reproduce the locally qualified macOS profile.
+# Transitive numeric/tokenizer packages are direct constraints, not new features.
 dependencies = [
     "mcp>=1.26.0",
     "pydantic>=2.0",
-    "numpy>=1.26",
-    "faiss-cpu>=1.7",
-    "sentence-transformers>=3.0",
-    "transformers>=4.40",
-    "huggingface_hub>=0.25",
+    "torch==2.10.0",
+    "sentence-transformers==5.2.3",
+    "transformers==5.2.0",
+    "numpy==2.4.2",
+    "faiss-cpu==1.13.2",
+    "huggingface-hub==1.5.0",
+    "tokenizers==0.22.2",
+    "safetensors==0.7.0",
+    "scikit-learn==1.8.0",
+    "scipy==1.17.1",
 ]
 
 # Source/Issues remain the historical public repository while GitHub is frozen.

@@ -23,7 +23,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-UNITS = ["v4/tests/test_distribution_d1a.py", "v4/tests/test_quickstart.py", "v4/tests/test_readiness.py",
+UNITS = ["v4/tests/test_distribution_d1a.py", "v4/tests/test_quickstart.py", "v4/tests/test_qualified_runtime.py",
+         "v4/tests/test_work_cold.py", "v4/tests/test_readiness.py",
          "v4/tests/test_ops.py", "v4/tests/test_ops_doctor.py", "v4/tests/test_server_handlers.py"]
 
 
@@ -155,8 +156,11 @@ def main():
                 # Relay main is a blocking stdio client: verify entrypoint import without calling it.
                 smoke = '''import importlib.metadata, json, pathlib, sys
 from memory_os_v4.readiness import build_identity
+from memory_os_v4.ops.qualified_runtime import check_requirements, inspect_current
 info = build_identity()
 assert info['identity_source'] == 'embedded_descriptor', info
+assert check_requirements(importlib.metadata.distribution('memory-os-ai').requires)['ok']
+assert inspect_current()['ok'], inspect_current()
 import memory_os_v4
 assert pathlib.Path(memory_os_v4.__file__).is_relative_to(pathlib.Path(sys.prefix)), memory_os_v4.__file__
 for entry in importlib.metadata.distribution('memory-os-ai').entry_points:
@@ -184,6 +188,7 @@ assert snapshot() == before, 'Installed preview wrote to HOME'
 assert run.returncode == 0, run.stdout + run.stderr
 info = json.loads(run.stdout)
 assert info['writes'] == 'none' and info['stage'] == 'preview' and info['ok']
+assert info['backend'] == 'sqlite' and info['work_state'] is True and info['runtime_qualified'] is True
 print(json.dumps(info, sort_keys=True))
 '''
                 report["steps"][f"quickstart-preview-{index}"] = command([str(python), "-B", "-c", preview_smoke],
