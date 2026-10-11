@@ -10,6 +10,7 @@ from dataclasses import asdict
 import datetime as dt
 import hashlib
 import json
+import math
 import time
 import unicodedata
 import uuid
@@ -177,27 +178,73 @@ def get(engine, args, project):
 
 
 def listing(engine, args, project):
-    rows = [view(engine, t) for t in all_tasks(engine, project)
-            if t['status'] in args.status and (args.owner is None or (t['owner'] or {}).get('client_id') == args.owner)]
-    rows.sort(key=lambda t: (t['stale'], t['status'] != 'blocked',
-                             -dt.datetime.fromisoformat(t['updated_at']).timestamp(), t['task_id']))
-    binding = {'store': engine.store.meta['store_instance_id'], 'project': project,
-               'filters': digest([args.status, args.owner, args.limit]),
-               'cut': digest([(r['task_id'], r['revision']) for r in rows])}
-    offset = 0
+    """Indexed keyset pages; parse only bounded candidates, never a project dump.
+
+    The cursor pins stale classification time and the immutable project cut.
+    A task write invalidates it; aliases and filter changes cannot cross scope.
+    """
+    con = engine.store._connection
+    labels = tuple(getattr(project, 'labels', (project,)))
+    # Immutable append-only versions make rowid monotonic. Each project MAX is
+    # covered by task_versions_cut, independent of the requested status filter.
+    cuts = [(label, con.execute('SELECT COALESCE(MAX(rowid),0) FROM task_versions '
+                              'WHERE project=?', (label,)).fetchone()[0]) for label in labels]
+    binding = {'version': 2, 'store': engine.store.meta['store_instance_id'],
+               'project': list(labels), 'filters': digest([sorted(args.status), args.owner, args.limit]),
+               'cut': digest(cuts)}
+    at, after = time.time(), None
     if args.cursor:
         try:
             cursor = json.loads(base64.urlsafe_b64decode(args.cursor))
             if any(cursor.get(k) != v for k, v in binding.items()):
                 raise ValueError('changed source cut or scope')
-            offset = cursor['offset']
-            if type(offset) is not int or not 0 <= offset <= len(rows):
-                raise ValueError('invalid offset')
+            at, after = cursor['at'], cursor['after']
+            if (type(at) not in (float, int) or not math.isfinite(at)
+                    or not 0 <= time.time() - at <= 86400 or not isinstance(after, list)
+                    or len(after) != 3 or type(after[0]) is not int or after[0] not in range(4)
+                    or type(after[1]) not in (float, int) or not math.isfinite(after[1])
+                    or not isinstance(after[2], str)):
+                raise ValueError('invalid cursor')
         except (ValueError, TypeError, KeyError):
             return {'ok': False, 'code': 'cursor_stale'}
-    page = rows[offset:offset + args.limit]
-    cursor = base64.urlsafe_b64encode(_json({**binding, 'offset': offset + args.limit}).encode()).decode() if offset + args.limit < len(rows) else None
-    return {'ok': True, 'tasks': page, 'cursor': cursor, 'count': len(page)}
+    cutoff = at - 14 * 86400
+    candidates = []
+    # Each branch has equality on the leading index fields, a range on time,
+    # ORDER/LIMIT in SQL. Merge at most (labels * statuses * 2 * (limit+1))
+    # candidates; no unbounded Python scan/sort. done shares the non-blocked tier.
+    for label in labels:
+        for status in sorted(set(args.status)):
+            for stale in ((False,) if status == 'done' else (False, True)):
+                tier = int(stale) * 2 + int(status != 'blocked')
+                if after is not None and tier < after[0]:
+                    continue
+                params = [label, status]
+                where = 'l.project=? AND l.status=?'
+                if args.owner is not None:
+                    where += ' AND l.owner_id=?'
+                    params.append(args.owner)
+                if status != 'done':
+                    where += ' AND l.updated_epoch' + ('<?' if stale else '>=?')
+                    params.append(cutoff)
+                if after is not None and tier == after[0]:
+                    where += ' AND (l.updated_epoch<? OR (l.updated_epoch=? AND l.task_id>?))'
+                    params.extend([-after[1], -after[1], after[2]])
+                sql = ('SELECT l.updated_epoch,l.task_id,v.record_json FROM task_lookup l '
+                       'JOIN task_versions v ON v.task_id=l.task_id AND v.revision=l.revision WHERE ' + where +
+                       ' ORDER BY l.updated_epoch DESC,l.task_id LIMIT ?')
+                for epoch, task_id, record in con.execute(sql, [*params, args.limit + 1]):
+                    candidates.append(((tier, -epoch, task_id), record))
+    candidates.sort(key=lambda candidate: candidate[0])
+    selected = candidates[:args.limit]
+    page = []
+    for (tier, _epoch, _id), record in selected:
+        value = view(engine, json.loads(record))
+        value['stale'] = tier >= 2
+        page.append(value)
+    following = None
+    if len(candidates) > args.limit:
+        following = base64.urlsafe_b64encode(_json({**binding, 'at': at, 'after': selected[-1][0]}).encode()).decode()
+    return {'ok': True, 'tasks': page, 'cursor': following, 'count': len(page)}
 
 
 def block_cas(engine, args, project):
@@ -261,3 +308,12 @@ def check_integrity(store):
     if store._connection.execute('SELECT 1 FROM task_current c WHERE c.revision != '
                                  '(SELECT max(v.revision) FROM task_versions v WHERE v.task_id=c.task_id) LIMIT 1').fetchone():
         raise WorkError('task_integrity_failed')
+
+    # Known old archives have no derived lookup. Current schema must match the
+    # deterministic projection exactly; never silently trust a tampered index.
+    from .sqlite_store import TASK_LOOKUP_SELECT
+    if store._connection.execute("SELECT 1 FROM sqlite_master WHERE name='task_lookup'").fetchone():
+        current = 'SELECT task_id,revision,project,status,updated_epoch,owner_id FROM task_lookup'
+        for left, right in ((current, TASK_LOOKUP_SELECT), (TASK_LOOKUP_SELECT, current)):
+            if store._connection.execute('SELECT 1 FROM (' + left + ' EXCEPT ' + right + ') LIMIT 1').fetchone():
+                raise WorkError('task_integrity_failed')

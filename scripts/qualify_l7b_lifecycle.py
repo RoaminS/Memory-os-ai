@@ -92,7 +92,7 @@ def main():
             count = len(work.all_tasks(engine, 'l7b-synthetic'))
             result.update(cas_ms=cas, list50_ms=listing, cas_p95_ms=p95(cas), list50_p95_ms=p95(listing),
                           brief_bytes=size, brief_tokens=tokens, observed_tasks=count,
-                          ok=count == 10000 and p95(cas) <= 100 and p95(listing) <= 100 and size <= 6000 and tokens <= 1500)
+                          ok=count == 10000 and p95(cas) <= 100 and p95(listing) < 30 and size <= 6000 and tokens <= 1500)
             # Explicitly attest that the model-free path did not populate the cache.
             result['cache_vectors'] = engine.store._connection.execute('SELECT count(*) FROM embedding_cache').fetchone()[0]
             result['ok'] &= result['cache_vectors'] == 0

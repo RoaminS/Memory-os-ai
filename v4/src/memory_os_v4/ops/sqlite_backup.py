@@ -154,7 +154,7 @@ def inventory(con, guard=lambda: None):
     guard()
     version = con.execute('PRAGMA user_version').fetchone()[0]
     if (con.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
-            or version not in {5, SCHEMA_VERSION}):
+            or version not in range(5, SCHEMA_VERSION + 1)):
         raise BackupError("Unknown/future SQLite schema")
     if _schema(con) != _expected_schema(version):
         raise BackupError("Schema definitions differ from the attested migrations")

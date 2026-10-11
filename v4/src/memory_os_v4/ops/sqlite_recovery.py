@@ -167,7 +167,7 @@ def prepare_recovery(target_db, source_db, manifest, *, guard=lambda: None, faul
                 expected = sum(r['outcome'] == 'deleted' for r in replayed) if table == 'item_versions' else 1
                 if additions != expected:
                     raise BackupError('Unexpected recovery records')
-            elif table == 'schema_migrations' and snapshot['schema_version'] == 5:
+            elif table == 'schema_migrations' and snapshot['schema_version'] < store._connection.execute('PRAGMA user_version').fetchone()[0]:
                 if after[:len(before)] != before or [(r[0], r[1]) for r in after] != schema_checksums():
                     raise BackupError('Unattested copy schema upgrade')
             elif after != before:

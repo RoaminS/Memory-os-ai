@@ -17,7 +17,7 @@ from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
 APPLICATION_ID = 0x4D4F5334
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = (
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at REAL NOT NULL)",
@@ -85,7 +85,29 @@ SCHEMA_WORK = (
     "CREATE TRIGGER tasks_no_delete BEFORE DELETE ON task_versions BEGIN SELECT RAISE(ABORT,'immutable task'); END",
 )
 
-MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION, SCHEMA_LEGACY, SCHEMA_WORK)
+# Rebuildable current-task lookup; immutable task_versions remain the authority.
+TASK_LOOKUP_SELECT = """SELECT c.task_id,c.revision,v.project,
+    json_extract(v.record_json,'$.status'),
+    CAST(strftime('%s',substr(json_extract(v.record_json,'$.updated_at'),1,19)||'+00:00') AS REAL) +
+    CASE WHEN instr(json_extract(v.record_json,'$.updated_at'),'.')>0
+    THEN CAST('0.'||substr(json_extract(v.record_json,'$.updated_at'),21) AS REAL) ELSE 0 END,
+    json_extract(v.record_json,'$.owner.client_id')
+    FROM task_current c JOIN task_versions v ON v.task_id=c.task_id AND v.revision=c.revision"""
+SCHEMA_WORK_LOOKUP = (
+    "CREATE TABLE task_lookup(task_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,project TEXT NOT NULL,"
+    "status TEXT NOT NULL,updated_epoch REAL NOT NULL,owner_id TEXT,"
+    "FOREIGN KEY(task_id,revision) REFERENCES task_versions(task_id,revision))",
+    "INSERT INTO task_lookup " + TASK_LOOKUP_SELECT,
+    "CREATE INDEX task_lookup_page ON task_lookup(project,status,updated_epoch DESC,task_id)",
+    "CREATE INDEX task_lookup_owner_page ON task_lookup(project,status,owner_id,updated_epoch DESC,task_id)",
+    "CREATE INDEX task_versions_cut ON task_versions(project)",
+    *tuple("CREATE TRIGGER task_lookup_" + operation.lower() + " AFTER " + operation +
+           " ON task_current BEGIN INSERT INTO task_lookup " + TASK_LOOKUP_SELECT +
+           " WHERE c.task_id=NEW.task_id ON CONFLICT(task_id) DO UPDATE SET "
+           "revision=excluded.revision,project=excluded.project,status=excluded.status,"
+           "updated_epoch=excluded.updated_epoch,owner_id=excluded.owner_id; END" for operation in ("INSERT", "UPDATE")),
+)
+MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION, SCHEMA_LEGACY, SCHEMA_WORK, SCHEMA_WORK_LOOKUP)
 
 
 def schema_checksums():
