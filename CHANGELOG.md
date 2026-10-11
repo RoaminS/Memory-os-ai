@@ -1,6 +1,26 @@
 # Changelog
 
-## 4.0.4 — candidate ALPHA (2026-10-11), non publiée / non déployée
+## 4.0.5 — correctifs en préparation, non publiée / non déployée
+
+- Isolation commune des tests v3/v4 avant leur collecte : HOME/XDG/AppData
+  jetables, garde des écritures Python dans le HOME réel, échec même si l'erreur
+  est interceptée, protection des chemins via symlink et dir_fd.
+- Correction de `TestSetupMainCLI.test_main_all_target` : mock de `TARGETS`,
+  dont les callbacks originaux contournaient les anciens mocks de fonctions.
+- Isolation incluse dans la prochaine sdist et dans les empreintes de source ;
+  qualification dédiée avec comparaison SHA-256/mtime des configurations clients.
+  Aucun changement de serveur, profil d'encodage ou magasin de production.
+
+## 4.0.4 — ALPHA (2026-10-11), qualifiée / déployée localement
+
+- Incident de qualification : la suite v3 livrée dans cette sdist peut remplacer
+  la configuration Claude Desktop par le serveur v3 et écrire d'autres configs
+  locales. Ne pas exécuter les tests de la sdist 4.0.4 sur un profil utilisateur
+  réel ; utiliser un utilisateur/conteneur jetable. Correctif prévu en 4.0.5.
+  La configuration locale a été restaurée par Claude ; le service 4.0.4 n'est
+  pas la cause. Voir `v4/docs/INCIDENT_TEST_HOME_2026_10_11.md`.
+- Qualification complète et bascule locale réalisées par Claude avec le GO de
+  Romain ; publication PyPI autorisée à Romain, non attestée ici.
 
 - Verrou serveur de maintenance ; instructions clients alignées, opérations
   destructrices interdites sans activation explicite par l'opérateur.

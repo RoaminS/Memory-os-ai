@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-11",
+  "intended_release": "4.0.5",
+  "package_version_unchanged": "4.0.4",
+  "fix_commit": "71b6cc8bd290b73da4de29044ec948ecb6507df7",
+  "source_sha256": {
+    "conftest.py": "0db451ea1e552028cb86f6817d4b55f75636d8beaf03727d7b61151dd8eb793a",
+    "scripts/test_home_guard.py": "9746a8c377fdf7dd1aea2df28c46ac329aa851f2025565fded13b9f46a37c298",
+    "tests/conftest.py": "b6ad0401af455de50df095fa3f26706a5f056f8020ad6207a6beadb1758d2780",
+    "v4/tests/conftest.py": "d1eea7cc5f9c26c60e3b45f79f13b48fe1487cb6cfbd9d5b0e18d6ab20cde0a5",
+    "tests/test_home_isolation.py": "5228281f0eb2d81756177032e1e0f3c633c75741d9c29e89093f95829b8ba8e5",
+    "v4/tests/test_test_home_isolation.py": "de1dc5efe402583365717556bff3ce1d30a562dd3b779577cabe7981bef8e716",
+    "tests/test_zz_full_coverage.py": "86d3a0bb56bb7b709226e9b6d5fc0e20c1c71b64795c71afd2c4fcc2dcf4529c",
+    "scripts/qualify_405_test_isolation.py": "b4ed9161fa2d3ba7d9d441cb8953de3cf6fa6659a9c23874b4814999961ed07f",
+    "scripts/qualify_4_0_4_local.py": "bc662fed6340da8febedcad734f6cff5139651a5c561d7138839c2fec5440f56",
+    "MANIFEST.in": "6c002b0c97bd4153376e12401116d9c308e0ca34c8a2e8d7c5fb3e8237e038ca"
+  },
+  "qualification_report": ".local-qualification/405-test-isolation-codex-v4/report.json",
+  "qualification_report_sha256": "42be005b4209a34b2caafe18abc7099b79c9ee36c5f2702d7efcc10b41339dbc",
+  "results": {
+    "v3": {
+      "tests": 585,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "v4": {
+      "tests": 1492,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "tcp_cases": 0
+    }
+  },
+  "regressions": 15,
+  "lint": "project and v4 E9/F passed",
+  "client_configs_unchanged": true,
+  "tcp_qualified": false,
+  "neural_inference": false,
+  "swap_in_sandbox": "unavailable; full requires measurement",
+  "minimum_free_bytes": 5325385728,
+  "sdist_manifest_selection_verified": [
+    "conftest.py",
+    "scripts/test_home_guard.py",
+    "tests/test_home_isolation.py"
+  ],
+  "historical_403": {
+    "source_commit": "53030c2c99b09b5dc3f8467dda0a114e47477ee2",
+    "v3_cached": {
+      "passed": 566,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "test_executed": true,
+    "exposure_confirmed": true,
+    "historical_config_write_attested": false,
+    "evidence_sha256": {
+      "source-proof.json": "e56f23da425209f41389d0a7972581d8ac1309589838046a9e247b4b86ceab67",
+      "v3_cached.xml": "f4ecb767631dc299a23149198d5ad298b3bd1558f763e19b6213fd7a6a087756"
+    }
+  },
+  "immutable_404_artifacts_modified": false,
+  "production_change": false,
+  "publication": false
+}
