@@ -117,10 +117,16 @@ BEAM 500K was downloaded with approval but **refused before inference**: only 15
 fresh independent groups survived the audit (minimum 30). Its first annotation
 failure is a missing `source_chat_ids` field, not a demonstrated dangling ID.
 See [held-out alternatives and diagnosis](v4/docs/HELDOUT_OPTIONS_V2.md).
-Romain authorized **MemoryAgentBench-LRU download and audit only** (55 MB cap).
-The [bounded acquisition and zero-inference audit](v4/docs/MAB_LRU_ACQUISITION_AUDIT_v1.md)
-require attested original sources; a dataset-eligibility GO still requires a sealed
-campaign plan before any reader/judge call.
+The approved **MemoryAgentBench-LRU acquisition/audit completed with NO-GO**:
+110 contexts, 171 questions, 74 unique usable questions, zero fresh attested
+source groups (`infbench_sum`/`detective_qa` unresolved); zero inference.
+See [bounded acquisition/audit](v4/docs/MAB_LRU_ACQUISITION_AUDIT_v1.md).
+Romain instead authorized [LongMemEval-S answer accuracy via Codex](v4/docs/LME_S_ANSWER_LUNA_v1.md):
+all 500 questions including abstentions, C4 versus same-arm BM25, Luna low reader
+and Luna high judge with official question-type grading templates. The qualified
+4.0.3 engine is frozen separately from this harness. No API spend; results remain
+**descriptive**, since this corpus was already observed and the judge differs
+from the published GPT-4o snapshot. This campaign has not been run by Codex.
 See [copy qualification and later rollout](v4/docs/QUALIFY_4_0_3.md).
 
 
