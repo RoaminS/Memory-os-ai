@@ -209,13 +209,17 @@ def test_weekly_template_is_nice_and_does_not_activate_anything(tmp_path):
     assert not (tmp_path / 'drill.err').exists()
 
 
-@pytest.mark.parametrize('backend,commit', [('jsonl', 'a' * 40), ('sqlite_s1', 'invalid')])
-def test_s4_job_templates_refuse_unqualified_backend_build_before_token(case, monkeypatch, backend, commit):
+@pytest.mark.parametrize('backend,commit', [('jsonl', 'a' * 40), ('sqlite_s1', 'invalid'),
+                                           ('sqlite_s1', 'A' * 40), ('sqlite_s1', 'a' * 39)])
+def test_s4_job_templates_refuse_unqualified_backend_build_before_token(case, monkeypatch, capsys, backend, commit):
     settings, _ = case
     monkeypatch.setenv('MEMORY_V4_STORE_BACKEND', backend)
     monkeypatch.setenv('MEMORY_V4_BUILD_COMMIT', commit)
     assert cmd_setup(SimpleNamespace(sqlite_s4_jobs=True), settings) == 2
     assert not settings.token_file.exists()
+    result = json.loads(capsys.readouterr().out)
+    assert result['ok'] is False and result['code'] == 'sqlite_s4_not_configured'
+    assert commit not in json.dumps(result)
 
 
 def test_reconciled_drill_requires_authority_and_keeps_production_quarantined(case, budget, monkeypatch):

@@ -48,7 +48,7 @@ class Harness:
         temporary.chmod(0o600)
         temporary.replace(self.token)
 
-    def start(self, fault="none"):
+    def start(self, fault="none", *, warm=True):
         self.stop()
         # Only this isolated child is fault-injected. Never import/configure the live server.
         code = '''
@@ -93,16 +93,23 @@ elif fault == 'task-committed':
         if name=='memory_task_create' and args.get('request_id')=='cut': os._exit(79)
         return result
     server.dispatch=dispatch
-sys.argv = [sys.argv[0], "--transport", "http", "--port", sys.argv[2], "--warm"]
+warm = sys.argv[3] == "warm"
+sys.argv = [sys.argv[0], "--transport", "http", "--port", sys.argv[2]]
+if warm:
+    sys.argv.append("--warm")
 server.run()
 '''
         log = (self.root / "server.log").open("ab")
-        self.process = subprocess.Popen([sys.executable, "-c", code, fault, str(self.port)], env=self.env,
+        self.process = subprocess.Popen([sys.executable, "-c", code, fault, str(self.port), "warm" if warm else "cold"], env=self.env,
                                         stdout=log, stderr=log)
         log.close()
         deadline = time.monotonic() + 30
+        # Cold authority is opened by an authenticated tool, not a readiness GET.
+        endpoint = 'ready' if warm else 'health'
         while time.monotonic() < deadline:
-            request = urllib.request.Request(f"http://127.0.0.1:{self.port}/ready",
+            # A cold server is live before its work authority is opened by the
+            # first authenticated tool read; /ready alone must not initialize it.
+            request = urllib.request.Request(f"http://127.0.0.1:{self.port}/{endpoint}",
                                              headers={"Authorization": "Bearer " + read_token(self.token)})
             try:
                 with urllib.request.urlopen(request, timeout=1) as response:
@@ -113,7 +120,7 @@ server.run()
             if self.process.poll() is not None:
                 raise AssertionError((self.root / "server.log").read_text()[-2000:])
             time.sleep(.05)
-        raise AssertionError("Hash server not ready after 30 s")
+        raise AssertionError(f"Private server /{endpoint} not ready after 30 s")
 
     def params(self):
         return StdioServerParameters(command=sys.executable, args=["-m", "memory_os_v4.ops.relay"], env=self.env)
@@ -436,24 +443,45 @@ def test_L7b_cold_model_free_ready_write_mode_and_relay_owner(harness):
     h = harness
     h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1', MEMORY_V4_WORK_STATE='1',
                  MEMORY_V4_EMBED_MODEL='deliberately-unavailable-no-download')
-    h.start()
-    req = urllib.request.Request(f'http://127.0.0.1:{h.port}/ready',
-                                 headers={'Authorization': 'Bearer ' + read_token(h.token)})
-    with urllib.request.urlopen(req, timeout=5) as reply:
-        ready = json.load(reply)
-    assert ready['reason'] == 'ready_work_only'
-    assert ready['capabilities']['work_state'] and not ready['capabilities']['retrieval_ready']
-    assert not ready['capabilities']['encoding']['loaded']
-    assert ready['capabilities']['policies']['write_mode'] == 'read_write'
+    h.start(warm=False)
 
     async def run():
         async with stdio_client(h.params()) as (r, w), ClientSession(
                 r, w, client_info=Implementation(name='cold-codex', version='1')) as session:
             await session.initialize()
+            initial = payload(await session.call_tool('memory_task_list', {'project': 'p', 'limit': 8}))
+            assert initial['tasks'] == []  # authenticated read opens work authority only
+            req = urllib.request.Request(f'http://127.0.0.1:{h.port}/ready',
+                                         headers={'Authorization': 'Bearer ' + read_token(h.token)})
+            with urllib.request.urlopen(req, timeout=5) as reply:
+                ready = json.load(reply)
+            assert ready['reason'] == 'ready_work_only'
+            assert ready['capabilities']['work_state'] and not ready['capabilities']['retrieval_ready']
+            assert not ready['capabilities']['encoding']['loaded']
+            assert ready['capabilities']['policies']['write_mode'] == 'read_write'
             task = payload(await session.call_tool('memory_task_create', {
                 'project': 'p', 'title': 'Cold task', 'owner': {'client_id': 'spoofed'}, 'request_id': 'cold'}))
             assert task['owner']['client_id'] == 'cold-codex'
             assert not task['owner_authenticated']
             tasks = payload(await session.call_tool('memory_task_list', {'project': 'p', 'limit': 8}))
             assert tasks['tasks'][0]['task_id'] == task['task_id']
+    anyio.run(run)
+
+
+def test_L7b_warm_available_hash_ready_before_first_tool(harness):
+    h = harness
+    h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1', MEMORY_V4_WORK_STATE='1', MEMORY_V4_EMBED_MODEL='hash')
+    h.start(warm=True)
+    req = urllib.request.Request(f'http://127.0.0.1:{h.port}/ready',
+                                 headers={'Authorization': 'Bearer ' + read_token(h.token)})
+    with urllib.request.urlopen(req, timeout=5) as reply:
+        ready = json.load(reply)
+    assert ready['reason'] == 'ready'
+    caps = ready['capabilities']
+    assert caps['work_state'] and caps['retrieval_ready'] and caps['encoding']['loaded']
+    assert caps['encoding']['model'] == 'hash'
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            assert payload(await session.call_tool('memory_search', {'project': 'p', 'query': 'synthetic'}))['hits'] == []
     anyio.run(run)

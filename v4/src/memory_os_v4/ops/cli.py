@@ -211,8 +211,13 @@ def cmd_setup(args, s: OpsSettings) -> int:
         import re
         from ..config import Config
         from ..readiness import build_identity
-        cfg = Config.from_env()
-        declared = build_identity()
+        try:
+            cfg = Config.from_env()
+            declared = build_identity()
+        except ValueError:
+            _print_json({'ok': False, 'code': 'sqlite_s4_not_configured',
+                         'error': 'Invalid SQLite backend/build identity configuration; token unchanged'})
+            return 2
         commit = declared.get('commit') or ''
         if cfg.store_backend != 'sqlite_s1' or declared.get('source_dirty') or not re.fullmatch(r'[0-9a-f]{40}', commit):
             _print_json({'ok': False, 'code': 'sqlite_s4_not_configured',
