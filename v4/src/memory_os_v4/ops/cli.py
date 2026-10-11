@@ -52,6 +52,36 @@ def cmd_provision(args, s: OpsSettings) -> int:
         return 1
 
 
+def cmd_quickstart(args, s: OpsSettings) -> int:
+    from . import quickstart
+    from .provision import ProvisionError
+    try:
+        if args.undo:
+            result = quickstart.undo(args.undo, home=Path.home())
+            _print_json(result)
+            return 0 if all(r['undo'] in {'restored', 'nothing-to-undo'} for r in result['results']) else 1
+        chosen = tuple(args.clients.split(',')) if args.clients else quickstart.DEFAULT_CLIENTS
+        plan = quickstart.prepare(s, clients=chosen)
+        if args.apply:
+            result = quickstart.apply_install(plan, s, download_approved=args.download_approved, demo=args.demo)
+            if args.report:
+                result = {**quickstart.report(plan), 'ok': result['ok'], 'stage': result['stage'],
+                          'stamp': result['stamp'], 'elapsed_s': result['elapsed_s'],
+                          'configured': [r['client'] for r in result.get('clients', {}).get('records', [])
+                                         if r['status'] in {'applied', 'unchanged'}],
+                          'relay_connected': result.get('relay', {}).get('connected', False),
+                          'real_client_usage': 'unmeasured'}
+        else:
+            result = {**quickstart.report(plan), 'ok': plan['ok'], 'stage': 'preview',
+                      'writes': 'none', 'blockers': plan['blockers']} if args.report else plan
+        _print_json(result)
+        return 0 if result['ok'] else 1
+    except (OSError, ValueError, RuntimeError, ProvisionError) as exc:
+        _print_json({'ok': False, 'code': 'quickstart_refused',
+                     'error': str(exc) if isinstance(exc, (quickstart.QuickstartError, ProvisionError)) else type(exc).__name__})
+        return 1
+
+
 def cmd_health(args, s: OpsSettings) -> int:
     from .health import notify, render, report
 
@@ -357,6 +387,14 @@ def main(argv: list[str] | None = None) -> int:
         prog="memory-os-admin", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+    qs = sub.add_parser('quickstart', help='macOS onboarding: preview by default; explicit apply/download/demo')
+    qs.add_argument('--clients', help='comma-separated chosen clients (default: claude-code,codex)')
+    mode = qs.add_mutually_exclusive_group()
+    mode.add_argument('--apply', action='store_true')
+    mode.add_argument('--undo', metavar='STAMP')
+    qs.add_argument('--download-approved', action='store_true')
+    qs.add_argument('--demo', action='store_true', help='opt-in save/search through relay in a unique demo project')
+    qs.add_argument('--report', action='store_true', help='anonymized diagnostic summary')
     pv = sub.add_parser("provision", help="preview pinned resources; no download without two explicit flags")
     pv.add_argument("--resources", default="granite,cl100k")
     pv.add_argument("--cache-dir", type=Path)
@@ -389,9 +427,12 @@ def main(argv: list[str] | None = None) -> int:
     st.add_argument("--write-launchd", metavar="DIR")
     st.add_argument("--sqlite-s4-jobs", action="store_true", help="Generate inactive SQLite backup + weekly file-drill templates")
     args = p.parse_args(argv)
+    if args.cmd == 'quickstart' and (args.download_approved or args.demo) and not args.apply:
+        p.error('--download-approved/--demo require --apply')
     s = OpsSettings.from_env()
     handler = {
         "provision": cmd_provision,
+        "quickstart": cmd_quickstart,
         "token": cmd_token,
         "health": cmd_health,
         "backup": cmd_backup,

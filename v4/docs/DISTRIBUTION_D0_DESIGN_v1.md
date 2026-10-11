@@ -16,7 +16,7 @@ Proposition D1a, à figer après revue d’imports :
 | `documents` | pymupdf pour l’ingestion PDF v4 | Déjà import optionnel dans `_h_ingest` ; erreur explicite sans extra |
 | `v3` | dépendances nécessaires au moteur document historique : pymupdf, pytesseract, python-pptx, python-docx, Pillow, requests, plus core partagé | Auditer imports directs/dynamiques et imports transitifs ; ne pas rendre import/CLI v3 silencieusement cassés |
 | `audio`, `doc-legacy`, `cloud-*` | extras historiques, aliases préservés si besoin | Déclarer leur dépendance au groupe v3 quand nécessaire ; vérifier chaque commande documentée |
-| `dev` | tests/build/lint ; fixture v3 nécessite `[v3,dev]` | La CI ne doit pas cacher un défaut de core derrière un environnement full |
+| `dev` | tests/build/lint ; fixture v3 nécessite `[legacy-v3,dev]` | La CI ne doit pas cacher un défaut de core derrière un environnement full |
 
 Ne pas mélanger ce premier découpage avec un nouveau backend vectoriel, modèle plus petit, ONNX ou core entièrement sans ML. Un futur mode work-only allégé nécessiterait sa propre interface explicite et qualification ; aucun fallback hash pour simuler une installation neuronale réussie.
 

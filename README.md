@@ -42,8 +42,12 @@ size/time still needs a clean-machine measurement.
 
 **4.0.6 candidate only, not available in PyPI 4.0.5:** document libraries move to `[documents]` and `[legacy-v3]`;
 a verified embedded identity removes the manual commit declaration; `memory-os-admin provision` previews
-pinned resources and needs `--apply --download-approved` for missing files. `quickstart` is planned and not
-implemented yet. The complete onboarding instructions will be qualified before release.
+pinned resources and needs `--apply --download-approved` for missing files. The candidate implements
+`memory-os-admin quickstart --clients claude-code,codex` as a zero-write preview; explicit `--apply`
+configures a new macOS installation, with separate download and demo consent. Existing different services,
+non-empty stores and unsafe configs are refused. Client configuration undo is semantic and preserves the
+store/service/token/resources. These features and the complete onboarding still require installed-artifact
+and new-user qualification before release; they are absent from published 4.0.5.
 
 ## Supported assistants
 

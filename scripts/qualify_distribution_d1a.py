@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-UNITS = ["v4/tests/test_distribution_d1a.py", "v4/tests/test_readiness.py",
+UNITS = ["v4/tests/test_distribution_d1a.py", "v4/tests/test_quickstart.py", "v4/tests/test_readiness.py",
          "v4/tests/test_ops.py", "v4/tests/test_ops_doctor.py", "v4/tests/test_server_handlers.py"]
 
 
@@ -167,6 +167,27 @@ print(json.dumps(info,sort_keys=True))
                 report["steps"][f"smoke-{index}"] = command([str(python), "-B", "-c", smoke], output, isolated, output / f"smoke-{index}.log")
                 report["steps"][f"provision-preview-{index}"] = command([str(private / "bin/memory-os-admin"), "provision"],
                     output, isolated, output / f"provision-preview-{index}.log")
+                # Installed quickstart preview: isolated HOME/port/label, absent resources,
+                # no service/config/token/cache write. No real assistant is invoked.
+                preview_smoke = '''import json, os, pathlib, socket, subprocess, sys, uuid
+home = pathlib.Path(os.environ['HOME'])
+def snapshot():
+ return {str(p.relative_to(home)): (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else b'') for p in home.rglob('*')}
+with socket.socket() as sock:
+ sock.bind(('127.0.0.1',0)); port = sock.getsockname()[1]
+env = {**os.environ, 'MEMORY_V4_URL': f'http://127.0.0.1:{port}/mcp/',
+       'MEMORY_V4_SERVICE_LABEL': 'local.memory-os-preview-' + uuid.uuid4().hex}
+before = snapshot()
+run = subprocess.run([str(pathlib.Path(sys.executable).parent/'memory-os-admin'), 'quickstart',
+ '--clients', 'cursor', '--report'], env=env, capture_output=True, text=True, timeout=30)
+assert snapshot() == before, 'Installed preview wrote to HOME'
+assert run.returncode == 0, run.stdout + run.stderr
+info = json.loads(run.stdout)
+assert info['writes'] == 'none' and info['stage'] == 'preview' and info['ok']
+print(json.dumps(info, sort_keys=True))
+'''
+                report["steps"][f"quickstart-preview-{index}"] = command([str(python), "-B", "-c", preview_smoke],
+                    output, isolated, output / f"quickstart-preview-{index}.log", guard)
             if descriptors[0] != descriptors[1]:
                 raise RuntimeError("Wheel/sdist descriptor mismatch")
             report["identity"] = descriptors[0]

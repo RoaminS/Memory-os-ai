@@ -1,6 +1,7 @@
 # Connecting your assistants to Memory OS AI
 
-Current version **4.0.5**; 4.0.6 candidate: automatic configuration via `quickstart` is planned, not implemented or published.
+Current published version **4.0.5**; the 4.0.6 candidate implements `quickstart`,
+with synthetic tests. It is not yet qualified on a new user installation or published.
 Claude draft integrated after Codex review, 2026-10-11.
 
 ## Principle
