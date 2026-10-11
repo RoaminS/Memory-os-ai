@@ -331,3 +331,11 @@ def test_C02_completed_before_stdio_delivery_remains_discoverable(settings):
         assert session.effects == 1
     finally:
         next_relay.close()
+
+
+def test_every_server_mutation_has_durable_relay_policy():
+    from memory_os_v4 import models, server
+    from memory_os_v4.ops.durable_relay import MUTATIONS, READS
+    mutations = {name for name, cls in server.TOOL_MODELS.items() if issubclass(cls, models.MutationIn)}
+    assert mutations == MUTATIONS
+    assert set(server.TOOL_MODELS) - mutations == READS

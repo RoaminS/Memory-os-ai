@@ -100,7 +100,7 @@ class DurableRelay:
             raise ValueError("Invalid logical request_id; nothing sent")
         args["request_id"] = request_id
         raw = raw_args_sha256(args)
-        captured = {}
+        captured = {"code": "preflight_unavailable"}
 
         async def send(session):
             # Server resolves defaults/scope. This is READ ONLY and is never the mutation itself.
@@ -115,6 +115,7 @@ class DurableRelay:
                         checked_data = None
                 if isinstance(checked_data, dict) and checked_data.get("code") == "maintenance_denied":
                     return checked
+            captured["code"] = "legacy_unattested"
             preflight = body(checked)
             if (preflight.get("contract") != "l3-v2" or not preflight.get("store_instance_id")
                     or preflight.get("raw_args_sha256") != raw or not preflight.get("scope")
@@ -122,6 +123,7 @@ class DurableRelay:
                 raise RuntimeError("legacy_unattested: mutation not sent; upgrade the server contract")
             identity = preflight["store_instance_id"]
             if self.identity is not None and identity != self.identity:
+                captured["code"] = "identity_changed"
                 raise RuntimeError("identity_changed: restart client after operator review; mutation not sent")
             self.identity = identity
             row = {k: preflight[k] for k in ("scope", "operation", "raw_args_sha256", "store_instance_id")}
@@ -130,6 +132,7 @@ class DurableRelay:
             from .request_journal import scan
             report = scan(journal.path.parent, exclude=journal.path)
             if report["errors"] or journal.poisoned:
+                captured["code"] = "journal_integrity_uncertain"
                 raise RuntimeError("Journal integrity uncertain: mutation not sent")
             records = report["entries"] + list(journal.records.values())
             prior = [r for r in records if r["endpoint_sha256"] == journal.endpoint
@@ -137,13 +140,17 @@ class DurableRelay:
             if prior:
                 if any(r["raw_args_sha256"] != raw or r["store_instance_id"] != identity
                        or r["operation"] != row["operation"] for r in prior):
+                    captured["code"] = "request_conflict"
                     raise RuntimeError("Logical request identity conflict; mutation not sent")
                 status = await self._status(session, row)
                 if status["status"] == "completed":
                     return response(status["result"])
+                captured["code"] = "unresolved_request"
                 raise RuntimeError("Unresolved logical request; mutation not sent, no replay")
+            captured["code"] = "journal_not_durable"
             journal.append(row, "prepared")
             journal.append(row, "sending")  # fsync must succeed BEFORE entering call_tool.
+            captured["code"] = "outcome_uncertain"
             result = await session.call_tool(name, args)
             # Tool errors may follow partial writes: only a durable receipt can resolve them.
             try:
@@ -151,6 +158,7 @@ class DurableRelay:
             except (ValueError, RuntimeError):
                 journal.append(row, "blocked")
                 return result
+            captured["code"] = "completion_not_durable"
             journal.append({**row, "result_sha256": hashlib.sha256(_json(data).encode()).hexdigest()}, "completed")
             return result
 
@@ -160,5 +168,5 @@ class DurableRelay:
             # Cancellation keeps the last durable sending record. Never swallow cancellation.
             if not isinstance(exc, Exception):
                 raise
-            raise RuntimeError(f"memory-os: request_id={request_id}; outcome uncertain or refused. "
+            raise RuntimeError(f"memory-os: request_id={request_id}; code={captured['code']}; outcome uncertain or refused. "
                                "Use memory_request_status; do not repeat the mutation.") from exc
