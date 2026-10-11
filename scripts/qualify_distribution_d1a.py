@@ -84,6 +84,8 @@ def main():
     env = {key: value for key, value in os.environ.items() if not key.startswith("MEMORY_V4_")}
     env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONOPTIMIZE="0", PYTHONPATH="src:v4/src:v4",
                HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", MEMORY_TEST_HASH_V3="1")
+    if args.build_python:
+        env["MEMORY_TEST_BUILD_PYTHON"] = str(args.build_python.resolve())
     try:
         xml = output / "unit.xml"
         report["steps"]["unit"] = command([sys.executable, "-B", "-m", "pytest", "-c", "pyproject.toml", *UNITS,

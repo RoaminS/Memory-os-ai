@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -144,6 +145,73 @@ include = ["memory_os_ai*", "memory_os_v4*"]
     with zipfile.ZipFile(next((source / "dist").glob("*.whl"))) as archive:
         rebuilt = json.loads(archive.read("memory_os_v4/" + NAME))
     assert rebuilt == direct
+
+
+def test_pep517_clean_export_and_git_free_sdist_rebuild(sealed, tmp_path):
+    # Use the actual PEP 517 frontend, not setup.py (which adds its own root).
+    # Tiny synthetic packages only; existing build tools, no dependency download.
+    python = os.environ.get("MEMORY_TEST_BUILD_PYTHON", sys.executable)
+    if "MEMORY_TEST_BUILD_PYTHON" not in os.environ:
+        equipped = subprocess.run([python, "-B", "-c", "import build, wheel"],
+                                  capture_output=True, timeout=10)
+        if equipped.returncode and Path("/opt/homebrew/bin/python3.11").is_file():
+            python = "/opt/homebrew/bin/python3.11"
+    for name in ("setup.py", "memory_os_build.py"):
+        shutil.copyfile(ROOT / name, sealed / name)
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())["build-system"]
+    (sealed / "pyproject.toml").write_text(f'''[build-system]
+requires = {json.dumps(metadata["requires"])}
+build-backend = {json.dumps(metadata["build-backend"])}
+[project]
+name = "memory-os-ai"
+version = "{VERSION}"
+[tool.setuptools.packages.find]
+where = ["src", "v4/src"]
+include = ["memory_os_ai*", "memory_os_v4*"]
+''')
+    (sealed / "MANIFEST.in").write_text("include setup.py memory_os_build.py LICENSE LICENSE.GPL-3.0\n")
+    git = ["git", "-C", str(sealed)]
+    subprocess.run([*git, "add", "."], check=True, capture_output=True)
+    subprocess.run([*git, "-c", "user.name=Synthetic", "-c", "user.email=test@invalid",
+                    "commit", "-qm", "PEP 517 fixture"], check=True, capture_output=True)
+    commit = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+    exported = tmp_path / "clean-export"
+    exported.mkdir()
+    archived = subprocess.check_output([*git, "archive", commit])
+    with tarfile.open(fileobj=io.BytesIO(archived)) as archive:
+        archive.extractall(exported, filter="data")
+    assert not (exported / ".git").exists()
+    safe_env = {k: v for k, v in os.environ.items()
+                if k in ("PATH", "HOME", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "LANG", "LC_ALL")}
+    env = {**safe_env, "PYTHONPATH": "", "PYTHONDONTWRITEBYTECODE": "1",
+           "MEMORY_OS_BUILD_GIT_DIR": str(sealed / ".git"),
+           "MEMORY_OS_BUILD_SOURCE_COMMIT": commit}
+    command = [python, "-m", "build", "--no-isolation"]
+
+    def build(source, kind, output, environment):
+        result = subprocess.run([*command, kind, "--outdir", str(output)], cwd=source,
+                                env=environment, capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    direct_dist, sdist_dist = tmp_path / "direct", tmp_path / "sdist-dist"
+    build(exported, "--wheel", direct_dist, env)
+    build(exported, "--sdist", sdist_dist, env)
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    with tarfile.open(next(sdist_dist.glob("*.tar.gz"))) as archive:
+        archive.extractall(extracted, filter="data")
+    source = next(extracted.iterdir())
+    assert (source / "memory_os_build.py").read_bytes() == (ROOT / "memory_os_build.py").read_bytes()
+    assert (source / builder.SEED).is_file() and not (source / ".git").exists()
+    git_free_env = {k: v for k, v in env.items() if not k.startswith("MEMORY_OS_BUILD_")}
+    rebuilt_dist = tmp_path / "rebuilt"
+    build(source, "--wheel", rebuilt_dist, git_free_env)
+    descriptors = []
+    for folder in (direct_dist, rebuilt_dist):
+        with zipfile.ZipFile(next(folder.glob("*.whl"))) as archive:
+            descriptors.append(json.loads(archive.read("memory_os_v4/" + NAME)))
+    assert descriptors[0] == descriptors[1]
+    assert descriptors[0]["source_commit"] == commit
 
 
 def test_identity_installed_env_consistency_and_no_git(sealed, tmp_path, monkeypatch):

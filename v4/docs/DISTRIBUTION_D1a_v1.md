@@ -77,9 +77,40 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:v4/src:v4 \
   .local-qualification/brief-test-runtime-claude-3c-v1/bin/python -B \
   scripts/qualify_distribution_d1a.py --build --source-commit SOURCE_D1A_COMPLET \
   --build-python /opt/homebrew/bin/python3.11 \
-  --output .local-qualification/distribution-d1a-artifacts-claude-v1
+  --output .local-qualification/distribution-d1a-artifacts-claude-v2
 ```
 
 Le script ne télécharge aucune dépendance. Il vérifie wheel direct, wheel issu de sdist, SHA-256/descripteurs identiques, installations hors dépôt, cinq entrypoints et preview installé sans modèle. Ces smokes réutilisent les dépendances existantes : **ne pas annoncer une installation core propre ni un gain disque mesuré**. Le runtime brief local n’a pas `wheel`, mais `/opt/homebrew/bin/python3.11` a déjà setuptools 80.9.0, wheel 0.45.1, build 1.4.0 : `--build-python` sépare cet interpréteur des tests/venvs privés. Aucun téléchargement de dépendance implicite ; swap/disk contrôlés avant et pendant les subprocess de build/install.
 
 Restent avant release : installs propres core / ops+brief / v3+ops+brief, `pip check`, volumes reçus/venv/cache/pic/température/durée ; vérification upstream et acquisition sur cache neuf avec GO, puis semantic/copy/relay/TCP/full v3/v4/T05 après quickstart. Aucune mesure lourde avec le disque actuel. Fixtures téléchargées uniquement sur dossier privé neuf ; aucune manipulation de cache/service de production. Ressources présentes : preview hors réseau puis contrôle SHA local suffit ; absent : consentement requis, pas de téléchargement demandé par ce livrable.
+
+## 5. Correctif PEP 517 (2026-10-11)
+
+La qualification réelle D1a v1 a refusé le build direct : `setuptools.build_meta`
+exécute `setup.py` sans ajouter son dossier aux imports. Le mini-test précédent
+appelait `python setup.py …` : cette invocation ajoutait le dossier implicitement,
+donc ne couvrait pas le défaut. Le refus et les preuves v1 restent conservés.
+
+`setup.py` ajoute maintenant son propre dossier absolu avant l'import du hook,
+sans dépendre du cwd ou du `PYTHONPATH` de l'opérateur. L'attestation reste stricte.
+`MANIFEST.in` incluait déjà explicitement `memory_os_build.py`.
+
+Nouvelle régression : export synthétique propre par `git archive`, sans `.git`,
+`PYTHONPATH` vide, mêmes paramètres `[build-system]` que le projet ; invocation
+exacte `python -m build --no-isolation --wheel` avec preuve Git externe scellée,
+puis `--sdist` et reconstruction du wheel depuis le sdist sans Git ni variables
+de build. Elle vérifie la présence et les octets du helper dans le sdist, ainsi
+que les descripteurs identiques et le commit attendu. Avant correctif : échec
+reproduit `ModuleNotFoundError` ; après : succès. Qualification locale légère v3 :
+229 tests réussis, zéro échec/skip ; lint des fichiers modifiés et règles fatales
+runtime/scripts verts. Preuves : `.local-qualification/distribution-d1a-light-v3/`
+et `.local-qualification/distribution-d1a-pep517-fix-v1/`. Aucun installateur de dépendance,
+modèle, téléchargement ou appel d'inférence. `--build-python` sert aussi à ce test ;
+hors qualification, `MEMORY_TEST_BUILD_PYTHON` permet de choisir un interpréteur
+déjà équipé. Le test refuse si cet interpréteur manque des outils requis.
+
+Relancer la commande `--build` ci-dessus dans le dossier **v2 neuf**, avec le SHA
+complet du bundle correctif à la place de `SOURCE_D1A_COMPLET`. Ce succès miniature
+ne qualifie pas les artefacts complets : la garde disque/swap et les preuves
+wheel/sdist/installations de Claude restent nécessaires. Ne pas réutiliser le
+dossier refusé `distribution-d1a-artifacts-claude-v1`.
