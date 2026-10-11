@@ -1,8 +1,8 @@
 # L2 — politique de maintenance, incrément candidat 4.0.4
 
 `MEMORY_V4_MAINTENANCE_MODE` est un réglage **opérateur**, lu avant ouverture du
-magasin et figé pour la durée de vie du moteur. Valeur invalide : refus de
-démarrage, sans magasin créé. Modifier une mémoire, un bloc, un argument MCP ou
+magasin et figé pour la durée de vie du moteur. Valeur invalide : refus avant
+ouverture du moteur, sans magasin créé. Modifier une mémoire, un bloc, un argument MCP ou
 l'environnement d'un moteur déjà ouvert n'accorde aucune permission.
 
 | Mode | `dry_run=true` (défaut) | `dry_run=false` |

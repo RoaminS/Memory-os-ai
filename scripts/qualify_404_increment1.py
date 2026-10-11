@@ -17,6 +17,23 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_counts(xml_path: Path, suite: str) -> dict:
+    tree = ET.parse(xml_path).getroot()
+    nodes = [tree] if tree.tag == "testsuite" else list(tree.iter("testsuite"))
+    counts = {key: sum(int(node.attrib.get(key, 0)) for node in nodes)
+              for key in ("tests", "failures", "errors", "skipped")}
+    cases = list(tree.iter("testcase"))
+    counts["tcp_cases"] = sum(
+        case.attrib.get("classname", "").split(".")[-1] in {"test_server_http_e2e", "test_ops_e2e"}
+        for case in cases)
+    minimum = {"unit": 1188, "tcp": 12, "full": 1200}[suite]
+    if (counts["tests"] < minimum or counts["tests"] != len(cases)
+            or any(counts[k] for k in ("failures", "errors", "skipped"))
+            or (suite != "unit" and counts["tcp_cases"] < 12)):
+        raise RuntimeError("Required tests failed, skipped or incomplete; qualification refused")
+    return counts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -31,6 +48,8 @@ def main() -> int:
               "tcp_qualified": False, "release_qualified": False,
               "l3_l4_runtime_implemented": False}
     env = dict(os.environ)
+    # A host's selection override must not silently turn a full qualification into one test.
+    env.pop("PYTEST_ADDOPTS", None)
     env.update(PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
                OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", VECLIB_MAXIMUM_THREADS="1",
                PYTHONPATH=str(ROOT / "v4/src") + os.pathsep + str(ROOT / "v4"),
@@ -61,13 +80,8 @@ def main() -> int:
                                        "seconds": time.monotonic() - started})
             if completed.returncode:
                 raise RuntimeError(f"{label} failed; evidence preserved")
-        suites = ET.parse(output / "pytest.xml").getroot()
-        nodes = [suites] if suites.tag == "testsuite" else list(suites.iter("testsuite"))
-        counts = {key: sum(int(node.attrib.get(key, 0)) for node in nodes)
-                  for key in ("tests", "failures", "errors", "skipped")}
+        counts = test_counts(output / "pytest.xml", args.suite)
         report["pytest"] = counts
-        if counts["skipped"] or not counts["tests"]:
-            raise RuntimeError("Required tests skipped or absent; qualification refused")
         # Snapshot deterministic/hash-only output sizes and dispatch timing, not neural performance.
         if args.suite != "tcp":
             measure = [sys.executable, str(ROOT / "scripts/qualification_baseline_404.py"),
