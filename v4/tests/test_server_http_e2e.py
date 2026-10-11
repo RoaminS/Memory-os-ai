@@ -29,7 +29,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def http_server(tmp_path):
+def http_server(tmp_path, request):
     src_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
     env = dict(os.environ)
     token_file = tmp_path / "http-token"
@@ -37,7 +37,9 @@ def http_server(tmp_path):
     token_file.chmod(0o600)
     env.update(PYTHONPATH=src_dir, MEMORY_V4_DIR=str(tmp_path), MEMORY_V4_EMBED_MODEL="hash",
                HF_HUB_OFFLINE="1", MEMORY_V4_PROJECT="e2e", MEMORY_V4_TOKEN_FILE=str(token_file),
-               MEMORY_V4_BUILD_COMMIT="a" * 40)
+               MEMORY_V4_BUILD_COMMIT="a" * 40,
+               MEMORY_V4_MAINTENANCE_MODE=getattr(request, "param", "disabled"),
+               MEMORY_V4_QUALIFICATION_METRICS="1")
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "memory_os_v4.server", "--transport", "http", "--port", str(port), "--warm"],
@@ -71,6 +73,29 @@ async def _call(url, name, args):
                 await s.initialize()
                 res = await s.call_tool(name, args)
                 return json.loads(res.content[0].text)
+
+
+async def test_http_maintenance_denied_before_receipt_with_metrics(http_server):
+    url, data_dir = http_server
+    before = {p.name: p.read_bytes() for p in data_dir.iterdir() if p.is_file()}
+    for name in ("memory_consolidate", "memory_compact"):
+        result = await _call(url, name, {"request_id": "tcp-denied", "dry_run": False})
+        assert result["code"] == "maintenance_denied" and result["outcome"] == "not_started"
+    assert {p.name: p.read_bytes() for p in data_dir.iterdir() if p.is_file()} == before
+    status = await _call(url, "memory_status", {})
+    assert status["maintenance"]["mode"] == "disabled"
+    for name in ("memory_consolidate", "memory_compact"):
+        assert status["qualification"]["tools"][name]["maintenance_denied"] == 1
+
+
+@pytest.mark.parametrize("http_server", ["preview"], indirect=True)
+async def test_http_maintenance_preview_is_read_only_and_apply_denied(http_server):
+    url, data_dir = http_server
+    before = {p.name: p.read_bytes() for p in data_dir.iterdir() if p.is_file()}
+    assert "decayed" in await _call(url, "memory_compact", {"request_id": "tcp-preview"})
+    result = await _call(url, "memory_consolidate", {"dry_run": False, "request_id": "tcp-apply"})
+    assert result["code"] == "maintenance_denied"
+    assert {p.name: p.read_bytes() for p in data_dir.iterdir() if p.is_file()} == before
 
 
 async def test_two_clients_share_one_engine(http_server):

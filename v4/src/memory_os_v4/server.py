@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+from time import perf_counter
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -33,6 +34,7 @@ from .config import Config
 from .instructions import build_instructions
 from .memory import MemoryV4
 from .maintenance import MaintenanceDenied, MaintenancePolicy
+from .qualification import QualificationMetrics, enabled_from_env, result_text
 from .migrate import resolve_under_home as _resolve_under_home
 from .store import MemoryItem
 from .text import tokenize
@@ -172,6 +174,8 @@ def _hit_dict(hit) -> dict:
 def _h_status(engine: MemoryV4, args: models.StatusIn) -> dict:
     s = dict(engine.status(project=_project_of(args.project)))
     s["maintenance"] = engine.maintenance_status()
+    if _qualification.enabled:
+        s["qualification"] = _qualification.snapshot()
     s["last_consolidated"] = _iso(s.get("last_consolidated"))
     return _round_floats(s)
 
@@ -548,7 +552,23 @@ def _request_scope(name: str, payload: dict) -> str:
     return scope
 
 
+_qualification = QualificationMetrics(TOOL_HANDLERS, enabled=enabled_from_env())
+
+
 def dispatch(name: str, arguments: dict | None) -> dict:
+    if not _qualification.enabled:
+        return _dispatch(name, arguments)
+    started = perf_counter()
+    result = _dispatch(name, arguments)
+    elapsed_ms = (perf_counter() - started) * 1000
+    try:
+        _qualification.record(name, arguments, result, elapsed_ms)
+    except Exception:  # Observation must never change an acknowledged mutation's result.
+        _qualification.failed_observation()
+    return result
+
+
+def _dispatch(name: str, arguments: dict | None) -> dict:
     """Validate ``arguments`` against ``name``'s model, call its handler, and
     normalize any exception into ``{"ok": False, "error": ...}``."""
     arguments = arguments or {}
@@ -609,7 +629,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     # so one slow call does not stall the other clients of a shared HTTP
     # server. The engine itself is thread-safe (single RLock).
     result = await anyio.to_thread.run_sync(dispatch, name, arguments)
-    return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+    return [TextContent(type="text", text=result_text(result))]
 
 
 async def _run_stdio() -> None:
