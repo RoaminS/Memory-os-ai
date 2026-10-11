@@ -1,0 +1,103 @@
+{
+  "version": "4.0.5",
+  "local_qualified": true,
+  "release_qualified": false,
+  "release_ready": false,
+  "source_commit": "0becca215d038314c2d08c009c456c0f7b8e21a8",
+  "manifest_initial_sha256": "c87a652480b6615e366914b01a06e8bec8cba92e0704dffb729355a1f0b58cc8",
+  "artifacts": [
+    {
+      "name": "memory_os_ai-4.0.5-py3-none-any.whl",
+      "bytes": 647639,
+      "sha256": "b71c8c12a22c8d3bb04fef175fd9ef4be41ff0966ef1a3de84fd987e59056889"
+    },
+    {
+      "name": "memory_os_ai-4.0.5.tar.gz",
+      "bytes": 1149802,
+      "sha256": "5aad8f95b30094901121ca9dcc7b820a75b2fdb7925cef3e9ee84d1157498ef6"
+    }
+  ],
+  "checks": {
+    "adversarial_probe": "passed",
+    "a6_review": "passed",
+    "v3": "passed",
+    "v4": "passed",
+    "lint": "passed",
+    "lint_correctness": "passed",
+    "build": "passed",
+    "twine_strict": "passed",
+    "wheel_install": "passed",
+    "wheel_pip_check": "passed",
+    "wheel_smoke": "passed",
+    "sdist_install": "passed",
+    "sdist_pip_check": "passed",
+    "sdist_smoke": "passed",
+    "sdist_source_v3": "passed",
+    "sdist_source_v4": "passed",
+    "source_tcp": "pending",
+    "cached_semantic": "pending",
+    "v3_cached": "pending",
+    "production_copy": "pending",
+    "brief_exact": "pending"
+  },
+  "logs_sha256": {
+    "adversarial_probe.log": "ab47d3014a436baba8cbe59212d00cd742f80c369f7b71a7f0d7177391bf14f2",
+    "build.log": "26d2a2e339b0486b997b2dc3155e3b120676b13d2c11a3ed8bf4d1354b4d16ca",
+    "lint.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "lint_correctness.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "sdist_install.log": "8cf1c067405050ee838febb88df475dfc546dd30bca8088b56673ceb964b779a",
+    "sdist_pip_check.log": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
+    "sdist_smoke.log": "80ec773477353b3eb1008818396fdb086da8893cb2ead839ea6d09d44243dd2a",
+    "sdist_source_v3.log": "2cf6b42b2bfa8b7ab76e5380d54ed96fcb43ba727b68b503f459efb675fabb39",
+    "sdist_source_v4.log": "231462689427b44680a93fee45c868fbc958424a148bfce6a13b38c9cca438a3",
+    "twine_strict.log": "8569ed7a4611437e03c6e556190bd1a483e0082d59d0dbfd92488e03e927f26f",
+    "v3.log": "4c6de02ca2b619bd809e49d2969e09093490d06ef1c6cb596214a1826ca268bd",
+    "v4.log": "d16161e28c490340509aa9790bd8c886a2da21ee56469db595a9455de0b734ff",
+    "wheel_install.log": "20646a4bbd08be7904d4406034933edcb68f87349c792c7d9b0470bb09524d12",
+    "wheel_pip_check.log": "702e24fe4b7fe049cefef2c8907bf8eab41800c4b84db35697af6c0fbabc0d27",
+    "wheel_smoke.log": "baa69bba44db8ae559441279b08a18bd84d691ba6194c19ad5f0b43001e3dc42"
+  },
+  "counts": {
+    "source_v3": 588,
+    "source_v4": 1631,
+    "sdist_v3": 588,
+    "sdist_v4": 1627
+  },
+  "coverage_percent": {
+    "v3": 81.46422628951747,
+    "v4": 86.01198461676057
+  },
+  "local_configs_unchanged": true,
+  "local_config_proof_sha256": "20fde778c48a7c3117b8cf7a29385d12c8a12fc046316d662db0c2c541723c06",
+  "api_calls": 0,
+  "neural_inference": false,
+  "production_change": false,
+  "pending": [
+    "27 source TCP tests",
+    "L1a exact offline 400 measurements + TCP envelope",
+    "1 cached MiniLM test",
+    "full v3 cached actual encoder suite",
+    "copy/native-profile/cache/timing/search/doctor",
+    "installed wheel relay TCP",
+    "installed sdist relay TCP",
+    "schema7 S4/L7b 10k"
+  ],
+  "sdist_exclusions": [
+    "1 neural slow test",
+    "4 archive/Git tests named in local runner"
+  ],
+  "candidate_defaults": {
+    "store": "jsonl",
+    "work_state": false,
+    "registry": false,
+    "encoding": [
+      "auto",
+      "native",
+      32
+    ],
+    "c4": [
+      "scoped_literal",
+      3
+    ]
+  }
+}
