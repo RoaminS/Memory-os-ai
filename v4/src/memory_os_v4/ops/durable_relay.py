@@ -172,6 +172,9 @@ class DurableRelay:
                     return checked
             # A timeout, error result or malformed body does not attest an old
             # contract. Only a successful control response can prove its absence.
+            if isinstance(checked_data, dict) and checked_data.get("code") == "maintenance_window":
+                captured["code"] = "maintenance_window"
+                raise RuntimeError("Operator write window; mutation not started")
             if isinstance(checked_data, dict) and checked_data.get("code") == "invalid_arguments":
                 captured["code"] = "invalid_arguments"
                 raise RuntimeError("Mutation arguments invalid; nothing sent")
@@ -244,7 +247,7 @@ class DurableRelay:
                 if transport_code in {"authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
                     captured["code"] = transport_code
             if captured["code"] in {"preflight_unavailable", "upstream_not_ready", "legacy_unattested", "preflight_invalid",
-                                    "invalid_arguments", "authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
+                                    "maintenance_window", "invalid_arguments", "authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
                 from .request_journal import scan
                 report = scan(journal.path.parent, exclude=journal.path)
                 prior = report["entries"] + list(journal.records.values())
@@ -252,7 +255,8 @@ class DurableRelay:
                     r["request_id"] == request_id and r["endpoint_sha256"] == journal.endpoint for r in prior))
                 details = {"ok": False, "request_id": request_id, "code": captured["code"],
                            "attempt_outcome": "not_sent", "mutation_sent": False,
-                           "retryable": captured["code"] in {"preflight_unavailable", "upstream_not_ready"} and not status_required,
+                           "outcome": "not_started",
+                           "retryable": captured["code"] in {"preflight_unavailable", "upstream_not_ready", "maintenance_window"} and not status_required,
                            "automatic_retry": False, "logical_status_required": status_required,
                            "message": "No mutation sent on this attempt. Retry manually only after readiness and any prior logical status are resolved."}
                 self.preflight_failure = {**details, "observed_at": time.time()}

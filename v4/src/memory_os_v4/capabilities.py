@@ -24,6 +24,7 @@ def deployed(engine, build: dict) -> dict:
         },
         "policies": {
             "maintenance": engine.maintenance_status(),
+            "writes": engine.write_status(),
             "bm25_profile": cfg.bm25_profile,
             "lexical_guard_k": cfg.lexical_guard_k,
             "fusion": cfg.fusion,
@@ -46,6 +47,8 @@ def deployed(engine, build: dict) -> dict:
             "expansion": True,
         },
         "client_relays": "unknown_to_server",
+        "work_state": False,
+        "block_cas": False,
     }
 
 

@@ -37,7 +37,7 @@ from .brief_tokens import TokenizerUnavailable
 from .instructions import build_instructions
 from .memory import MemoryV4
 from .idempotency import raw_args_sha256
-from .maintenance import MaintenanceDenied, MaintenancePolicy
+from .maintenance import MaintenanceDenied, MaintenancePolicy, MaintenanceWindow, WritePolicy
 from .qualification import QualificationMetrics, enabled_from_env, result_text
 from .migrate import resolve_under_home as _resolve_under_home
 from .store import MemoryItem
@@ -514,6 +514,8 @@ def _h_request_status(engine: MemoryV4, args: models.RequestStatusIn) -> dict:
                             "error": "Mutation arguments do not match the declared schema",
                             "validation_errors": [{"path": list(e["loc"]), "type": e["type"]}
                                                   for e in exc.errors(include_input=False)[:8]]}
+                if args.operation not in {"memory_consolidate", "memory_compact"} or not parsed.dry_run:
+                    engine.require_writes()
                 if args.operation in {"memory_consolidate", "memory_compact"}:
                     engine.require_maintenance(parsed.dry_run)
                 payload = parsed.model_dump(mode="json", exclude={"request_id"})
@@ -671,6 +673,17 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         return {"ok": False, "error": str(exc)}
 
     try:
+        if _engine is None:
+            planned_name, planned_args = name, parsed
+            if name == "memory_request_status" and parsed.arguments is not None:
+                planned_name = parsed.operation
+                planned_args = parsed.arguments
+            planned_cls = TOOL_MODELS.get(planned_name)
+            if planned_cls and issubclass(planned_cls, models.MutationIn):
+                preview = (planned_args.get("dry_run", True) is True if isinstance(planned_args, dict)
+                           else getattr(planned_args, "dry_run", False) is True)
+                if planned_name not in {"memory_consolidate", "memory_compact"} or not preview:
+                    WritePolicy(Config.from_env().write_mode).require()
         if name in {"memory_consolidate", "memory_compact"} and _engine is None:
             # Refuse a cold disabled server without opening its store or loading an encoder.
             MaintenancePolicy(Config.from_env().maintenance_mode).require(parsed.dry_run)
@@ -687,7 +700,7 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         return {"ok": False, "mode": "compact", "code": "tokenizer_unavailable", "error": "Exact offline tokenizer unavailable; provision it explicitly or request mode=detailed."}
     except ProjectError as exc:
         return {"ok": False, "error": str(exc), "code": str(exc).split(":", 1)[0], "outcome": "not_started"}
-    except MaintenanceDenied as exc:
+    except (MaintenanceDenied, MaintenanceWindow) as exc:
         return {"ok": False, "error": str(exc), "code": exc.code, "outcome": "not_started"}
     except Exception as exc:  # noqa: BLE001 - deliberately broad: never leak a traceback to the client
         logger.exception("tool %s failed", name)
@@ -757,7 +770,9 @@ def _build_http_app(host: str, port: int):
 
     async def health(request):
         return JSONResponse({"ok": True, "server": "memory-os-v4", "transport": "http",
-                             "engine_loaded": _engine is not None, **identity})
+                             "engine_loaded": _engine is not None,
+                             "writes": _engine.write_status() if _engine is not None else WritePolicy(Config.from_env().write_mode).status(),
+                             **identity})
 
     async def ready(request):
         ok, reason, capabilities = await anyio.to_thread.run_sync(readiness_snapshot, _engine, identity)
@@ -895,8 +910,11 @@ def run() -> None:
     parser.add_argument("--host", default=os.environ.get("MEMORY_V4_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("MEMORY_V4_PORT", "8765")))
     parser.add_argument("--warm", action="store_true", help="Load the engine (model + index) before serving.")
+    parser.add_argument("--read-only", action="store_true", help="Operator window: reject mutations before receipt; keep reads available.")
     parser.add_argument("--selfcheck", action="store_true", help="Instantiate a throwaway engine and exercise every tool once.")
     args = parser.parse_args()
+    if args.read_only:
+        os.environ["MEMORY_V4_WRITE_MODE"] = "read_only"
 
     logging.basicConfig(level=os.environ.get("MEMORY_V4_LOG_LEVEL", "WARNING"))
 

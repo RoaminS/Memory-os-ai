@@ -55,6 +55,7 @@ def call(relay, name='memory_block_set', args=None):
     ('wrong_operation', 'preflight_invalid', False),
     ('authentication', 'authentication_rejected', False),
     ('invalid_arguments', 'invalid_arguments', False),
+    ('maintenance_window', 'maintenance_window', True),
 ])
 def test_preflight_failure_has_no_mutation_or_pending_entry(tmp_path, monkeypatch, failure, code, retryable):
     monkeypatch.setenv('MEMORY_V4_RELAY_JOURNAL_DIR', str(tmp_path / 'relay'))
@@ -71,6 +72,8 @@ def test_preflight_failure_has_no_mutation_or_pending_entry(tmp_path, monkeypatc
                 if failure == 'invalid_arguments':
                     return types.CallToolResult(content=[types.TextContent(type='text',
                         text=json.dumps({'ok': False, 'code': 'invalid_arguments'}))])
+                if failure == 'maintenance_window':
+                    return response({'ok': False, 'code': 'maintenance_window', 'outcome': 'not_started'})
                 if failure in {'warming', 'warming_ok'}:
                     return response({'ok': failure == 'warming_ok', 'code': 'engine_not_ready'})
                 if failure == 'legacy':
@@ -93,6 +96,7 @@ def test_preflight_failure_has_no_mutation_or_pending_entry(tmp_path, monkeypatc
         assert details['code'] == code and details['retryable'] is retryable
         assert details['mutation_sent'] is False and details['automatic_retry'] is False
         assert details['attempt_outcome'] == 'not_sent'
+        assert details['outcome'] == 'not_started'
         assert session.effects == 0 and relay.journal.records == {}
         local = call(relay, 'memory_request_status', {}).structuredContent
         assert local['unresolved_count'] == 0

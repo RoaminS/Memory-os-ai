@@ -163,6 +163,26 @@ def test_405_preflight_refusal_through_sdk_then_manual_retry(harness, fault, cod
     assert len(versions) == 1 and versions[0]["text"] == "ONCE"
 
 
+def test_S4_B09_read_only_window_keeps_reads_and_never_sends_mutation(harness):
+    h = harness
+    h.env['MEMORY_V4_WRITE_MODE'] = 'read_only'
+    h.start()
+
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            assert payload(await session.call_tool('memory_status', {}))['total'] == 0
+            result = await session.call_tool('memory_block_set', {'name': 'working_rules', 'text': 'No write',
+                                                               'request_id': 'window', 'project': 'synthetic'})
+            assert result.isError and result.structuredContent['code'] == 'maintenance_window'
+            assert result.structuredContent['outcome'] == 'not_started'
+            assert result.structuredContent['retryable'] is True
+            local = payload(await session.call_tool('memory_request_status', {}))
+            assert local['unresolved_count'] == 0
+            assert not (h.root / 'store/requests.jsonl').exists()
+    anyio.run(run)
+
+
 def test_C07_thirty_restart_rotation_cycles(harness):
     h = harness
     h.start()

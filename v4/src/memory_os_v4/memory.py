@@ -30,7 +30,7 @@ from .fact_updates import (
 )
 from .llm import LLMClient
 from .idempotency import RequestJournal, sync_sources
-from .maintenance import MaintenancePolicy
+from .maintenance import MaintenancePolicy, WritePolicy, READ_OPERATIONS
 from .writer_lock import WriterLock
 from .migrate import read_v3_log
 from .retrieval import HybridRetriever, SearchHit, mmr
@@ -97,6 +97,7 @@ def _atomic_mutation(method):
     """JSONL keeps its existing semantics; SQLite commits the whole facade call."""
     @wraps(method)
     def guarded(self, *args, **kwargs):
+        self.require_writes()
         if self.config.store_backend != "sqlite_s1":
             return method(self, *args, **kwargs)
         return self._sql_mutation(method.__name__, {"args": args, "kwargs": kwargs},
@@ -116,6 +117,7 @@ class MemoryV4:
 
         self.config.validate_lexical_policy()
         self._maintenance_policy = MaintenancePolicy(self.config.maintenance_mode)
+        self._write_policy = WritePolicy(self.config.write_mode)
         self.data_dir = Path(self.config.data_dir).expanduser()
         if self.config.store_backend not in {"jsonl", "sqlite_s1"}:
             raise ValueError("Unknown store backend; choose jsonl or experimental sqlite_s1")
@@ -144,6 +146,7 @@ class MemoryV4:
                 self.store = Store(self.data_dir)
                 self.requests = RequestJournal(self.data_dir)
                 self.blocks = BlockStore(self.data_dir / "blocks.jsonl", self.config.block_char_limit)
+                self.blocks.write_guard = self.require_writes
             # Enrolment identifies this store lineage, NOT freshness of a restored snapshot.
             self.store.meta.setdefault("store_instance_id", uuid.uuid4().hex)
             self.store.save_meta(dict(self.store.meta))
@@ -199,7 +202,8 @@ class MemoryV4:
             if self._closed:
                 return
             try:
-                self.flush()
+                if self._write_policy.mode == "read_write":
+                    self.flush()
             finally:
                 self._closed = True
                 try:
@@ -219,12 +223,17 @@ class MemoryV4:
         """Serialize the whole MCP handler, including direct block/store access."""
         with self._lock:
             self._ensure_open()
+            if self._write_policy.mode == "read_only" and operation in READ_OPERATIONS:
+                # Normal SQLite reads record access/receipts; a frozen window
+                # must serve them without creating those semantic writes.
+                return action()
             if operation in {"memory_consolidate", "memory_compact"}:
                 dry_run = payload.get("dry_run", True)
                 self.require_maintenance(dry_run)
                 if dry_run:
                     # Preview is read-only: no pending/completed receipt or SQLite transaction.
                     return action()
+            self.require_writes()
             attestation = ({"raw_args_sha256": raw_args_sha256,
                             "store_instance_id": self.store.meta["store_instance_id"]}
                            if raw_args_sha256 is not None else None)
@@ -244,6 +253,7 @@ class MemoryV4:
         """
         with self._lock:
             self._ensure_open()
+            self.require_writes()
             if self._mutation_depth:
                 try:
                     if request_id is not None:
@@ -995,7 +1005,15 @@ class MemoryV4:
                                   lambda: self._consolidate(False, project))
 
     def require_maintenance(self, dry_run: bool) -> None:
+        if not dry_run:
+            self.require_writes()
         self._maintenance_policy.require(dry_run)
+
+    def require_writes(self) -> None:
+        self._write_policy.require()
+
+    def write_status(self) -> dict:
+        return self._write_policy.status()
 
     def maintenance_status(self) -> dict:
         return self._maintenance_policy.status()

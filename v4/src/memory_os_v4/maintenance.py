@@ -1,11 +1,37 @@
 """Operator-only maintenance policy, captured before the store is opened."""
 from dataclasses import dataclass
 
+READ_OPERATIONS = {"memory_status", "memory_request_status", "memory_session_brief", "memory_search",
+                   "memory_get_context", "memory_timeline", "memory_block_get", "memory_list_documents",
+                   "memory_search_occurrences"}
+
 
 class MaintenanceDenied(PermissionError):
     """A policy refusal, never an uncertain mutation result."""
 
     code = "maintenance_denied"
+
+
+class MaintenanceWindow(PermissionError):
+    """Operator has frozen semantic writes; no receipt may be prepared."""
+
+    code = "maintenance_window"
+
+
+@dataclass(frozen=True)
+class WritePolicy:
+    mode: str = "read_write"
+
+    def __post_init__(self):
+        if self.mode not in {"read_write", "read_only"}:
+            raise ValueError("write_mode must be read_write or read_only")
+
+    def require(self):
+        if self.mode == "read_only":
+            raise MaintenanceWindow("Operator maintenance window: mutation not started; reads remain available")
+
+    def status(self):
+        return {"mode": self.mode, "mutations_allowed": self.mode == "read_write"}
 
 
 @dataclass(frozen=True)

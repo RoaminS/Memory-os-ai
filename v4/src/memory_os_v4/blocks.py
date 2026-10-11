@@ -77,6 +77,9 @@ class BlockStore:
         return block.text if block else ""
 
     def set(self, name: str, text: str, project: str = "default", scope: str = "project") -> None:
+        guard = getattr(self, "write_guard", None)
+        if guard is not None:
+            guard()
         target = self._target(project, scope)
         if len(text) > self.char_limit:
             logger.warning("block %r exceeds char limit; truncating", name)

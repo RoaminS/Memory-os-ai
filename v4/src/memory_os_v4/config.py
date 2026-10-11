@@ -125,6 +125,7 @@ class Config:
     episode_ttl_days: int = 120
     # Operator setting only, frozen by the engine at construction. Never a tool argument.
     maintenance_mode: str = "disabled"  # disabled | preview | apply
+    write_mode: str = "read_write"  # frozen operator window; independent of maintenance permission
 
     # --- Ablation flags (bench/ABLATIONS.md, 2026-09-12 campaign) -----------
     # Every flag below defaults to the pre-campaign behaviour EXCEPT
@@ -334,6 +335,7 @@ class Config:
             project_registry=_env_opt_str("MEMORY_V4_PROJECT_REGISTRY", d.project_registry),
             data_dir=_env_str("MEMORY_V4_DIR", d.data_dir),
             maintenance_mode=_env_str("MEMORY_V4_MAINTENANCE_MODE", d.maintenance_mode),
+            write_mode=_env_str("MEMORY_V4_WRITE_MODE", d.write_mode),
             store_backend=_env_str("MEMORY_V4_STORE_BACKEND", d.store_backend),
             sqlite_embedding_namespace=_env_str("MEMORY_V4_SQLITE_EMBEDDING_NAMESPACE", d.sqlite_embedding_namespace),
             embed_model=_env_str("MEMORY_V4_EMBED_MODEL", d.embed_model),
