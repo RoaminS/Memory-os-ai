@@ -40,7 +40,7 @@ export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src:$PWD/v4/src:$PWD/v4"
 export MEMORY_V4_CL100K_PATH=/Users/romain/.config/memory-os/cl100k_base.tiktoken
 unset MEMORY_V4_PROJECT_REGISTRY
 P405_PY="$PWD/.local-qualification/brief-test-runtime-claude-3c-v1/bin/python"
-P405_RELEASE=.local-qualification/release-4.0.5-v1
+P405_RELEASE=.local-qualification/release-4.0.5-v2
 "$P405_PY" -B scripts/qualify_405_test_isolation.py --suite full \
  --output .local-qualification/405-full-claude-v1
 "$P405_PY" -B scripts/qualify_404_increment3c.py --suite full \
@@ -70,6 +70,10 @@ Adapter git-dir au Git d'import si nécessaire, sans changer le source_commit.
 Les seuils10k sont déjà figés dans le lanceur. Revue des sources préalable aux
 mesures et de l'activation client ; aucun hook auto-write. /ready work_state reste
 le garde du hook SessionStart (limit8, statutsblocked/open).
+
+Tentative locale release-4.0.5-v1 conservée : suites source587/1631, lint,
+build/twine verts, wheel refusée car la note de version n'était pas packagée.
+Ajout de la note/inclusion ; seuls les artefacts **v2** sont candidats à qualifier.
 
 ## 3. Artefacts exacts — copie JSONL et relais installés
 

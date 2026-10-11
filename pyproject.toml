@@ -97,7 +97,7 @@ where = ["src", "v4/src"]
 include = ["memory_os_ai*", "memory_os_v4*"]
 
 [tool.setuptools.data-files]
-"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md"]
+"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md"]
 "share/doc/memory-os-ai/v4" = ["v4/docs/*.md"]
 "share/doc/memory-os-ai/v4/contracts" = ["v4/docs/contracts/*.json"]
 
