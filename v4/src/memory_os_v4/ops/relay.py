@@ -39,6 +39,7 @@ UNCERTAIN = (
 UNAVAILABLE = "memory-os relay: the memory server is unreachable; nothing was sent."
 
 Operation = Callable[[ClientSession], Awaitable[Any]]
+CATALOG_PREFETCH_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -199,6 +200,38 @@ class Relay:
         raise AssertionError("unreachable")
 
 
+class SessionToolCatalog:
+    """Session-bound descriptors, not a claim that the upstream is reachable.
+
+    MCP clients (and the server SDK) can list tools while validating a LOCAL
+    status result. That path must never queue an upstream request, even when a
+    mutation is in flight. New upstream capabilities require a new client session.
+    """
+
+    def __init__(self) -> None:
+        self._tools: list[types.Tool] = []
+
+    async def prefetch(self, relay: Relay) -> None:
+        try:
+            with anyio.move_on_after(CATALOG_PREFETCH_TIMEOUT_S):
+                result = await relay.submit(lambda session: session.list_tools(), replay=True)
+                self._tools = [tool.model_copy(deep=True) for tool in result.tools
+                               if tool.name != "memory_request_status"]
+        except Exception:
+            # Preserve a previous valid snapshot if a refresh ever fails. Never
+            # catch cancellation or advertise invented upstream capabilities.
+            pass
+
+    def tools(self) -> list[types.Tool]:
+        from ..models import RequestStatusIn
+        # Always own this descriptor: an upstream outputSchema could reject the
+        # relay-local unresolved inventory, which has a different response shape.
+        local = types.Tool(name="memory_request_status",
+                           description="Local unresolved calls; no automatic replay. Available during upstream outages.",
+                           inputSchema=RequestStatusIn.model_json_schema())
+        return [tool.model_copy(deep=True) for tool in self._tools] + [local]
+
+
 async def serve(settings: OpsSettings) -> None:
     send, recv = anyio.create_memory_object_stream(16)
     init_box: dict[str, Any] = {}
@@ -221,14 +254,11 @@ async def serve(settings: OpsSettings) -> None:
         server = Server(init.serverInfo.name, version=init.serverInfo.version,
                         instructions=init.instructions)
 
+        catalog = SessionToolCatalog()
+
         @server.list_tools()
         async def list_tools() -> list[types.Tool]:
-            tools = (await relay.submit(lambda s: s.list_tools(), replay=True)).tools
-            if not any(t.name == "memory_request_status" for t in tools):
-                from ..models import RequestStatusIn
-                tools.append(types.Tool(name="memory_request_status", description="Local unresolved calls; no automatic replay.",
-                                        inputSchema=RequestStatusIn.model_json_schema()))
-            return tools
+            return catalog.tools()
 
         @server.call_tool(validate_input=False)
         async def call_tool(name: str, arguments: dict):
@@ -241,6 +271,7 @@ async def serve(settings: OpsSettings) -> None:
             return res.content
 
         try:
+            await catalog.prefetch(relay)
             async with stdio_server() as (r, w):
                 await server.run(r, w, server.create_initialization_options())
         finally:

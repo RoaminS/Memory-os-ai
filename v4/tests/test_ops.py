@@ -524,8 +524,12 @@ def test_relay_initialization_preserves_upstream_version(settings, monkeypatch, 
     async def fake_owner(_settings, recv, ready):
         ready(init)
         async with recv:
-            async for _ in recv:
-                raise AssertionError('No upstream request in identity test')
+            async for request in recv:
+                # One prefetch after initialize; no mutation or model call.
+                class CatalogSession:
+                    async def list_tools(self):
+                        return types.ListToolsResult(tools=[])
+                await relay._reply(request, await request.op(CatalogSession()))
 
     @asynccontextmanager
     async def fake_stdio():
