@@ -57,6 +57,14 @@ from memory_os_v4 import server
 fault = sys.argv[1]
 if fault == "identity":
     server.server.version = "synthetic-changed"
+if fault == "warming":
+    original = server.dispatch
+    def dispatch(name, args):
+        from pathlib import Path
+        if name == "memory_request_status" and "arguments" in args and Path(os.environ["MEMORY_V4_DIR"]).parent.joinpath("warming").exists():
+            return {"ok": False, "code": "engine_not_ready"}
+        return original(name, args)
+    server.dispatch = dispatch
 if fault == "partial":
     handler = server.TOOL_HANDLERS["memory_block_set"]
     def partial(e, args):
@@ -109,6 +117,50 @@ def harness(tmp_path):
 def payload(result):
     assert not result.isError, result
     return json.loads(result.content[0].text)
+
+
+@pytest.mark.parametrize("fault,code", [("warming", "upstream_not_ready"),
+                                        ("outage", "preflight_unavailable")])
+def test_405_preflight_refusal_through_sdk_then_manual_retry(harness, fault, code):
+    h = harness
+    marker = h.root / "warming"
+    if fault == "warming":
+        marker.write_text("synthetic preflight refusal")
+    h.start("warming" if fault == "warming" else "none")
+    args = {"request_id": "manual-after-ready", "name": "working_rules", "text": "ONCE",
+            "project": "synthetic"}
+
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            if fault == "outage":
+                h.stop()
+            with anyio.fail_after(10):
+                refusal = await session.call_tool("memory_block_set", args)
+            assert refusal.isError
+            details = refusal.structuredContent
+            assert details == json.loads(refusal.content[0].text)
+            assert details["code"] == code and details["retryable"] is True
+            assert details["attempt_outcome"] == "not_sent" and details["mutation_sent"] is False
+            assert details["automatic_retry"] is False and details["logical_status_required"] is False
+            local = payload(await session.call_tool("memory_request_status", {}))
+            assert local["unresolved_count"] == 0
+            assert local["connection"]["preflight_failure"]["code"] == code
+            assert not (h.root / "store/requests.jsonl").exists()
+            if fault == "warming":
+                marker.unlink()
+            else:
+                h.start()
+            with anyio.fail_after(5):
+                assert not (await session.call_tool("memory_block_set", args)).isError
+            completed = payload(await session.call_tool("memory_request_status", {"request_id": args["request_id"]}))
+            assert completed["status"] == "completed" and completed["replay_permitted"] is False
+            local = payload(await session.call_tool("memory_request_status", {}))
+            assert local["connection"]["preflight_failure"] is None
+
+    anyio.run(run)
+    versions = [json.loads(line) for line in (h.root / "store/blocks.jsonl").read_text().splitlines()]
+    assert len(versions) == 1 and versions[0]["text"] == "ONCE"
 
 
 def test_C07_thirty_restart_rotation_cycles(harness):

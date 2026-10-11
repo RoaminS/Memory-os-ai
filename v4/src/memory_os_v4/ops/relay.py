@@ -29,7 +29,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from .auth import SecretFileError, http_client, read_token
-from .durable_relay import DurableRelay
+from .durable_relay import DurableRelay, PreflightRefusal
 from .settings import OpsSettings
 
 UNCERTAIN = (
@@ -320,7 +320,11 @@ async def serve(settings: OpsSettings) -> None:
 
         @server.call_tool(validate_input=False)
         async def call_tool(name: str, arguments: dict):
-            res = await durable.call(name, arguments)
+            try:
+                res = await durable.call(name, arguments)
+            except PreflightRefusal as exc:
+                return types.CallToolResult(isError=True, structuredContent=exc.details,
+                    content=[types.TextContent(type="text", text=str(exc))])
             if res.isError:
                 text = "\n".join(c.text for c in res.content if isinstance(c, types.TextContent))
                 raise RuntimeError(text or f"{name} failed")

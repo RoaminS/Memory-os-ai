@@ -36,12 +36,21 @@ def response(data):
                                 structuredContent=data)
 
 
+class PreflightRefusal(RuntimeError):
+    """A control read failed before preparing or sending this mutation."""
+
+    def __init__(self, details):
+        self.details = details
+        super().__init__(json.dumps(details, ensure_ascii=False))
+
+
 class DurableRelay:
     def __init__(self, transport, settings):
         self.transport, self.settings = transport, settings
         self.journal = None
         self.identity = None
         self.connection_observation = None
+        self.preflight_failure = None
 
     def ledger(self):
         if self.journal is None:
@@ -81,7 +90,8 @@ class DurableRelay:
                     "last_error": getattr(self.transport, "last_error", None),
                     "observation": self.connection_observation,
                     "live_probe": False, "control_deadline_s": 4,
-                    "catalog": "session_snapshot", "relay_version": __version__}})
+                    "catalog": "session_snapshot", "relay_version": __version__,
+                    "preflight_failure": self.preflight_failure}})
             # Includes resolved local entries so an explicit retry is a status read, never a replay.
             from .request_journal import scan
             records = scan(journal.path.parent, exclude=journal.path)["entries"] + list(journal.records.values())
@@ -150,27 +160,39 @@ class DurableRelay:
         async def send(session):
             # Server resolves defaults/scope. This is READ ONLY and is never the mutation itself.
             checked = await session.call_tool("memory_request_status", {"operation": name, "arguments": args})
+            checked_data = checked.structuredContent
+            if checked_data is None:
+                try:
+                    checked_data = json.loads("".join(c.text for c in checked.content if isinstance(c, types.TextContent)))
+                except ValueError:
+                    checked_data = None
             # Preserve a server-authorized preflight refusal; no mutation was sent.
             if not checked.isError:
-                checked_data = checked.structuredContent
-                if checked_data is None:
-                    try:
-                        checked_data = json.loads("".join(c.text for c in checked.content if isinstance(c, types.TextContent)))
-                    except ValueError:
-                        checked_data = None
                 if isinstance(checked_data, dict) and checked_data.get("code") in {"maintenance_denied", "project_unknown"}:
                     return checked
-            captured["code"] = "legacy_unattested"
+            # A timeout, error result or malformed body does not attest an old
+            # contract. Only a successful control response can prove its absence.
+            if isinstance(checked_data, dict) and checked_data.get("code") in {
+                "upstream_not_ready", "engine_not_ready", "engine_initializing"
+            }:
+                captured["code"] = "upstream_not_ready"
+                raise RuntimeError("Upstream is not ready; mutation not sent")
             preflight = body(checked)
-            if (preflight.get("contract") != "l3-v2" or not preflight.get("store_instance_id")
+            if preflight.get("contract") != "l3-v2":
+                captured["code"] = "legacy_unattested"
+                raise RuntimeError("Server does not advertise l3-v2")
+            captured["code"] = "preflight_invalid"
+            if (not preflight.get("store_instance_id")
                     or preflight.get("raw_args_sha256") != raw or not preflight.get("scope")
+                    or preflight.get("operation") != name
                     or preflight.get("replay_permitted") is not False):
-                raise RuntimeError("legacy_unattested: mutation not sent; upgrade the server contract")
+                raise RuntimeError("Invalid l3-v2 attestation; mutation not sent")
             identity = preflight["store_instance_id"]
             if self.identity is not None and identity != self.identity:
                 captured["code"] = "identity_changed"
                 raise RuntimeError("identity_changed: restart client after operator review; mutation not sent")
             self.identity = identity
+            self.preflight_failure = None
             row = {k: preflight[k] for k in ("scope", "operation", "raw_args_sha256", "store_instance_id")}
             row["request_id"] = request_id
             captured.update(row)
@@ -213,5 +235,23 @@ class DurableRelay:
             # Cancellation keeps the last durable sending record. Never swallow cancellation.
             if not isinstance(exc, Exception):
                 raise
+            if captured["code"] == "preflight_unavailable":
+                transport_code = (getattr(self.transport, "last_error", None) or {}).get("code")
+                if transport_code in {"authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
+                    captured["code"] = transport_code
+            if captured["code"] in {"preflight_unavailable", "upstream_not_ready", "legacy_unattested", "preflight_invalid",
+                                    "authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
+                from .request_journal import scan
+                report = scan(journal.path.parent, exclude=journal.path)
+                prior = report["entries"] + list(journal.records.values())
+                status_required = bool(report["errors"] or journal.poisoned or any(
+                    r["request_id"] == request_id and r["endpoint_sha256"] == journal.endpoint for r in prior))
+                details = {"ok": False, "request_id": request_id, "code": captured["code"],
+                           "attempt_outcome": "not_sent", "mutation_sent": False,
+                           "retryable": captured["code"] in {"preflight_unavailable", "upstream_not_ready"} and not status_required,
+                           "automatic_retry": False, "logical_status_required": status_required,
+                           "message": "No mutation sent on this attempt. Retry manually only after readiness and any prior logical status are resolved."}
+                self.preflight_failure = {**details, "observed_at": time.time()}
+                raise PreflightRefusal(details) from exc
             raise RuntimeError(f"memory-os: request_id={request_id}; code={captured['code']}; outcome uncertain or refused. "
                                "Use memory_request_status; do not repeat the mutation.") from exc
