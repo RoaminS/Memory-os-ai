@@ -16,7 +16,8 @@ RELAY = {"command": "/py", "args": ["-m", "memory_os_v4.ops.relay"]}
 
 
 @pytest.fixture()
-def settings(tmp_path: Path) -> OpsSettings:
+def settings(tmp_path: Path, monkeypatch) -> OpsSettings:
+    monkeypatch.setenv("MEMORY_V4_RELAY_JOURNAL_DIR", str(tmp_path / "ops/relay"))
     store = tmp_path / "store"
     store.mkdir()
     (store / "items.jsonl").write_text(json.dumps({"id": "a", "kind": "fact", "text": "A", "project": "p"}) + "\n")
@@ -148,7 +149,7 @@ def test_grok_toml_propagates_non_secret_settings():
     client = next(c for c in clients.CLIENTS if c.key == "grok")
     env = {"MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/", "MEMORY_V4_TOKEN_FILE": "/tmp/custom.token"}
     entry = tomllib.loads(clients.snippet(client, "/py", env))["mcp_servers"][clients.SERVER]
-    assert entry["env"] == env
+    assert entry["env"] == {"MEMORY_V4_CLIENT_ID": "grok", **env}
     assert clients.classify(entry) == "relay"
 
 
@@ -159,3 +160,53 @@ def test_doctor_checks_sqlite_receipts_without_engine_or_reencoding(settings):
         engine.add_facts([{"text": "A synthetic fact", "item_id": "a"}], project="P")
     check = doctor._store(settings)
     assert check.status == "PASS" and "SQLite" in check.detail and "receipts" in check.detail
+
+
+@pytest.mark.parametrize("key,root", [("zed", "context_servers"), ("devin", "mcpServers")])
+def test_new_clients_roundtrip_and_doctor_no_config_writes(tmp_path, key, root):
+    client = next(c for c in clients.CLIENTS if c.key == key)
+    value = clients.snippet(client, "/py", {"MEMORY_V4_TOKEN_FILE": "/synthetic/token"})
+    entry = json.loads(value)[root]["memory-os-ai"]
+    assert entry["env"]["MEMORY_V4_CLIENT_ID"] == key
+    if key == "zed":
+        assert entry["source"] == "custom"
+    _write(tmp_path, key, value)
+    before = client.config_path(tmp_path).read_bytes()
+    assert clients.read_entry(client, tmp_path) == ("ok", entry)
+    checks = {c.area: c for c in doctor._clients(tmp_path)}
+    assert checks[f"client:{key}"].status == "PASS"
+    assert "handshake not checked" in checks[f"client:{key}"].detail
+    assert client.config_path(tmp_path).read_bytes() == before
+
+
+def test_zed_jsonc_preserves_quoted_urls_comments_and_trailing_commas(tmp_path):
+    text = '''// user configuration
+    { "context_servers": { "memory-os-ai": {
+        "source": "custom", "command": "memory-os-relay", "args": [],
+        "env": { "MEMORY_V4_URL": "http://localhost:8765/mcp/", }, /* comment */
+    }, }, }'''
+    _write(tmp_path, "zed", text)
+    client = next(c for c in clients.CLIENTS if c.key == "zed")
+    state, entry = clients.read_entry(client, tmp_path)
+    assert state == "ok" and clients.classify(entry) == "relay"
+    assert entry["env"]["MEMORY_V4_URL"] == "http://localhost:8765/mcp/"
+
+
+def test_doctor_reports_orphan_uncertainty(settings, tmp_path):
+    from memory_os_v4.ops.request_journal import RelayJournal
+    j = RelayJournal(settings.ops_dir / "relay", settings.url)
+    j.append({"request_id": "test", "scope": "p", "operation": "memory_block_set",
+              "raw_args_sha256": "a" * 64, "store_instance_id": "store"}, "sending")
+    j.close()
+    before = j.path.read_bytes()
+    checks = {c.area: c for c in doctor.run(settings, home=tmp_path)}
+    assert checks["relay-journals"].status == "WARN"
+    assert "1 orphan uncertain" in checks["relay-journals"].detail
+    assert j.path.read_bytes() == before
+
+
+@pytest.mark.parametrize("source", [None, "builtin"])
+def test_zed_noncustom_entry_is_not_a_working_relay(tmp_path, source):
+    _write(tmp_path, "zed", json.dumps({"context_servers": {"memory-os-ai": {**RELAY, "source": source}}}))
+    client = next(c for c in clients.CLIENTS if c.key == "zed")
+    assert clients.read_entry(client, tmp_path)[0] == "unreadable"

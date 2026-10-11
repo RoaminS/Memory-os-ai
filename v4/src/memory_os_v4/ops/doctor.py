@@ -188,6 +188,15 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
               _secret(settings.backup_key, "backup-key", required=False, key=True)]
     checks += _server(settings)
     checks += [_service(settings), _store(settings), _backup(settings)]
+    from .request_journal import directory, scan, key, RESOLVED
+    journal = scan(directory(settings))
+    resolved = {key(r) for r in journal["entries"] if r["state"] in RESOLVED}
+    uncertain = {key(r) for r in journal["entries"] if key(r) not in resolved}
+    checks.append(Check("relay-journals", "WARN" if uncertain or journal["errors"] or journal["active_journals"] else "PASS",
+                        f"{len(uncertain)} orphan uncertain operations; {len(journal['errors'])} journal errors; "
+                        f"{journal['active_journals']} active (unresolved count not inspected); "
+                        f"{journal['bytes']} bytes; oldest {journal['oldest_age_s']:.0f} s",
+                        "memory_request_status without ID via each relay; never repeat an unresolved mutation"))
     checks += _clients(home)
     return checks
 

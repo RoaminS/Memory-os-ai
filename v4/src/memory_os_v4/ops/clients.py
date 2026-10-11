@@ -40,6 +40,8 @@ CLIENTS: tuple[Client, ...] = (
     Client("antigravity", "Antigravity", ".gemini/config/mcp_config.json", "mcpServers"),
     Client("gemini-cli", "Gemini CLI", ".gemini/settings.json", "mcpServers"),
     Client("grok", "Grok CLI", ".grok/config.toml", "grok-toml"),
+    Client("zed", "Zed", ".config/zed/settings.json", "zed"),
+    Client("devin", "Devin Desktop", ".config/devin/mcp_config.json", "mcpServers"),
     Client("windsurf", "Windsurf", ".codeium/windsurf/mcp_config.json", "mcpServers"),
 )
 
@@ -82,13 +84,15 @@ def read_entry(client: Client, home: Path) -> tuple[str, dict | None]:
         if client.fmt.endswith("toml"):
             entry = _toml_entry(raw)
         else:
-            data = json.loads(raw)
-            key = "servers" if client.fmt == "vscode" else "mcpServers"
+            data = _jsonc(raw) if client.fmt == "zed" else json.loads(raw)
+            key = {"vscode": "servers", "zed": "context_servers"}.get(client.fmt, "mcpServers")
             servers = data.get(key, {})
             if not isinstance(servers, dict):
                 return "unreadable", None
             entry = servers.get(SERVER)
         if entry is not None and not isinstance(entry, dict):
+            return "unreadable", None
+        if client.fmt == "zed" and entry is not None and entry.get("source") != "custom":
             return "unreadable", None
         return "ok", entry
     except FileNotFoundError:
@@ -103,6 +107,9 @@ def relay_command(python: str) -> tuple[str, list[str]]:
 
 def snippet(client: Client, python: str, env: dict[str, str]) -> str:
     command, args = relay_command(python)
+    env = {"MEMORY_V4_CLIENT_ID": client.key, **env}
+    if client.fmt == "zed":
+        return json.dumps({"context_servers": {SERVER: {"source": "custom", "command": command, "args": args, "env": env}}}, indent=1)
     if client.fmt == "claude-user":
         flags = " ".join(f"--env {shlex.quote(f'{k}={v}')}" for k, v in env.items())
         return f"claude mcp add --scope user --transport stdio {flags} {SERVER} -- " + " ".join(
@@ -119,3 +126,13 @@ def snippet(client: Client, python: str, env: dict[str, str]) -> str:
             f"[mcp_servers.{SERVER}.env]\n" + "\n".join(f"{k} = {json.dumps(v)}" for k, v in env.items()))
     return json.dumps({"mcpServers": {SERVER: {"command": command, "args": args, "env": env}}}, indent=1)
 
+
+
+def _jsonc(text: str):
+    """Zed JSONC: remove comments/trailing commas outside quoted JSON strings only."""
+    import re
+    # Tokenization preserves quoted URLs, escaped quotes and comment-like text.
+    token = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/')
+    clean = token.sub(lambda m: m.group() if m.group().startswith('"') else ' ', text)
+    token = re.compile(r'"(?:\\.|[^"\\])*"|,\s*(?=[}\]])')
+    return json.loads(token.sub(lambda m: m.group() if m.group().startswith('"') else '', clean))
