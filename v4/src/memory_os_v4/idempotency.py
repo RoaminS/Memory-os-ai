@@ -25,6 +25,11 @@ def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def raw_args_sha256(arguments: dict) -> str:
+    """Transport arguments, no defaults/scope resolution and no logical request ID."""
+    return hashlib.sha256(_json({k: v for k, v in arguments.items() if k != "request_id"}).encode()).hexdigest()
+
+
 class RequestJournal:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "requests.jsonl"
@@ -76,7 +81,7 @@ class RequestJournal:
                 os.close(fd)
 
     def execute(self, scope: str, request_id: str, operation: str, payload: dict,
-                action: Callable[[], dict], sync: Callable[[], None]) -> dict:
+                action: Callable[[], dict], sync: Callable[[], None], *, attestation: dict | None = None) -> dict:
         if self._poisoned:
             raise RuntimeError("Request journal write failed; inspect requests.jsonl and restart before retrying writes")
         fingerprint = hashlib.sha256(_json({"operation": operation, "payload": payload}).encode()).hexdigest()
@@ -92,7 +97,8 @@ class RequestJournal:
                 )
             # A fresh copy keeps callers from modifying the durable response in memory.
             return json.loads(_json(previous["result"]))
-        record = {"scope": scope, "request_id": request_id, "fingerprint": fingerprint, "state": "pending"}
+        record = {"scope": scope, "request_id": request_id, "fingerprint": fingerprint, "state": "pending",
+                  "operation": operation, **(attestation or {})}
         self._append(record)
         result = action()
         sync()

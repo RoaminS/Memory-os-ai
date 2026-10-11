@@ -142,6 +142,11 @@ class MemoryV4:
                 self.store = Store(self.data_dir)
                 self.requests = RequestJournal(self.data_dir)
                 self.blocks = BlockStore(self.data_dir / "blocks.jsonl", self.config.block_char_limit)
+            # Enrolment identifies this store lineage, NOT freshness of a restored snapshot.
+            self.store.meta.setdefault("store_instance_id", uuid.uuid4().hex)
+            self.store.save_meta(dict(self.store.meta))
+            if self.config.store_backend != "sqlite_s1":
+                sync_sources(self.data_dir)
             self.embedder = _make_embedder(self.config)
             if self.config.store_backend == "sqlite_s1":
                 from .sqlite_embeddings import SQLiteEmbeddings
@@ -208,7 +213,7 @@ class MemoryV4:
         self.close()
 
     def execute_request(self, operation: str, scope: str, payload: dict, request_id: str | None,
-                        action) -> dict:
+                        action, *, raw_args_sha256=None) -> dict:
         """Serialize the whole MCP handler, including direct block/store access."""
         with self._lock:
             self._ensure_open()
@@ -218,14 +223,18 @@ class MemoryV4:
                 if dry_run:
                     # Preview is read-only: no pending/completed receipt or SQLite transaction.
                     return action()
+            attestation = ({"raw_args_sha256": raw_args_sha256,
+                            "store_instance_id": self.store.meta["store_instance_id"]}
+                           if raw_args_sha256 is not None else None)
             if self.config.store_backend == "sqlite_s1":
-                return self._sql_mutation(operation, payload, action, scope=scope, request_id=request_id)
+                return self._sql_mutation(operation, payload, action, scope=scope, request_id=request_id,
+                                          attestation=attestation)
             if request_id is None:
                 return action()
             return self.requests.execute(scope, request_id, operation, payload, action,
-                                         lambda: sync_sources(self.data_dir))
+                                         lambda: sync_sources(self.data_dir), attestation=attestation)
 
-    def _sql_mutation(self, operation, payload, action, *, scope="__engine_internal__", request_id=None):
+    def _sql_mutation(self, operation, payload, action, *, scope="__engine_internal__", request_id=None, attestation=None):
         """One outer BEGIN IMMEDIATE, sources + final receipt, then acknowledgement.
 
         Nested facade/handler/block mutations join the same transaction. Low-level
@@ -259,7 +268,7 @@ class MemoryV4:
                         raise RuntimeError("Nested mutation failed; whole request must roll back")
                     self._flush_sql_sources()
                     # This is the final source write; COMMIT must precede return.
-                    self.requests.complete(scope, request_id, operation, payload, result, implicit=implicit)
+                    self.requests.complete(scope, request_id, operation, payload, result, implicit=implicit, attestation=attestation)
                 return result
             except BaseException:
                 if not self.store._poisoned:

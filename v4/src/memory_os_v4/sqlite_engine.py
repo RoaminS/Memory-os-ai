@@ -170,7 +170,7 @@ class SQLiteRequests:
             raise RequestConflictError("Implicit receipt has no replay result; clients must use explicit request_id")
         return True, json.loads(_json(previous["result"]))
 
-    def complete(self, scope, request_id, operation, payload, result, *, implicit=False):
+    def complete(self, scope, request_id, operation, payload, result, *, implicit=False, attestation=None):
         # Retention precedes the final receipt; it rolls back with the request.
         retain = self.implicit_limit - int(implicit)
         removed = self.store.write("receipt_retention", "DELETE FROM request_receipts WHERE "
@@ -189,6 +189,7 @@ class SQLiteRequests:
             "sequence": sequence,
             "committed_at": time.time(),
             "explicit": not implicit,
+            **(attestation or {}),
         }
         if not implicit:
             value["result"] = json_value(result)

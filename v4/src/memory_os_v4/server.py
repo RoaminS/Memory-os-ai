@@ -33,6 +33,7 @@ from pydantic import BaseModel, ValidationError
 from .config import Config
 from .instructions import build_instructions
 from .memory import MemoryV4
+from .idempotency import raw_args_sha256
 from .maintenance import MaintenanceDenied, MaintenancePolicy
 from .qualification import QualificationMetrics, enabled_from_env, result_text
 from .migrate import resolve_under_home as _resolve_under_home
@@ -472,6 +473,48 @@ def _h_migrate_v3(engine: MemoryV4, args: models.MigrateV3In) -> dict:
     return result
 
 
+def _h_request_status(engine: MemoryV4, args: models.RequestStatusIn) -> dict:
+    """Receipt lookup, never execute_request: no receipt/transaction created by reads."""
+    from .idempotency import raw_args_sha256
+    with engine._lock:
+        engine._ensure_open()
+        identity = engine.store.meta.get("store_instance_id")
+        result = {"ok": True, "contract": "l3-v2", "store_instance_id": identity,
+                  "replay_permitted": False, "status": "unknown"}
+        if args.request_id is None:
+            if args.arguments is not None:
+                cls = TOOL_MODELS.get(args.operation)
+                if cls is None or not issubclass(cls, models.MutationIn):
+                    raise ValueError("Preflight requires a supported mutation")
+                parsed = cls(**args.arguments)
+                if args.operation in {"memory_consolidate", "memory_compact"}:
+                    engine.require_maintenance(parsed.dry_run)
+                payload = parsed.model_dump(mode="json", exclude={"request_id"})
+                return {**result, "scope": _request_scope(args.operation, payload),
+                        "operation": "memory_consolidate" if args.operation == "memory_compact" else args.operation,
+                        "raw_args_sha256": raw_args_sha256(args.arguments)}
+            # The server cannot inspect relay-local journals. Do not pretend otherwise.
+            return {**result, "local_journals": False,
+                    "notice": "Use the relay's memory_request_status without an ID for local unresolved calls."}
+        result["request_id"] = args.request_id
+        if not identity or args.store_instance_id != identity:
+            return {**result, "reason": "store_identity_missing_or_changed"}
+        if not all((args.scope, args.operation, args.raw_args_sha256)):
+            return {**result, "reason": "incomplete_receipt_identity"}
+        previous = engine.requests.records.get((args.scope, args.request_id))
+        if previous is None:
+            return {**result, "status": "not_found", "reason": "absence_is_not_nonexecution"}
+        if not previous.get("raw_args_sha256") or previous.get("store_instance_id") != identity:
+            return {**result, "reason": "legacy_unattested"}
+        operation = "memory_consolidate" if args.operation == "memory_compact" else args.operation
+        if previous["raw_args_sha256"] != args.raw_args_sha256 or previous.get("operation") != operation:
+            return {**result, "status": "conflict"}
+        if previous["state"] != "complete":
+            return {**result, "status": "pending", "reason": "may_have_partially_applied"}
+        return {**result, "status": "completed", "canonical_sha256": previous["fingerprint"],
+                "result": json.loads(json.dumps(previous["result"]))}
+
+
 # --------------------------------------------------------------- tool tables
 TOOL_MODELS: dict[str, type[BaseModel]] = {
     "memory_session_brief": models.SessionBriefIn,
@@ -489,6 +532,7 @@ TOOL_MODELS: dict[str, type[BaseModel]] = {
     "memory_list_documents": models.ListDocumentsIn,
     "memory_search_occurrences": models.SearchOccurrencesIn,
     "memory_status": models.StatusIn,
+    "memory_request_status": models.RequestStatusIn,
     "memory_migrate_v3": models.MigrateV3In,
 }
 
@@ -508,6 +552,7 @@ TOOL_HANDLERS: dict[str, Callable[[MemoryV4, BaseModel], dict]] = {
     "memory_list_documents": _h_list_documents,
     "memory_search_occurrences": _h_search_occurrences,
     "memory_status": _h_status,
+    "memory_request_status": _h_request_status,
     "memory_migrate_v3": _h_migrate_v3,
 }
 
@@ -526,6 +571,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "memory_ingest": "Ingest a text file or folder (under $HOME) into memory as chunked 'doc' items.",
     "memory_list_documents": "List ingested documents grouped by doc_ref, with chunk counts.",
     "memory_search_occurrences": "Count items whose text contains a keyword (tokenized match) and return sample snippets.",
+    "memory_request_status": "Read-only receipt status; never authorizes replay. Without ID via relay: local unresolved calls.",
     "memory_status": "Engine status: item counts by kind, embedding model, index sizes, data dir.",
     "memory_migrate_v3": "One-time, read-only migration of a v3 _conversation_log.jsonl into v4 episodes and summaries.",
 }
@@ -590,11 +636,14 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
             # Refuse a cold disabled server without opening its store or loading an encoder.
             MaintenancePolicy(Config.from_env().maintenance_mode).require(parsed.dry_run)
         engine = get_engine()
+        if name == "memory_request_status":
+            return handler(engine, parsed)
         payload = parsed.model_dump(mode="json", exclude={"request_id"})
         scope = _request_scope(name, payload)
         operation = "memory_consolidate" if name == "memory_compact" else name
         return engine.execute_request(operation, scope, payload, getattr(parsed, "request_id", None),
-                                      lambda: handler(engine, parsed))
+                                      lambda: handler(engine, parsed),
+                                      raw_args_sha256=raw_args_sha256(arguments))
     except MaintenanceDenied as exc:
         return {"ok": False, "error": str(exc), "code": exc.code, "outcome": "not_started"}
     except Exception as exc:  # noqa: BLE001 - deliberately broad: never leak a traceback to the client
@@ -730,6 +779,7 @@ def _selfcheck() -> int:
         return result
 
     call("memory_status", {})
+    call("memory_request_status", {})
     call("memory_block_set", {"name": "user_profile", "text": "Selfcheck user.", "mode": "replace"})
     call("memory_block_get", {})
     call(

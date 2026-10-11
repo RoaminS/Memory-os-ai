@@ -329,3 +329,14 @@ class SearchOccurrencesIn(BaseModel):
     keyword: str = Field(..., min_length=1, description="Keyword or short phrase to count exact occurrences of.")
     project: str | None = Field(None, description=_PROJECT_DESC)
     limit: int = Field(20, ge=1, le=200, description="Maximum number of matching snippets to return.")
+
+
+class RequestStatusIn(BaseModel):
+    """No ID: server capability/preflight, or relay-local unresolved entries."""
+    model_config = ConfigDict(extra="forbid")
+    request_id: str | None = Field(None, min_length=1, max_length=200)
+    scope: str | None = Field(None, max_length=4096)
+    operation: str | None = Field(None, max_length=80)
+    raw_args_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    store_instance_id: str | None = Field(None, min_length=1, max_length=200)
+    arguments: dict | None = None

@@ -3,7 +3,6 @@
 MEMORY_INSTRUCTIONS = """Memory OS v4 — persistent memory. Follow these rules.
 
 1. SESSION START: call memory_session_brief before answering (focus_query for the topic).
-   Returns core blocks, recent episodes, key facts, procedures, pending items.
 2. RECALL: before guessing, call memory_search (at_time="YYYY-MM-DD" for "what was true on X")
    or memory_timeline ("how did X evolve"). For a comparison/counting/multi-part question also
    pass queries: 2-4 keyword-rich sub-questions naming the person/entity each needs; and
@@ -22,12 +21,12 @@ MEMORY_INSTRUCTIONS = """Memory OS v4 — persistent memory. Follow these rules.
 4. BLOCKS: memory_block_set (mode="replace") when profile/project/rules change; terse, not
    accumulating. Blocks are project-local; scope="global" explicitly shares.
 5. MAINTENANCE: consolidate/compact require operator authorization; preview by default.
-   Never schedule them or retry uncertain mutations.
+   Never schedule them. If a mutation is uncertain: memory_request_status (no ID lists local pending calls via relay); never repeat it.
 
 Example memory_chat_save:
 {"messages": [{"role": "user", "content": "Ship the v4 MCP server today.",
                "keywords": ["mcp", "server", "shipping"]}],
- "summary": "Built the v4 MCP server: 16 tools, tests green.",
+ "summary": "Built the v4 MCP server; tests green.",
  "facts": [{"text": "Romain shipped the Memory OS v4 MCP server on 2026-09-12.",
             "entities": ["Romain", "Memory OS v4"], "event_time": "2026-09-12",
             "keywords": ["mcp", "server", "release"]}]}

@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "L3 v2 — implemented increment 2, no production qualification",
+  "$defs": {
+    "request_status_input": {
+      "additionalProperties": false,
+      "description": "No ID: server capability/preflight, or relay-local unresolved entries.",
+      "properties": {
+        "request_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "maxLength": 80,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operation"
+        },
+        "raw_args_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Args Sha256"
+        },
+        "store_instance_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Store Instance Id"
+        },
+        "arguments": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arguments"
+        }
+      },
+      "title": "RequestStatusIn",
+      "type": "object"
+    },
+    "server_status_output": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "const": true
+        },
+        "contract": {
+          "const": "l3-v2"
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "pending",
+            "not_found",
+            "unknown",
+            "conflict"
+          ]
+        },
+        "store_instance_id": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "raw_args_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "canonical_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "result": {
+          "type": "object"
+        },
+        "notice": {
+          "type": "string"
+        },
+        "local_journals": {
+          "const": false
+        },
+        "replay_permitted": {
+          "const": false
+        }
+      },
+      "required": [
+        "ok",
+        "contract",
+        "status",
+        "store_instance_id",
+        "replay_permitted"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "completed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "result",
+              "canonical_sha256",
+              "request_id"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "result"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ledger_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "scope",
+        "operation",
+        "raw_args_sha256",
+        "store_instance_id",
+        "endpoint_sha256",
+        "state",
+        "at",
+        "pid",
+        "previous_sha256",
+        "sha256"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "store_instance_id": {
+          "type": "string"
+        },
+        "raw_args_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "endpoint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "result_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "state": {
+          "enum": [
+            "prepared",
+            "sending",
+            "completed",
+            "blocked"
+          ]
+        },
+        "at": {
+          "type": "number"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "previous_sha256": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64})?$"
+        }
+      }
+    }
+  }
+}
