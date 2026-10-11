@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _PROJECT_DESC = (
     "Project label to scope this call to; defaults to MEMORY_V4_PROJECT or 'default'. "
@@ -343,3 +343,115 @@ class RequestStatusIn(BaseModel):
     raw_args_sha256: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
     store_instance_id: str | None = Field(None, min_length=1, max_length=200)
     arguments: dict | None = None
+
+
+class WorkEvidenceIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    type: Literal['item', 'artifact', 'decision']
+    ref: str = Field(min_length=1, max_length=1024)
+    sha256: str | None = Field(None, pattern=r'^[0-9a-f]{64}$')
+    note: str | None = Field(None, max_length=1000)
+
+
+class WorkOwnerIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    client_id: str | None = Field(None, max_length=200)
+    client_version: str | None = Field(None, max_length=80)
+    actor_label: str | None = Field(None, max_length=200)
+
+
+class WorkProjectIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    project: str = Field(min_length=1, max_length=512, description="Concrete nonempty project, never '*'; no implicit scope.")
+
+    @field_validator('project')
+    @classmethod
+    def concrete_project(cls, value):
+        if not value.strip() or value == '*':
+            raise ValueError('Concrete nonempty project required')
+        return value
+
+    @field_validator('title', 'reason', check_fields=False)
+    @classmethod
+    def meaningful_text(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError('Nonempty text required')
+        return value
+
+
+class TaskCreateIn(MutationIn, WorkProjectIn):
+    client_provenance: WorkOwnerIn | None = Field(None, description='Relay-filled declarative downstream clientInfo; never authentication.')
+    project: str = Field(min_length=1, max_length=512)
+    request_id: str = Field(min_length=1, max_length=200)
+    task_id: str | None = Field(None, max_length=36)
+    title: str = Field(min_length=1, max_length=512)
+    next_action: str = Field('', max_length=1000)
+    owner: WorkOwnerIn | None = None
+    context_id: str | None = Field(None, max_length=200)
+    evidence: list[WorkEvidenceIn] = Field(default_factory=list, max_length=32)
+
+
+class TaskPatchIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    title: str | None = Field(None, min_length=1, max_length=512)
+    status: Literal['open', 'blocked', 'done'] | None = None
+    owner: WorkOwnerIn | None = None
+    next_action: str | None = Field(None, max_length=1000)
+    blocked_reason: str | None = Field(None, max_length=1000)
+    resolution: str | None = Field(None, max_length=2000)
+    reopen: bool = Field(False, strict=True)
+
+    @model_validator(mode='after')
+    def no_null_required_fields(self):
+        for key in ('title', 'status', 'next_action'):
+            if key in self.model_fields_set and getattr(self, key) is None:
+                raise ValueError(key + ' cannot be null')
+        if self.title is not None and not self.title.strip():
+            raise ValueError('Nonempty title required')
+        return self
+
+
+class TaskUpdateIn(MutationIn, WorkProjectIn):
+    client_provenance: WorkOwnerIn | None = Field(None, description='Declarative mutation author, distinct from owner; relay overwrites model-supplied identity.')
+    project: str = Field(min_length=1, max_length=512)
+    request_id: str = Field(min_length=1, max_length=200)
+    task_id: str = Field(min_length=1, max_length=36)
+    expected_etag: str = Field(min_length=1, max_length=200)
+    patch: TaskPatchIn
+    reason: str = Field(min_length=1, max_length=1000)
+    evidence: list[WorkEvidenceIn] | None = Field(None, max_length=32)
+
+
+class TaskGetIn(WorkProjectIn):
+    model_config = ConfigDict(extra='forbid')
+    project: str = Field(min_length=1, max_length=512)
+    task_id: str = Field(min_length=1, max_length=36)
+    include_history: bool = False
+
+
+class TaskListIn(WorkProjectIn):
+    model_config = ConfigDict(extra='forbid')
+    project: str = Field(min_length=1, max_length=512)
+    status: list[Literal['open', 'blocked', 'done']] = Field(default_factory=lambda: ['open', 'blocked'], min_length=1, max_length=3)
+    owner: str | None = Field(None, max_length=200)
+    limit: int = Field(50, ge=1, le=100)
+    cursor: str | None = Field(None, max_length=2048)
+
+
+class TaskPreviewIn(WorkProjectIn):
+    model_config = ConfigDict(extra='forbid')
+    project: str = Field(min_length=1, max_length=512)
+    title: str | None = Field(None, min_length=1, max_length=512)
+    import_todos: bool = False
+
+
+class BlockCasIn(MutationIn, WorkProjectIn):
+    client_provenance: WorkOwnerIn | None = None
+    project: str = Field(min_length=1, max_length=512)
+    request_id: str = Field(min_length=1, max_length=200)
+    scope: Literal['project', 'global']
+    name: str = Field(min_length=1, max_length=200)
+    expected_etag: str | None = Field(..., max_length=200)
+    text: str = Field(max_length=8000)
+    reason: str = Field(min_length=1, max_length=1000)
+    evidence: list[WorkEvidenceIn] | None = Field(None, max_length=32, description='Omit to retain prior evidence; explicit list replaces it.')

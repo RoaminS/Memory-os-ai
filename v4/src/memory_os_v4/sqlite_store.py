@@ -17,7 +17,7 @@ from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
 APPLICATION_ID = 0x4D4F5334
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = (
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at REAL NOT NULL)",
@@ -74,7 +74,18 @@ SCHEMA_LEGACY = (
            for table in ("legacy_files", "legacy_request_log", "legacy_pending_requests") for op in ("update", "delete")),
 )
 
-MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION, SCHEMA_LEGACY)
+SCHEMA_WORK = (
+    '''CREATE TABLE task_versions(
+        task_id TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),project TEXT NOT NULL,
+        record_json TEXT NOT NULL,record_sha256 TEXT NOT NULL,PRIMARY KEY(task_id,revision))''',
+    '''CREATE TABLE task_current(task_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,
+        FOREIGN KEY(task_id,revision) REFERENCES task_versions(task_id,revision))''',
+    'CREATE INDEX task_versions_project ON task_versions(project,task_id,revision)',
+    "CREATE TRIGGER tasks_no_update BEFORE UPDATE ON task_versions BEGIN SELECT RAISE(ABORT,'immutable task'); END",
+    "CREATE TRIGGER tasks_no_delete BEFORE DELETE ON task_versions BEGIN SELECT RAISE(ABORT,'immutable task'); END",
+)
+
+MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION, SCHEMA_LEGACY, SCHEMA_WORK)
 
 
 def schema_checksums():
@@ -375,6 +386,8 @@ class SQLiteStore(Store):
                 maximum = self._connection.execute("SELECT COALESCE(max(sequence),0) FROM request_receipts").fetchone()[0]
                 if counter is None or counter[0] < maximum:
                     return False
+                from .work_state import check_integrity
+                check_integrity(self)
                 return True
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
                 return False

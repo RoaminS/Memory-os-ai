@@ -98,6 +98,8 @@ def _file_manifest(files):
 def _inventory(files):
     if "store.sqlite3" in files:
         raise ValueError("Source must be JSONL-only, no dual authority")
+    if any(files.get(name, b'').strip() for name in ('task-versions.jsonl', 'task-current.jsonl')):
+        raise ValueError('Inactive work-state sidecars require explicit conversion; no implicit task import')
     check_files(files)
     for name, data in files.items():
         if name.endswith(".jsonl"):
@@ -152,6 +154,8 @@ def _authority_digest(connection):
         "store_metadata",
         "legacy_request_log",
         "legacy_pending_requests",
+        "task_versions",
+        "task_current",
     )
     rows = {table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables}
     rows["legacy_files"] = connection.execute("SELECT path,sha256 FROM legacy_files ORDER BY path").fetchall()
@@ -477,6 +481,9 @@ def export(source, destination, *, original=False, rollback=False, fault_hook=No
                     ("items.jsonl", "SELECT record_json FROM item_versions ORDER BY rowid"),
                     ("blocks.jsonl", "SELECT record_json FROM block_versions ORDER BY sequence"),
                     ("sqlite-receipts.jsonl", "SELECT record_json FROM request_receipts ORDER BY sequence"),
+                    ('task-versions.jsonl', 'SELECT record_json FROM task_versions ORDER BY task_id,revision'),
+                    ('task-current.jsonl', 'SELECT v.record_json FROM task_current c JOIN task_versions v '
+                                           'ON c.task_id=v.task_id AND c.revision=v.revision ORDER BY c.task_id'),
                 ):
                     files[name] = b"".join(row[0].encode() + b"\n" for row in connection.execute(query))
                 pending = [
@@ -496,6 +503,14 @@ def export(source, destination, *, original=False, rollback=False, fault_hook=No
                     "SELECT value_json FROM store_metadata WHERE key='metadata'"
                 ).fetchone()
                 files["meta.json"] = (row[0] if row else "{}").encode()
+                if connection.execute('SELECT 1 FROM task_current LIMIT 1').fetchone():
+                    meta = loads_strict(files['meta.json'])
+                    meta['inactive_work_state_sidecars'] = ['task-versions.jsonl', 'task-current.jsonl']
+                    files['meta.json'] = _json(meta).encode()
+                if connection.execute("SELECT 1 FROM block_versions WHERE json_extract(record_json,'$.cas')=1 LIMIT 1").fetchone():
+                    meta = loads_strict(files['meta.json'])
+                    meta['inactive_block_cas'] = True
+                    files['meta.json'] = _json(meta).encode()
                 files["writer.lock"] = b""
                 files["export.json"] = _json(
                     {
@@ -515,6 +530,7 @@ def export(source, destination, *, original=False, rollback=False, fault_hook=No
                              'source_authority_sha256': _authority_digest(connection),
                              'source_receipt_sequence': connection.execute(
                                  'SELECT value FROM receipt_counter WHERE id=1').fetchone()[0]}
+                    event['recovery_receipt_sequence'] = event['source_receipt_sequence'] + 1
                     meta.update(store_instance_id=event['store_instance_id'], restored_from_instance_id=old_id)
                     meta['recovery_history'] = [*meta.get('recovery_history', []), event]
                     files['meta.json'] = _json(meta).encode()
@@ -522,6 +538,8 @@ def export(source, destination, *, original=False, rollback=False, fault_hook=No
                               'work_state': False, 'block_cas': False, 'reopening_allowed': False}
                     receipt = {'scope': 'operator:s4', 'request_id': 's4-rollback-' + event['store_instance_id'],
                                'fingerprint': fingerprint('sqlite_jsonl_rollback', event),
+                               'raw_args_sha256': _sha(_json(event).encode()),
+                               'sequence': event['recovery_receipt_sequence'],
                                'operation': 'sqlite_jsonl_rollback', 'state': 'complete', 'explicit': True,
                                'result': result, 'store_instance_id': event['store_instance_id']}
                     files['requests.jsonl'] += _json(receipt).encode() + b'\n'

@@ -75,6 +75,36 @@ def test_reconcile_forgets_identity_history_and_no_source_writes(restored, monke
         assert 'erase' not in {h.item.id for h in engine.search('confidential erased', project='p')}
 
 
+def test_attested_schema5_historical_copy_is_verified_before_upgrade6(restored):
+    import sqlite3
+    source, target, _ = restored
+    before_source = s4.readonly(source.store.db_path)
+    before = s4.inventory(before_source)
+    before_source.close()
+    # Construct a historical v5 fixture from an EMPTY v6 extension, copy only.
+    con = sqlite3.connect(target / s4.DB)
+    con.execute('DROP TABLE task_current')
+    con.execute('DROP TABLE task_versions')
+    con.execute('DELETE FROM schema_migrations WHERE version=6')
+    con.execute('PRAGMA user_version=5')
+    con.commit()
+    con.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+    con.close()
+    original = s4.readonly(target / s4.DB, sealed=True)
+    manifest = {'logical_inventory': s4.inventory(original)}
+    original.close()
+    assert manifest['logical_inventory']['schema_version'] == 5
+    result = recovery.prepare_recovery(target / s4.DB, source.store.db_path, manifest)
+    assert result['schema_upgrade'] == {'from': 5, 'to': 6}
+    restored_store = SQLiteStore(target)
+    assert restored_store._connection.execute('SELECT count(*) FROM task_current').fetchone()[0] == 0
+    assert restored_store.get('erase').deleted
+    restored_store.close()
+    current = s4.readonly(source.store.db_path)
+    assert s4.inventory(current) == before
+    current.close()
+
+
 def test_missing_authority_or_bad_lineage_keeps_target_identical(restored, tmp_path):
     source, target, manifest = restored
     before = hashlib.sha256((target / s4.DB).read_bytes()).hexdigest()

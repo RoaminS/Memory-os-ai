@@ -75,6 +75,10 @@ class SQLiteBlocks(BlockStore):
     def set(self, name, text, project="default", scope="project"):
         def apply():
             target = self._target(project, scope)
+            if getattr(self, 'cas_enabled', False) and self.store._connection.execute(
+                'SELECT 1 FROM block_versions WHERE block_key=? LIMIT 1', (_json((target, name)),)).fetchone():
+                from .work_state import WorkError
+                raise WorkError('cas_required')
             if (
                 not isinstance(name, str)
                 or not name

@@ -55,6 +55,28 @@ class Session:
         return response({"effect": self.effects})
 
 
+@pytest.mark.parametrize('has_receipt', [True, False])
+def test_work_refusal_resolved_only_by_receipt_never_replayed(settings, has_receipt):
+    class Refusal(Session):
+        async def call_tool(self, name, args):
+            if name == 'memory_task_update':
+                self.effects += 1  # counts calls, no mutation was accepted
+                result = {'ok': False, 'code': 'revision_conflict', 'current_etag': 'new'}
+                if has_receipt:
+                    self.receipts[args['request_id']] = {'status': 'completed', 'result': result}
+                return response(result)
+            return await super().call_tool(name, args)
+    session = Refusal()
+    relay = DurableRelay(Transport(session), settings)
+    try:
+        result = call(relay, 'memory_task_update', {'request_id': 'conflict', 'project': 'p'})
+        assert result.structuredContent['code'] == 'revision_conflict'
+        assert relay.journal.status()['unresolved_count'] == (0 if has_receipt else 1)
+        assert session.effects == 1
+    finally:
+        relay.close()
+
+
 class Transport:
     def __init__(self, session):
         self.session = session

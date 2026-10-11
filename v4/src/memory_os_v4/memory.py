@@ -142,6 +142,7 @@ class MemoryV4:
                 self.requests = SQLiteRequests(self.store)
                 self.blocks = SQLiteBlocks(self.store, self.config.block_char_limit)
                 self.blocks.mutate = self._sql_mutation
+                self.blocks.cas_enabled = self.config.work_state
             else:
                 self.store = Store(self.data_dir)
                 self.requests = RequestJournal(self.data_dir)
@@ -154,6 +155,9 @@ class MemoryV4:
                         raise RuntimeError("Block handle outlived its memory engine")
                     engine._ensure_open()
                     engine.require_writes()
+                    if engine.store.meta.get('inactive_block_cas'):
+                        from .work_state import WorkError
+                        raise WorkError('backend_unsupported')
 
                 self.blocks.write_guard = block_write_guard
             # Enrolment identifies this store lineage, NOT freshness of a restored snapshot.

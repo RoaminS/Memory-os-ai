@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import datetime as dt
 import json
 import time
 
@@ -105,8 +106,14 @@ def build(engine, project, focus_query=None, expand=()):
             notices.append("ambiguous_block")
         by_id = {it.id: it for it in live}
         requested = set(expand)
+        from . import work_state as work
+        tasks = [work.view(engine, task) for task in work.all_tasks(engine, project)] if work.enabled(engine) and project is not None else []
+        tasks = [t for t in tasks if t['status'] != 'done' or 'task:' + t['task_id'] in requested]
+        tasks.sort(key=lambda t: ('task:' + t['task_id'] not in requested, t['stale'],
+                                  t['status'] != 'blocked', -dt.datetime.fromisoformat(t['updated_at']).timestamp(), t['task_id']))
+        task_refs = {'task:' + t['task_id'] for t in tasks}
         found = requested & by_id.keys()
-        if requested - found:
+        if requested - found - task_refs:
             notices.append("reference_not_found")
         expanded = found | {it.id for it in live if found.intersection(it.parent_ids)}
         lexical = engine.bm25.scoped(set(by_id))
@@ -122,12 +129,16 @@ def build(engine, project, focus_query=None, expand=()):
                 it.id,
             )
         )
-        if not live and not blocks:
+        if not live and not blocks and not tasks:
             notices.append("empty_project")
         selected = live[:40]
         if len(live) > len(selected):
             notices.append("budget_saturated")
         rows = [{"id": it.id, "kind": it.kind, "text": it.text[:480]} for it in selected]
+        rows = [{'id': 'task:' + t['task_id'], 'kind': 'task',
+                 'text': (f"{t['status']} | {t['title']} | owner={(t.get('owner') or {}).get('client_id')} | "
+                          f"next={t['next_action']} | blocked={t['blocked_reason']} | stale={t['stale']}")[:480]}
+                for t in tasks[:10]] + rows
         if any(len(it.text) > 480 for it in selected):
             notices.append("item_truncated")
         if any(len(v) > 480 for v in blocks.values()):

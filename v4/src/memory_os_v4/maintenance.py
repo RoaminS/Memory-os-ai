@@ -4,6 +4,7 @@ from dataclasses import dataclass
 READ_OPERATIONS = {"memory_status", "memory_request_status", "memory_session_brief", "memory_search",
                    "memory_get_context", "memory_timeline", "memory_block_get", "memory_list_documents",
                    "memory_search_occurrences"}
+READ_OPERATIONS.update({'memory_task_get', 'memory_task_list', 'memory_task_preview'})
 
 
 class MaintenanceDenied(PermissionError):

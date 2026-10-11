@@ -12,7 +12,7 @@ import time
 import uuid
 
 from ..sqlite_engine import SQLiteRequests
-from ..sqlite_store import SQLiteStore, _json
+from ..sqlite_store import SQLiteStore, _json, schema_checksums
 from ..store import MemoryItem
 from .backup import BackupError
 from .sqlite_backup import inventory, plain_path, readonly
@@ -24,16 +24,21 @@ def digest(value):
 
 
 def rows(con, table):
+    if table in {'task_versions', 'task_current'} and not con.execute(f'PRAGMA table_info("{table}")').fetchall():
+        return []  # attested schema5 predates these tables
     return con.execute(f'SELECT * FROM "{table}" ORDER BY 1,2').fetchall()
 
 
 def prefix(source, original, guard):
     """Immutable snapshot records must still exist exactly in current authority."""
     for table, keys in (('item_versions', ('item_id', 'revision')),
+                        ('task_versions', ('task_id', 'revision')),
                         ('block_versions', ('sequence',)), ('legacy_files', ('path',)),
                         ('legacy_request_log', ('ordinal',)),
                         ('legacy_pending_requests', ('scope', 'request_id'))):
         columns = [r[1] for r in original.execute(f'PRAGMA table_info("{table}")')]
+        if table == 'task_versions' and not columns:
+            continue
         positions = [columns.index(k) for k in keys]
         where = ' AND '.join('"' + key + '"=?' for key in keys)
         for row in original.execute(f'SELECT * FROM "{table}"'):
@@ -76,7 +81,8 @@ def prepare_recovery(target_db, source_db, manifest, *, guard=lambda: None, faul
         if snapshot != manifest['logical_inventory']:
             raise BackupError('Unverified snapshot cannot be recovered')
         if (current['store_instance_id'] != snapshot['store_instance_id']
-                or current['snapshot_receipt_sequence'] < snapshot['snapshot_receipt_sequence']):
+                or current['snapshot_receipt_sequence'] < snapshot['snapshot_receipt_sequence']
+                or current['schema_version'] < snapshot['schema_version']):
             raise BackupError('Missing or incompatible authority lineage/cut; quarantine retained')
         prefix(source, original, guard)
         tombstones = {}
@@ -101,6 +107,7 @@ def prepare_recovery(target_db, source_db, manifest, *, guard=lambda: None, faul
         saved = {table: rows(original, table) for table in
                  ('item_versions', 'block_versions', 'request_receipts', 'embedding_cache',
                   'legacy_files', 'legacy_request_log', 'legacy_pending_requests', 'schema_migrations')}
+        saved.update({table: rows(original, table) for table in ('task_versions', 'task_current')})
         old_meta = loads_strict(original.execute("SELECT value_json FROM store_metadata WHERE key='metadata'").fetchone()[0].encode())
     finally:
         original.close()
@@ -145,6 +152,7 @@ def prepare_recovery(target_db, source_db, manifest, *, guard=lambda: None, faul
                       'recovery_request_id': recovery_id, 'recovery_event_sha256': digest(event),
                       'forget_reconciliation': 'complete', 'quarantined': True,
                       'reopening_allowed': False, 'model': old_meta.get('embed_model'),
+                      'schema_upgrade': {'from': snapshot['schema_version'], 'to': store._connection.execute('PRAGMA user_version').fetchone()[0]},
                       'dim': old_meta.get('dim'), 'encoding_profile': snapshot['encoding_profile']}
             requests.complete('operator:s4', recovery_id, 's4_restore_recovery', proof, result,
                               attestation={'store_instance_id': new_id, 'raw_args_sha256': digest(proof)})
@@ -159,6 +167,9 @@ def prepare_recovery(target_db, source_db, manifest, *, guard=lambda: None, faul
                 expected = sum(r['outcome'] == 'deleted' for r in replayed) if table == 'item_versions' else 1
                 if additions != expected:
                     raise BackupError('Unexpected recovery records')
+            elif table == 'schema_migrations' and snapshot['schema_version'] == 5:
+                if after[:len(before)] != before or [(r[0], r[1]) for r in after] != schema_checksums():
+                    raise BackupError('Unattested copy schema upgrade')
             elif after != before:
                 raise BackupError('Recovery changed unrelated records')
         actual_meta = dict(store.meta)

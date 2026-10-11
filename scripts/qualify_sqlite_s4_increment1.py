@@ -40,10 +40,13 @@ def main():
             report['samples'].append(resource_sample(True))
         report['resource_policy'] = 'physical_tcp_guard' if args.tcp else 'synthetic_unit_caps'
         before = snapshots(operator_home())
-        paths = ['v4/tests/s4', 'v4/tests/test_relay_preflight_405.py']
+        paths = ['v4/tests/s4', 'v4/tests/test_relay_preflight_405.py', 'v4/tests/test_sqlite_engine.py',
+                 'v4/tests/test_sqlite_migration.py', 'v4/tests/test_work_state.py', 'v4/tests/test_config_attestation.py',
+                 'v4/tests/test_relay_journal_l3.py::test_work_refusal_resolved_only_by_receipt_never_replayed']
         if args.tcp:
             paths += ['v4/tests/test_l3_tcp.py::test_S4_B09_read_only_window_keeps_reads_and_never_sends_mutation',
-                      'v4/tests/test_l3_tcp.py::test_S4_B10_real_private_sqlite_restore_reconciles_forgets_and_reopens']
+                      'v4/tests/test_l3_tcp.py::test_S4_B10_real_private_sqlite_restore_reconciles_forgets_and_reopens',
+                      'v4/tests/test_l3_tcp.py::test_L7b_W06_task_disconnect_owner_and_receipt_no_replay']
         command = [sys.executable, '-B', '-m', 'pytest', '-c', str(ROOT / 'pyproject.toml'), '-q',
                    '-p', 'no:cacheprovider', '--basetemp=' + str(output / 'pytest-tmp'),
                    '--junitxml=' + str(output / 'tests.xml'), *paths]
@@ -77,7 +80,7 @@ def main():
         suites = list(ET.parse(output / 'tests.xml').getroot().iter('testsuite'))
         counts = {k: sum(int(s.get(k, 0)) for s in suites) for k in ('tests', 'failures', 'errors', 'skipped')}
         report['counts'] = counts
-        if process.returncode or counts['tests'] < (86 if args.tcp else 84) or any(counts[k] for k in ('failures', 'errors', 'skipped')):
+        if process.returncode or counts['tests'] < (165 if args.tcp else 161) or any(counts[k] for k in ('failures', 'errors', 'skipped')):
             raise RuntimeError('S4 suite incomplete/failed; evidence preserved')
         report.update(ok=True, tcp_qualified=args.tcp)
     except (OSError, RuntimeError, subprocess.SubprocessError, ET.ParseError) as exc:

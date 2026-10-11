@@ -79,6 +79,20 @@ elif fault == "committed":
         if name == "memory_block_set" and args.get("request_id") == "cut": os._exit(79)
         return result
     server.dispatch = dispatch
+elif fault == 'task-partial':
+    handler = server.TOOL_HANDLERS['memory_task_create']
+    def partial(e,args):
+        result=handler(e,args)
+        if args.request_id=='cut': os._exit(78)
+        return result
+    server.TOOL_HANDLERS['memory_task_create']=partial
+elif fault == 'task-committed':
+    original=server.dispatch
+    def dispatch(name,args):
+        result=original(name,args)
+        if name=='memory_task_create' and args.get('request_id')=='cut': os._exit(79)
+        return result
+    server.dispatch=dispatch
 sys.argv = [sys.argv[0], "--transport", "http", "--port", sys.argv[2], "--warm"]
 server.run()
 '''
@@ -213,6 +227,36 @@ def test_S4_B10_real_private_sqlite_restore_reconciles_forgets_and_reopens(harne
         assert result['forgets_replayed'][0]['item_id'] == 'erase'
         assert result['quarantined'] and not result['reopening_allowed']
         assert source.store.get('erase').deleted
+
+
+@pytest.mark.parametrize('fault,expected,count', [('task-partial', 'not_found', 0),
+                                                ('task-committed', 'completed', 1)])
+def test_L7b_W06_task_disconnect_owner_and_receipt_no_replay(harness, fault, expected, count):
+    from mcp.types import Implementation
+    h = harness
+    h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1', MEMORY_V4_WORK_STATE='1')
+    h.start(fault)
+    args = {'project': 'p', 'title': 'One synthetic durable task', 'request_id': 'cut',
+            'owner': {'client_id': 'model-must-not-override'}}
+    async def run():
+        async with stdio_client(h.params()) as (r,w), ClientSession(r,w,client_info=Implementation(name='synthetic-codex',version='1')) as session:
+            await session.initialize()
+            with anyio.fail_after(10):
+                result = await session.call_tool('memory_task_create', args)
+            assert result.isError
+            local = payload(await session.call_tool('memory_request_status', {}))
+            assert local['unresolved_count'] == 1
+        h.start()
+        async with stdio_client(h.params()) as (r,w), ClientSession(r,w) as session:
+            await session.initialize()
+            result = payload(await session.call_tool('memory_request_status', {'request_id': 'cut'}))
+            assert result['status'] == expected and result['replay_permitted'] is False
+            tasks = payload(await session.call_tool('memory_task_list', {'project': 'p'}))
+            assert tasks['count'] == count
+            if count:
+                assert tasks['tasks'][0]['owner']['client_id'] == 'synthetic-codex'
+                assert tasks['tasks'][0]['owner_authenticated'] is False
+    anyio.run(run)
 
 
 def test_C07_thirty_restart_rotation_cycles(harness):

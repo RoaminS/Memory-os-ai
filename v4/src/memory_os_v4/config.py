@@ -307,6 +307,7 @@ class Config:
     # back to the absolute `facet_weight` (bench reproduction only).
     facet_share: float | None = 0.30
     store_backend: str = "jsonl"  # "sqlite_s1" = experimental S2, fresh/S1 stores; not production
+    work_state: bool = False  # L7b candidate; SQLite and separate operator GO required.
     sqlite_embedding_namespace: str = "v1"  # Bump when local model weights/revision change.
 
     def half_life_days(self, kind: str) -> float:
@@ -337,6 +338,7 @@ class Config:
             maintenance_mode=_env_str("MEMORY_V4_MAINTENANCE_MODE", d.maintenance_mode),
             write_mode=_env_str("MEMORY_V4_WRITE_MODE", d.write_mode),
             store_backend=_env_str("MEMORY_V4_STORE_BACKEND", d.store_backend),
+            work_state=_env_bool("MEMORY_V4_WORK_STATE", d.work_state),
             sqlite_embedding_namespace=_env_str("MEMORY_V4_SQLITE_EMBEDDING_NAMESPACE", d.sqlite_embedding_namespace),
             embed_model=_env_str("MEMORY_V4_EMBED_MODEL", d.embed_model),
             device=_env_str("MEMORY_V4_DEVICE", d.device),

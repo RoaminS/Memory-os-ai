@@ -18,6 +18,8 @@ READS = {"memory_status", "memory_request_status", "memory_session_brief", "memo
 
 MUTATIONS = {"memory_chat_save", "memory_add_facts", "memory_block_set", "memory_forget",
              "memory_ingest", "memory_migrate_v3", "memory_consolidate", "memory_compact"}
+READS.update({'memory_task_get', 'memory_task_list', 'memory_task_preview'})
+MUTATIONS.update({'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'})
 
 
 def body(result):
@@ -178,6 +180,9 @@ class DurableRelay:
             if isinstance(checked_data, dict) and checked_data.get("code") == "invalid_arguments":
                 captured["code"] = "invalid_arguments"
                 raise RuntimeError("Mutation arguments invalid; nothing sent")
+            if isinstance(checked_data, dict) and checked_data.get('code') in {'backend_unsupported', 'capability_disabled'}:
+                captured['code'] = checked_data['code']
+                raise RuntimeError('Work-state capability unavailable; nothing sent')
             if isinstance(checked_data, dict) and checked_data.get("code") in {
                 "upstream_not_ready", "engine_not_ready", "engine_initializing"
             }:
@@ -230,6 +235,15 @@ class DurableRelay:
             try:
                 data = body(result)
             except (ValueError, RuntimeError):
+                if name in {'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'}:
+                    # A CAS refusal has a final receipt too. Resolve through a
+                    # read, never infer completion from an error or replay it.
+                    try:
+                        resolved = await self._status(session, row)
+                        if resolved.get('status') == 'completed':
+                            return response(resolved['result'])
+                    except Exception:
+                        pass  # preserve uncertainty if the receipt is unavailable
                 journal.append(row, "blocked")
                 return result
             captured["code"] = "completion_not_durable"
@@ -247,7 +261,7 @@ class DurableRelay:
                 if transport_code in {"authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
                     captured["code"] = transport_code
             if captured["code"] in {"preflight_unavailable", "upstream_not_ready", "legacy_unattested", "preflight_invalid",
-                                    "maintenance_window", "invalid_arguments", "authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
+                                    "maintenance_window", "invalid_arguments", "backend_unsupported", "capability_disabled", "authentication_rejected", "token_missing", "token_invalid", "identity_changed"}:
                 from .request_journal import scan
                 report = scan(journal.path.parent, exclude=journal.path)
                 prior = report["entries"] + list(journal.records.values())

@@ -35,6 +35,10 @@ def probe(root: Path, settings, recovery, *, guard=lambda: None):
     try:
         live = [MemoryItem.from_dict(json.loads(row[0])) for row in con.execute(
             "SELECT v.record_json FROM items i JOIN item_versions v ON v.item_id=i.id AND v.revision=i.current_revision WHERE COALESCE(json_extract(v.record_json,'$.deleted'),0)=0")]
+        task_count = con.execute('SELECT count(*) FROM task_current').fetchone()[0]
+        task_witnesses = [json.loads(row[0]) for row in con.execute(
+            'SELECT v.record_json FROM task_current c JOIN task_versions v ON c.task_id=v.task_id '
+            'AND c.revision=v.revision ORDER BY c.task_id LIMIT 3')]
     finally:
         con.close()
     with socket.socket() as sock:
@@ -47,6 +51,7 @@ def probe(root: Path, settings, recovery, *, guard=lambda: None):
     env = {**os.environ, 'MEMORY_V4_DIR': str(root), 'MEMORY_V4_TOKEN_FILE': str(token),
            'MEMORY_V4_URL': private.url,
            'MEMORY_V4_STORE_BACKEND': 'sqlite_s1', 'MEMORY_V4_EMBED_MODEL': model,
+           'MEMORY_V4_WORK_STATE': '1' if task_count else '0',  # diagnostic private copy only
            'MEMORY_V4_HASH_DIM': str(dim), 'MEMORY_V4_PROJECT': '*',
            'MEMORY_V4_WRITE_MODE': 'read_only', 'MEMORY_V4_MAINTENANCE_MODE': 'disabled',
            'MEMORY_V4_DEVICE': profile['device'] if profile.get('device') != 'hash' else 'auto',
@@ -100,12 +105,17 @@ def probe(root: Path, settings, recovery, *, guard=lambda: None):
                                       'store_instance_id': recovery['restored_from_instance_id']}, private)
                 if old.get('reason') != 'store_identity_missing_or_changed':
                     raise BackupError('Historical client identity was accepted unexpectedly')
+                for task in task_witnesses:
+                    value = await call_tool('memory_task_get', {'project': task['project'], 'task_id': task['task_id']}, private)
+                    if any(value.get(k) != v for k, v in task.items()):
+                        raise BackupError('Private restore task witness/history differs')
                 return status, witnesses
         status, witnesses = anyio.run(checks)
         authority_cut(settings.store_dir / 'store.sqlite3', recovery['reconciliation'], guard)
         return {'match': True, 'ready_status': 200, 'version': __version__, 'commit': commit,
                 'store_instance_id': recovery['store_instance_id'], 'expected_total': len(live),
                 'status_total': status['total'], 'corpus_reencodings': status['embedding_cache']['misses'],
+                'task_count': task_count, 'task_witnesses_verified': len(task_witnesses),
                 'witnesses': witnesses, 'duration_s': round(time.monotonic() - start, 3),
                 'production_modified': False, 'private_only': True}
     finally:

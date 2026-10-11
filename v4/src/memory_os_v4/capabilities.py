@@ -47,8 +47,8 @@ def deployed(engine, build: dict) -> dict:
             "expansion": True,
         },
         "client_relays": "unknown_to_server",
-        "work_state": False,
-        "block_cas": False,
+        "work_state": cfg.store_backend == 'sqlite_s1' and cfg.work_state,
+        "block_cas": cfg.store_backend == 'sqlite_s1' and cfg.work_state,
     }
 
 

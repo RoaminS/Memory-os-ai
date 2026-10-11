@@ -320,6 +320,9 @@ async def serve(settings: OpsSettings) -> None:
 
         @server.call_tool(validate_input=False)
         async def call_tool(name: str, arguments: dict):
+            if name in {'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'}:
+                arguments = task_owner_arguments(arguments, server.request_context.session.client_params.clientInfo,
+                                                 creation=name == 'memory_task_create')
             try:
                 res = await durable.call(name, arguments)
             except PreflightRefusal as exc:
@@ -343,6 +346,16 @@ async def serve(settings: OpsSettings) -> None:
 
 def main() -> None:
     anyio.run(serve, OpsSettings.from_env())
+
+
+def task_owner_arguments(arguments, client_info, *, creation=True):
+    """Downstream initialize data, never a model override or authentication claim."""
+    result = dict(arguments or {})
+    client = {'client_id': client_info.name[:200], 'client_version': client_info.version[:80]}
+    if creation:
+        result['owner'] = {**(result.get('owner') or {}), **client}
+    result['client_provenance'] = client
+    return result
 
 
 if __name__ == "__main__":

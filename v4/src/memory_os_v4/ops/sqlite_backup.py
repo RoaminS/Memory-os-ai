@@ -128,10 +128,10 @@ def _schema(con):
     return con.execute("SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").fetchall()
 
 
-def _expected_schema():
+def _expected_schema(version=SCHEMA_VERSION):
     con = sqlite3.connect(":memory:")
     try:
-        for migration in MIGRATIONS:
+        for migration in MIGRATIONS[:version]:
             for statement in migration:
                 con.execute(statement)
         return _schema(con)
@@ -152,12 +152,13 @@ def inventory(con, guard=lambda: None):
     are verified without ever opening SQLiteStore (which would be a writer).
     """
     guard()
+    version = con.execute('PRAGMA user_version').fetchone()[0]
     if (con.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
-            or con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION):
+            or version not in {5, SCHEMA_VERSION}):
         raise BackupError("Unknown/future SQLite schema")
-    if _schema(con) != _expected_schema():
+    if _schema(con) != _expected_schema(version):
         raise BackupError("Schema definitions differ from the attested migrations")
-    if con.execute("SELECT version,checksum FROM schema_migrations ORDER BY version").fetchall() != schema_checksums():
+    if con.execute("SELECT version,checksum FROM schema_migrations ORDER BY version").fetchall() != schema_checksums()[:version]:
         raise BackupError("Migration checksum mismatch")
     if con.execute("PRAGMA integrity_check").fetchall() != [("ok",)] or con.execute("PRAGMA foreign_key_check").fetchone():
         raise BackupError("SQLite structural integrity failed")
@@ -219,7 +220,14 @@ def inventory(con, guard=lambda: None):
             raise BackupError("Receipt identity/state inconsistent")
         if not isinstance(value.get("fingerprint"), str) or (value.get("explicit", True) and "result" not in value):
             raise BackupError("Receipt completion evidence missing")
-    return {"schema_version": SCHEMA_VERSION, "schema_sha256": hashlib.sha256(_json(_schema(con)).encode()).hexdigest(),
+    from types import SimpleNamespace
+    from ..work_state import check_integrity
+    try:
+        if version >= 6:
+            check_integrity(SimpleNamespace(_connection=con))
+    except ValueError as exc:
+        raise BackupError('Task authority integrity failed') from exc
+    return {"schema_version": version, "schema_sha256": hashlib.sha256(_json(_schema(con)).encode()).hexdigest(),
             "tables": tables, "store_instance_id": identity, "snapshot_receipt_sequence": counter,
             "encoding_profile": meta.get("embed_compute_profile"), "package_version": meta.get("version")}
 
