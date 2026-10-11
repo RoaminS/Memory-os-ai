@@ -40,7 +40,7 @@ export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src:$PWD/v4/src:$PWD/v4"
 export MEMORY_V4_CL100K_PATH=/Users/romain/.config/memory-os/cl100k_base.tiktoken
 unset MEMORY_V4_PROJECT_REGISTRY
 P405_PY="$PWD/.local-qualification/brief-test-runtime-claude-3c-v1/bin/python"
-P405_RELEASE=.local-qualification/release-4.0.5-v4
+P405_RELEASE=.local-qualification/release-4.0.5-v5
 "$P405_PY" -B scripts/qualify_405_test_isolation.py --suite full \
  --output .local-qualification/405-full-claude-v1
 "$P405_PY" -B scripts/qualify_404_increment3c.py --suite full \
@@ -49,7 +49,7 @@ P405_RELEASE=.local-qualification/release-4.0.5-v4
  --output .local-qualification/405-brief-exact-claude-v1
 ```
 
-Attendu :588v3,1658v4 (27TCP), zéro échec/skipped, configs MCP inchangées ;
+Attendu :602v3,1658v4 (27TCP), zéro échec/skipped, configs MCP inchangées ;
 400mesures exactes + enveloppe MCP. Nouveau TCP cold inclus ; W06 avant/après
 commit et owner clientInfo inclus. Unités locales ne sont jamais une preuve TCP.
 
@@ -99,9 +99,9 @@ Séquence suivante après succès des preuves exactes :
 "$P405_PY" -B scripts/qualify_release_copy.py \
  --manifest "$P405_RELEASE/manifest.json" --environments "$P405_RELEASE/environments.json" \
  --baseline-python /Users/romain/.memory-os-runtime/venv-4.0.4/bin/python \
- --output-root .local-qualification/copy-4.0.5-v1
+ --output-root .local-qualification/copy-4.0.5-v2
 "$P405_PY" -B scripts/verify_release_manifest.py "$P405_RELEASE/manifest.json" \
- --record-copy-proof .local-qualification/copy-4.0.5-v1/report.json
+ --record-copy-proof .local-qualification/copy-4.0.5-v2/report.json
 "$P405_PY" -B scripts/installed_relay_e2e.py \
  --manifest "$P405_RELEASE/manifest.json" --environments "$P405_RELEASE/environments.json" \
  --output "$P405_RELEASE/installed-relay-proof.json"
@@ -139,3 +139,52 @@ runtime sans remplacer les fichiers live par l'ancien snapshot. Si la copie ne
 passe pas, rester arrêté et réconcilier. Retour SQLite/tâches n'est pas ce parcours :
 exportrollback conserve les sidecars inactifs et exige son GO/runbook propre.
 Aucune promotion ou retour n'est exécuté par Codex. Aucune publication autorisée.
+
+## 5. Correctif de qualification baseline4.0.4 — reprise v5
+
+Le rapport copy-4.0.5-v1 refusé reste intact : son refus provenait de l'allowlist
+4.0.2/4.0.3 du lanceur, avant les comparaisons finales. Le correctif accepte
+explicitement 4.0.4, exige son UUID valide préexistant et le conserve dans les
+quatre copies ; aucun enrolment 4.0.4 ni baseline future accepté implicitement.
+Les gardes profil/reopen/rankings restent inchangées. Quatorze régressions ajoutées.
+
+Le sdist inclut scripts/tests : reconstruire était nécessaire. Les artefacts et
+le manifeste v4 sont donc conservés mais remplacés comme candidats par v5.
+Les fichiers moteur et tests v4 n'ont pas changé. Les preuves brief source/exact
+déjà vertes peuvent être référencées : le vérificateur exige leurs inventaires et
+empreintes v4 exacts. Les mesures S4/L7b restent historiques, valides pour ces
+sources inchangées ; ne pas les réétiqueter comme nouvelles mesures. En revanche,
+la preuve source v4 n'est pas transférable au nouveau source_commit/compteur v3 :
+**rejouer les étapes 7–8**, puis 9–13 dans les dossiers neufs ci-dessous.
+
+Après fin du tour Codex, sans autre modification de l'arbre :
+
+```sh
+export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src:$PWD/v4/src:$PWD/v4"
+export MEMORY_V4_CL100K_PATH=/Users/romain/.config/memory-os/cl100k_base.tiktoken
+unset MEMORY_V4_PROJECT_REGISTRY
+P405_PY="$PWD/.local-qualification/brief-test-runtime-claude-3c-v1/bin/python"
+P405_RELEASE=.local-qualification/release-4.0.5-v5
+"$P405_PY" -B scripts/verify_release_manifest.py "$P405_RELEASE/manifest.json" \
+ --record-brief-source .local-qualification/405-brief-source-claude-v1/report.json \
+ --record-brief-exact .local-qualification/405-brief-exact-claude-v1/report.json
+"$P405_PY" -B scripts/source_release_checks.py \
+ --manifest "$P405_RELEASE/manifest.json" --output "$P405_RELEASE/source-proof.json"
+"$P405_PY" -B scripts/verify_release_manifest.py "$P405_RELEASE/manifest.json" \
+ --record-source-proof "$P405_RELEASE/source-proof.json"
+"$P405_PY" -B scripts/qualify_release_copy.py \
+ --manifest "$P405_RELEASE/manifest.json" --environments "$P405_RELEASE/environments.json" \
+ --baseline-python /Users/romain/.memory-os-runtime/venv-4.0.4/bin/python \
+ --output-root .local-qualification/copy-4.0.5-v2
+"$P405_PY" -B scripts/verify_release_manifest.py "$P405_RELEASE/manifest.json" \
+ --record-copy-proof .local-qualification/copy-4.0.5-v2/report.json
+"$P405_PY" -B scripts/installed_relay_e2e.py \
+ --manifest "$P405_RELEASE/manifest.json" --environments "$P405_RELEASE/environments.json" \
+ --output "$P405_RELEASE/installed-relay-proof.json"
+"$P405_PY" -B scripts/verify_release_manifest.py "$P405_RELEASE/manifest.json" \
+ --record-relay-proof "$P405_RELEASE/installed-relay-proof.json"
+"$P405_PY" -B scripts/verify_release_manifest.py "$P405_RELEASE/manifest.json"
+```
+
+Arrêt au premier échec ; aucune suppression, reprise ou falsification des preuves
+v1/v4. Aucun job réel exécuté par Codex. Garde publication fermée jusqu'à la fin.

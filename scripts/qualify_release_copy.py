@@ -107,7 +107,7 @@ def run(command, cwd, env, log, timeout):
 
 
 def compare(reports, *, baseline_version="4.0.2"):
-    if baseline_version not in {"4.0.2", "4.0.3"}:
+    if baseline_version not in {"4.0.2", "4.0.3", "4.0.4"}:
         raise ValueError("Unqualified baseline")
     baseline = reports['baseline']
     candidates = [reports[k] for k in ('wheel', 'sdist', 'wheel-warm', 'sdist-warm')]
@@ -127,8 +127,12 @@ def compare(reports, *, baseline_version="4.0.2"):
     if any(reports[k]['startup_encoded_texts'] != 0 for k in ('wheel-warm', 'sdist-warm')):
         raise ValueError('Warm reopen reencoded corpus')
     identities = {}
-    if baseline_version == '4.0.3':
+    if baseline_version in {'4.0.3', '4.0.4'}:
         old_identity = baseline.get('store_instance_id')
+        # 4.0.3 may precede L3 enrolment; 4.0.4 already owns an identity.
+        if baseline_version == '4.0.4' and (
+                not isinstance(old_identity, str) or not re.fullmatch(r'[0-9a-f]{32}', old_identity)):
+            raise ValueError('L3 baseline identity missing or invalid')
         for kind in ('wheel', 'sdist'):
             identity = reports[kind].get('store_instance_id')
             if (not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{32}', identity)

@@ -77,6 +77,62 @@ def record():
             'search': {'query': {'ids': ['fact']}}}
 
 
+def identity_reports():
+    return {k: {**record(), 'store_instance_id': 'a' * 32}
+            for k in ('baseline', 'wheel', 'sdist', 'wheel-warm', 'sdist-warm')}
+
+
+def test_404_baseline_preserves_existing_identity_without_enrolment():
+    result = module.compare(identity_reports(), baseline_version='4.0.4')
+    assert result['baseline_version'] == '4.0.4'
+    assert result['search_identical_to_baseline']
+    assert result['store_instance_ids'] == {'wheel': 'a' * 32, 'sdist': 'a' * 32}
+    assert result['enrolment_created_on_private_copies'] is False
+    assert result['search_identical_to_402'] is None
+
+
+@pytest.mark.parametrize('identity', [None, '', 'invalid', 'A' * 32])
+def test_404_baseline_requires_attested_existing_identity(identity):
+    reports = identity_reports()
+    reports['baseline']['store_instance_id'] = identity
+    with pytest.raises(ValueError, match='L3 baseline identity'):
+        module.compare(reports, baseline_version='4.0.4')
+
+
+@pytest.mark.parametrize('kind', ['wheel', 'sdist', 'wheel-warm', 'sdist-warm'])
+def test_404_baseline_rejects_changed_identity_in_every_copy(kind):
+    reports = identity_reports()
+    reports[kind]['store_instance_id'] = 'b' * 32
+    with pytest.raises(ValueError, match='L3 identity'):
+        module.compare(reports, baseline_version='4.0.4')
+
+
+def test_404_baseline_keeps_compute_warm_and_ranking_gates():
+    reports = identity_reports()
+    reports['baseline']['encoding_profile']['batch_size'] = 1
+    with pytest.raises(ValueError, match='compute profile differs'):
+        module.compare(reports, baseline_version='4.0.4')
+    reports = identity_reports()
+    reports['sdist-warm']['startup_encoded_texts'] = 1
+    with pytest.raises(ValueError, match='reencoded'):
+        module.compare(reports, baseline_version='4.0.4')
+    reports = identity_reports()
+    reports['sdist']['search']['query']['ids'] = ['other']
+    with pytest.raises(ValueError, match='rankings differ'):
+        module.compare(reports, baseline_version='4.0.4')
+    reports = identity_reports()
+    reports['baseline']['search']['query']['ids'] = ['other']
+    result = module.compare(reports, baseline_version='4.0.4')
+    assert result['changed_queries'] == ['query']
+    assert result['search_identical_to_baseline'] is False
+
+
+@pytest.mark.parametrize('version', ['4.0.1', '4.0.5', '5.0.0', 'invalid'])
+def test_unqualified_future_or_old_baselines_remain_refused(version):
+    with pytest.raises(ValueError, match='Unqualified baseline'):
+        module.compare(identity_reports(), baseline_version=version)
+
+
 def test_search_change_is_explicit_and_does_not_qualify_silently():
     reports = {k: record() for k in ('baseline', 'wheel', 'sdist', 'wheel-warm', 'sdist-warm')}
     assert module.compare(reports)['search_identical_to_402']
