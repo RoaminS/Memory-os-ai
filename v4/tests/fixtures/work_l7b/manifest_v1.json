@@ -1,0 +1,15 @@
+{
+  "format": "l7b-scenarios-v1",
+  "sha256": "af31604abcac8979f951ca650c2e3eaa200c830c18f15c9b861bb7e0904ea0ff",
+  "count": 20,
+  "sealed_at": "2026-10-11T15:28:45.361975+00:00",
+  "author": "Claude",
+  "sealed_by": "Codex",
+  "implementation_started": false,
+  "source": "/private/tmp/l7b_scenarios_v1.jsonl",
+  "limitations": [
+    "W06 real disconnect and W07 operational restore require TCP/copy qualification; synthetic runners are not that evidence",
+    "L1b handoff budgets remain separately qualified"
+  ],
+  "immutable": true
+}
