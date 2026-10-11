@@ -1,12 +1,29 @@
 # Changelog
 
-## 4.0.4 — en préparation, non publiée / non déployée
+## 4.0.4 — candidate ALPHA (2026-10-11), non publiée / non déployée
 
-- Le relais MCP préserve `serverInfo.version` de l'amont au lieu d'annoncer
-  la version du SDK MCP ; tests d'initialisation et assertion TCP dynamique.
+- Verrou serveur de maintenance ; instructions clients alignées, opérations
+  destructrices interdites sans activation explicite par l'opérateur.
+- Journal durable du relais, statut local des requêtes incertaines même pendant
+  panne du catalogue, adoption read-only, rotation bornée sans purge d'incertains.
+  Aucun rejeu automatique ; limites de transactions JSONL explicites.
+- Rotation du jeton et reconnexion bornées, erreurs explicites, détection d'un
+  changement d'identité serveur ; `serverInfo.version` amont conservée.
+- Capacités déployées dans `/ready` et doctor ; observations client datées,
+  identité/profil/version contrôlés ; diagnostic distinct des preuves de connexion.
+- Brief compact par défaut : enveloppe entière ≤6000 octets / ≤1500 tokens
+  cl100k_base, validité/portée filtrées, références expansibles, detailed explicite.
+  Extra `[brief]` et table locale SHA-256 vérifiée requis, aucun téléchargement
+  implicite ; correction du runtime jetable incluant `tiktoken_ext`.
+- Registre canonique IDs/alias livré mais INACTIF selon Romain ; aucune fusion
+  automatique, aucune réécriture historique. Création de nouveaux projets à
+  fluidifier avant activation séparée.
+- C4, JSONL et profil auto→MPS/native/batch32/512 inchangés ; SQLite opt-in.
+- Compteurs/latences/budgets de qualification locaux ; aucune nouvelle campagne
+  ni prétention leaderboard. Qualification source, exact tokens, copie4.0.3→4.0.4,
+  et relais installés requise avant GO distincts de publication et bascule.
 - Diagnostic BEAM : annotations manquantes distinguées des IDs inexistants ;
   refus pour groupes indépendants insuffisants avant lecture des annotations.
-  Aucun seuil, score, paramètre C4 ou profil de production modifié.
 
 ## 4.0.3 — ALPHA (2026-10-10), non publiée / déployée localement
 

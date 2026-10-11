@@ -53,8 +53,8 @@ def main():
     root = Path(__file__).resolve().parents[1]
     directory = args.manifest.resolve().parent
     manifest = json.loads(args.manifest.read_text())
-    if manifest['version'] not in {'4.0.2', '4.0.3'}:
-        raise ValueError('This source qualification targets 4.0.2/4.0.3')
+    if manifest['version'] not in {'4.0.2', '4.0.3', '4.0.4'}:
+        raise ValueError('This source qualification targets 4.0.2/4.0.3/4.0.4')
     files = manifest['qualification_source_sha256']
     if any(digest(root / name) != sha for name, sha in files.items()):
         raise ValueError('Source files differ from qualified artifacts')
@@ -68,8 +68,17 @@ def main():
            'MEMORY_WORKSPACE': str(root), 'MEMORY_V4_BUILD_COMMIT': manifest['source_commit']}
     suites = [('source_tcp', ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py'], 10),
               ('cached_semantic', ['v4/tests/test_core_slow_integration.py'], 1)]
-    if manifest['version'] == '4.0.3':
+    if manifest['version'] in {'4.0.3', '4.0.4'}:
         suites.append(('v3_cached', ['tests'], manifest['source_expected_v3_tests']))
+    if manifest['version'] == '4.0.4':
+        suites[0] = ('source_tcp', [*suites[0][1], 'v4/tests/test_l3_tcp.py'], 20)
+        table = os.environ.get('MEMORY_V4_CL100K_PATH', '')
+        env = {k: v for k, v in env.items() if not k.startswith('MEMORY_V4_')}
+        env.update(MEMORY_V4_CL100K_PATH=table, MEMORY_V4_BUILD_COMMIT=manifest['source_commit'],
+                   MEMORY_V4_DIR=str(directory / 'unused-store'), MEMORY_V4_OPS_DIR=str(directory / 'ops'))
+        env.pop('PYTEST_ADDOPTS', None)
+    if args.output.exists():
+        raise ValueError('Fresh proof required; preserve earlier evidence')
     try:
         for name, paths, count in suites:
             xml = directory / (name + '.xml')
@@ -78,7 +87,7 @@ def main():
             command = ['/usr/bin/nice', '-n', '15', sys.executable, '-m', 'pytest', '-c', 'pyproject.toml',
                        '-q', '-p', 'no:cacheprovider', '--basetemp=' + str(directory / (name + '-tests')),
                        '--junitxml=' + str(xml), *paths]
-            with log_path.open('w') as log:
+            with log_path.open('x') as log:
                 process = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT,
                                            start_new_session=True)
                 try:

@@ -9,14 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--source-report", required=True, type=Path)
-    p.add_argument("--brief-report", required=True, type=Path)
-    a = p.parse_args()
-    source, brief = (
-        json.loads(path.read_text()) for path in (a.source_report, a.brief_report)
-    )
+def validate_reports(source, brief):
+    if not __debug__:
+        raise RuntimeError("Assertions required; do not use Python -O")
     assert (
         source["ok"] and source["tcp_qualified"] and source["l1a_transport_qualified"]
     )
@@ -52,6 +47,15 @@ def main():
         )
         for r in brief["cases"]
     )
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--source-report", required=True, type=Path)
+    p.add_argument("--brief-report", required=True, type=Path)
+    a = p.parse_args()
+    source, brief = (json.loads(path.read_text()) for path in (a.source_report, a.brief_report))
+    validate_reports(source, brief)
     print(
         json.dumps(
             {

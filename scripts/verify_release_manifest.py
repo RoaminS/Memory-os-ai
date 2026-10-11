@@ -29,11 +29,12 @@ def validate_source(proof, manifest):
             or not manifest.get('qualification_source_sha256')
             or proof.get('source_sha256') != manifest['qualification_source_sha256']):
         raise ValueError('preuve source TCP/modèle absente ou différente')
-    for name, count in [('source_tcp', 10), ('cached_semantic', 1)]:
+    tcp_count = 20 if manifest['version'] == '4.0.4' else 10
+    for name, count in [('source_tcp', tcp_count), ('cached_semantic', 1)]:
         result = proof.get('checks', {}).get(name, {})
         if result != {'passed': count, 'failed': 0, 'errors': 0, 'skipped': 0}:
             raise ValueError('suite source incomplète/ignorée/en échec : ' + name)
-    if manifest['version'] == '4.0.3':
+    if manifest['version'] in {'4.0.3', '4.0.4'}:
         count = manifest.get('source_expected_v3_tests')
         if (type(count) is not int or count < 1 or proof.get('checks', {}).get('v3_cached') !=
                 {'passed': count, 'failed': 0, 'errors': 0, 'skipped': 0}):
@@ -41,7 +42,8 @@ def validate_source(proof, manifest):
 
 
 def validate_copy(proof, manifest):
-    if (proof.get('ok') is not True or proof.get('version') != '4.0.3'
+    version = manifest.get('version', '4.0.3')
+    if (proof.get('ok') is not True or proof.get('version') != version
             or proof.get('source_commit') != manifest['source_commit']
             or proof.get('artifacts') != manifest['artifacts']
             or proof.get('production_modified') is not False
@@ -49,7 +51,10 @@ def validate_copy(proof, manifest):
             or proof.get('warm_encoded_texts') != 0 or proof.get('doctor', {}).get('ok') is not True
             or proof.get('scripts_sha256') != manifest.get('copy_scripts_sha256')):
         raise ValueError('preuve copie/profil/recherche/doctor absente, modifiée ou en échec')
-    if proof.get('search_identical_to_402') is not True:
+    if version == '4.0.4' and proof.get('baseline_version') != '4.0.3':
+        raise ValueError('baseline copie 4.0.3 requise')
+    identical = proof.get('search_identical_to_baseline') if version == '4.0.4' else proof.get('search_identical_to_402')
+    if identical is not True:
         review = proof.get('search_change_review', {})
         if (review.get('reviewer') != 'Claude' or review.get('accepted') is not True
                 or not isinstance(review.get('rationale'), str) or len(review['rationale'].strip()) < 80
@@ -64,7 +69,21 @@ def validate_copy(proof, manifest):
         raise ValueError('profil natif MPS non attesté')
 
 
-def validate_local(manifest, directory, *, require_source=True, require_copy=True):
+def validate_brief(proof, manifest):
+    from verify_404_increment3b import validate_reports
+    validate_reports(proof['source'], proof['brief'])
+    expected = manifest['qualification_source_sha256']
+    for name, prefixes in [('source', ('v4/src/', 'v4/tests/')), ('brief', ('v4/src/',))]:
+        report = proof[name]
+        paths = {p for p in expected if p.startswith(prefixes) and p.endswith('.py')}
+        if not paths or set(report['source_sha256']) != paths:
+            raise ValueError('inventaire source L1a incomplet')
+        for path, digest in report['source_sha256'].items():
+            if expected.get(path) != digest:
+                raise ValueError('preuve L1a provenant d’une autre source')
+
+
+def validate_local(manifest, directory, *, require_source=True, require_copy=True, require_brief=True):
     expected = expected_artifacts(manifest.get('version'))
     if not re.fullmatch(r'[0-9a-f]{40}', manifest.get('source_commit', '')):
         raise ValueError('identité version/source invalide')
@@ -80,20 +99,26 @@ def validate_local(manifest, directory, *, require_source=True, require_copy=Tru
         path = directory / 'artifacts' / artifact['name']
         if not path.is_file() or sha256(path) != artifact['sha256']:
             raise ValueError('artefact absent/modifié : ' + artifact['name'])
-    if manifest['version'] in {'4.0.2', '4.0.3'} and require_source:
-        required = ('source_tcp', 'cached_semantic', 'v3_cached') if manifest['version'] == '4.0.3' else ('source_tcp', 'cached_semantic')
+    if manifest['version'] in {'4.0.2', '4.0.3', '4.0.4'} and require_source:
+        required = ('source_tcp', 'cached_semantic', 'v3_cached') if manifest['version'] in {'4.0.3', '4.0.4'} else ('source_tcp', 'cached_semantic')
         if not all(checks.get(name) == 'passed' for name in required):
             raise ValueError('TCP source et test MiniLM cached encore en attente')
         path = directory / 'source-proof.json'
         if not path.is_file() or sha256(path) != manifest.get('source_proof_sha256'):
             raise ValueError('preuve source absente/modifiée')
         validate_source(json.loads(path.read_text()), manifest)
-    if manifest['version'] == '4.0.3' and require_copy:
+    if manifest['version'] in {'4.0.3', '4.0.4'} and require_copy:
         path = directory / 'copy-proof.json'
         if (checks.get('production_copy') != 'passed' or not path.is_file()
                 or sha256(path) != manifest.get('copy_proof_sha256')):
             raise ValueError('qualification sur copie/profil natif encore en attente')
         validate_copy(json.loads(path.read_text()), manifest)
+    if manifest['version'] == '4.0.4' and require_brief:
+        path = directory / 'brief-proof.json'
+        if (checks.get('brief_exact') != 'passed' or not path.is_file()
+                or sha256(path) != manifest.get('brief_proof_sha256')):
+            raise ValueError('qualification L1a TCP et 400 mesures exactes encore en attente')
+        validate_brief(json.loads(path.read_text()), manifest)
 
 
 def validate_relay(proof, manifest):
@@ -113,9 +138,16 @@ def validate_relay(proof, manifest):
                 or case.get('artifact_sha256') != artifact['sha256']
                 or not all(case.get(check) is True for check in CASE_CHECKS)):
             raise ValueError('cas installé incomplet/en échec ou autre artefact : ' + case['kind'])
+        if manifest['version'] == '4.0.4':
+            brief = case.get('brief', {})
+            if (case.get('local_status_during_outage') is not True or not brief.get('ok')
+                    or not 0 < brief.get('bytes', 0) <= 6000 or not 0 < brief.get('tokens', 0) <= 1500):
+                raise ValueError('preuve brief exact/statut local du relais installé absente')
 
 
 def main(argv=None) -> int:
+    if not __debug__:
+        raise RuntimeError('Assertions required; do not use Python -O')
     parser = argparse.ArgumentParser()
     parser.add_argument('manifest', type=Path)
     parser.add_argument('--record-relay-proof', type=Path,
@@ -124,14 +156,31 @@ def main(argv=None) -> int:
                         help='Enregistre TCP source et MiniLM cached concordants, sans lever la garde relais')
     parser.add_argument('--record-copy-proof', type=Path)
     parser.add_argument('--copy-review', type=Path, help='Revue Claude liée au SHA du rapport original si les classements changent')
+    parser.add_argument('--record-brief-source', type=Path)
+    parser.add_argument('--record-brief-exact', type=Path)
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(args.manifest.read_text())
+        if args.record_brief_source or args.record_brief_exact:
+            if (not args.record_brief_source or not args.record_brief_exact or manifest['version'] != '4.0.4'
+                    or args.record_source_proof or args.record_copy_proof or args.record_relay_proof):
+                raise ValueError('enregistrer les deux preuves L1a séparément')
+            validate_local(manifest, args.manifest.parent, require_source=False, require_copy=False, require_brief=False)
+            proof = {'source': json.loads(args.record_brief_source.read_text()),
+                     'brief': json.loads(args.record_brief_exact.read_text())}
+            validate_brief(proof, manifest)
+            destination = args.manifest.parent / 'brief-proof.json'
+            destination.write_text(json.dumps(proof, ensure_ascii=False, indent=2) + '\n')
+            manifest['checks']['brief_exact'] = 'passed'
+            manifest.update(brief_proof_sha256=sha256(destination), release_ready=False)
+            args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
+            print('Preuves L1a enregistrées ; aucune publication/bascule.')
+            return 0
         if args.copy_review and not args.record_copy_proof:
             raise ValueError('--copy-review nécessite --record-copy-proof')
         if args.record_copy_proof:
-            if args.record_source_proof or args.record_relay_proof or manifest['version'] != '4.0.3':
-                raise ValueError('enregistrer la preuve copie 4.0.3 séparément')
+            if args.record_source_proof or args.record_relay_proof or manifest['version'] not in {'4.0.3', '4.0.4'}:
+                raise ValueError('enregistrer la preuve copie 4.0.3/4.0.4 séparément')
             validate_local(manifest, args.manifest.parent, require_copy=False)
             proof = json.loads(args.record_copy_proof.read_text())
             if args.copy_review:
@@ -150,13 +199,13 @@ def main(argv=None) -> int:
         if args.record_source_proof:
             if args.record_relay_proof:
                 raise ValueError('enregistrer source et relais séparément')
-            validate_local(manifest, args.manifest.parent, require_source=False, require_copy=False)
+            validate_local(manifest, args.manifest.parent, require_source=False, require_copy=False, require_brief=False)
             proof = json.loads(args.record_source_proof.read_text())
             validate_source(proof, manifest)
             destination = args.manifest.parent / 'source-proof.json'
             destination.write_bytes(args.record_source_proof.read_bytes())
             manifest['checks'].update(source_tcp='passed', cached_semantic='passed')
-            if manifest['version'] == '4.0.3':
+            if manifest['version'] in {'4.0.3', '4.0.4'}:
                 manifest['checks']['v3_cached'] = 'passed'
             manifest.update(source_proof_sha256=sha256(destination), release_ready=False)
             args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
@@ -175,7 +224,7 @@ def main(argv=None) -> int:
             args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
         elif sha256(proof_path) != manifest.get('relay_proof_sha256'):
             raise ValueError('preuve relais modifiée depuis son acceptation')
-    except (ValueError, OSError, KeyError, TypeError, StopIteration) as exc:
+    except (ValueError, OSError, KeyError, TypeError, StopIteration, AssertionError) as exc:
         print('REFUS : ' + str(exc))
         return 1
     print('Preuves et empreintes concordantes ; aucune publication effectuée. Romain conserve le GO PyPI.')

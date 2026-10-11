@@ -1,4 +1,4 @@
-"""Guarded installed 4.0.3 qualification on stable read-only JSONL snapshot.
+"""Guarded installed 4.0.3/4.0.4 qualification on stable read-only JSONL snapshot.
 
 No live-store engine, service control, consolidation, download, publication or
 credentials read. A changing snapshot stops, never retries automatically.
@@ -92,7 +92,9 @@ def run(command, cwd, env, log, timeout):
             stop(child)
 
 
-def compare(reports):
+def compare(reports, *, baseline_version="4.0.2"):
+    if baseline_version not in {"4.0.2", "4.0.3"}:
+        raise ValueError("Unqualified baseline")
     baseline = reports['baseline']
     candidates = [reports[k] for k in ('wheel', 'sdist', 'wheel-warm', 'sdist-warm')]
     if any(r['total'] != baseline['total'] or not r['source_records_unchanged'] for r in candidates):
@@ -115,14 +117,15 @@ def compare(reports):
            for candidate in candidates[1:]):
         raise ValueError('Wheel/sdist/warm search rankings differ')
     changed = [q for q in reference if reference[q]['ids'] != baseline['search'][q]['ids']]
-    return {'search_identical_to_402': not changed, 'changed_queries': changed,
+    return {'search_identical_to_baseline': not changed, 'baseline_version': baseline_version,
+            'search_identical_to_402': not changed if baseline_version == '4.0.2' else None, 'changed_queries': changed,
             'rankings_identical_between_artifacts_and_reopen': True,
             'encoding_profile': p, 'warm_encoded_texts': 0,
             'explanation': None if not changed else
-            'Legacy vectors were unverified; 4.0.3 rebuilt all vectors with attested native/MPS/batch32. This does NOT prove quality equivalence. Reviewer explanation/GO required; publication guard stays closed.'}
+            'Rankings differ from the installed baseline. Inspect attested profiles and rebuild counts before providing a query-specific review; no automatic explanation or quality equivalence claim.'}
 
 
-def private_doctor(python, store, root, env, commit):
+def private_doctor(python, store, root, env, commit, version="4.0.3"):
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
@@ -157,7 +160,7 @@ def private_doctor(python, store, root, env, commit):
                     req = urllib.request.Request(f'http://127.0.0.1:{port}/ready', headers={'Authorization': 'Bearer ' + token})
                     with opener.open(req, timeout=1) as response:
                         ready = json.loads(response.read())
-                    if ready.get('ready') and ready.get('version') == '4.0.3' and ready.get('commit') == commit:
+                    if ready.get('ready') and ready.get('version') == version and ready.get('commit') == commit:
                         break
                 except (OSError, ValueError):
                     pass
@@ -177,7 +180,7 @@ def main(argv=None):
     parser.add_argument('--environments', type=Path, required=True)
     parser.add_argument('--output-root', type=Path, required=True)
     parser.add_argument('--source-dir', type=Path, default=Path.home() / '.memory-os-v4')
-    parser.add_argument('--baseline-python', type=Path, default=Path.home() / '.memory-os-runtime/venv-4.0.2/bin/python')
+    parser.add_argument('--baseline-python', type=Path, required=True)
     parser.add_argument('--production-plist', type=Path, default=Path.home() / 'Library/LaunchAgents/com.romain.memory-os-v4.plist')
     a = parser.parse_args(argv)
     clone = Path(__file__).resolve().parents[1]
@@ -185,8 +188,13 @@ def main(argv=None):
     if not root.is_relative_to(clone / '.local-qualification') or root.exists():
         raise ValueError('Fresh output strictly inside private clone required')
     manifest = json.loads(a.manifest.read_text())
-    if manifest['version'] != '4.0.3':
-        raise ValueError('Candidate version must be 4.0.3')
+    if manifest['version'] not in {'4.0.3', '4.0.4'}:
+        raise ValueError('Candidate version must be 4.0.3/4.0.4')
+    version = manifest['version']
+    baseline_version = '4.0.3' if version == '4.0.4' else '4.0.2'
+    if version == '4.0.4':
+        if 'MEMORY_V4_PROJECT_REGISTRY' in plistlib.loads(a.production_plist.read_bytes()).get('EnvironmentVariables', {}):
+            raise ValueError('Production registry must stay inactive for 4.0.4')
     from verify_release_manifest import validate_local
     validate_local(manifest, a.manifest.parent, require_source=False, require_copy=False)
     envs = json.loads(a.environments.read_text())
@@ -194,15 +202,23 @@ def main(argv=None):
     # Inherit compute/retrieval settings, never the live token/store/log/service.
     settings = {k: v for k, v in plist.get('EnvironmentVariables', {}).items()
                 if k.startswith(('MEMORY_V4_', 'PYTORCH_')) and k not in
-                {'MEMORY_V4_DIR', 'MEMORY_V4_TOKEN_FILE', 'MEMORY_V4_BUILD_COMMIT', 'MEMORY_V4_PROJECT', 'MEMORY_V4_URL', 'MEMORY_V4_SERVICE_LABEL'}}
+                {'MEMORY_V4_DIR', 'MEMORY_V4_TOKEN_FILE', 'MEMORY_V4_BUILD_COMMIT', 'MEMORY_V4_PROJECT', 'MEMORY_V4_URL', 'MEMORY_V4_SERVICE_LABEL', 'MEMORY_V4_CL100K_PATH'}}
     env = {k: v for k, v in os.environ.items() if not k.startswith(('MEMORY_', 'OPENAI_', 'ANTHROPIC_', 'PYTORCH_'))}
     env.update(settings, PYTHONPATH='', PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1',
                HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1', PYTHONHASHSEED='0',
                OMP_NUM_THREADS='1', TOKENIZERS_PARALLELISM='false', PYTORCH_ENABLE_MPS_FALLBACK='0')
+    if version == '4.0.4':
+        from memory_os_v4.brief_tokens import TABLE_SHA256
+        table = Path(os.environ.get('MEMORY_V4_CL100K_PATH', '')).resolve()
+        if not table.is_file() or digest(table) != TABLE_SHA256:
+            raise ValueError('Explicit qualified local cl100k table required')
+        env['MEMORY_V4_CL100K_PATH'] = str(table)
+        env['MEMORY_V4_EXPECT_SERVER_VERSION'] = version
+        env['MEMORY_V4_EXPECT_BACKEND'] = 'jsonl'
     resources(clone)
     root.mkdir(mode=0o700)
     (root / 'copy-owner.json').write_text(json.dumps({'source_commit': manifest['source_commit'], 'production_change': False}))
-    report = {'ok': False, 'version': '4.0.3', 'source_commit': manifest['source_commit'],
+    report = {'ok': False, 'version': version, 'baseline_version': baseline_version, 'source_commit': manifest['source_commit'],
               'artifacts': manifest['artifacts'], 'production_modified': False, 'reports': {},
               'scripts_sha256': {n: digest(Path(__file__).with_name(f)) for n, f in
                                 [('runner', 'qualify_release_copy.py'), ('worker', 'release_copy_worker.py')]}}
@@ -215,11 +231,11 @@ def main(argv=None):
         shutil.copyfile(Path(__file__).with_name('release_copy_worker.py'), root / 'worker.py')
         anchor = time.time()  # identical time for all private searches; no annotation
         for kind, version, python, store_kind in [
-            ('baseline', '4.0.2', a.baseline_python, 'baseline'),
-            ('wheel', '4.0.3', Path(envs['wheel_environment']) / 'bin/python', 'wheel'),
-            ('wheel-warm', '4.0.3', Path(envs['wheel_environment']) / 'bin/python', 'wheel'),
-            ('sdist', '4.0.3', Path(envs['sdist_environment']) / 'bin/python', 'sdist'),
-            ('sdist-warm', '4.0.3', Path(envs['sdist_environment']) / 'bin/python', 'sdist')]:
+            ('baseline', baseline_version, a.baseline_python, 'baseline'),
+            ('wheel', version, Path(envs['wheel_environment']) / 'bin/python', 'wheel'),
+            ('wheel-warm', version, Path(envs['wheel_environment']) / 'bin/python', 'wheel'),
+            ('sdist', version, Path(envs['sdist_environment']) / 'bin/python', 'sdist'),
+            ('sdist-warm', version, Path(envs['sdist_environment']) / 'bin/python', 'sdist')]:
             store = root / (store_kind + '-store')
             if not store.exists():
                 shutil.copytree(root / 'snapshot', store)
@@ -237,12 +253,12 @@ def main(argv=None):
             allowed = {'version', 'dim', 'embed_model', 'embed_compute_profile', 'bm25_profile'}
             if {k: v for k, v in old_meta.items() if k not in allowed} != {k: v for k, v in new_meta.items() if k not in allowed}:
                 raise RuntimeError('Non-cache metadata changed on copy')
-        report.update(compare(report['reports']))
-        report['doctor'] = private_doctor(Path(envs['wheel_environment']) / 'bin/python', root / 'wheel-store', root, env, manifest['source_commit'])
+        report.update(compare(report['reports'], baseline_version=baseline_version))
+        report['doctor'] = private_doctor(Path(envs['wheel_environment']) / 'bin/python', root / 'wheel-store', root, env, manifest['source_commit'], version)
         if inventory(root / 'snapshot') != original:
             raise RuntimeError('Read-only master snapshot changed')
         report['ok'] = report['doctor']['ok']
-        report['search_review_required'] = not report['search_identical_to_402']
+        report['search_review_required'] = not report['search_identical_to_baseline']
         if report['search_review_required']:
             report['warning'] = 'Changed legacy search rankings require explicit review; guard remains closed'
     except Exception as exc:

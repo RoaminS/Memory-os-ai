@@ -125,12 +125,26 @@ def main() -> int:
                                                             {'project': 'package-probe', 'query': first_text, 'top_k': 5})
                             assert not found.isError and first_id in {h['id'] for h in json.loads(found.content[0].text)['hits']}
                             report['roundtrip'] = True
+                            if args.version == '4.0.4':
+                                brief = await session.call_tool('memory_session_brief', {'project': 'package-probe'})
+                                from memory_os_v4.brief_tokens import counter
+                                wire = json.dumps(brief.model_dump(mode='json', by_alias=True, exclude_none=True), ensure_ascii=False, separators=(',', ':'))
+                                data = json.loads(brief.content[0].text)
+                                assert not brief.isError and data['mode'] == 'compact'
+                                assert first_id in {r['id'] for r in data['references']}
+                                report['brief'] = {'ok': True, 'bytes': len(wire.encode('utf-8')),
+                                                   'tokens': counter()(wire)}
+                                assert report['brief']['bytes'] <= 6000 and report['brief']['tokens'] <= 1500
                             await anyio.to_thread.run_sync(lambda: stop(holder['server'], abrupt=True))
                             with anyio.fail_after(30):
                                 down = await add(down_text)
                             assert down.isError and any(word in down.content[0].text.lower()
                                                         for word in ('uncertain', 'unreachable', 'unavailable'))
                             report['failure_reported'] = True
+                            if args.version == '4.0.4':
+                                local = await session.call_tool('memory_request_status', {})
+                                assert not local.isError and 'connection' in json.loads(local.content[0].text)
+                                report['local_status_during_outage'] = True
                             holder['server'] = await anyio.to_thread.run_sync(start)
                             with anyio.fail_after(30):
                                 after = await add(after_text)
