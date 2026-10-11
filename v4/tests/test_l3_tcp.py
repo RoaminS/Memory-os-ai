@@ -55,6 +55,8 @@ class Harness:
 import os,sys
 from memory_os_v4 import server
 fault = sys.argv[1]
+if fault == "identity":
+    server.server.version = "synthetic-changed"
 if fault == "partial":
     handler = server.TOOL_HANDLERS["memory_block_set"]
     def partial(e, args):
@@ -166,3 +168,47 @@ def test_C02_C04_C08_disconnect_and_new_relay_adopts_journal(harness, fault, exp
     anyio.run(second)
     versions = [json.loads(line) for line in (h.root / "store/blocks.jsonl").read_text().splitlines()]
     assert len(versions) == 1 and versions[0]["text"] == "ONCE"
+
+
+def test_L4_identity_changed_survives_outage_catalog(harness):
+    h = harness
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            h.stop()
+            h.rotate()
+            h.start("identity")
+            for _ in range(2):
+                with anyio.fail_after(5):
+                    result = await session.call_tool("memory_status", {})
+                    assert result.isError and "identity_changed" in result.content[0].text
+                    status = payload(await session.call_tool("memory_request_status", {}))
+                    assert status["connection"]["last_error"]["code"] == "identity_changed"
+                    assert status["connection"]["live_probe"] is False
+            assert not (h.root / "store/requests.jsonl").exists()
+    anyio.run(run)
+
+
+def test_L7a_registry_scopes_through_packaged_relay(harness):
+    h = harness
+    registry = h.root / "projects.json"
+    registry.write_text(json.dumps({"schema_version": 1, "projects": [
+        {"id": "prj_test", "aliases": ["legacy"]}, {"id": "prj_other", "aliases": []}]}))
+    registry.chmod(0o600)
+    h.env["MEMORY_V4_PROJECT_REGISTRY"] = str(registry)
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            args = {"name": "project_state", "text": "SCOPED", "project": "legacy", "request_id": "canonical"}
+            payload(await session.call_tool("memory_block_set", args))
+            assert payload(await session.call_tool("memory_block_get", {"project": "prj_test"}))["blocks"]["project_state"] == "SCOPED"
+            assert payload(await session.call_tool("memory_block_get", {"project": "prj_other"}))["blocks"]["project_state"] == ""
+            result = await session.call_tool("memory_block_set", {**args, "project": "unknown", "request_id": "rejected"})
+            assert result.isError
+            status = payload(await session.call_tool("memory_request_status", {"request_id": "canonical"}))
+            assert status["status"] == "completed"
+            inventory = payload(await session.call_tool("memory_request_status", {}))
+            assert json.loads(inventory["recent_completed"][0]["scope"]) == ["project", "prj_test"]
+    anyio.run(run)
