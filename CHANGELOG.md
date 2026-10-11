@@ -1,6 +1,18 @@
 # Changelog
 
-## 4.0.5 — correctifs en préparation, non publiée / non déployée
+## 4.0.5 — candidate ALPHA, non publiée / non déployée
+
+- L7b opt-in : liste filtrée et paginée par index SQL au schéma7, curseur lié
+  à l’identité/projet/filtres/cut et instant de classification stale figé.
+  Cible list50 p95 <30 ms à10k ; mesure synthétique locale0,36 ms, confirmation
+  physique requise. Historique de tâches immuable, projection reconstruisible.
+- Démarrage SQLite+L7b sans modèle : CRUD/CAS/brief/reprise restent accessibles,
+  recherche chargée/attestée seulement au premier appel explicite. Ready annonce
+  ready_work_only/retrieval_ready=false tant que le modèle n’est pas chargé,
+  profil historique jamais présenté comme un modèle courant attesté. Échec de
+  recherche explicite sans désactiver les tâches. JSONL par défaut inchangé.
+- /ready expose capabilities.policies.write_mode (read_write/read_only).
+  La provenance clientInfo du relais reste déclarative, sans ACL individuelle.
 
 - Préflight du relais : panne/initialisation distinctes d'un contrat ancien,
   résultat « cette mutation non envoyée », reprise manuelle seulement et aucun
@@ -18,8 +30,8 @@
   transitions explicites et CAS de blocs/tâches, ETags liés au magasin/projet,
   provenance relayée déclarative, tâches stale et propositions todo sans import
   automatique. Backend SQLite ET drapeau work_state requis ; défauts inchangés.
-  585 v3 +1622 v4 unitaires passent, entrées MCP inchangées ; TCP/10k et démarrage
-  L7b sans modèle restent à qualifier avant activation. Voir
+  585 v3 +1622 v4 unitaires passent, entrées MCP inchangées ; TCP/10k restent à qualifier pour cette candidate avant activation ;
+  démarrage sans modèle désormais testé avec interdiction de construction d’encodeur. Voir
   `v4/docs/P1_S4_L7B_INCREMENT_v1.md`. Aucun déploiement ni publication.
 - SQLite S4 incrément2, candidate non qualifiée pour activation : fenêtre serveur read_only,
   sauvegarde en ligne par API SQLite, inventaire exhaustif et archive chiffrée,

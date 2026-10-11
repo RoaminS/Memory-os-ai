@@ -67,13 +67,13 @@ def main() -> None:
     for module in ("memory_os_ai", "memory_os_v4", "memory_os_v4.ops"):
         imported = __import__(module, fromlist=["__file__"])
         assert package_root in Path(imported.__file__).resolve().parents, imported.__file__
-        if args.version in {"4.0.3", "4.0.4"} and module != "memory_os_v4.ops":
+        if args.version in {"4.0.3", "4.0.4", "4.0.5"} and module != "memory_os_v4.ops":
             assert imported.__version__ == args.version, (module, imported.__version__)
     docs = Path(sys.executable).parent.parent / "share/doc/memory-os-ai"
     for document in ("AGENTS.md", "CLAUDE.md", "CHANGELOG.md", f"v{args.version}.md", "v4/OPERATIONS.md",
                      "v4/A6_REVIEW_966eca5.md"):
         assert (docs / document).is_file(), document
-    if args.version == '4.0.4':
+    if args.version in {'4.0.4', '4.0.5'}:
         schema = json.loads((docs / 'v4/contracts/l3-l4-v1.schema.json').read_text())
         assert '$schema' in schema
     for name in ("memory-os-ai", "memory-os-v4", "memory-os-ai-v3"):
@@ -103,13 +103,13 @@ def main() -> None:
         setup = subprocess.run([str(admin), "setup", "--write-launchd", str(root / "plists")],
                                env=env, check=True, capture_output=True, text=True, timeout=10)
         assert token not in setup.stdout + setup.stderr and len(list((root / "plists").glob("*.plist"))) == 3
-        if args.version in {'4.0.2', '4.0.3', '4.0.4'}:
+        if args.version in {'4.0.2', '4.0.3', '4.0.4', '4.0.5'}:
             from memory_os_v4 import Config
             assert Config().bm25_profile == 'scoped_literal' and Config().lexical_guard_k == 3
             assert Config().store_backend == 'jsonl'
-            if args.version in {'4.0.3', '4.0.4'}:
+            if args.version in {'4.0.3', '4.0.4', '4.0.5'}:
                 assert (Config().device, Config().embed_dtype, Config().embed_batch_size) == ('auto', 'native', 32)
-            if args.version == '4.0.4':
+            if args.version in {'4.0.4', '4.0.5'}:
                 assert Config().project_registry is None
                 from memory_os_v4.brief_tokens import counter, status
                 assert status()['ready'] and counter()('hello world') == 2

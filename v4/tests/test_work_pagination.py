@@ -101,3 +101,31 @@ def test_projection_rollback_is_atomic(engine):
     assert engine.store._connection.execute('SELECT * FROM task_lookup').fetchall() == before
     assert engine.store._connection.execute('SELECT count(*) FROM task_versions').fetchone()[0] == 1
     assert _json(before)  # fixture remains inspectable
+
+
+def test_known_schema6_copy_upgrades_lookup_without_changing_task_authority(tmp_path):
+    import sqlite3
+    from memory_os_v4.sqlite_store import SQLiteStore
+    path = tmp_path / 'schema6'
+    with MemoryV4(config=Config(data_dir=str(path), store_backend='sqlite_s1', embed_model='hash',
+                               hash_dim=16, work_state=True)) as value:
+        from memory_os_v4 import server
+        from unittest.mock import patch
+        with patch.object(server, '_engine', value):
+            assert server.dispatch('memory_task_create', {'project': 'p', 'title': 'Survives upgrade', 'request_id': 'one'})['ok']
+        authority = value.store._connection.execute('SELECT * FROM task_versions').fetchall()
+    con = sqlite3.connect(path / 'store.sqlite3')
+    con.execute('DROP TRIGGER task_lookup_insert')
+    con.execute('DROP TRIGGER task_lookup_update')
+    con.execute('DROP TABLE task_lookup')
+    con.execute('DROP INDEX task_versions_cut')
+    con.execute('DELETE FROM schema_migrations WHERE version=7')
+    con.execute('PRAGMA user_version=6')
+    con.commit()
+    con.close()
+    from contextlib import closing
+    with closing(SQLiteStore(path)) as store:
+        assert store._connection.execute('PRAGMA user_version').fetchone()[0] == 7
+        assert store._connection.execute('SELECT * FROM task_versions').fetchall() == authority
+        assert store._connection.execute('SELECT count(*) FROM task_lookup').fetchone()[0] == 1
+        assert store.check_integrity()

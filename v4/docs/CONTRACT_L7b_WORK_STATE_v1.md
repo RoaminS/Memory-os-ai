@@ -161,3 +161,23 @@ serveur complet charge encore l'encodeur configuré. L'exigence « sans modèle 
 n'est pas intégralement qualifiée au démarrage et reste bloquante pour activation
 L7b. TCP, mesures10k, reprise industrielle et handoffs clients restent des portes
 séparées. Les signatures du contrat et les seuils ne sont pas modifiés.
+
+## 8. Candidate4.0.5 : pagination SQL et indépendance du modèle
+
+Au schéma7, `task_lookup` est une projection déterministe/reconstruisible des
+heads immuables ; migrations connues5/6 sur copies, aucun rewrite des versions.
+Les triggers maintiennent projection/head dans la transaction du reçu. Liste :
+filtre/index/range/order/limit SQL, fusion bornée des branches alias/statut,
+curseur keyset lié au cut immutable du projet et instant stale figé (expiration24h).
+La cible list50 est désormais p95<30ms à10k, avant nouvelle mesure.
+
+SQLite+work_state activé avec modèle neural ouvre désormais l'autorité sans
+construire/charger/résoudre l'encodeur. CRUD/liste/CAS/brief/statut L3 fonctionnent
+à froid ; ready_work_only indique explicitement retrieval_ready=false et
+encoding.loaded=false, profil historique distinct du profil actuellement attesté.
+Une recherche/ingestion explicite initialise le vrai modèle et reconstruit les
+index avec attestation avant usage ; indisponibilité explicite laisse les tâches
+utilisables. Les mutations cold préservent les métadonnées d'encodage/cache.
+La limite froide de§7 est corrigée en code et tests synthétiques ; son TCP réel
+reste à qualifier. JSONL et work_state=false gardent l'ancien démarrage.
+Voir QUALIFY_4_0_5.md ; activation demeure soumise au GO SQLite/L7b distinct.

@@ -186,7 +186,7 @@ def private_doctor(python, store, root, env, commit, version="4.0.3"):
                     with opener.open(req, timeout=1) as response:
                         ready = json.loads(response.read())
                     if ready.get('ready') and ready.get('version') == version and ready.get('commit') == commit:
-                        if version == '4.0.4':
+                        if version in {'4.0.4', '4.0.5'}:
                             caps = ready['capabilities']
                             if (caps['projects']['registry_enabled'] is not False
                                     or caps['store']['backend'] != 'jsonl'
@@ -221,13 +221,17 @@ def main(argv=None):
     if not root.is_relative_to(clone / '.local-qualification') or root.exists():
         raise ValueError('Fresh output strictly inside private clone required')
     manifest = json.loads(a.manifest.read_text())
-    if manifest['version'] not in {'4.0.3', '4.0.4'}:
-        raise ValueError('Candidate version must be 4.0.3/4.0.4')
+    if manifest['version'] not in {'4.0.3', '4.0.4', '4.0.5'}:
+        raise ValueError('Candidate version must be 4.0.3/4.0.4/4.0.5')
     version = manifest['version']
-    baseline_version = '4.0.3' if version == '4.0.4' else '4.0.2'
-    if version == '4.0.4':
+    baseline_version = {'4.0.3': '4.0.2', '4.0.4': '4.0.3', '4.0.5': '4.0.4'}[version]
+    if version in {'4.0.4', '4.0.5'}:
         if 'MEMORY_V4_PROJECT_REGISTRY' in plistlib.loads(a.production_plist.read_bytes()).get('EnvironmentVariables', {}):
             raise ValueError('Production registry must stay inactive for 4.0.4')
+    if version == '4.0.5':
+        values = plistlib.loads(a.production_plist.read_bytes()).get('EnvironmentVariables', {})
+        if values.get('MEMORY_V4_STORE_BACKEND', 'jsonl') != 'jsonl' or values.get('MEMORY_V4_WORK_STATE', '0').lower() not in {'0', 'false', 'off', 'no'}:
+            raise ValueError('4.0.5 release copy must preserve JSONL and inactive tasks')
     from verify_release_manifest import validate_local
     validate_local(manifest, a.manifest.parent, require_source=False, require_copy=False)
     envs = json.loads(a.environments.read_text())
@@ -240,7 +244,7 @@ def main(argv=None):
     env.update(settings, PYTHONPATH='', PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1',
                HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1', PYTHONHASHSEED='0',
                OMP_NUM_THREADS='1', TOKENIZERS_PARALLELISM='false', PYTORCH_ENABLE_MPS_FALLBACK='0')
-    if version == '4.0.4':
+    if version in {'4.0.4', '4.0.5'}:
         from memory_os_v4.brief_tokens import TABLE_SHA256
         table = Path(os.environ.get('MEMORY_V4_CL100K_PATH', '')).resolve()
         if not table.is_file() or digest(table) != TABLE_SHA256:
