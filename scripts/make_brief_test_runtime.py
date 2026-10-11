@@ -8,6 +8,18 @@ import sys
 import venv
 
 
+def create_runtime(output, base, tiktoken_site):
+    sources = [tiktoken_site / name for name in
+               ("tiktoken", "tiktoken_ext", "tiktoken-0.12.0.dist-info")]
+    if not base.is_dir() or not all(p.is_dir() for p in sources):
+        raise ValueError("preinstalled qualified base or complete tiktoken 0.12.0 missing; no download fallback")
+    venv.EnvBuilder(with_pip=False).create(output)
+    site = next((output / "lib").glob("python*/site-packages"))
+    (site / "qualified-base.pth").write_text(str(base) + "\n")
+    for source in sources:
+        (site / source.name).symlink_to(source.resolve(), target_is_directory=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, type=Path)
@@ -35,19 +47,10 @@ def main():
     if shutil.disk_usage(root).free < 5_000_000_000:
         parser.error("disk guard < 5 GB")
     base = args.base_site.resolve()
-    sources = [
-        args.tiktoken_site / "tiktoken",
-        args.tiktoken_site / "tiktoken-0.12.0.dist-info",
-    ]
-    if not base.is_dir() or not all(p.is_dir() for p in sources):
-        parser.error(
-            "preinstalled qualified base or tiktoken 0.12.0 missing; no download fallback"
-        )
-    venv.EnvBuilder(with_pip=False).create(output)
-    site = output / "lib/python3.11/site-packages"
-    (site / "qualified-base.pth").write_text(str(base) + "\n")
-    for source in sources:
-        (site / source.name).symlink_to(source.resolve(), target_is_directory=True)
+    try:
+        create_runtime(output, base, args.tiktoken_site.resolve())
+    except ValueError as exc:
+        parser.error(str(exc))
     print(output / "bin/python")
 
 
