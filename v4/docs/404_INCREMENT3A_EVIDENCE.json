@@ -1,0 +1,89 @@
+{
+  "base": "3450bce",
+  "source_commit": "228d726",
+  "branch": "feat/404-increment-3a",
+  "unit": {
+    "tests": 1273,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "tcp_cases": 0
+  },
+  "ok": true,
+  "tcp_qualified": false,
+  "production_modified": false,
+  "neural_inference": false,
+  "l5_implemented": false,
+  "l1a_implemented": false,
+  "proof_directory": ".local-qualification/404-increment3a-unit-final-v2",
+  "evidence_sha256": {
+    "baseline.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lint-project.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "lint-v4.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "pytest.log": "6a2d1abddb03250e9a270fb7d4ee785cb0c1dfa16d959e3a5bee6444ef2033d6",
+    "pytest.xml": "2ba836a9c6f60aa0816fe1e6a975d109522da69082e957cc50710add27b5d8c5",
+    "report.json": "a2993efb7cb22234d3ccd39adc12ea0f4f03107a43791a16ef22c05913db194a"
+  },
+  "commands": [
+    {
+      "label": "pytest",
+      "argv": [
+        "/Users/romain/Memory-os-ai/.venv/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "-m",
+        "not slow",
+        "-p",
+        "no:cacheprovider",
+        "--basetemp",
+        "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/404-increment3a-unit-final-v2/pytest-tmp",
+        "--junitxml",
+        "/Users/romain/Documents/Codex/2026-10-09/v/work/implementation/.local-qualification/404-increment3a-unit-final-v2/pytest.xml",
+        "v4/tests",
+        "--ignore=v4/tests/test_server_http_e2e.py",
+        "--ignore=v4/tests/test_ops_e2e.py",
+        "--ignore=v4/tests/test_l3_tcp.py"
+      ],
+      "returncode": 0,
+      "seconds": 40.766775416675955
+    },
+    {
+      "label": "lint-project",
+      "argv": [
+        "ruff",
+        "check",
+        "--no-cache",
+        "--config",
+        "pyproject.toml",
+        "src",
+        "tests",
+        "scripts"
+      ],
+      "returncode": 0,
+      "seconds": 0.07731937523931265
+    },
+    {
+      "label": "lint-v4",
+      "argv": [
+        "ruff",
+        "check",
+        "--no-cache",
+        "--config",
+        "pyproject.toml",
+        "src",
+        "tests",
+        "v4/src",
+        "v4/tests",
+        "v4/bench",
+        "scripts",
+        "--select",
+        "E9,F"
+      ],
+      "returncode": 0,
+      "seconds": 0.03824070794507861
+    }
+  ],
+  "swap_guard": "unavailable_in_sandbox",
+  "tcp_required": 18
+}
