@@ -16,7 +16,7 @@ from memory_os_v4.writer_lock import WriterConflictError
 
 
 def _engine(path):
-    return MemoryV4(config=Config(data_dir=str(path), embed_model="hash"))
+    return MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(path), embed_model="hash"))
 
 
 def _child(path, hold=False):
@@ -26,7 +26,7 @@ import sys
 from memory_os_v4.config import Config
 from memory_os_v4.memory import MemoryV4
 try:
-    with MemoryV4(config=Config(data_dir=sys.argv[1], embed_model='hash')):
+    with MemoryV4(config=Config(maintenance_mode="apply", data_dir=sys.argv[1], embed_model='hash')):
         print('acquired', flush=True)
         if sys.argv[2] == 'hold':
             input()
@@ -104,6 +104,7 @@ def test_close_releases_lease_even_when_flush_fails(tmp_path, monkeypatch):
 def bound_engine(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     monkeypatch.setattr(server, "get_engine", lambda: engine)
+    monkeypatch.setattr(server, "_engine", engine)
     monkeypatch.setenv("MEMORY_V4_PROJECT", "alpha")
     yield engine
     engine.close()

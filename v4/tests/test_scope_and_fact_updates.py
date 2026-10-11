@@ -13,7 +13,7 @@ from memory_os_v4.temporal import is_valid_at
 
 def mem(tmp_path):
     # Deliberately permissive cosine thresholds expose destructive similarity rules.
-    return MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash", dedup_cos=0.0, supersede_cos=0.0))
+    return MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(tmp_path), embed_model="hash", dedup_cos=0.0, supersede_cos=0.0))
 
 
 def identity(subject="person:alice", predicate="residence", cardinality="single"):
@@ -34,7 +34,7 @@ def test_identical_and_near_facts_are_not_deduped_across_projects(tmp_path):
     assert second["deduped"] == third["deduped"] == []
     assert {h.item.project for h in m.search("Acme", project="A")} == {"A"}
     assert {h.item.project for h in m.search("Acme")} == {"A", "B", "C"}
-    assert m.consolidate()["deduped"] == 0
+    assert m.consolidate(dry_run=False)["deduped"] == 0
 
 
 def test_scoped_consolidation_brief_stats_and_forget_leave_b_unchanged(tmp_path):
@@ -45,7 +45,7 @@ def test_scoped_consolidation_brief_stats_and_forget_leave_b_unchanged(tmp_path)
     m.blocks.set("project_state", "B secret block", project="B")
     before = b.to_dict()
     stats = m.status(project="B")
-    m.consolidate(project="A")
+    m.consolidate(dry_run=False, project="A")
     assert m.store.get(a.id).importance == .1
     assert b.to_dict() == before
     assert m.status(project="B") == stats
@@ -62,8 +62,8 @@ def test_scoped_consolidation_cannot_supersede_matching_identity_in_b(tmp_path):
     m = mem(tmp_path)
     _, b = fact(m, "Alice lives in Paris.", 10, project="B", identity=identity())
     _, a = fact(m, "Alice lives in Lyon.", 20, identity=identity())
-    assert m.consolidate(project="A")["superseded"] == 0
-    assert m.consolidate()["superseded"] == 0
+    assert m.consolidate(dry_run=False, project="A")["superseded"] == 0
+    assert m.consolidate(dry_run=False)["superseded"] == 0
     assert b.valid_until is a.valid_until is None
 
 
@@ -95,8 +95,8 @@ def test_complementary_values_negation_and_order_survive_similarity(tmp_path):
     for i, text in enumerate(texts):
         r, _ = fact(m, text, i + 1)
         assert r["added"] and not r["superseded"] and not r["deduped"]
-    assert m.consolidate()["deduped"] == 0
-    assert m.consolidate()["superseded"] == 0
+    assert m.consolidate(dry_run=False)["deduped"] == 0
+    assert m.consolidate(dry_run=False)["superseded"] == 0
     assert m.status()["total"] == len(texts)
 
 
@@ -108,7 +108,7 @@ def test_homonyms_and_multivalued_identity_survive_text_dedup(tmp_path):
     for i, place in enumerate(("Paris", "Lyon")):
         r, _ = fact(m, f"Alice visits {place}.", 20+i, identity=identity(predicate="visits", cardinality="multi"))
         assert r["added"] and not r["superseded"]
-    assert m.consolidate()["deduped"] == 0
+    assert m.consolidate(dry_run=False)["deduped"] == 0
     assert m.status()["total"] == 4
 
 
@@ -123,9 +123,9 @@ def test_explicit_replacement_closes_at_valid_from_and_reverts(tmp_path):
     for t, expected in ((100, a), (150, b), (249, b), (250, c)):
         hits = m.search("Alice lives", project="A", at_time=t, kinds=["fact"])
         assert [h.item.id for h in hits] == [expected.id]
-    assert m.consolidate()["deduped"] == 0
+    assert m.consolidate(dry_run=False)["deduped"] == 0
     assert {it.id for it in m.store.all(False)} == {a.id, b.id, c.id}
-    assert m.consolidate()["superseded"] == 0
+    assert m.consolidate(dry_run=False)["superseded"] == 0
 
 
 def test_identity_timeline_handles_historical_insertion_and_revert(tmp_path):
@@ -142,7 +142,7 @@ def test_identity_timeline_handles_historical_insertion_and_revert(tmp_path):
     m.close()
     reloaded = mem(tmp_path)
     assert reloaded.store.get(a.id).identity == identity()
-    assert reloaded.consolidate()["deduped"] == 0
+    assert reloaded.consolidate(dry_run=False)["deduped"] == 0
 
 
 def test_replacement_rejects_cross_project_and_equal_validity_without_mutation(tmp_path):
@@ -194,7 +194,7 @@ def test_consolidation_preserves_separate_bounded_assertions(tmp_path):
     before = (tmp_path / "items.jsonl").read_bytes()
     assert m.consolidate(dry_run=True)["deduped"] == 0
     assert (tmp_path / "items.jsonl").read_bytes() == before
-    assert m.consolidate()["deduped"] == 0
+    assert m.consolidate(dry_run=False)["deduped"] == 0
     assert is_valid_at(a, 150) and not is_valid_at(b, 150)
     assert is_valid_at(b, 350) and not is_valid_at(a, 350)
 
@@ -208,7 +208,7 @@ def test_scoped_consolidation_dedup_drops_vectors_and_history_is_retained(tmp_pa
         {"text": "Alice works at Acme!", "project": "B", "event_time": 200, "entities": ["Alice"]},
     ], kind="fact")
     m._index_items(items)
-    assert m.consolidate(project="A")["deduped"] == 1
+    assert m.consolidate(dry_run=False, project="A")["deduped"] == 1
     assert m.status(project="A")["total"] == m.status(project="A")["vector_count"] == 1
     assert m.status(project="B")["total"] == m.status(project="B")["vector_count"] == 1
     assert len(m.store.all()) == 3  # soft deletion preserves the log.
@@ -242,5 +242,5 @@ def test_assertion_dedup_preserves_negation_and_numeric_values(tmp_path, positiv
     second, _ = fact(m, changed, 200)
     assert first["added"] and second["added"]
     assert second["deduped"] == second["superseded"] == []
-    assert m.consolidate()["deduped"] == 0
+    assert m.consolidate(dry_run=False)["deduped"] == 0
     assert m.status()["total"] == 2

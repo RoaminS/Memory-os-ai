@@ -29,6 +29,7 @@ from .fact_updates import (
 )
 from .llm import LLMClient
 from .idempotency import RequestJournal, sync_sources
+from .maintenance import MaintenancePolicy
 from .writer_lock import WriterLock
 from .migrate import read_v3_log
 from .retrieval import HybridRetriever, SearchHit, mmr
@@ -112,6 +113,7 @@ class MemoryV4:
         self._lock = RLock()
 
         self.config.validate_lexical_policy()
+        self._maintenance_policy = MaintenancePolicy(self.config.maintenance_mode)
         self.data_dir = Path(self.config.data_dir).expanduser()
         if self.config.store_backend not in {"jsonl", "sqlite_s1"}:
             raise ValueError("Unknown store backend; choose jsonl or experimental sqlite_s1")
@@ -210,6 +212,12 @@ class MemoryV4:
         """Serialize the whole MCP handler, including direct block/store access."""
         with self._lock:
             self._ensure_open()
+            if operation in {"memory_consolidate", "memory_compact"}:
+                dry_run = payload.get("dry_run", True)
+                self.require_maintenance(dry_run)
+                if dry_run:
+                    # Preview is read-only: no pending/completed receipt or SQLite transaction.
+                    return action()
             if self.config.store_backend == "sqlite_s1":
                 return self._sql_mutation(operation, payload, action, scope=scope, request_id=request_id)
             if request_id is None:
@@ -964,8 +972,20 @@ class MemoryV4:
 
     # ------------------------------------------------------------ upkeep
     @_requires_open
-    @_atomic_mutation
-    def consolidate(self, dry_run: bool = False, project: str | None = None) -> dict:
+    def consolidate(self, dry_run: bool = True, project: str | None = None) -> dict:
+        self.require_maintenance(dry_run)
+        if dry_run or self.config.store_backend != "sqlite_s1":
+            return self._consolidate(dry_run, project)
+        return self._sql_mutation("consolidate", {"dry_run": False, "project": project},
+                                  lambda: self._consolidate(False, project))
+
+    def require_maintenance(self, dry_run: bool) -> None:
+        self._maintenance_policy.require(dry_run)
+
+    def maintenance_status(self) -> dict:
+        return self._maintenance_policy.status()
+
+    def _consolidate(self, dry_run: bool, project: str | None) -> dict:
         with self._lock:
             deduped = consolidate_mod.dedup_sweep(
                 self.store, self.vector_index, self.config, dry_run, project=project)

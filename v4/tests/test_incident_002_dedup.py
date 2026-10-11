@@ -10,7 +10,7 @@ HOOK = "On 2026-10-09 Claude configured the Claude Code hook for memory-os-ai."
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
-    with MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash",
+    with MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(tmp_path), embed_model="hash",
                               dedup_cos=0.0, supersede_cos=0.0)) as m:
         # Even cosine=1 cannot prove equality. Avoid expensive Granite dependency.
         vector = np.zeros(m.embedder.dim, dtype=np.float32)
@@ -25,7 +25,7 @@ def test_relay_and_hook_both_persist_at_write_and_consolidation(engine, kind):
         result = engine.add_facts([{"text": text, "kind": kind, "entities": ["Claude"]}],
                                   project="INC-002", event_time=100)
         assert len(result["added"]) == 1 and result["deduped"] == result["superseded"] == []
-    assert engine.consolidate(project="INC-002")["deduped"] == 0
+    assert engine.consolidate(dry_run=False, project="INC-002")["deduped"] == 0
     assert {r.text for r in engine.store.all(False)} == {RELAY, HOOK}
 
 
@@ -61,5 +61,5 @@ def test_legacy_complementary_summaries_survive_sweep_but_exact_duplicates_do_no
     ], kind="summary")
     engine._index_items(rows)
     engine.config.dedup_cos = 1.01
-    assert engine.consolidate(project="INC-002")["deduped"] == 1
+    assert engine.consolidate(dry_run=False, project="INC-002")["deduped"] == 1
     assert {r.text for r in engine.store.all(False)} == {RELAY, HOOK}

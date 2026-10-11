@@ -267,7 +267,7 @@ class ConsolidateIn(MutationIn):
 
     project: str | None = Field(None, description=_PROJECT_DESC)
 
-    dry_run: bool = Field(False, description="If true, report what would change without writing anything.")
+    dry_run: bool = Field(True, strict=True, description="Preview by default; both preview and apply require operator policy authorization. Never grants permission.")
 
 
 class CompactIn(ConsolidateIn):

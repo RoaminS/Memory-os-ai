@@ -12,7 +12,7 @@ from memory_os_v4.text import tokenize
 
 
 def _mem(tmp_path, **kwargs) -> MemoryV4:
-    cfg = Config(embed_model="hash", data_dir=str(tmp_path), **kwargs)
+    cfg = Config(maintenance_mode="apply", embed_model="hash", data_dir=str(tmp_path), **kwargs)
     return MemoryV4(config=cfg)
 
 

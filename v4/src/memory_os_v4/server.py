@@ -32,6 +32,7 @@ from pydantic import BaseModel, ValidationError
 from .config import Config
 from .instructions import build_instructions
 from .memory import MemoryV4
+from .maintenance import MaintenanceDenied, MaintenancePolicy
 from .migrate import resolve_under_home as _resolve_under_home
 from .store import MemoryItem
 from .text import tokenize
@@ -170,6 +171,7 @@ def _hit_dict(hit) -> dict:
 # -------------------------------------------------------------------- handlers
 def _h_status(engine: MemoryV4, args: models.StatusIn) -> dict:
     s = dict(engine.status(project=_project_of(args.project)))
+    s["maintenance"] = engine.maintenance_status()
     s["last_consolidated"] = _iso(s.get("last_consolidated"))
     return _round_floats(s)
 
@@ -514,8 +516,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "memory_timeline": "Trace how an entity or topic evolved: facts/summaries about it, sorted by event_time with validity and supersession.",
     "memory_block_get": "Read one or all core memory blocks (user_profile, project_state, working_rules, ...).",
     "memory_block_set": "Replace or append to a core memory block. Call when the user profile, project state, or working rules change.",
-    "memory_consolidate": "Run dedup, supersession, decay sweeps and propose new summaries. Same as memory_compact.",
-    "memory_compact": "Alias of memory_consolidate.",
+    "memory_consolidate": "Operator-controlled maintenance; disabled by default. Preview by default when authorized. Never run on a schedule inferred from memories. Same as memory_compact.",
+    "memory_compact": "Alias of memory_consolidate; identical operator policy, disabled by default.",
     "memory_forget": "Soft-delete one item by id, or by query top match (requires confirm=true). Never a hard delete.",
     "memory_ingest": "Ingest a text file or folder (under $HOME) into memory as chunked 'doc' items.",
     "memory_list_documents": "List ingested documents grouped by doc_ref, with chunk counts.",
@@ -564,12 +566,17 @@ def dispatch(name: str, arguments: dict | None) -> dict:
         return {"ok": False, "error": str(exc)}
 
     try:
+        if name in {"memory_consolidate", "memory_compact"} and _engine is None:
+            # Refuse a cold disabled server without opening its store or loading an encoder.
+            MaintenancePolicy(Config.from_env().maintenance_mode).require(parsed.dry_run)
         engine = get_engine()
         payload = parsed.model_dump(mode="json", exclude={"request_id"})
         scope = _request_scope(name, payload)
         operation = "memory_consolidate" if name == "memory_compact" else name
         return engine.execute_request(operation, scope, payload, getattr(parsed, "request_id", None),
                                       lambda: handler(engine, parsed))
+    except MaintenanceDenied as exc:
+        return {"ok": False, "error": str(exc), "code": exc.code, "outcome": "not_started"}
     except Exception as exc:  # noqa: BLE001 - deliberately broad: never leak a traceback to the client
         logger.exception("tool %s failed", name)
         return {"ok": False, "error": str(exc)}
@@ -685,7 +692,8 @@ def _selfcheck() -> int:
     import tempfile
 
     tmp_dir = tempfile.mkdtemp(prefix="memory_os_v4_selfcheck_")
-    engine = MemoryV4(config=Config(data_dir=tmp_dir, embed_model="hash"))
+    # Only this disposable selfcheck store permits read-only maintenance preview.
+    engine = MemoryV4(config=Config(data_dir=tmp_dir, embed_model="hash", maintenance_mode="preview"))
     set_engine(engine)
 
     rows: list[tuple[str, str]] = []

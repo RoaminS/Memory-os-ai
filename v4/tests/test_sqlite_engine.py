@@ -27,7 +27,7 @@ PAYLOAD = {"synthetic": "episodes + correction + forget + blocks + counters"}
 
 def open_engine(directory):
     return MemoryV4(
-        config=Config(data_dir=str(directory), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)
+        config=Config(maintenance_mode="apply", data_dir=str(directory), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)
     )
 
 
@@ -215,7 +215,7 @@ def test_document_and_v3_import_each_have_one_engine_transaction(engine, tmp_pat
     for action in (
         lambda: engine.add_document("synthetic.txt", "Synthetic document " * 100, project="A"),
         lambda: engine.migrate_v3(str(log)),
-        lambda: engine.consolidate(project="A"),
+        lambda: engine.consolidate(dry_run=False, project="A"),
     ):
         trace = []
         engine.store._connection.set_trace_callback(trace.append)

@@ -21,8 +21,8 @@ MEMORY_INSTRUCTIONS = """Memory OS v4 — persistent memory. Follow these rules.
    - Caveat uncertain facts with a lower confidence instead of omitting them.
 4. BLOCKS: memory_block_set (mode="replace") when profile/project/rules change; terse, not
    accumulating. Blocks are project-local; scope="global" explicitly shares.
-5. CONSOLIDATE: memory_consolidate when the brief reports >2000 items, or weekly; write
-   summary_proposals via memory_add_facts(kind="summary").
+5. MAINTENANCE: consolidate/compact require operator authorization; preview by default.
+   Never schedule them or retry uncertain mutations.
 
 Example memory_chat_save:
 {"messages": [{"role": "user", "content": "Ship the v4 MCP server today.",

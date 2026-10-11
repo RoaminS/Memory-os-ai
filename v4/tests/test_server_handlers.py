@@ -19,7 +19,7 @@ from memory_os_v4.memory import MemoryV4
 
 @pytest.fixture
 def engine(tmp_path):
-    eng = MemoryV4(config=Config(embed_model="hash", data_dir=str(tmp_path)))
+    eng = MemoryV4(config=Config(maintenance_mode="apply", embed_model="hash", data_dir=str(tmp_path)))
     yield eng
     eng.close()
 
@@ -28,6 +28,7 @@ def engine(tmp_path):
 def server_engine(engine, monkeypatch):
     """Monkeypatch the server's lazy engine getter to return ``engine``."""
     monkeypatch.setattr(server, "get_engine", lambda: engine)
+    monkeypatch.setattr(server, "_engine", engine)
     yield engine
 
 
@@ -141,7 +142,7 @@ def test_chat_save_dedupes_facts_on_repeat(server_engine):
 
 def test_chat_save_supersedes_with_new_dated_fact(tmp_path, monkeypatch):
     # Supersession is authorized by explicit single-valued property identity.
-    eng = MemoryV4(config=Config(embed_model="hash", data_dir=str(tmp_path), supersede_cos=0.3))
+    eng = MemoryV4(config=Config(maintenance_mode="apply", embed_model="hash", data_dir=str(tmp_path), supersede_cos=0.3))
     monkeypatch.setattr(server, "get_engine", lambda: eng)
 
     call(

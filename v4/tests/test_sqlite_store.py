@@ -164,38 +164,38 @@ def test_future_schema_and_foreign_database_refused_without_downgrade(tmp_path):
 def test_jsonl_source_and_production_paths_refused_before_writes(tmp_path, monkeypatch):
     (tmp_path / "items.jsonl").write_text('{}\n')
     with pytest.raises(ValueError, match="implicit"):
-        MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1"))
+        MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1"))
     assert not (tmp_path / "writer.lock").exists() and not (tmp_path / "store.sqlite3").exists()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     live = tmp_path / ".memory-os-v4"
     with pytest.raises(ValueError, match="forbidden"):
-        MemoryV4(config=Config(data_dir=str(live), embed_model="hash", store_backend="sqlite_s1"))
+        MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(live), embed_model="hash", store_backend="sqlite_s1"))
     assert not live.exists()
 
 
 def test_explicit_flag_config_and_refusal_of_silent_backend_switch(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMORY_V4_STORE_BACKEND", "sqlite_s1")
-    assert Config.from_env().store_backend == "sqlite_s1" and Config().store_backend == "jsonl"
-    with MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1")) as engine:
+    assert Config.from_env().store_backend == "sqlite_s1" and Config(maintenance_mode="apply", ).store_backend == "jsonl"
+    with MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1")) as engine:
         engine.add_episode("Synthetic episode", project="A")
         assert isinstance(engine.store, SQLiteStore)
         assert engine_readiness(engine) == (True, "ready")
     with pytest.raises(ValueError, match="explicit backend"):
-        MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash"))
-    with MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1")) as engine:
+        MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(tmp_path), embed_model="hash"))
+    with MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1")) as engine:
         assert engine.status(project="A")["total"] == 1
 
 
 def test_inc001_and_inc002_regressions_on_sqlite_engine(tmp_path):
     relay = "On 2026-10-09 Claude configured the Claude desktop relay for memory-os-ai."
     hook = "On 2026-10-09 Claude configured the Claude Code hook for memory-os-ai."
-    with MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1",
+    with MemoryV4(config=Config(maintenance_mode="apply", data_dir=str(tmp_path), embed_model="hash", store_backend="sqlite_s1",
                               dedup_cos=0, supersede_cos=0)) as engine:
         for text in (relay, hook, "BTC A5 completed.", "ETH A5 completed."):
             result = engine.add_facts([{"text": text, "entities": ["Claude", "2026-10-09"]}],
                                       project="A", event_time=100)
             assert result["added"] and not result["deduped"] and not result["superseded"]
-        assert engine.consolidate(project="A")["superseded"] == 0
+        assert engine.consolidate(dry_run=False, project="A")["superseded"] == 0
         assert len(engine.store.all(False)) == 4
         identity = {"subject_id": "user:synthetic", "predicate": "residence", "cardinality": "single"}
         old = engine.add_facts([{"text": "User lives in Paris.", "identity": identity}],
