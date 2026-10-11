@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "memory-os-ai": {
+      "command": "memory-os-relay",
+      "args": [],
+      "env": {
+        "MEMORY_V4_CLIENT_ID": "claude-code"
+      }
+    }
+  }
+}

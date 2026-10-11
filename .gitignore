@@ -53,3 +53,7 @@ v4/bench/data/longmemeval_oracle.json
 
 # Private, disposable repair copies and qualification evidence
 .local-qualification/
+
+# Client settings belong to the operator; never ship an auto-loaded legacy server.
+.mcp.json
+.vscode/mcp.json

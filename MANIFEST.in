@@ -2,6 +2,7 @@ include LICENSE LICENSE.GPL-3.0
 include CONTRIBUTING.md
 include AGENTS.md CLAUDE.md CHANGELOG.md
 include conftest.py
+exclude .mcp.json .vscode/mcp.json
 include v4/pyproject.toml
 recursive-include docs *.md
 recursive-include v4/docs *.md *.json
