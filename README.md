@@ -4,8 +4,9 @@
 **A local project memory shared between your assistants: dated decisions, next actions and verifiable history,
 under your control.**
 
-Status: **ALPHA**. **Current version: 4.0.5** (PyPI, 11/10/2026). **4.0.6 = candidate** under preparation (simplified
-install), not published. macOS Apple Silicon first. Draft integrated after Codex review (2026-10-11); candidate features are not yet published.
+Status: **ALPHA**. **Source candidate: 4.0.6** (2026-10-12), not published or deployed.
+**Current published release: 4.0.5** (PyPI, 2026-10-11). macOS Apple Silicon first.
+The new candidate must pass artifact qualification and a clean-install trial before publication.
 
 ## What it does
 
@@ -23,7 +24,23 @@ Note: what your assistant reads in memory then enters **its own** context (cloud
 
 ## Install (macOS Apple Silicon, Python ≥ 3.11)
 
-The current published release requires manual provisioning and service setup by an operator. It is not yet a
+For the **4.0.6 candidate**, use the exact locally qualified wheel in a durable environment.
+The clean-install trial is still pending; the following candidate commands require this wheel,
+not the current PyPI package:
+
+```bash
+python3.11 -m venv .venv-memory-os
+.venv-memory-os/bin/python -m pip install '/ABS/PATH/memory_os_ai-4.0.6-py3-none-any.whl[ops,brief]'
+.venv-memory-os/bin/memory-os-admin quickstart --clients codex,cursor  # preview: no writes or downloads
+# After reviewing the preview, with separate consent for downloads:
+.venv-memory-os/bin/memory-os-admin quickstart --clients codex,cursor --apply --download-approved
+```
+
+Optional `--demo` explicitly saves/searches a fact in a unique demo project. This verifies the
+packaged relay; it does not measure a real handoff between assistants. See the packaged client matrix
+in `docs/CLIENTS.md`. Keep the environment for the service; the canonical project registry remains inactive.
+
+The **published 4.0.5** release requires manual provisioning and service setup by an operator. It is not yet a
 qualified ten-minute installation for a new user. Install into a durable environment (not a `uvx` daemon):
 
 ```bash
@@ -46,8 +63,8 @@ pinned resources and needs `--apply --download-approved` for missing files. The 
 `memory-os-admin quickstart --clients claude-code,codex` as a zero-write preview; explicit `--apply`
 configures a new macOS installation, with separate download and demo consent. Existing different services,
 non-empty stores and unsafe configs are refused. Client configuration undo is semantic and preserves the
-store/service/token/resources. These features and the complete onboarding still require installed-artifact
-and new-user qualification before release; they are absent from published 4.0.5.
+store/service/token/resources. The exact 4.0.6 artifacts and complete onboarding still require qualification
+and a clean-install trial before release; they are absent from published 4.0.5.
 
 For **new 4.0.6 quickstart installs**, SQLite with work state/tasks is the default;
 `--backend jsonl` is the explicit alternative. Existing installations are never migrated implicitly.
@@ -90,7 +107,10 @@ without explicit authorization. In SQLite mode (opt-in in 4.0.5): encrypted onli
 - BEAM 100K retrieval: C4 0.462 vs BM25 0.445, delta +0.017 [-0.004, +0.040], 20 conversations,
   Granite/CPU: the preregistered recall criterion **failed**. These evaluations differ from the operator
   production profile (Granite, auto/MPS, native precision, batch 32). No official leaderboard claim.
-- **No productivity gain measured** to date (handoff study between assistants not run).
+- End-to-end answer pilot: 10 observed questions, C4 0.40 vs BM25 0.20, Codex reader/judge;
+  **descriptive only**, different judge from published papers, not a held-out comparison or ranking.
+- **No productivity gain measured** to date. L11, the handoff study between assistants, was not run.
+  The LongMemEval-S and BEAM results above are descriptive, not official leaderboard scores.
 
 ## Limits (ALPHA)
 

@@ -1,7 +1,7 @@
 # 4.0.6 — profil d'installation qualifié et choix du magasin
 
-Décision Romain : 2026-10-11. Implémentation : 2026-10-12. Candidate future
-4.0.6, version des sources encore 4.0.5. Pas de publication/bascule/migration.
+Décision Romain : 2026-10-11. Implémentation : 2026-10-12. Sources désormais
+**4.0.6 candidate**, non publiée/non déployée ; nouveau wheel à requalifier. Pas de publication/bascule/migration.
 
 ## Décision : pins exacts + attestation, plutôt que bornes mineures
 

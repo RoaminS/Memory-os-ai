@@ -1,7 +1,7 @@
 # D1c — refus setup et contrat cold/warm corrigés
 
-2026-10-12. Au-dessus de `3074ed8`, version des sources encore 4.0.5 pour la
-future candidate 4.0.6. Aucun changement de production, téléchargement ou
+2026-10-12. Au-dessus de `3074ed8`, sources désormais **4.0.6 candidate**,
+non publiée/non déployée. Les anciennes preuves restent conservées et datées. Aucun changement de production, téléchargement ou
 inférence neuronale côté Codex. Le rapport refusé
 `.local-qualification/distribution-profile-sqlite-full-claude-v1` reste conservé.
 

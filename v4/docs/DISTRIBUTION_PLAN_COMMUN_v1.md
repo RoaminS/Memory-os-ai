@@ -49,17 +49,17 @@ Corrections de l’analyse de Claude : le runtime force le mode hors ligne par d
 5. D1c : cinq essais débutants ; corriger et refaire les essais échoués en conservant les preuves.
 6. T05 complet : wheel/sdist/installations hors dépôt, v3 avec son extra, v4, TCP/relais installés, lint/twine, copy/drill ; puis seulement candidate qualifiée soumise à Romain. D3 poursuit le pilote à J+7 ; le lancement large D4 attend ses résultats.
 
-La version ne change qu’à la préparation réelle de la candidate. D0 modifie encore les métadonnées de travail 4.0.5 ; **il ne remplace pas les artefacts PyPI déjà publiés**. Pas d’activation SQLite/registre, changement d’encodeur ou nouveau modèle dans D0. Les GOs d’installation de test, téléchargement et publication restent séparés. Les gros jobs externes restent séquentiels et gardés (disque ≥5 GB, swap ≤8,5 GB), au plus deux jobs lourds autorisés, sans simultanéité imposée.
+Mise à jour 2026-10-12 : la préparation réelle de la candidate porte désormais les sources/métadonnées à **4.0.6**. La phase D0 travaillait en 4.0.5 ; **il ne remplace pas les artefacts PyPI déjà publiés**. Pas d’activation SQLite/registre, changement d’encodeur ou nouveau modèle dans D0. Les GOs d’installation de test, téléchargement et publication restent séparés. Les gros jobs externes restent séquentiels et gardés (disque ≥5 GB, swap ≤8,5 GB), au plus deux jobs lourds autorisés, sans simultanéité imposée.
 
 ## 3. Décisions produit et points restant à acter
 
-1. **Nouvelles installations SQLite + tâches** : proposition soutenue par les deux analyses. Qualifier un profil candidat explicite, puis obtenir le choix de Romain **avant de figer les defaults de release**. Anciennes installations inchangées ; aucune migration automatique. Activation du registre séparée, après UX de création de projet.
+1. **Nouvelles installations SQLite + tâches** : décision de Romain actée le 2026-10-11 et implémentée : défaut du quickstart neuf 4.0.6 ; alternative explicite `--backend jsonl`. Le nouveau wheel et son installation restent à qualifier. Anciennes installations inchangées ; aucune migration automatique. Activation du registre séparée, après UX de création de projet.
 2. **Méthode durable** : proposer `uv tool install` versionné comme parcours de référence ; venv/pip en secours ; pipx après qualification. `uvx` autorisé pour un relais/essai, pas comme résidence du daemon. Choix à figer dans la revue D1.
 3. **Budget ressources** : mesurer avant de contractualiser le seuil « <2 GB ». Rapporter téléchargements, taille venv, cache modèles et pic disque, avec versions/profil. Le gate de dix minutes demeure ; pas de plafond arbitraire prétendument déjà atteignable.
 4. **Hébergement/publication** : Romain choisit domaine/hébergeur/budget. Site local préparé pendant D0 ; URL publique ajoutée seulement après GO. Déblocage GitHub reste une décision séparée ; aucun hébergeur de remplacement pour contourner le gel du dépôt.
 5. **Identité embarquée et canonicalisation des clients** : contrats D1 relus par Claude avant implémentation. Identité de release n’est pas signature du code ; propriétaire client déclaratif n’est pas identité authentifiée.
 
-Désaccords résiduels à résoudre par contresignature : aucun sur l’ordre ou le positionnement proposé ; la méthode durable, le budget disque et les defaults de nouvelles installations restent des **choix ouverts**, pas un accord déjà acquis.
+Désaccords résiduels à résoudre par contresignature : aucun sur l’ordre ou le positionnement proposé ; la méthode durable et le budget disque restent des **choix ouverts** ; le défaut SQLite+tâches des installations neuves a depuis été approuvé par Romain.
 
 ## 4. Mesure, preuves et périmètres
 

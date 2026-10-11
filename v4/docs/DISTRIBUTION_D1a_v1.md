@@ -1,6 +1,6 @@
 # D1a — extras, identité installée et ressources explicites
 
-2026-10-11. Implémentation pour la future 4.0.6 ; version source encore 4.0.5, **aucune nouvelle release qualifiée/publiée**. Disque initial ~3 GB, remonté à ~5.7 GB en fin de tour. Tests synthétiques permis ; builds du projet différés, car le swap n’est pas attestable dans le sandbox. Aucun changement du serveur, du magasin ou des clients de production.
+Historique D1a du 2026-10-11 ; état au 2026-10-12 : sources **4.0.6 candidate**, non publiée/non déployée. Les preuves précédentes portent sur les commits pré-release ; requalification des artefacts 4.0.6 et trial neuf requis. Disque initial ~3 GB, remonté à ~5.7 GB en fin de tour. Tests synthétiques permis ; builds du projet différés, car le swap n’est pas attestable dans le sandbox. Aucun changement du serveur, du magasin ou des clients de production.
 
 ## 1. Revue des livrables de Claude
 

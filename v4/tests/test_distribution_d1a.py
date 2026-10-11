@@ -29,6 +29,26 @@ spec.loader.exec_module(builder)
 SHA = "a" * 40
 
 
+def test_release_versions_and_packaged_notes_are_consistent():
+    """Check public release identities without pinning a future test to this version."""
+    from memory_os_ai import __version__ as legacy_version
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    standalone = tomllib.loads((ROOT / "v4/pyproject.toml").read_text())
+    registry = json.loads((ROOT / "server.json").read_text())
+    assert project["project"]["version"] == standalone["project"]["version"] == VERSION == legacy_version
+    assert registry["version"] == VERSION
+    package = registry["packages"][0]
+    assert package["version"] == VERSION
+    requirement = f"memory-os-ai[ops]=={VERSION}"
+    assert next(a["value"] for a in package["runtimeArguments"] if a.get("name") == "--from") == requirement
+    launch = registry["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["launch"]
+    assert launch["manual_pinned_command"] == f"uvx --from {requirement} memory-os-relay"
+    release = f"docs/releases/v{VERSION}.md"
+    assert release in project["tool"]["setuptools"]["data-files"]["share/doc/memory-os-ai"]
+    assert (ROOT / release).is_file()
+
+
 @pytest.fixture
 def sealed(tmp_path, monkeypatch):
     root = tmp_path / "source"

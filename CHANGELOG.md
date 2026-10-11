@@ -1,56 +1,58 @@
 # Changelog
 
-## 4.0.5 — candidate ALPHA, non publiée / non déployée
+## 4.0.6 — candidate ALPHA (2026-10-12), non publiée / non déployée
 
-- L7b opt-in : liste filtrée et paginée par index SQL au schéma7, curseur lié
-  à l’identité/projet/filtres/cut et instant de classification stale figé.
-  Cible list50 p95 <30 ms à10k ; mesure synthétique locale0,36 ms, confirmation
-  physique requise. Historique de tâches immuable, projection reconstruisible.
-- Démarrage SQLite+L7b sans modèle : CRUD/CAS/brief/reprise restent accessibles,
-  recherche chargée/attestée seulement au premier appel explicite. Ready annonce
-  ready_work_only/retrieval_ready=false tant que le modèle n’est pas chargé,
-  profil historique jamais présenté comme un modèle courant attesté. Échec de
-  recherche explicite sans désactiver les tâches. JSONL par défaut inchangé.
-- /ready expose capabilities.policies.write_mode (read_write/read_only).
-  La provenance clientInfo du relais reste déclarative, sans ACL individuelle.
+- D0 : métadonnées et liens publics corrigés, manifeste MCP stdio relayé en
+  4.0.6 (brouillon non publié), Docker explicitement historique v3, README et
+  matrice de 11 clients distinguant configuration, connexion et usage réel.
+- D1 : dépendances documents/historique déplacées vers `[documents]` et
+  `[legacy-v3]` ; le core neuronal conserve PyTorch/Granite. Les commandes v3
+  signalent l'extra manquant ; aucun gain de taille annoncé sans mesure neuve.
+- Identité de build embarquée et vérifiée depuis wheel/sdist, source/payload
+  contrôlés ; `build_unqualified` si descriptor absent ou modifié. Identité
+  exposée dans ready/doctor ; ce contrôle n'est pas une signature de confiance.
+- Profil qualifié épinglé exactement : torch 2.10.0, sentence-transformers
+  5.2.3, transformers 5.2.0, numpy 2.4.2 et dépendances numériques/tokenizer.
+  Quickstart refuse un profil installé différent avant activation. La liste
+  de versions ne prouve pas l'équivalence entre toutes les machines.
+- Provision explicite Granite/cl100k avec révisions/empreintes, aperçu sans
+  écriture, téléchargement uniquement après consentement ; offline par défaut.
+- Quickstart macOS : choix des clients, aperçu sans écriture, `--apply`, consentements
+  téléchargement/demo séparés, configurations sauvegardées/journalisées,
+  restauration sémantique de notre entrée ; refus des fichiers invalides,
+  services étrangers et magasins non vides. Aucun job backup planifié implicitement.
+- Décision Romain du 2026-10-11 : **installation neuve via quickstart = SQLite
+  + tâches**, alternative `--backend jsonl`. Aucune migration implicite des
+  installations existantes ; défaut Config JSONL et registre canonique inactif conservés.
+- Correctifs de packaging/refus : helper PEP 517 disponible dans le build direct
+  et depuis sdist ; extra `legacy-v3` évite le marqueur de version ambigu `v3` ;
+  contrôle de tous les marqueurs produits ; identité invalide refusée avant token.
+  `--warm` charge réellement la recherche SQLite ; mode froid sans modèle préservé,
+  test séparé hash/warm. Qualification TCP par les **28 identités attendues**.
+- Préparation finale : versions alignées, notes et docs de release embarquées ;
+  aucun nouveau changement fonctionnel au-dessus de `62d906f`.
+- Qualification de ce commit/ces artefacts et essai d'installation neuve encore
+  requis. Aucun gain de productivité mesuré : L11 non exécuté ; LME-S/BEAM
+  descriptifs, profils/limites explicités, aucun classement officiel revendiqué.
+  Publication, bascule et GitHub restent soumis aux décisions distinctes de Romain.
 
-- Préflight du relais : panne/initialisation distinctes d'un contrat ancien,
-  résultat « cette mutation non envoyée », reprise manuelle seulement et aucun
-  raccourci pour les request_id déjà incertains. Qualification machine en attente.
-  Arguments invalides signalés distinctement ; alias canonique compact conservé.
-- Configurations MCP personnelles retirées du suivi Git, fichiers privés
-  conservés ; template explicite v4 relayé à la place du serveur v3 autochargé.
-- Archivage vérifié des preuves sans retrait des originaux (donc sans gain disque)
-  et contrats L7b/CAS amendés ; L7b désormais livré opt-in, non activé.
-- Qualification : empreinte sémantique de l’entrée MCP dans les fichiers
-  applicatifs, SHA strict pour les fichiers du dépôt ; test TCP aligné sur le
-  refus preflight_unavailable/not_started avant envoi.
-- SQLite S4 et L7b candidat : rollback après nouvelles écritures, rotation et
-  couverture de crash étendues ; tables de tâches append-only au schéma6,
-  transitions explicites et CAS de blocs/tâches, ETags liés au magasin/projet,
-  provenance relayée déclarative, tâches stale et propositions todo sans import
-  automatique. Backend SQLite ET drapeau work_state requis ; défauts inchangés.
-  585 v3 +1622 v4 unitaires passent, entrées MCP inchangées ; TCP/10k restent à qualifier pour cette candidate avant activation ;
-  démarrage sans modèle désormais testé avec interdiction de construction d’encodeur. Voir
-  `v4/docs/P1_S4_L7B_INCREMENT_v1.md`. Aucun déploiement ni publication.
-- SQLite S4 incrément2, candidate non qualifiée pour activation : fenêtre serveur read_only,
-  sauvegarde en ligne par API SQLite, inventaire exhaustif et archive chiffrée,
-  drill fichiers en quarantaine, marge disque health/doctor et modèles hebdomadaires
-  inactifs. Réconciliation des tombstones depuis l'autorité actuelle, nouvelle
-  identité et reçu atomiques sur copie, ouverture HTTP privée contrôlée, rotation
-  et matrices ENOSPC/SIGKILL synthétiques. Clé metadata corrigée, guard JSONL à
-  référence faible, compteurs hors brief. 585 v3 +1582 v4 unitaires passent ;
-  TCP et lifecycle10k à qualifier par Claude. Aucune activation SQLite/production.
-  Voir `v4/docs/SQLITE_S4_INCREMENT2.md` pour incidents et portes restantes.
+## 4.0.5 — ALPHA publiée / déployée (2026-10-11)
 
-- Isolation commune des tests v3/v4 avant leur collecte : HOME/XDG/AppData
-  jetables, garde des écritures Python dans le HOME réel, échec même si l'erreur
-  est interceptée, protection des chemins via symlink et dir_fd.
-- Correction de `TestSetupMainCLI.test_main_all_target` : mock de `TARGETS`,
-  dont les callbacks originaux contournaient les anciens mocks de fonctions.
-- Isolation incluse dans la prochaine sdist et dans les empreintes de source ;
-  qualification dédiée avec empreintes MCP sémantiques et SHA strict des fichiers du dépôt.
-  Aucun changement de serveur, profil d'encodage ou magasin de production.
+- Isolation HOME/XDG/AppData des tests v3/v4 et garde d'écriture dans le HOME réel ;
+  correction des callbacks setup historiques pouvant modifier les configs utilisateur.
+- Templates MCP relayés ; erreurs préflight retryables avant envoi distinctes des
+  résultats incertains après envoi. Aucun rejeu automatique des mutations.
+- Qualification : comparaison sémantique de notre entrée dans les fichiers clients,
+  SHA strict des fichiers du dépôt. Suites, TCP, copie et relais installés qualifiés.
+- SQLite S4 et L7b livrés opt-in : sauvegarde/drill, rollback après nouvelles écritures,
+  tâches/CAS, historique et reçus atomiques ; liste filtrée/paginée en SQL au schéma7.
+  Mesure 10k par Claude : CAS p95 5,5 ms, list50 p95 0,52 ms ; preuve synthétique.
+- Démarrage SQLite/tâches à froid sans modèle ; recherche initialisée explicitement ;
+  ready expose retrieval_ready et capabilities.policies.write_mode.
+- Romain a approuvé publication/bascule puis activation séparée SQLite+tâches le
+  2026-10-11. Cette activation concerne son installation, pas le défaut Config
+  du package. Registre inactif et profil auto/MPS/native/batch32/C4 conservés.
+- Incident tests 4.0.4 documenté : ne pas exécuter cette ancienne suite avec le HOME réel.
 
 ## 4.0.4 — ALPHA (2026-10-11), qualifiée / déployée localement
 

@@ -1,6 +1,6 @@
 # D1b — quickstart candidat, revue et qualification
 
-2026-10-11. Version source 4.0.5, fonctionnalités destinées à la future 4.0.6.
+Historique D1b du 2026-10-11 ; état au 2026-10-12 : version source **4.0.6 candidate**, non publiée/non déployée. Les preuves de cette étape ne remplacent pas la qualification des nouveaux artefacts.
 Aucune publication/bascule. GitHub gelé. Pas de modèle téléchargé ou encodé,
 aucun assistant réel invoqué par Codex ; tests synthétiques séquentiels.
 

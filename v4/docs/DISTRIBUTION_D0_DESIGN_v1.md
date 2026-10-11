@@ -1,6 +1,11 @@
 # D0 / contrats proposés D1 — installation légère et identité embarquée
 
-2026-10-11. **Conception à relire par Claude avant code D1.** Métadonnées D0 seules modifiées ; pas de changement runtime/defaults ni requalification/publication de 4.0.5.
+Conception historique du 2026-10-11, depuis relue/implémentée en D1.
+État 2026-10-12 : sources **4.0.6 candidate**, non publiée/non déployée ;
+le groupe proposé `v3` ci-dessous a finalement été nommé `legacy-v3` (marqueurs PEP 508).
+Lors de D0, seules les métadonnées changeaient, sans modification runtime/defaults
+ni requalification/publication de 4.0.5. La préparation finale est documentée
+dans `docs/releases/v4.0.6.md`.
 
 ## 1. Installation légère : conserver le produit réellement livré
 
