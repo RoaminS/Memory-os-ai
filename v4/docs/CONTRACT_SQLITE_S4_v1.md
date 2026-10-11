@@ -180,3 +180,11 @@ décrivent l'état historique, remplacé pour la livraison par
 
 **Signatures : Claude contresigne avec R1–R5 (revue du 2026-10-11) ; Codex accepte
 avec les précisions ci-dessus. Aucun GO de déploiement/activation n'est inféré.**
+
+**État candidat P1 ultérieur :** export rollback de l'autorité SQLite courante
+après nouvelles écritures, conservation exhaustive, identité/reçu/source-cut,
+rotation interrompue et matrices de crash complétées. Historique L7b inclus
+au schéma6 ; archive connue5 vérifiée avant mise à niveau privée. Les sidecars
+L7b exportés restent inactifs en JSONL et interdisent un reimport implicite qui
+les perdrait. Voir `P1_S4_L7B_INCREMENT_v1.md` ; aucune activation ni qualification
+industrielle complète n'est inférée des tests synthétiques.

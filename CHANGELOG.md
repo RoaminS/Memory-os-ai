@@ -9,7 +9,18 @@
 - Configurations MCP personnelles retirées du suivi Git, fichiers privés
   conservés ; template explicite v4 relayé à la place du serveur v3 autochargé.
 - Archivage vérifié des preuves sans retrait des originaux (donc sans gain disque)
-  et contrats L7b/CAS amendés ; L7b non implémenté/non activé.
+  et contrats L7b/CAS amendés ; L7b désormais livré opt-in, non activé.
+- Qualification : empreinte sémantique de l’entrée MCP dans les fichiers
+  applicatifs, SHA strict pour les fichiers du dépôt ; test TCP aligné sur le
+  refus preflight_unavailable/not_started avant envoi.
+- SQLite S4 et L7b candidat : rollback après nouvelles écritures, rotation et
+  couverture de crash étendues ; tables de tâches append-only au schéma6,
+  transitions explicites et CAS de blocs/tâches, ETags liés au magasin/projet,
+  provenance relayée déclarative, tâches stale et propositions todo sans import
+  automatique. Backend SQLite ET drapeau work_state requis ; défauts inchangés.
+  585 v3 +1622 v4 unitaires passent, entrées MCP inchangées ; TCP/10k et démarrage
+  L7b sans modèle restent à qualifier avant activation. Voir
+  `v4/docs/P1_S4_L7B_INCREMENT_v1.md`. Aucun déploiement ni publication.
 - SQLite S4 incrément2, candidate non qualifiée pour activation : fenêtre serveur read_only,
   sauvegarde en ligne par API SQLite, inventaire exhaustif et archive chiffrée,
   drill fichiers en quarantaine, marge disque health/doctor et modèles hebdomadaires
@@ -26,7 +37,7 @@
 - Correction de `TestSetupMainCLI.test_main_all_target` : mock de `TARGETS`,
   dont les callbacks originaux contournaient les anciens mocks de fonctions.
 - Isolation incluse dans la prochaine sdist et dans les empreintes de source ;
-  qualification dédiée avec comparaison SHA-256/mtime des configurations clients.
+  qualification dédiée avec empreintes MCP sémantiques et SHA strict des fichiers du dépôt.
   Aucun changement de serveur, profil d'encodage ou magasin de production.
 
 ## 4.0.4 — ALPHA (2026-10-11), qualifiée / déployée localement

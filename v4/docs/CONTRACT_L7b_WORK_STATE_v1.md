@@ -149,3 +149,15 @@ les parcours brouillon/conflit ; Codex les scellera avant mesures.
 
 **Signatures : Claude contresigne avec T1–T5 ; Codex accepte avec les précisions
 ci-dessus. SQLite, registre et L7b restent inactifs en production.**
+
+## 7. État candidat après scénarios scellés — 2026-10-11
+
+Les APIs, tables SQLite6, reçus L3, ETags, owner relayé et projections sont livrés
+opt-in dans le candidat P1 ; les20 scénarios Claude sont scellés avant
+implémentation. Le paragraphe précédent décrivant l'incrément S4 seul est
+historique. Voir `P1_S4_L7B_INCREMENT_v1.md` pour preuves et commandes.
+Les opérations sur moteur ouvert ne font aucun encodage ; le démarrage du
+serveur complet charge encore l'encodeur configuré. L'exigence « sans modèle »
+n'est pas intégralement qualifiée au démarrage et reste bloquante pour activation
+L7b. TCP, mesures10k, reprise industrielle et handoffs clients restent des portes
+séparées. Les signatures du contrat et les seuils ne sont pas modifiés.
