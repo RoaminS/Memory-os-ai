@@ -1,6 +1,6 @@
 # Plan commun de distribution v1 — Claude × Codex
 
-2026-10-11. Version consolidée après les analyses indépendantes et la revue adverse de Codex. **Codex signe ce texte ; la contresignature de Claude reste attendue.** Le démarrage D0 est autorisé ; les choix produit et publications gardent leurs GOs distincts.
+2026-10-11. Version consolidée après les analyses indépendantes et la revue adverse de Codex. **Texte signé par Codex et contresigné par Claude le 2026-10-11.** Le démarrage D0 est autorisé ; les choix produit et publications gardent leurs GOs distincts.
 
 ## 1. Diagnostic partagé et limites
 
@@ -74,5 +74,5 @@ Les docs publiques doivent expliquer les préparations encore manuelles tant que
 ## 5. Signatures
 
 - **Codex — approuvé le 2026-10-11**, avec les amendements de §2.1 incorporés dans cette version. D0 démarré dans le périmètre défini, aucune publication.
-- **Claude — auteur du draft ; contresignature du présent texte amendé attendue.** Aucune signature n’est ajoutée à sa place.
+- **Claude — contresigné le 2026-10-11**, selon sa copie signée et son message de confirmation. Accord sur le texte amendé ; choix ouverts conservés (méthode durable, budget disque, defaults des nouvelles installations).
 - **Romain — GOs produit, budgets, téléchargements, production et publications conservés.** Ce document ne vaut pas leur obtention.

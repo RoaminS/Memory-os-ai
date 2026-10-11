@@ -77,3 +77,8 @@ mcp-publisher validate server.json
 ```
 
 Le test réel de consommateur demeure D4, après D1. Aucun nouveau téléchargement, installation utilisateur ou test de production demandé par ce reçu.
+
+
+## 6. Revue externe D0 / accord D1 — 2026-10-11
+
+Claude a contresigné le plan et les contrats extras/identité. Il a exécuté `mcp-publisher validate server.json` avec mcp-publisher 1.4.1 : valide contre registry.modelcontextprotocol.io, sans login/publish. Cette preuve externe complète le refus DNS local précédent, conservé ; elle ne qualifie pas encore un consommateur D4. Doctor expliquera la suppression possible de l’ancien SHA env ; `/ready` distinguera `embedded_descriptor`, `env_declared`, `git_checkout`, `unqualified`.

@@ -1,182 +1,97 @@
 <!-- mcp-name: io.github.romainsantoli-web/memory-os-ai -->
 # Memory OS AI
 
-**4.0.2 ALPHA — published on PyPI on 2026-10-10.**
+**A local project memory shared between your assistants: dated decisions, next actions and verifiable history,
+under your control.**
 
-> **One local memory for all your AI assistants.** Decisions, facts and lessons saved by Claude are recalled by
-> Codex, Copilot, Cursor, Gemini or Grok — on your machine, under your control, with evidence for every claim.
+Status: **ALPHA**. **Current version: 4.0.5** (PyPI, 11/10/2026). **4.0.6 = candidate** under preparation (simplified
+install), not published. macOS Apple Silicon first. Draft integrated after Codex review (2026-10-11); candidate features are not yet published.
 
-[![PyPI](https://img.shields.io/pypi/v/memory-os-ai)](https://pypi.org/project/memory-os-ai/)
-[![Python](https://img.shields.io/badge/python-3.11+-blue)]()
-[![MCP](https://img.shields.io/badge/MCP-2025--11--25-purple)]()
-[![License](https://img.shields.io/badge/license-LGPL--3.0--or--later-orange)]()
+## What it does
 
-Every AI assistant forgets between sessions, and nothing it learns reaches the next assistant you open. Memory OS AI
-is a local [MCP](https://modelcontextprotocol.io) server that gives all of them the **same persistent memory**:
-typed, dated, sourced and isolated per project. It needs **no LLM on the server side** — the assistant you already
-use extracts the facts — so recall costs no API call and works offline.
+You work with several AI assistants (Claude Code, Codex, Cursor, Copilot, Grok…). Each one has its own memory, or none.
+Memory OS AI is a **local MCP server** that they all share:
 
-## Quick start (macOS)
+- **Resume a project**: on startup, a compact brief (≤ 1,500 tokens) gives the objective, the decisions in force,
+  the next action, with open tasks when SQLite/work state is enabled. Compact mode requires the optional offline tokenizer table.
+- **Record a decision**: dated, sourced facts; a correction explicitly replaces the old one (history kept).
+- **Hand over work**: shared tasks (open / blocked / done) with protection against concurrent writes (CAS),
+  so that two assistants do not overwrite each other.
 
-Before `setup`, set `MEMORY_V4_BUILD_COMMIT` to the **40-character source commit from the qualified release
-dossier** (`releases/4.0.2/QUALIFICATION.md`). An installed wheel has no Git checkout:
-without this operator-provided identity, `/ready` refuses the build and `doctor` reports FAIL.
-Download/setup is not proof of the operator's local configuration or data migration.
+The server needs **no LLM**: your assistant extracts the facts, local search costs no API call.
+Note: what your assistant reads in memory then enters **its own** context (cloud if your assistant is in the cloud).
 
-```bash
-pip install 'memory-os-ai[ops]'
-memory-os-admin setup --write-launchd ~/memory-os-launchd   # creates your private access token + prints client configs
-cp ~/memory-os-launchd/*.plist ~/Library/LaunchAgents/ && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.memory-os-v4.plist
-memory-os-admin doctor                                       # checks the server, the security and every AI client
-```
+## Install (macOS Apple Silicon, Python ≥ 3.11)
 
-`doctor` ends with a line such as `17 checks: 16 pass, 1 warn, 0 fail`. Full guide: [`v4/docs/OPERATIONS.md`](v4/docs/OPERATIONS.md).
-
-## Works with your assistants and editors
-
-All clients connect through `memory-os-relay`, which reads your private token file itself — **no secret is ever
-written into a client configuration**. `memory-os-admin setup` prints a configuration snippet for each one, and
-`memory-os-admin doctor` checks their configuration syntax; it does not prove a live handshake for every client.
-
-| Client | Configuration | Client evidence / candidate configuration |
-|---|---|---|
-| Claude Code | `claude mcp add --scope user …` (`~/.claude.json`; project overrides possible) | previous relay run verified; generated configuration only |
-| Claude Desktop | `claude_desktop_config.json` (edit with the app closed) | verified |
-| OpenAI Codex (CLI / app) | `codex mcp add …` | verified end to end |
-| VS Code / GitHub Copilot | `Code/User/mcp.json` | configuration generated and checked |
-| Google Antigravity | `~/.gemini/config/mcp_config.json` | configuration generated and checked |
-| Grok CLI (xAI) | `grok mcp add …` | verified (`grok mcp doctor`: handshake, 16 tools) |
-| Cursor · Gemini CLI · Windsurf | `~/.cursor/mcp.json` · `~/.gemini/settings.json` · `~/.codeium/windsurf/mcp_config.json` | configuration generated |
-
-Shared agent rules live in [`AGENTS.md`](AGENTS.md): start with `memory_session_brief`, search before assuming,
-save atomic dated facts with `memory_chat_save`. The server also sends these rules to every client at connection.
-Claude Code gets two optional hooks: the project brief injected at session start (framed as data, never as
-instructions) and a reminder to save after long sessions.
-
-## What makes it different
-
-- **One memory, every assistant.** The point is continuity *between* AI vendors; built-in memories (ChatGPT,
-  Claude, Gemini, Copilot) stay locked to one of them.
-- **Local and private by default.** One server per user on `127.0.0.1`, mandatory bearer token (0600 file),
-  Host/Origin validation against DNS-rebinding, no telemetry. Memories are treated as data, never as instructions.
-- **No LLM on the server.** Extraction is done by the client assistant at save time; search is hybrid dense + BM25
-  with multi-query fusion. A warm search takes about 15 ms in the evaluation harness; cold start (server and
-  model load, ~3 s) and ingestion are paid once, not per query.
-- **Facts that change correctly.** Bi-temporal facts (`event_time`, `valid_from`/`valid_until`): a fact is only
-  replaced explicitly or on a declared unique property — never because two sentences look alike — and history is
-  kept. `memory_timeline` answers "how did X evolve", `at_time` answers "what was true on …".
-- **Operated like production, even in ALPHA.** Single writer with an inter-process lock, idempotent requests with
-  durable receipts, encrypted verified backups (AES-256-GCM) with restore drills, a daily health report, runbooks
-  for eight incident types, and a `/ready` endpoint that reports the attested build commit.
-
-## Evidence, not adjectives
-
-Every number below comes from a versioned run you can reproduce; none is a vendor claim.
-
-| What | Result | Protocol |
-|---|---|---|
-| **BEAM 100K** annotated-turn Recall@10, 400 questions completed (355 with evidence), Granite, no LLM | C4 0.462 vs BM25 0.445; paired Δ +0.017, IC95 **[-0.004, +0.040] — preregistered criterion not met**. MRR 0.444 vs 0.436; Δ +0.008 [+0.003, +0.015] | 20 conversation clusters, frozen plan `beam-c4-retrieval-v2` (sha256 `5878e5b5…`), 0 failures. This is retrieval only, not answer accuracy or a leaderboard score. See [`BEAM_RESULT_V2.md`](v4/docs/BEAM_RESULT_V2.md) |
-| **LongMemEval-S** evidence Recall@10, 500 questions executed (479 with evidence scored; 21 abstention cases excluded from retrieval metrics), ~50 sessions of history each, no LLM, MiniLM — candidate C4 (scoped literal BM25 + 3 protected lexical results + hybrid fusion) | **0.754 [0.721, 0.785] vs BM25 0.712 [0.675, 0.748]; paired Δ +0.042 [+0.022, +0.061]** (466 evidence clusters); MRR 0.626 vs 0.614, Δ +0.012 [+0.008, +0.0164]; 0 failures | Frozen preregistered plan `lexical-c4-s-v3` (sha256 38c1877e…); CI conditional on the fixed distractor corpus; questions overlap the oracle variant used for development, so this is **not** an independent confirmation and **not** an official leaderboard score |
-| Development history, LongMemEval oracle (exploratory) | 4.0.1 defaults ≈ BM25 (0.802 vs 0.812); root cause found (filtering after candidate truncation); corrected lexical path = exact BM25 parity; C4 +0.026 recall on dev | `v4/docs/LEXICAL_DEV_V1.md`, failures kept |
-| LoCoMo evidence Recall@10 (exploratory) | 0.538 production defaults → 0.815 with offline LLM enrichment and reranking | `v4/RESULTS.md`; offline enrichment is not the production path |
-| 4.0.1 release qualification | 478 v3 + 795 v4 tests, two adversarial review rounds, installed-artifact relay proof (round-trip, failure, reconnection, no replay) for wheel and sdist | `releases/4.0.1/QUALIFICATION.md` |
-
-We publish retrieval recall, answer quality and agent-task success **separately**, with sample sizes and
-confidence intervals, and always next to simple baselines (BM25, dense-only, files, full context). BEAM had no
-exact normalized question/turn overlap with LongMemEval and its preregistered recall criterion failed. The next milestones are the
-indexing-cost target, a new held-out temporal test, answer accuracy with a fixed reader model and independent
-reproduction — before any leaderboard claim. On BEAM, indexing took 678 s per conversation at the median while
-warm search stayed at 41 ms p50; the encoder consumed 99.86% of measured ingestion time.
-
-The experimental MPS/float32 run completed the same 20 BEAM conversations in 661 s:
-ingestion p50 29.1 s, p95 43.1 s, max 43.7 s. Against archived CPU predictions,
-Recall@10 Δ +0.0006 (97.5% CI [-0.0083, +0.0135]) and MRR Δ +0.0007
-[-0.0003, +0.0019]. **Preregistered two-sided equivalence was not demonstrated**;
-no post-hoc non-inferiority claim is made. Historical CPU timings are not paired.
-The development candidate preserves `device=auto`, matching the existing MPS
-deployment on this Mac. Production uses native loading and batch32; the measured
-MPS float32/batch4 profile differs and remains an experimental variant. Backend
-or precision changes require operator approval and compatible/rebuilt vectors. See
-[`MPS_RESULT_V1.md`](v4/docs/MPS_RESULT_V1.md) for evidence, settings and limitations.
-The production audit and corrected recommendation are documented in
-[`MPS_PRODUCTION_ALIGNMENT_V1.md`](v4/docs/MPS_PRODUCTION_ALIGNMENT_V1.md).
-
-The **4.0.3 artifacts are qualified on a private copy**. Claude completed the local
-switchover on 2026-10-10 at 22:36 with Romain's GO (doctor 15 PASS / 0 FAIL).
-PyPI publication requires
-a separate GO. The candidate preserves
-`auto/native/batch32` and records loaded parameter dtype/device, model revision,
-runtime versions and encoder source hash in `memory_status` and authenticated
-`/ready`. Unattested or changed caches rebuild before queries; this first rebuild
-was qualified on a private copy. The completed ten-question answer pilot used
-Luna low + Astra high through ChatGPT-authenticated Codex only, on observed BEAM:
-C4 accuracy 0.40 vs BM25 0.20, 40 calls, 362,348 tokens, zero API spend. This is
-descriptive: no official judge comparison or leaderboard claim. The broader
-[campaign protocol](v4/docs/ANSWER_HELDOUT_CAMPAIGN_v1.md) is preregistered;
-BEAM 500K was downloaded with approval but **refused before inference**: only 15
-fresh independent groups survived the audit (minimum 30). Its first annotation
-failure is a missing `source_chat_ids` field, not a demonstrated dangling ID.
-See [held-out alternatives and diagnosis](v4/docs/HELDOUT_OPTIONS_V2.md).
-The approved **MemoryAgentBench-LRU acquisition/audit completed with NO-GO**:
-110 contexts, 171 questions, 74 unique usable questions, zero fresh attested
-source groups (`infbench_sum`/`detective_qa` unresolved); zero inference.
-See [bounded acquisition/audit](v4/docs/MAB_LRU_ACQUISITION_AUDIT_v1.md).
-Romain instead authorized [LongMemEval-S answer accuracy via Codex](v4/docs/LME_S_ANSWER_LUNA_v1.md):
-all 500 questions including abstentions, C4 versus same-arm BM25, Luna low reader
-and Luna high judge with official question-type grading templates. The qualified
-4.0.3 engine is frozen separately from this harness. No API spend; results remain
-**descriptive**, since this corpus was already observed and the judge differs
-from the published GPT-4o snapshot. This campaign has not been run by Codex.
-See [copy qualification and later rollout](v4/docs/QUALIFY_4_0_3.md).
-
-
-## Architecture
-
-```
- Claude · Codex · Copilot · Cursor · Antigravity · Gemini · Grok · Windsurf
-        │ stdio (MCP)            one relay per client process, reads the 0600 token file
-        ▼
- memory-os-relay ──HTTP + Bearer──▶ memory-os-v4 server (127.0.0.1:8765, launchd)
-                                     ├─ MCP tools: brief, search, timeline, chat_save, add_facts, blocks, forget…
-                                     ├─ engine: typed bi-temporal items, project scopes, explicit fact updates
-                                     ├─ retrieval: dense (granite-97m multilingual) + BM25 + entities, RRF fusion
-                                     ├─ single writer lock · request receipts · /health · /ready
-                                     └─ store: JSONL by default; transactional SQLite S2/S3 opt-in (qualified backups not yet supported)
- memory-os-admin: setup · doctor · backup · restore-drill · health · hooks
-```
-
-Details: [`v4/docs/ARCHITECTURE.md`](v4/docs/ARCHITECTURE.md), [`v4/docs/HTTP_CLIENT_CONTRACT.md`](v4/docs/HTTP_CLIENT_CONTRACT.md),
-[`v4/docs/ADR-001-SQLITE.md`](v4/docs/ADR-001-SQLITE.md), [`v4/docs/READINESS.md`](v4/docs/READINESS.md).
-
-## Honest limits of this ALPHA
-
-- One user, one machine (macOS qualified). Projects organise memory; they are not a security boundary between
-  people. No remote access: assistants that run only in the cloud cannot reach a local server yet.
-- The JSONL store and request receipts are not atomic across files; transactional SQLite S2 and offline reversible migration S3 ship opt-in,
-  with failure-injection tests and embedding caching. SQLite qualified backups/restore drills (S4) remain to do;
-  the current ops backup command refuses SQLite.
-- C4 is the 4.0.2 default (`MEMORY_V4_BM25_PROFILE=scoped_literal`,
-  `MEMORY_V4_LEXICAL_GUARD_K=3`). LongMemEval-S passed its gate but was not independent; the question-disjoint
-  BEAM run failed its recall gate. C4 therefore has no general superiority claim. Rollback uses
-  `MEMORY_V4_BM25_PROFILE=legacy` and `MEMORY_V4_LEXICAL_GUARD_K=0`.
-- Neither run measures official answer accuracy, multilingual quality, agent-task success or leaderboard rank.
-
-## Development
+The current published release requires manual provisioning and service setup by an operator. It is not yet a
+qualified ten-minute installation for a new user. Install into a durable environment (not a `uvx` daemon):
 
 ```bash
-pip install -e '.[dev,ops]'
-pytest v4/tests          # v4 engine, MCP server, ops layer
-pytest tests             # v3 engine
+uv tool install 'memory-os-ai[ops,brief]==4.0.5'  # requires uv; current published package
+memory-os-admin --help
 ```
-The v4 engine lives in `v4/src/memory_os_v4`; the evaluation harness in `v4/bench`. Contributions: see
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-## Legacy v3 document engine
+Before starting the server: explicitly provision Granite (~220.2 MB, revision
+`835ad14087e140460703cf0fae09f97d469d65c2`), tiktoken 0.12.0 and the cl100k table (1.68 MB); create a 0600
+token with `memory-os-admin token create`; prepare the qualified release commit declaration required by 4.0.5;
+then use `memory-os-admin setup` to generate client snippets/service templates and `memory-os-admin doctor`
+to check the running installation. **Setup creates the token if needed and prints snippets; it does not install
+or start a service or edit client configs.** Model loading is offline by default; a missing model is a failure,
+not a silent download. Runtime dependencies (including torch) are additional to model weights; installation
+size/time still needs a clean-machine measurement.
 
-`memory-os-ai-v3` still ships the previous FAISS document server (21 tools: document ingestion for PDF/DOCX/
-images/audio, chat extraction, cross-project linking, cloud overflow). Existing v3 memories can be imported into v4
-with the `memory_migrate_v3` tool. v3 documentation: [`legacy/`](legacy/) and the 3.x release notes.
+**4.0.6 candidate only, not available in PyPI 4.0.5:** document libraries move to `[documents]` and `[v3]`;
+a verified embedded identity removes the manual commit declaration; `memory-os-admin provision` previews
+pinned resources and needs `--apply --download-approved` for missing files. `quickstart` is planned and not
+implemented yet. The complete onboarding instructions will be qualified before release.
 
-## License
+## Supported assistants
 
-LGPL-3.0-or-later. Built and reviewed jointly by Claude (Anthropic) and Codex (OpenAI) with [@romainsantoli-web](https://github.com/romainsantoli-web).
+| Assistant | Configured | Connection verified | Real usage observed |
+|---|---|---|---|
+| Claude Code | yes | yes | yes (brief at startup, saves, assisted capture) |
+| Codex (CLI / ChatGPT app) | yes | yes | yes (saves, tasks) |
+| Grok CLI | yes | yes (handshake, tools) | not measured |
+| Claude Desktop | yes (edit with the app closed) | to verify | not measured |
+| VS Code (Copilot agent mode) | yes | to verify (Copilot Chat extension) | not measured |
+| Cursor · Antigravity · Zed · Devin Desktop · Windsurf · Gemini CLI | yes | to verify | not measured |
+
+Definitions: *configured* = valid entry detected by `doctor`; *connection verified* = MCP handshake/tool call
+observed; *real usage* = memory used in real work. These levels describe the operator deployment reported on 2026-10-11, not every installation.
+The candidate source/sdist includes `docs/CLIENTS.md`; packaged documentation is installed under
+`share/doc/memory-os-ai`. No unpublished documentation URL is presented as live.
+
+## Security and control
+
+Local server (`127.0.0.1`), private access token (0600) read by the relay: **never written into a client
+configuration**. Memories are data, never instructions. Maintenance operations (consolidation) are refused
+without explicit authorization. In SQLite mode (opt-in in 4.0.5): encrypted online backups and a restore test.
+
+## Results, with their conditions
+
+- 4.0.5 qualification: more than 1,600 v4 tests plus the v3 suite; outage/reconnection/no-replay TCP tests,
+  and qualification on a copy of the operator store. This is engineering evidence, not a productivity score.
+- Compact brief: 400 exact measurements, max 1,349 tokens / 3,678 bytes.
+- LongMemEval-S retrieval: C4 Recall@10 0.754 vs BM25 0.712, paired delta +0.042 [0.022, 0.061];
+  MiniLM/CPU, 466 evidence clusters, observed questions and conditional intervals: **not independent**.
+- BEAM 100K retrieval: C4 0.462 vs BM25 0.445, delta +0.017 [-0.004, +0.040], 20 conversations,
+  Granite/CPU: the preregistered recall criterion **failed**. These evaluations differ from the operator
+  production profile (Granite, auto/MPS, native precision, batch 32). No official leaderboard claim.
+- **No productivity gain measured** to date (handoff study between assistants not run).
+
+## Limits (ALPHA)
+
+macOS Apple Silicon first; Linux and Windows not qualified. A single machine (no multi-device sync), a single user.
+Alternatives: Mem0 (OSS and self-hostable), Zep (managed memory) / Graphiti (open-source temporal graph), Letta (agents with memory), Supermemory
+(MCP memory, managed service), native memories of the assistants (some with import/export). Different products; we
+claim no superiority: our angle is a local memory shared between existing assistants, with explicit
+mutation contracts.
+
+## Older test suites
+
+The 4.0.4 source test suite could overwrite real client MCP configs. HOME/config isolation was fixed and
+qualified in 4.0.5. Do not run the 4.0.4 suite against your real home.
+
+## Licence
+
+LGPL-3.0-or-later. Third-party model: IBM Granite embedding (see its licence).
