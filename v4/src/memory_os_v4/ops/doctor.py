@@ -201,7 +201,16 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
                         "memory_request_status without ID via each relay; never repeat an unresolved mutation"))
     checks += _clients(home)
     from .connection_proof import inspect_proofs
-    checks += [Check(**row) for row in inspect_proofs(settings)]
+    current_identity = None
+    try:
+        code, raw = http_get(settings.ready_url, settings)
+        deployed = json.loads(raw)
+        if code == 200 and deployed.get("ready") is True:
+            current_identity = {"version": deployed["version"], "commit": deployed["commit"],
+                                "store_instance_id": deployed["capabilities"]["store"]["instance_id"]}
+    except (SecretFileError, ValueError, KeyError, TypeError):
+        pass
+    checks += [Check(**row) for row in inspect_proofs(settings, current_identity)]
     return checks
 
 
@@ -243,4 +252,9 @@ def _capabilities(info: dict) -> list[Check]:
                         f"doctor environment package={__version__}; client relay artifacts are separate")]
     except (KeyError, TypeError):
         return [Check("capabilities", "FAIL", "malformed deployed capability contract")]
+    tokenizer = caps.get("brief", {}).get("tokenizer", {})
+    if caps.get("brief", {}).get("compact"):
+        checks.append(Check("brief-tokenizer", "PASS" if tokenizer.get("ready") else "FAIL",
+                            "exact offline cl100k_base available" if tokenizer.get("ready") else
+                            "compact unavailable: provision brief extra and attested local table"))
     return checks

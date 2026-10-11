@@ -1,4 +1,5 @@
 """Read-only aggregation of client-exported relay observations, never a live probe."""
+
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ from .clients import CLIENTS
 
 def artifact():
     from .. import __version__
+
     root = Path(__file__).parent
     digest = hashlib.sha256()
     for name in ("relay.py", "durable_relay.py", "request_journal.py", "connection_proof.py"):
@@ -17,7 +19,7 @@ def artifact():
     return {"version": __version__, "source_sha256": digest.hexdigest()}
 
 
-def inspect_proofs(settings):
+def inspect_proofs(settings, server_identity=None):
     """Operator saves connection fields returned by each actual client. No inferred installation."""
     path = os.environ.get("MEMORY_V4_CLIENT_PROOFS")
     records = []
@@ -40,13 +42,26 @@ def inspect_proofs(settings):
         for r in candidates:
             try:
                 age = time.time() - float(r["observed_at"])
-                if (0 <= age <= 300 and r["endpoint_sha256"] == endpoint and r["successful_control"] is True
-                        and r["relay"] == artifact() and isinstance(r["server"]["version"], str)
-                        and r["server"]["version"] == r["relay"]["version"]):
+                if (
+                    0 <= age <= 300
+                    and r["endpoint_sha256"] == endpoint
+                    and r["successful_control"] is True
+                    and r["relay"] == artifact()
+                    and isinstance(r["server"]["version"], str)
+                    and r["server"]["version"] == r["relay"]["version"]
+                    and server_identity is not None
+                    and all(r["server"].get(k) == v for k, v in server_identity.items())
+                ):
                     valid.append(r)
             except (KeyError, ValueError, TypeError):
                 pass
-        result.append({"area": "connection:" + client.key, "status": "PASS" if valid else "WARN",
-                       "detail": "recent client-exported control observation; not a live probe" if valid else
-                       "unknown: no fresh matching client/endpoint/artifact observation"})
+        result.append(
+            {
+                "area": "connection:" + client.key,
+                "status": "PASS" if valid else "WARN",
+                "detail": "recent client-exported control observation; not a live probe"
+                if valid
+                else "unknown: no fresh matching client/endpoint/artifact observation",
+            }
+        )
     return result

@@ -910,6 +910,8 @@ class MemoryV4:
             now = time.time()
             live = [
                 it for it in self.store.all(include_deleted=False) if matches(it.project, project)
+                and is_valid_at(it, now) and not (it.invalidated_by and it.valid_until is None)
+                and "sensitive" not in it.tags
             ]
 
             episodes = sorted(
@@ -939,6 +941,8 @@ class MemoryV4:
 
             pending = [it for it in live if self._is_pending(it)][:6]
 
+            live_ids = {it.id for it in live}
+            focus_hits = [hit for hit in focus_hits if hit.item.id in live_ids]
             sections: dict = {
                 "blocks": self.blocks.all(project=project),
                 "recent_episodes": [it.to_dict() for it in recent_episodes],

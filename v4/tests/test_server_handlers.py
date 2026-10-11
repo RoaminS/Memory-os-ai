@@ -94,7 +94,7 @@ def test_instructions_stay_under_2600_chars():
 # --------------------------------------------------- memory_session_brief --
 def test_session_brief_happy_path(server_engine):
     server_engine.add_episode("Hello world.", project="p1")
-    result = call("memory_session_brief", {"project": "p1"})
+    result = call("memory_session_brief", {"mode": "detailed", "project": "p1"})
     assert "blocks" in result
     assert result["recent_episodes"][0]["text"] == "Hello world."
     # datetimes must be ISO strings, not raw floats

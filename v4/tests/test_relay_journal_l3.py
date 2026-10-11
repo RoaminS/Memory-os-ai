@@ -84,7 +84,7 @@ def test_C02_C08_orphan_adoption_and_status_never_replay(settings, fault, effect
         report = call(second, "memory_request_status", {}).structuredContent
         assert report["unresolved_count"] == 1
         assert path.read_bytes() == original
-        brief = call(second, "memory_session_brief", {}).structuredContent
+        brief = call(second, "memory_session_brief", {"mode": "detailed"}).structuredContent
         assert "1 uncertain" in brief["text"]
         found = call(second, "memory_request_status", {"request_id": "id"}).structuredContent
         assert found["replay_permitted"] is False

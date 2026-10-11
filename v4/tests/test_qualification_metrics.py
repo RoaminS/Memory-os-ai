@@ -53,7 +53,7 @@ def test_dispatch_outcomes_metrics_do_not_write_store_or_change_ack(tmp_path, mo
         monkeypatch.setattr(server, "_engine", engine)
         server.dispatch("memory_search", {"query": ""})
         server.dispatch("memory_compact", {})
-        server.dispatch("memory_session_brief", {"max_tokens": 1000})
+        server.dispatch("memory_session_brief", {"mode": "detailed", "max_tokens": 1000})
         snap = server.dispatch("memory_status", {})["qualification"]
         assert snap["tools"]["memory_search"]["errors"] == 1
         assert snap["tools"]["memory_compact"]["maintenance_denied"] == 1
@@ -72,6 +72,6 @@ async def test_transport_text_matches_byte_counter(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_qualification", m)
     with MemoryV4(config=Config(data_dir=str(tmp_path), embed_model="hash")) as engine:
         monkeypatch.setattr(server, "_engine", engine)
-        content = await server.call_tool("memory_session_brief", {"max_tokens": 1000})
+        content = await server.call_tool("memory_session_brief", {"mode": "detailed", "max_tokens": 1000})
         row = m.snapshot()["tools"]["memory_session_brief"]
         assert row["content_text_utf8_bytes_sum"] == len(content[0].text.encode("utf-8"))

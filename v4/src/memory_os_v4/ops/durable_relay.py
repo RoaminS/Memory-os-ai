@@ -106,12 +106,32 @@ class DurableRelay:
                         "client_id": os.environ.get("MEMORY_V4_CLIENT_ID", "unknown"),
                         "endpoint_sha256": hashlib.sha256(self.settings.url.encode()).hexdigest(),
                         "observed_at": time.time(), "successful_control": True,
-                        "relay": artifact(), "server": caps.get("engine", {})}
+                        "relay": artifact(), "server": {**caps.get("engine", {}),
+                            "store_instance_id": caps.get("store", {}).get("instance_id")}}
 
             else:
-                result = await self.transport.submit(lambda s: s.call_tool(name, args), replay=name in READS)
+                try:
+                    result = await self.transport.submit(lambda s: s.call_tool(name, args), replay=name in READS)
+                except Exception:
+                    if name != "memory_session_brief" or args.get("mode", "compact") == "detailed":
+                        raise
+                    from ..brief import compact_error, envelope
+                    return envelope(compact_error({"code": "upstream_unavailable"}))
             if name == "memory_session_brief":
                 report = journal.status()
+                if args.get("mode", "compact") == "compact":
+                    data = result.structuredContent
+                    if data is None:
+                        data = json.loads("".join(c.text for c in result.content if isinstance(c, types.TextContent)))
+                    if isinstance(data, dict) and data.get("ok") is False:
+                        from ..brief import compact_error, envelope
+                        return envelope(compact_error(data))
+                    if data.get("mode") == "compact":
+                        from ..brief import rebudget, envelope
+                        notices = ["unresolved_requests"] if (report["unresolved_count"] or report["errors"] or report["journal_poisoned"]) else []
+                        return envelope(rebudget(data, notices))
+                    from ..brief import compact_error, envelope
+                    return envelope(compact_error({"code": "brief_unavailable"}))
                 if report["unresolved_count"] or report["errors"] or report["journal_poisoned"]:
                     data = body(result)
                     notice = (f"{report['unresolved_count']} uncertain operations; see memory_request_status. "

@@ -23,6 +23,9 @@ def _save(project, text):
 
 
 def test_resolvers(monkeypatch):
+    monkeypatch.setattr(srv, "_engine", None)
+    monkeypatch.delenv("MEMORY_V4_PROJECT_REGISTRY", raising=False)
+    monkeypatch.setattr(srv, "get_engine", lambda: pytest.fail("resolver opened store"))
     monkeypatch.setenv("MEMORY_V4_PROJECT", "*")
     assert srv._project_of(None) is None
     assert srv._project_of("alpha") == "alpha"
@@ -48,7 +51,7 @@ def test_star_reads_across_projects(engine, monkeypatch):
     occ = srv.dispatch("memory_search_occurrences", {"keyword": "Londres"})
     assert occ["count"] == 2
 
-    brief = srv.dispatch("memory_session_brief", {})
+    brief = srv.dispatch("memory_session_brief", {"mode": "detailed", })
     assert len(brief["recent_episodes"]) == 2
 
 

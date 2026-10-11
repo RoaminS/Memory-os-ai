@@ -234,3 +234,50 @@ def test_L4_rejected_token_is_explicit_then_recovers(harness):
             with anyio.fail_after(5):
                 assert payload(await session.call_tool("memory_status", {}))["embed_model"] == "hash"
     anyio.run(run)
+
+
+def test_L5_capabilities_roundtrip_and_client_observation(harness):
+    h = harness
+    h.env['MEMORY_V4_CLIENT_ID'] = 'codex'
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r,w), ClientSession(r,w) as session:
+            await session.initialize()
+            result=payload(await session.call_tool('memory_status',{}))
+            caps=result['capabilities']
+            assert caps['store']['backend']=='jsonl'
+            assert caps['encoding']['profile']['device']=='hash'
+            assert caps['brief']['default_mode']=='compact'
+            local=payload(await session.call_tool('memory_request_status',{}))
+            proof=local['connection']['observation']
+            assert proof['client_id']=='codex' and proof['successful_control']
+            assert proof['server']['commit']=='a'*40
+            assert proof['server']['store_instance_id']==caps['store']['instance_id']
+            assert len(proof['relay']['source_sha256'])==64
+    anyio.run(run)
+
+
+def test_L1a_real_tcp_compact_and_offline_counter_failure(harness):
+    h=harness
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r,w), ClientSession(r,w) as session:
+            await session.initialize()
+            payload(await session.call_tool('memory_add_facts',{'project':'brief-test','facts':[{'text':'Synthetic current task: verify compact brief.'}]}))
+            compact=await session.call_tool('memory_session_brief',{'project':'brief-test'})
+            data=payload(compact)
+            from memory_os_v4.brief_tokens import status, counter
+            proof={'counter_ready':status()['ready'],'measured':False}
+            if proof['counter_ready']:
+                wire=json.dumps(compact.model_dump(mode='json',by_alias=True,exclude_none=True),ensure_ascii=False,separators=(',',':'))
+                proof.update(measured=True,bytes=len(wire.encode()),tokens=counter()(wire))
+                assert proof['bytes']<=6000 and proof['tokens']<=1500
+                assert data['mode']=='compact' and data['references']
+                detailed=payload(await session.call_tool('memory_session_brief',{'project':'brief-test','mode':'detailed','expand':[data['references'][0]['id']]}))
+                assert detailed['items'][0]['text']=='Synthetic current task: verify compact brief.'
+            else:
+                assert data['code']=='tokenizer_unavailable'
+            (h.root/'brief-envelope.json').write_text(json.dumps(proof))
+            huge=await session.call_tool('memory_session_brief',{'expand':['x'*10000]})
+            assert len(json.dumps(huge.model_dump(mode='json',exclude_none=True)).encode())<1000
+    anyio.run(run)

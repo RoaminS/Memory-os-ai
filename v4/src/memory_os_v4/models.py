@@ -144,11 +144,14 @@ class MessageIn(BaseModel):
 class SessionBriefIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    mode: Literal["compact", "detailed"] = Field("compact", description="compact bounds the entire MCP envelope; detailed explicitly requests the legacy full structure.")
+    expand: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=20, description="Expand IDs within this project, including valid direct children. detailed returns full item text.")
+
     focus_query: str | None = Field(
         None, description="Optional topic to additionally pull focused search hits for."
     )
     max_tokens: int = Field(
-        3000, ge=200, le=20000, description="Approximate token budget for the rendered brief text."
+        3000, ge=200, le=20000, description="Detailed mode only: approximate rendered-text budget. Compact always bounds the full envelope to 6000 bytes and 1500 cl100k_base tokens."
     )
     project: str | None = Field(None, description=_PROJECT_DESC)
 

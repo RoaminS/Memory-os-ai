@@ -33,6 +33,7 @@ from mcp.types import TextContent, Tool
 from pydantic import BaseModel, ValidationError
 
 from .config import Config
+from .brief_tokens import TokenizerUnavailable
 from .instructions import build_instructions
 from .memory import MemoryV4
 from .idempotency import raw_args_sha256
@@ -83,20 +84,29 @@ def default_project() -> str:
 ALL_PROJECTS = "*"
 
 
+def _project_registry():
+    # Resolving identity is not permission to open a store/load a model.
+    if _engine is not None:
+        return _engine.projects
+    from .projects import ProjectRegistry
+    return ProjectRegistry.load(os.environ.get("MEMORY_V4_PROJECT_REGISTRY"))
+
+
+
 def _project_of(value: str | None) -> str | None:
     """Read scope. ``"*"`` (explicit, or as MEMORY_V4_PROJECT) means every
     project -> ``None``, which the engine already treats as "no filter".
     A shared server serves many projects, so it runs with MEMORY_V4_PROJECT=*."""
     scope = value if value is not None else default_project()
-    return None if scope == ALL_PROJECTS else get_engine().projects.resolve(scope, read=True)
+    return None if scope == ALL_PROJECTS else _project_registry().resolve(scope, read=True)
 
 
 def _write_project_of(value: str | None) -> str:
     """Write target: always a concrete label, never the ``"*"`` wildcard."""
     if value is not None and value != ALL_PROJECTS:
-        return get_engine().projects.resolve(value)
+        return _project_registry().resolve(value)
     fallback = default_project()
-    return get_engine().projects.resolve("default" if fallback == ALL_PROJECTS else fallback)
+    return _project_registry().resolve("default" if fallback == ALL_PROJECTS else fallback)
 
 
 # ------------------------------------------------------------------- helpers
@@ -188,7 +198,13 @@ def _h_status(engine: MemoryV4, args: models.StatusIn) -> dict:
 
 def _h_session_brief(engine: MemoryV4, args: models.SessionBriefIn) -> dict:
     project = _project_of(args.project)
+    from .brief import build, expand_detailed
+    if args.mode == "compact":
+        return build(engine, project, args.focus_query, args.expand)
+    if args.expand:
+        return expand_detailed(engine, project, args.expand)
     brief = engine.session_brief(focus_query=args.focus_query, max_tokens=args.max_tokens, project=project)
+    brief["mode"] = "detailed"
     out = dict(brief)
     for key in ("recent_episodes", "key_facts", "procedures", "focus", "pending"):
         out[key] = [_convert_item_dict(d) for d in out.get(key, [])]
@@ -611,10 +627,15 @@ _qualification = QualificationMetrics(TOOL_HANDLERS, enabled=enabled_from_env())
 
 
 def dispatch(name: str, arguments: dict | None) -> dict:
+    def normalize(result):
+        if name == "memory_session_brief" and (arguments or {}).get("mode", "compact") != "detailed" and result.get("ok") is False:
+            from .brief import compact_error
+            return compact_error(result)
+        return result
     if not _qualification.enabled:
-        return _dispatch(name, arguments)
+        return normalize(_dispatch(name, arguments))
     started = perf_counter()
-    result = _dispatch(name, arguments)
+    result = normalize(_dispatch(name, arguments))
     elapsed_ms = (perf_counter() - started) * 1000
     try:
         _qualification.record(name, arguments, result, elapsed_ms)
@@ -635,7 +656,10 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
     try:
         parsed = model_cls(**arguments)
     except ValidationError as exc:
-        logger.warning("validation error for tool %s: %s", name, exc)
+        if name == "memory_session_brief":
+            logger.warning("invalid brief input")
+        else:
+            logger.warning("validation error for tool %s: %s", name, exc)
         return {"ok": False, "error": str(exc)}
     except ValueError as exc:
         return {"ok": False, "error": str(exc)}
@@ -653,6 +677,8 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         return engine.execute_request(operation, scope, payload, getattr(parsed, "request_id", None),
                                       lambda: handler(engine, parsed),
                                       raw_args_sha256=raw_args_sha256(arguments))
+    except TokenizerUnavailable:
+        return {"ok": False, "mode": "compact", "code": "tokenizer_unavailable", "error": "Exact offline tokenizer unavailable; provision it explicitly or request mode=detailed."}
     except ProjectError as exc:
         return {"ok": False, "error": str(exc), "code": str(exc).split(":", 1)[0], "outcome": "not_started"}
     except MaintenanceDenied as exc:
@@ -683,12 +709,15 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@server.call_tool()
+@server.call_tool(validate_input=False)
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     # dispatch is synchronous (embedding, disk I/O): run it off the event loop
     # so one slow call does not stall the other clients of a shared HTTP
     # server. The engine itself is thread-safe (single RLock).
     result = await anyio.to_thread.run_sync(dispatch, name, arguments)
+    if name == "memory_session_brief" and (arguments or {}).get("mode", "compact") == "compact":
+        from .brief import envelope
+        return envelope(result)
     return [TextContent(type="text", text=result_text(result))]
 
 
@@ -814,7 +843,7 @@ def _selfcheck() -> int:
     call("memory_search", {"query": "Paris", "project": "selfcheck"})
     call("memory_get_context", {"query": "Paris", "project": "selfcheck"})
     call("memory_timeline", {"query": "Paris", "project": "selfcheck"})
-    call("memory_session_brief", {"project": "selfcheck"})
+    call("memory_session_brief", {"project": "selfcheck", "mode": "detailed"})
     call("memory_list_documents", {"project": "selfcheck"})
     call("memory_search_occurrences", {"keyword": "Paris", "project": "selfcheck"})
     doc_path = _selfcheck_architecture_doc(tmp_dir)

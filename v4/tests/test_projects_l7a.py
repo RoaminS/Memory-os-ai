@@ -106,7 +106,7 @@ def test_aliases_filter_before_ranking_all_read_surfaces(engine):
     assert call("memory_search", **{**args, "project": "old-alpha"})["hits"] == hits
     assert len(engine.retriever.lexical_index(project=engine.projects.resolve("prj_alpha", read=True)).doc_len) == 3
     assert len(call("memory_timeline", project="prj_alpha", query="telescope")["items"]) == 3
-    brief = call("memory_session_brief", project="alpha-clone")
+    brief = call("memory_session_brief", mode="detailed", project="alpha-clone")
     assert {f["id"] for f in brief["key_facts"]} == {"old-alpha", "alpha-clone", "prj_alpha"}
     assert brief["blocks"]["working_rules"] == "historical instructions"
     assert old.keys() == {i.id for i in engine.store.all(False)}
