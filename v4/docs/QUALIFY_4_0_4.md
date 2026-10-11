@@ -18,7 +18,7 @@ Registre inactif : `unset MEMORY_V4_PROJECT_REGISTRY`. Les hooks gardent Q0v2.
 La tentative locale v1 reste préservée : schéma JSON L3/L4 absent du sdist,
 collecte refusée ; inclusion corrigée dans les deux distributions.
 
-Dossier :`.local-qualification/release-4.0.4-v3/`. Les artefacts et les deux venv
+Dossier :`.local-qualification/release-4.0.4-v4/`. Les artefacts et les deux venv
 hors dépôt sont ceux du manifeste ; **ne pas reconstruire** pour ces tests ou une
 publication ultérieure. Le manifeste source identifie le commit de construction,
 qui peut être un ancêtre du commit contenant le reçu de livraison. Les empreintes
@@ -30,7 +30,7 @@ après un refus. Les scripts ne contrôlent que des services privés sur port al
 ```sh
 cd /Users/romain/Documents/Codex/2026-10-09/v/work/implementation
 brief_python="$PWD/.local-qualification/brief-test-runtime-claude-3c-v1/bin/python"
-release_dir=.local-qualification/release-4.0.4-v3
+release_dir=.local-qualification/release-4.0.4-v4
 export PYTHONPATH="$PWD/src:$PWD/v4/src:$PWD/v4"
 export MEMORY_V4_CL100K_PATH="$PWD/.local-qualification/cl100k/cl100k_base.tiktoken"
 unset MEMORY_V4_PROJECT_REGISTRY

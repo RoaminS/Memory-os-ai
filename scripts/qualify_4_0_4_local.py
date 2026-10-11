@@ -16,11 +16,17 @@ import time
 import venv
 import tarfile
 import shutil
+import signal
 import xml.etree.ElementTree as ET
 
 
 def digest(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def disk_guard(path):
+    if shutil.disk_usage(path).free < 5_000_000_000:
+        raise ValueError('Disk guard < 5 GB; no further qualification work')
 
 
 def main():
@@ -33,12 +39,11 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     out = (args.output_dir or root / '.local-qualification/release-4.0.4').resolve()
-    if out.exists():
+    if not out.is_relative_to(root / '.local-qualification') or out.exists():
         raise ValueError('Fresh qualification directory required')
     out.mkdir(mode=0o700)
     py = sys.executable
-    if shutil.disk_usage(out).free < 5_000_000_000:
-        raise ValueError('Disk guard < 5 GB')
+    disk_guard(out)
     from memory_os_v4.brief_tokens import status
     if not status()['ready']:
         raise ValueError('Complete local tiktoken 0.12.0 runtime/table required; no download')
@@ -59,10 +64,26 @@ def main():
                PYTHONPATH=str(root / 'src') + ':' + str(root / 'v4/src') + ':' + str(root / 'v4'))
 
     def run(name, command, *, cwd=root, extra=None):
+        disk_guard(out)
         commands.append({'name': name, 'command': command, 'cwd': str(cwd), 'extra_environment': extra or {}})
         t = time.monotonic()
         with (out / (name + '.log')).open('x') as log:
-            result = subprocess.run(command, cwd=cwd, env={**env, **(extra or {})}, stdout=log, stderr=subprocess.STDOUT)
+            result = subprocess.Popen(command, cwd=cwd, env={**env, **(extra or {})},
+                                      stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                while result.poll() is None:
+                    disk_guard(out)
+                    if time.monotonic() - t > 900:
+                        raise RuntimeError(name + ' exceeded 900s; preserve evidence')
+                    time.sleep(.5)
+            finally:
+                if result.poll() is None:
+                    os.killpg(result.pid, signal.SIGTERM)
+                    try:
+                        result.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(result.pid, signal.SIGKILL)
+                        result.wait(timeout=5)
         checks[name] = 'passed' if result.returncode == 0 else 'failed'
         (out / 'commands.json').write_text(json.dumps(commands, indent=2) + '\n')
         print(name, checks[name], round(time.monotonic() - t, 2), 's', flush=True)
