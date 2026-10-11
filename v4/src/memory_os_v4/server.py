@@ -186,6 +186,10 @@ def _hit_dict(hit) -> dict:
 # -------------------------------------------------------------------- handlers
 def _h_status(engine: MemoryV4, args: models.StatusIn) -> dict:
     s = dict(engine.status(project=_project_of(args.project)))
+    if engine.config.store_backend == 'sqlite_s1':
+        s['embedding_cache'] = {'hits': engine._embedding_cache.hits,
+                                'misses': engine._embedding_cache.misses,
+                                'namespace': engine.config.sqlite_embedding_namespace}
     s["maintenance"] = engine.maintenance_status()
     from .capabilities import deployed
     from .readiness import build_identity

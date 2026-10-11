@@ -152,6 +152,7 @@ def test_archived_source_worker_runs_from_untracked_cwd_with_hash_only():
         # This fixture targets the immutable historical CPU archive, not today's Config.
         cfg.pop('maintenance_mode')
         cfg.pop('project_registry')  # Not present in the immutable historical CPU source.
+        cfg.pop('write_mode')  # Operator window added later; historical Config has no such field.
         campaign.write(root / 'plan.json', {'model': {'id': 'hash'}, 'cpu_config': cfg,
             'data': str(data), 'namespace': 'beam-c4-v1-capture', 'chunk_chars': 1024,
             'top_k': 10, 'context_bytes': 12000, 'selected': [{'id': c.id, 'probes': [p.id for p in c.probes]}]})

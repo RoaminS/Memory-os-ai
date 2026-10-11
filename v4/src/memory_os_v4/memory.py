@@ -1079,9 +1079,6 @@ class MemoryV4:
         if self.config.store_backend == "sqlite_s1":
             from .sqlite_stats import receipt_statistics
             result["receipts"] = receipt_statistics(self.store._connection, self.store.db_path)
-            result["embedding_cache"] = {"hits": self._embedding_cache.hits,
-                                         "misses": self._embedding_cache.misses,
-                                         "namespace": self.config.sqlite_embedding_namespace}
         return result
 
     @_requires_open
