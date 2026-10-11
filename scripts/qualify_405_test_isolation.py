@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -19,6 +20,56 @@ from test_home_guard import operator_home
 
 ROOT = Path(__file__).resolve().parents[1]
 TCP = ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py', 'v4/tests/test_l3_tcp.py']
+EXPECTED_TCP = (
+    'test_l3_tcp::test_405_preflight_refusal_through_sdk_then_manual_retry[outage-preflight_unavailable]',
+    'test_l3_tcp::test_405_preflight_refusal_through_sdk_then_manual_retry[warming-upstream_not_ready]',
+    'test_l3_tcp::test_C02_C04_C08_disconnect_and_new_relay_adopts_journal[committed-completed]',
+    'test_l3_tcp::test_C02_C04_C08_disconnect_and_new_relay_adopts_journal[partial-pending]',
+    'test_l3_tcp::test_C07_thirty_restart_rotation_cycles',
+    'test_l3_tcp::test_L1a_real_tcp_compact_and_offline_counter_failure',
+    'test_l3_tcp::test_L4_identity_changed_survives_outage_catalog',
+    'test_l3_tcp::test_L4_rejected_token_is_explicit_then_recovers',
+    'test_l3_tcp::test_L5_capabilities_roundtrip_and_client_observation',
+    'test_l3_tcp::test_L7a_registry_scopes_through_packaged_relay',
+    'test_l3_tcp::test_L7b_W06_task_disconnect_owner_and_receipt_no_replay[task-committed-completed-1]',
+    'test_l3_tcp::test_L7b_W06_task_disconnect_owner_and_receipt_no_replay[task-partial-not_found-0]',
+    'test_l3_tcp::test_L7b_cold_model_free_ready_write_mode_and_relay_owner',
+    'test_l3_tcp::test_L7b_warm_available_hash_ready_before_first_tool',
+    'test_l3_tcp::test_S4_B09_read_only_window_keeps_reads_and_never_sends_mutation',
+    'test_l3_tcp::test_S4_B10_real_private_sqlite_restore_reconciles_forgets_and_reopens',
+    'test_ops_e2e::test_relay_survives_server_restart_without_replaying',
+    'test_ops_e2e::test_relay_with_token_against_secured_server',
+    'test_server_http_e2e::test_authenticated_ready_reports_engine_and_build_identity',
+    'test_server_http_e2e::test_http_maintenance_denied_before_receipt_with_metrics',
+    'test_server_http_e2e::test_http_maintenance_preview_is_read_only_and_apply_denied[preview]',
+    'test_server_http_e2e::test_ready_requires_authorization_over_tcp',
+    'test_server_http_e2e::test_rejected_network_requests_leave_store_unchanged[headers0-401]',
+    'test_server_http_e2e::test_rejected_network_requests_leave_store_unchanged[headers1-401]',
+    'test_server_http_e2e::test_rejected_network_requests_leave_store_unchanged[headers2-421]',
+    'test_server_http_e2e::test_rejected_network_requests_leave_store_unchanged[headers3-403]',
+    'test_server_http_e2e::test_two_clients_share_one_engine',
+    'test_server_http_e2e::test_two_http_clients_retry_one_mutation',
+)
+
+
+def tcp_evidence(cases_xml):
+    """Exact IDs/multiplicity/outcomes: equal counts alone cannot qualify TCP."""
+    modules = {Path(path).stem for path in TCP}
+    observed, unsuccessful = [], []
+    for case in cases_xml:
+        module = case.get('classname', '').split('.')[-1]
+        if module not in modules:
+            continue
+        identity = module + '::' + case.get('name', '')
+        observed.append(identity)
+        if any(case.find(status) is not None for status in ('failure', 'error', 'skipped')):
+            unsuccessful.append(identity)
+    expected, actual = Counter(EXPECTED_TCP), Counter(observed)
+    return {'ok': actual == expected and not unsuccessful,
+            'expected_cases': len(EXPECTED_TCP), 'observed_cases': len(observed),
+            'missing': sorted((expected - actual).elements()),
+            'unexpected': sorted((actual - expected).elements()),
+            'unsuccessful': sorted(unsuccessful)}
 
 
 def snapshots(home):
@@ -129,11 +180,12 @@ def main():
                       for k in ('tests', 'failures', 'errors', 'skipped')}
             if name == 'v4':
                 cases_xml = list(ET.parse(output / (name + '.xml')).getroot().iter('testcase'))
-                counts['tcp_cases'] = sum(c.get('classname', '').split('.')[-1] in
-                                         {'test_server_http_e2e', 'test_ops_e2e', 'test_l3_tcp'}
-                                         for c in cases_xml)
-                if args.suite == 'full' and counts['tcp_cases'] != 27:
-                    raise RuntimeError('The 27 physical TCP cases are required')
+                tcp = tcp_evidence(cases_xml)
+                counts['tcp_cases'] = tcp['observed_cases']
+                report['commands'][-1]['tcp_evidence'] = tcp
+                if args.suite == 'full' and not tcp['ok']:
+                    report['commands'][-1]['counts'] = counts
+                    raise RuntimeError('Physical TCP case manifest differs or is incomplete; see tcp_evidence')
             report['commands'][-1]['counts'] = counts
             minimum = 587 if name == 'v3' else (1658 if args.suite == 'full' else 1631)
             if counts['tests'] < minimum or any(counts[k] for k in ('failures', 'errors', 'skipped')):
