@@ -46,7 +46,7 @@ Issues = "https://github.com/romainsantoli-web/Memory-os-ai/issues"
 
 [project.optional-dependencies]
 documents = ["pymupdf>=1.24"]
-v3 = [
+legacy-v3 = [
     "pymupdf>=1.24", "pytesseract>=0.3", "python-pptx>=1.0",
     "python-docx>=1.1", "Pillow>=10.0", "requests>=2.32",
 ]
@@ -55,7 +55,7 @@ ops = [
     "cryptography>=42",
 ]
 audio = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "openai-whisper>=20231117",
     "torch>=2.4",
     "torchaudio>=2.4",
@@ -65,7 +65,7 @@ gpu = [
     "torch>=2.4",
 ]
 doc-legacy = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "textract>=1.6",
 ]
 dev = [
@@ -77,29 +77,29 @@ dev = [
     "twine>=6.0",
 ]
 cloud-gdrive = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "google-api-python-client>=2.100",
     "google-auth>=2.23",
     "google-auth-oauthlib>=1.1",
 ]
 cloud-dropbox = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "dropbox>=12.0",
 ]
 cloud-s3 = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "boto3>=1.34",
 ]
 cloud-azure = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "azure-storage-blob>=12.19",
 ]
 cloud-box = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "boxsdk>=3.9",
 ]
 cloud-b2 = [
-    "memory-os-ai[v3]",
+    "memory-os-ai[legacy-v3]",
     "b2sdk>=2.1",
 ]
 cloud-all = [

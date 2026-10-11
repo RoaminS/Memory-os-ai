@@ -165,6 +165,8 @@ build-backend = {json.dumps(metadata["build-backend"])}
 [project]
 name = "memory-os-ai"
 version = "{VERSION}"
+[project.optional-dependencies]
+{chr(10).join(f'{json.dumps(k)} = {json.dumps(v)}' for k, v in tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['optional-dependencies'].items())}
 [tool.setuptools.packages.find]
 where = ["src", "v4/src"]
 include = ["memory_os_ai*", "memory_os_v4*"]
@@ -212,6 +214,23 @@ include = ["memory_os_ai*", "memory_os_v4*"]
             descriptors.append(json.loads(archive.read("memory_os_v4/" + NAME)))
     assert descriptors[0] == descriptors[1]
     assert descriptors[0]["source_commit"] == commit
+    checker = importlib.util.spec_from_file_location("extra_gate", ROOT / "scripts/check_extra_markers.py")
+    gate = importlib.util.module_from_spec(checker)
+    checker.loader.exec_module(gate)
+    for folder in (direct_dist, rebuilt_dist):
+        proof = gate.wheel_markers(next(folder.glob("*.whl")))
+        assert proof["ok"] and "legacy-v3" in proof["extras"] and "v3" not in proof["extras"]
+        assert all(n > 0 for n in proof["marker_evaluations"].values())
+
+
+def test_no_extra_name_can_parse_as_pep440_version():
+    from packaging import version
+    checker = importlib.util.spec_from_file_location("extra_gate", ROOT / "scripts/check_extra_markers.py")
+    gate = importlib.util.module_from_spec(checker)
+    checker.loader.exec_module(gate)
+    gate.check_names(tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["optional-dependencies"], version)
+    with pytest.raises(ValueError, match="PEP 440"):
+        gate.check_names(["v3"], version)
 
 
 def test_identity_installed_env_consistency_and_no_git(sealed, tmp_path, monkeypatch):
@@ -283,7 +302,7 @@ def test_extras_and_v3_failure_are_explicit(monkeypatch, capsys):
     assert "pymupdf>=1.24" in meta["optional-dependencies"]["documents"]
     monkeypatch.setattr(legacy_cli.importlib.util, "find_spec", lambda *a: None)
     assert legacy_cli.main() == 2
-    assert "memory-os-ai[v3]==" in capsys.readouterr().err
+    assert "memory-os-ai[legacy-v3]==" in capsys.readouterr().err
 
 
 def test_v3_help_does_not_import_legacy_server(monkeypatch, capsys):

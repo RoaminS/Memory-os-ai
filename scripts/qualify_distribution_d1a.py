@@ -113,6 +113,10 @@ def main():
             verify = load("d1_descriptor", ROOT / "v4/src/memory_os_v4/build_descriptor.py").verify
             descriptors = []
             wheel_sources = [next(direct.glob("*.whl")), next(via_sdist.glob("*.whl"))]
+            report["steps"]["extra_markers"] = command([build_python, "-B",
+                str(ROOT / "scripts/check_extra_markers.py"), "--pyproject", str(ROOT / "pyproject.toml"),
+                *[value for wheel in wheel_sources for value in ("--wheel", str(wheel))]],
+                ROOT, env, output / "extra-markers.log", guard)
             report["artifact_sha256"] = {str(p.relative_to(output)): digest(p) for folder in (direct, via_sdist) for p in folder.iterdir()}
             for index, wheel in enumerate(wheel_sources):
                 guard(output)

@@ -40,7 +40,7 @@ or start a service or edit client configs.** Model loading is offline by default
 not a silent download. Runtime dependencies (including torch) are additional to model weights; installation
 size/time still needs a clean-machine measurement.
 
-**4.0.6 candidate only, not available in PyPI 4.0.5:** document libraries move to `[documents]` and `[v3]`;
+**4.0.6 candidate only, not available in PyPI 4.0.5:** document libraries move to `[documents]` and `[legacy-v3]`;
 a verified embedded identity removes the manual commit declaration; `memory-os-admin provision` previews
 pinned resources and needs `--apply --download-approved` for missing files. `quickstart` is planned and not
 implemented yet. The complete onboarding instructions will be qualified before release.

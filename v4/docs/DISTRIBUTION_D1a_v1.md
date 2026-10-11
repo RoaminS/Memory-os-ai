@@ -49,7 +49,7 @@ Chemins par défaut : cache `HF_HUB_CACHE`, sinon `$HF_HOME/hub` ou `~/.cache/hu
 
 ## 3. Extras et identité
 
-Core conserve numpy/FAISS/MCP/transformers/sentence-transformers/huggingface_hub, donc torch transitif. `[documents]` fournit PDF v4 ; `[v3]` fournit OCR/Office/PDF/requests historiques ; `[audio]`, `[doc-legacy]` et `[cloud-*]` dépendent désormais de v3 pour préserver leur usage historique. OCR nécessite aussi Tesseract système, `.doc` les outils externes historiques ; les extras ne les installent pas. `[brief]`/`[ops]` restent distincts. Le paquet v3 exporte ses classes paresseusement ; son CLI sans extra répond avec une commande utile, son help n’instancie pas le moteur.
+Core conserve numpy/FAISS/MCP/transformers/sentence-transformers/huggingface_hub, donc torch transitif. `[documents]` fournit PDF v4 ; `[legacy-v3]` fournit OCR/Office/PDF/requests historiques ; `[audio]`, `[doc-legacy]` et `[cloud-*]` dépendent désormais de v3 pour préserver leur usage historique. OCR nécessite aussi Tesseract système, `.doc` les outils externes historiques ; les extras ne les installent pas. `[brief]`/`[ops]` restent distincts. Le paquet v3 exporte ses classes paresseusement ; son CLI sans extra répond avec une commande utile, son help n’instancie pas le moteur.
 
 Hooks setuptools : `memory_os_build.py` + `setup.py`. Source commit **vérifié par archive Git**, inventaire runtime/entrées de packaging scellé, génération `_build_identity.json` dans le payload installé. Sdist contient `_memory_os_build_source.json` : reconstruction sans Git acceptée si inventaire intact. Pas d’inventaire circulaire, horodatage volatile ou chemin personnel. Editable conserve le mode développement sans descripteur de release.
 
@@ -114,3 +114,20 @@ complet du bundle correctif à la place de `SOURCE_D1A_COMPLET`. Ce succès mini
 ne qualifie pas les artefacts complets : la garde disque/swap et les preuves
 wheel/sdist/installations de Claude restent nécessaires. Ne pas réutiliser le
 dossier refusé `distribution-d1a-artifacts-claude-v1`.
+
+## 6. Marqueurs des extras (2026-10-11)
+
+Claude a qualifié les builds direct et via-sdist au commit `29b5d4d`, puis
+l'installation a refusé les métadonnées : `v3` est une version PEP 440 valide,
+ce qui déclenche une comparaison de versions dans certains évaluateurs de
+marqueurs `extra`. L'extra candidat devient **`legacy-v3`**, dans les dépendances
+transitives, messages et documentation. La release PyPI 4.0.5 ne change pas.
+
+`scripts/check_extra_markers.py` est une garde hors réseau : refuse tout nom
+ d'extra interprétable comme version et évalue chaque marqueur du METADATA
+pour tous les extras déclarés et l'extra vide, avec `packaging` ET la copie
+vendue par pip. La régression PEP 517 utilise les vrais groupes optionnels
+sur un petit paquet synthétique ; les deux wheels sont vérifiés. La qualification
+complète applique cette même garde avant la première installation. Preuve locale :
+31 tests D1a réussis, sans modèle ; preuve finale du projet à refaire dans un
+dossier neuf `distribution-d1b-artifacts-claude-v1`.

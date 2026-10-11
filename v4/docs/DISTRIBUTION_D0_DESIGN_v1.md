@@ -20,7 +20,7 @@ Proposition D1a, à figer après revue d’imports :
 
 Ne pas mélanger ce premier découpage avec un nouveau backend vectoriel, modèle plus petit, ONNX ou core entièrement sans ML. Un futur mode work-only allégé nécessiterait sa propre interface explicite et qualification ; aucun fallback hash pour simuler une installation neuronale réussie.
 
-Preuves D1 : wheel et sdist installés hors dépôt sur core seul, `[ops,brief]`, `[v3,ops,brief]` ; `pip check`, cinq console scripts ; appel v3 sans extra → message d’installation utile, pas traceback ; imports v4 sans OCR/office ; tests v3 avec extra ; model/capture/ranking C4 inchangés. Mesurer débit réseau, octets reçus, venv, cache Granite/table, pic temporaire, temps total et temps modèle séparé. Nettoyage volontaire des environnements de test uniquement, aucune preuve supprimée.
+Preuves D1 : wheel et sdist installés hors dépôt sur core seul, `[ops,brief]`, `[legacy-v3,ops,brief]` ; `pip check`, cinq console scripts ; appel v3 sans extra → message d’installation utile, pas traceback ; imports v4 sans OCR/office ; tests v3 avec extra ; model/capture/ranking C4 inchangés. Mesurer débit réseau, octets reçus, venv, cache Granite/table, pic temporaire, temps total et temps modèle séparé. Nettoyage volontaire des environnements de test uniquement, aucune preuve supprimée.
 
 ## 2. Identité embarquée : contrat proposé
 
