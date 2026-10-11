@@ -95,6 +95,7 @@ def main():
     report = {'ok': True, 'version': a.version, 'kind': a.kind, 'package': str(package),
               'startup_seconds': startup, 'startup_encoded_texts': startup_texts,
               'encoding_profile': profile, 'search': rows, 'total': count,
+              'store_instance_id': engine.store.meta.get('store_instance_id'),
               'source_records_unchanged': True, 'access_tracking_disabled_on_copy_only': True}
     a.output.write_text(json.dumps(report, indent=2) + '\n')
 

@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import signal
 import socket
@@ -24,6 +25,19 @@ FILES = ('items.jsonl', 'blocks.jsonl', 'requests.jsonl', 'meta.json', 'embeddin
          'ids.json', 'chunk_map.json', 'bm25.json', 'entities.json')
 AUTHORITATIVE = ('items.jsonl', 'blocks.jsonl', 'requests.jsonl')
 DERIVED = {'meta.json', 'embeddings.npy', 'ids.json', 'chunk_map.json', 'bm25.json', 'entities.json'}
+
+
+def validate_meta(old, new, *, enrolment=False):
+    """Permit caches plus one bounded L3 enrolment, never an existing identity change."""
+    allowed = {'version', 'dim', 'embed_model', 'embed_compute_profile', 'bm25_profile'}
+    if enrolment:
+        identity = new.get('store_instance_id')
+        if not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{32}', identity):
+            raise ValueError('L3 store identity missing/invalid')
+        if 'store_instance_id' not in old:
+            allowed.add('store_instance_id')
+    if {k: v for k, v in old.items() if k not in allowed} != {k: v for k, v in new.items() if k not in allowed}:
+        raise ValueError('Non-cache metadata changed on copy')
 
 
 def digest(p):
@@ -112,6 +126,16 @@ def compare(reports, *, baseline_version="4.0.2"):
             raise ValueError('Installed baseline/candidate production compute profile differs: ' + key)
     if any(reports[k]['startup_encoded_texts'] != 0 for k in ('wheel-warm', 'sdist-warm')):
         raise ValueError('Warm reopen reencoded corpus')
+    identities = {}
+    if baseline_version == '4.0.3':
+        old_identity = baseline.get('store_instance_id')
+        for kind in ('wheel', 'sdist'):
+            identity = reports[kind].get('store_instance_id')
+            if (not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{32}', identity)
+                    or reports[kind + '-warm'].get('store_instance_id') != identity
+                    or (old_identity is not None and identity != old_identity)):
+                raise ValueError('L3 identity not preserved across reopen/artifacts')
+            identities[kind] = identity
     reference = reports['wheel']['search']
     if any({q: r['ids'] for q, r in candidate['search'].items()} != {q: r['ids'] for q, r in reference.items()}
            for candidate in candidates[1:]):
@@ -120,7 +144,8 @@ def compare(reports, *, baseline_version="4.0.2"):
     return {'search_identical_to_baseline': not changed, 'baseline_version': baseline_version,
             'search_identical_to_402': not changed if baseline_version == '4.0.2' else None, 'changed_queries': changed,
             'rankings_identical_between_artifacts_and_reopen': True,
-            'encoding_profile': p, 'warm_encoded_texts': 0,
+            'encoding_profile': p, 'warm_encoded_texts': 0, 'store_instance_ids': identities,
+            'enrolment_created_on_private_copies': baseline_version == '4.0.3' and baseline.get('store_instance_id') is None,
             'explanation': None if not changed else
             'Rankings differ from the installed baseline. Inspect attested profiles and rebuild counts before providing a query-specific review; no automatic explanation or quality equivalence claim.'}
 
@@ -161,6 +186,14 @@ def private_doctor(python, store, root, env, commit, version="4.0.3"):
                     with opener.open(req, timeout=1) as response:
                         ready = json.loads(response.read())
                     if ready.get('ready') and ready.get('version') == version and ready.get('commit') == commit:
+                        if version == '4.0.4':
+                            caps = ready['capabilities']
+                            if (caps['projects']['registry_enabled'] is not False
+                                    or caps['store']['backend'] != 'jsonl'
+                                    or caps['policies']['bm25_profile'] != 'scoped_literal'
+                                    or caps['policies']['lexical_guard_k'] != 3
+                                    or caps['brief']['tokenizer']['ready'] is not True):
+                                raise RuntimeError('Candidate deployed policies/table mismatch')
                         break
                 except (OSError, ValueError):
                     pass
@@ -250,9 +283,7 @@ def main(argv=None):
                     raise RuntimeError('Authoritative log changed on copy: ' + name)
             old_meta = json.loads((root / 'snapshot/meta.json').read_text())
             new_meta = json.loads((store / 'meta.json').read_text())
-            allowed = {'version', 'dim', 'embed_model', 'embed_compute_profile', 'bm25_profile'}
-            if {k: v for k, v in old_meta.items() if k not in allowed} != {k: v for k, v in new_meta.items() if k not in allowed}:
-                raise RuntimeError('Non-cache metadata changed on copy')
+            validate_meta(old_meta, new_meta, enrolment=manifest['version'] == '4.0.4' and kind != 'baseline')
         report.update(compare(report['reports'], baseline_version=baseline_version))
         report['doctor'] = private_doctor(Path(envs['wheel_environment']) / 'bin/python', root / 'wheel-store', root, env, manifest['source_commit'], version)
         if inventory(root / 'snapshot') != original:

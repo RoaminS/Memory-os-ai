@@ -18,7 +18,7 @@ Registre inactif : `unset MEMORY_V4_PROJECT_REGISTRY`. Les hooks gardent Q0v2.
 La tentative locale v1 reste préservée : schéma JSON L3/L4 absent du sdist,
 collecte refusée ; inclusion corrigée dans les deux distributions.
 
-Dossier :`.local-qualification/release-4.0.4-v2/`. Les artefacts et les deux venv
+Dossier :`.local-qualification/release-4.0.4-v3/`. Les artefacts et les deux venv
 hors dépôt sont ceux du manifeste ; **ne pas reconstruire** pour ces tests ou une
 publication ultérieure. Le manifeste source identifie le commit de construction,
 qui peut être un ancêtre du commit contenant le reçu de livraison. Les empreintes
@@ -30,7 +30,7 @@ après un refus. Les scripts ne contrôlent que des services privés sur port al
 ```sh
 cd /Users/romain/Documents/Codex/2026-10-09/v/work/implementation
 brief_python="$PWD/.local-qualification/brief-test-runtime-claude-3c-v1/bin/python"
-release_dir=.local-qualification/release-4.0.4-v2
+release_dir=.local-qualification/release-4.0.4-v3
 export PYTHONPATH="$PWD/src:$PWD/v4/src:$PWD/v4"
 export MEMORY_V4_CL100K_PATH="$PWD/.local-qualification/cl100k/cl100k_base.tiktoken"
 unset MEMORY_V4_PROJECT_REGISTRY
@@ -73,8 +73,11 @@ snapshot vérifié, pas d'une promesse de transaction JSONL multifichier.
 Baseline **installée4.0.3**, puis wheel4.0.4/reopen et sdist4.0.4/reopen sur copies
 indépendantes. Profil auto→MPS/native/batch32/512 repris du plist ; C4 inchangé,
 registre inactif, confinement supersession conservé. Aucune consolidation.
-Les historiques/provenances/reçus sont byte-identiques ; les données non cache
-et le nombre d'éléments sont inchangés. Les classements des dix sondes FR/EN sont
+Les historiques/provenances/reçus sont byte-identiques ; le nombre d'éléments
+et la méta non cache restent inchangés sauf l'enrôlement L3 : si absent,
+`store_instance_id` (32 chiffres hexadécimaux) est créé par le moteur sur chaque
+copie. Une identité existante ne peut changer ; cold→reopen la conserve.
+Ces copies sont des magasins distincts et leurs UUID peuvent différer. Les classements des dix sondes FR/EN sont
 identiques wheel/sdist/reopen ; zéro texte corpus réencodé au reopen ; profils
 natifs/révision/runtime comparés. Cold/reopen, rebuild et requêtes mesurés
 séparément. Doctor privé :zéro FAIL ; absence de vrais clients/launchd privés =WARN.

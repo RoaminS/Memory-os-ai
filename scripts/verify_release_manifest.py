@@ -53,6 +53,12 @@ def validate_copy(proof, manifest):
         raise ValueError('preuve copie/profil/recherche/doctor absente, modifiée ou en échec')
     if version == '4.0.4' and proof.get('baseline_version') != '4.0.3':
         raise ValueError('baseline copie 4.0.3 requise')
+    if version == '4.0.4':
+        identities = proof.get('store_instance_ids', {})
+        if (set(identities) != {'wheel', 'sdist'}
+                or any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{32}', v) for v in identities.values())
+                or proof['doctor'].get('ready', {}).get('capabilities', {}).get('store', {}).get('instance_id') != identities['wheel']):
+            raise ValueError('identités durables des copies non qualifiées')
     identical = proof.get('search_identical_to_baseline') if version == '4.0.4' else proof.get('search_identical_to_402')
     if identical is not True:
         review = proof.get('search_change_review', {})

@@ -28,7 +28,8 @@ def test_404_copy_requires_current_403_baseline():
     manifest = {'version': '4.0.4', 'source_commit': 'a' * 40, 'artifacts': [], 'copy_scripts_sha256': {}}
     proof = {'ok': True, **{k: manifest[k] for k in ('version', 'source_commit', 'artifacts')},
              'production_modified': False, 'rankings_identical_between_artifacts_and_reopen': True,
-             'warm_encoded_texts': 0, 'doctor': {'ok': True}, 'scripts_sha256': {},
+             'warm_encoded_texts': 0, 'doctor': {'ok': True, 'ready': {'capabilities': {'store': {'instance_id': 'e' * 32}}}}, 'scripts_sha256': {},
+             'store_instance_ids': {'wheel': 'e' * 32, 'sdist': 'f' * 32},
              'baseline_version': '4.0.2', 'search_identical_to_baseline': True,
              'encoding_profile': {'device': 'mps', 'dtype': 'native', 'batch_size': 32, 'max_seq_length': 512,
                                   'parameter_devices': ['mps'], 'parameter_dtypes': ['torch.bfloat16'],

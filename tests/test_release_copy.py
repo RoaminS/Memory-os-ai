@@ -46,6 +46,29 @@ def test_changing_source_stops_before_opening_an_engine(tmp_path, monkeypatch):
         module.snapshot(source, target)
 
 
+def test_l3_enrolment_is_only_permitted_additive_metadata():
+    old = {'version': '4.0.3', 'operator_marker': 'must-stay'}
+    new = {**old, 'version': '4.0.4', 'store_instance_id': 'a' * 32}
+    module.validate_meta(old, new, enrolment=True)
+    with pytest.raises(ValueError):
+        module.validate_meta(old, new)
+    for bad in ({**new, 'store_instance_id': 'invalid'}, {**new, 'operator_marker': 'changed'}):
+        with pytest.raises(ValueError):
+            module.validate_meta(old, bad, enrolment=True)
+    with pytest.raises(ValueError):
+        module.validate_meta(new, {**new, 'store_instance_id': 'b' * 32}, enrolment=True)
+
+
+def test_l3_identity_stable_on_warm_copy():
+    reports = {k: record() for k in ('baseline', 'wheel', 'sdist', 'wheel-warm', 'sdist-warm')}
+    for kind in ('wheel', 'sdist'):
+        reports[kind]['store_instance_id'] = reports[kind + '-warm']['store_instance_id'] = 'a' * 32
+    assert module.compare(reports, baseline_version='4.0.3')['enrolment_created_on_private_copies']
+    reports['wheel-warm']['store_instance_id'] = 'b' * 32
+    with pytest.raises(ValueError, match='L3 identity'):
+        module.compare(reports, baseline_version='4.0.3')
+
+
 def record():
     return {'total': 1, 'source_records_unchanged': True, 'startup_encoded_texts': 0,
             'encoding_profile': {'device': 'mps', 'parameter_devices': ['mps'], 'parameter_dtypes': ['torch.float32'],
