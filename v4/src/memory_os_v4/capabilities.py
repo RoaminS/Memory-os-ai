@@ -8,6 +8,8 @@ from . import __version__
 def deployed(engine, build: dict) -> dict:
     from .brief_tokens import status
     from .ops.qualified_runtime import inspect_current
+    from .config import inert_cos_settings
+    from .fact_updates import mutation_policy
 
     cfg = engine.config
     return {
@@ -35,6 +37,8 @@ def deployed(engine, build: dict) -> dict:
             "fusion": cfg.fusion,
             "request_receipts": "l3-v2",
             "automatic_mutation_replay": False,
+            "mutations": mutation_policy(),
+            "deprecated_inert_settings": inert_cos_settings(),
         },
         "projects": {
             "registry_enabled": engine.projects.document is not None,
@@ -45,6 +49,9 @@ def deployed(engine, build: dict) -> dict:
         "brief": {
             "default_mode": "compact",
             "compact": True,
+            "wire_formats": ["legacy", "compact_v2"],
+            "negotiation": "tool_input_schema",
+            "compact_budget_tokens_range": [200, 1500],
             "max_envelope_bytes": 6000,
             "max_envelope_tokens": 1500,
             "tokenizer": status(),

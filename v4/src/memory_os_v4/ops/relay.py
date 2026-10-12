@@ -288,6 +288,14 @@ class SessionToolCatalog:
                            inputSchema=RequestStatusIn.model_json_schema())
         return [tool.model_copy(deep=True) for tool in self._tools] + [local]
 
+    def brief_contract(self):
+        for tool in self._tools:
+            if tool.name == "memory_session_brief" and tool.outputSchema is None:
+                props = tool.inputSchema.get("properties", {})
+                formats = props.get("wire_format", {}).get("enum", [])
+                return {"legacy", *(["compact_v2"] if "compact_v2" in formats else [])}, "budget_tokens" in props
+        return {"legacy"}, False
+
 
 async def serve(settings: OpsSettings) -> None:
     send, recv = anyio.create_memory_object_stream(16)
@@ -337,6 +345,7 @@ async def serve(settings: OpsSettings) -> None:
 
         try:
             await catalog.prefetch(relay)
+            durable.brief_wire_formats, durable.brief_budget_supported = catalog.brief_contract()
             async with stdio_server() as (r, w):
                 await server.run(r, w, server.create_initialization_options())
         finally:

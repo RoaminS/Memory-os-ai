@@ -297,4 +297,14 @@ def _capabilities(info: dict) -> list[Check]:
         checks.append(Check("brief-tokenizer", "PASS" if tokenizer.get("ready") else "FAIL",
                             "exact offline cl100k_base available" if tokenizer.get("ready") else
                             "compact unavailable: provision brief extra and attested local table"))
+    mutation = caps.get("policies", {}).get("mutations")
+    if mutation is not None:
+        from ..fact_updates import mutation_policy
+        checks.append(Check("mutation-policy", "PASS" if mutation == mutation_policy() else "WARN",
+                            "deployed explicit-only replacement/exact assertion dedup" if mutation == mutation_policy() else
+                            "deployed mutation policy differs or is unknown; no COS confinement guarantee"))
+    inert = caps.get("policies", {}).get("deprecated_inert_settings", [])
+    if inert:
+        checks.append(Check("deprecated-config", "WARN", "deployed *_COS settings are ignored",
+                            "remove old settings during an explicitly approved service update; not a confinement mechanism"))
     return checks

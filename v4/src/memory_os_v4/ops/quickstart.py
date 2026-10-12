@@ -406,8 +406,7 @@ def _service_plan(settings, home, python, resource_env, *, backend=None):
            "MEMORY_V4_MAINTENANCE_MODE": "disabled",
            "MEMORY_V4_DEVICE": "auto", "MEMORY_V4_EMBED_DTYPE": "native",
            "MEMORY_V4_EMBED_BATCH_SIZE": "32", "MEMORY_V4_BM25_PROFILE": "scoped_literal",
-           "MEMORY_V4_LEXICAL_GUARD_K": "3", "MEMORY_V4_SUPERSEDE_COS": "1.01",
-           "MEMORY_V4_DEDUP_COS": "1.01", "TOKENIZERS_PARALLELISM": "false",
+           "MEMORY_V4_LEXICAL_GUARD_K": "3", "TOKENIZERS_PARALLELISM": "false",
            "MEMORY_V4_OPS_DIR": str(settings.ops_dir), **resource_env}
     argv = [python, "-m", "memory_os_v4.server", "--transport", "http", "--host", "127.0.0.1",
             "--port", str(settings.port), "--warm"]

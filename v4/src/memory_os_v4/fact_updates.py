@@ -14,6 +14,13 @@ import unicodedata
 from .store import MemoryItem, Store
 
 
+def mutation_policy():
+    """Describe enforced rules; legacy cosine knobs cannot change these rules."""
+    return {"supersession": "explicit_replaces_or_single_identity",
+            "deduplication": "normalized_assertion_with_compatible_identity_scope_and_validity",
+            "cosine_mutations": False}
+
+
 def start(item: MemoryItem) -> float:
     return item.valid_from if item.valid_from is not None else item.event_time
 

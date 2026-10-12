@@ -9,6 +9,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+DEPRECATED_COS_ENV = ("MEMORY_V4_DEDUP_COS", "MEMORY_V4_SUPERSEDE_COS")
+
+
+def inert_cos_settings():
+    return [name for name in DEPRECATED_COS_ENV if name in os.environ]
+
 
 def _env_str(name: str, default: str) -> str:
     return os.environ.get(name, default)
@@ -108,8 +114,8 @@ class Config:
     # are two different models that could need different fallbacks.
     rerank_device: str = "auto"
 
-    dedup_cos: float = 0.92
-    supersede_cos: float = 0.80
+    dedup_cos: float = 0.92  # Deprecated, inert: retained for constructor compatibility.
+    supersede_cos: float = 0.80  # Deprecated, inert: never a confinement control.
 
     half_life_episode_days: float = 30.0
     half_life_fact_days: float = 180.0
@@ -332,6 +338,10 @@ class Config:
         # An existing explicit alternative policy opts out of the new default guard.
         # An explicitly supplied nonzero guard still fails validation if incompatible.
         guard_default = d.lexical_guard_k if profile == "scoped_literal" and bm25 and not lexical_first else 0
+        if inert_cos_settings():
+            import logging
+            logging.getLogger("memory_os_v4").warning(
+                "Deprecated *_COS configuration is ignored; mutations use explicit identities/replaces and exact assertion equality")
         return cls(
             project_registry=_env_opt_str("MEMORY_V4_PROJECT_REGISTRY", d.project_registry),
             data_dir=_env_str("MEMORY_V4_DIR", d.data_dir),
@@ -356,8 +366,8 @@ class Config:
             rerank_top_n=_env_int("MEMORY_V4_RERANK_TOP_N", d.rerank_top_n),
             rerank_weight=_env_float("MEMORY_V4_RERANK_WEIGHT", d.rerank_weight),
             rerank_device=_env_str("MEMORY_V4_RERANK_DEVICE", d.rerank_device),
-            dedup_cos=_env_float("MEMORY_V4_DEDUP_COS", d.dedup_cos),
-            supersede_cos=_env_float("MEMORY_V4_SUPERSEDE_COS", d.supersede_cos),
+            dedup_cos=d.dedup_cos,
+            supersede_cos=d.supersede_cos,
             half_life_episode_days=_env_float(
                 "MEMORY_V4_HALF_LIFE_EPISODE", d.half_life_episode_days
             ),

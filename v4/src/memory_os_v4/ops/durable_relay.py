@@ -53,6 +53,8 @@ class DurableRelay:
         self.identity = None
         self.connection_observation = None
         self.preflight_failure = None
+        self.brief_wire_formats = {"legacy"}
+        self.brief_budget_supported = False
 
     def ledger(self):
         if self.journal is None:
@@ -105,6 +107,31 @@ class DurableRelay:
             row = next(iter(matches.values()))
             return response(await self.control(lambda s: self._status(s, row)))
         mutation = name in MUTATIONS
+        compact_brief = name == "memory_session_brief" and args.get("mode", "compact") == "compact"
+        brief_wire = args.get("wire_format", "compact_v2" if "compact_v2" in self.brief_wire_formats else "legacy")
+        brief_budget = args.get("budget_tokens")
+        def brief_error(data):
+            from ..brief import compact_error, envelope
+            local = journal.status()
+            notices = ["unresolved_requests"] if (local["unresolved_count"] or local["errors"] or local["journal_poisoned"]) else []
+            return envelope(compact_error(data, wire_format=brief_wire if brief_wire in {"legacy", "compact_v2"} else "legacy",
+                                         budget_tokens=brief_budget, notices=notices))
+        upstream_args = args
+        if compact_brief:
+            from ..brief import compact_error, envelope
+            if (brief_wire not in {"legacy", "compact_v2"}
+                    or (brief_budget is not None and (not isinstance(brief_budget, int)
+                        or isinstance(brief_budget, bool) or not 200 <= brief_budget <= 1500))):
+                return envelope(compact_error({"code": "brief_unavailable"}))
+            if brief_wire == "compact_v2" and brief_wire not in self.brief_wire_formats:
+                return brief_error({"code": "wire_format_unavailable"})
+            upstream_args = dict(args)
+            if "compact_v2" in self.brief_wire_formats:
+                upstream_args["wire_format"] = brief_wire
+            else:
+                upstream_args.pop("wire_format", None)
+            if not self.brief_budget_supported:
+                upstream_args.pop("budget_tokens", None)
         if name in {"memory_consolidate", "memory_compact"} and args.get("dry_run", True) is True:
             mutation = False
         if not mutation:
@@ -123,12 +150,11 @@ class DurableRelay:
 
             else:
                 try:
-                    result = await self.transport.submit(lambda s: s.call_tool(name, args), replay=name in READS)
+                    result = await self.transport.submit(lambda s: s.call_tool(name, upstream_args), replay=name in READS)
                 except Exception:
                     if name != "memory_session_brief" or args.get("mode", "compact") == "detailed":
                         raise
-                    from ..brief import compact_error, envelope
-                    return envelope(compact_error({"code": "upstream_unavailable"}))
+                    return brief_error({"code": "upstream_unavailable"})
             if name == "memory_session_brief":
                 report = journal.status()
                 if args.get("mode", "compact") == "compact":
@@ -136,14 +162,12 @@ class DurableRelay:
                     if data is None:
                         data = json.loads("".join(c.text for c in result.content if isinstance(c, types.TextContent)))
                     if isinstance(data, dict) and data.get("ok") is False:
-                        from ..brief import compact_error, envelope
-                        return envelope(compact_error(data))
+                        return brief_error(data)
                     if data.get("mode") == "compact":
                         from ..brief import rebudget, envelope
                         notices = ["unresolved_requests"] if (report["unresolved_count"] or report["errors"] or report["journal_poisoned"]) else []
-                        return envelope(rebudget(data, notices))
-                    from ..brief import compact_error, envelope
-                    return envelope(compact_error({"code": "brief_unavailable"}))
+                        return envelope(rebudget(data, notices, wire_format=brief_wire, budget_tokens=brief_budget))
+                    return brief_error({"code": "brief_unavailable"})
                 if report["unresolved_count"] or report["errors"] or report["journal_poisoned"]:
                     data = body(result)
                     notice = (f"{report['unresolved_count']} uncertain operations; see memory_request_status. "

@@ -313,7 +313,9 @@ def test_guard_is_required_before_any_download(tiny_resources, monkeypatch):
 
 def test_doctor_explains_embedded_identity(monkeypatch, tmp_path):
     from memory_os_v4.ops.settings import OpsSettings
-    info = {"ok": True, "ready": True, "version": VERSION, "commit": SHA, "source_dirty": False,
+    # Synthetic RELEASED deployment; a development checkout must not make the
+    # doctor accept an unqualified prerelease in production.
+    info = {"ok": True, "ready": True, "version": "4.0.6", "commit": SHA, "source_dirty": False,
             "commit_source": "embedded_descriptor", "identity_source": "embedded_descriptor"}
     monkeypatch.setattr(doctor, "http_get", lambda *a: (200, json.dumps(info).encode()))
     monkeypatch.setattr(doctor, "_get_without_token", lambda *a: 401)

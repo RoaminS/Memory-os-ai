@@ -2,7 +2,7 @@
 
 Checks: ``/health`` and ``/ready`` (404 = server predates readiness, reported as info; anything else but 200 is an
 anomaly), strict JSONL scan or read-only SQLite counters/quick_check, *new* fact
-supersessions compared with a baseline (an S1 anomaly while supersession is confined), age of the last backup that
+unacknowledged supersessions requiring operator review (no inferred legitimacy), age of the last backup that
 is qualified, read-back verified, still present and unchanged on disk, and free disk space.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import shutil
 import subprocess
 import time
@@ -107,11 +106,14 @@ def last_drill(settings):
 
 def report(settings: OpsSettings | None = None, confined: bool | None = None) -> dict:
     settings = settings or OpsSettings.from_env()
-    if confined is None:
-        confined = float(os.environ.get("MEMORY_V4_SUPERSEDE_COS", "0.8")) > 1.0
+    from ..config import inert_cos_settings
     anomalies: list[str] = []
     info: list[str] = []
     r: dict = {"at": dt.datetime.now().isoformat(timespec="seconds")}
+    if confined is not None:
+        info.append("--confined/confined is deprecated and has no control over engine mutations")
+    if inert_cos_settings():
+        info.append("Deprecated *_COS settings are inert; they do not establish confinement")
     try:
         health_status, _ = http_get(settings.health_url, settings)
         ready_status, ready_body = http_get(settings.ready_url, settings)
@@ -120,6 +122,18 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         ready_body = b""
         anomalies.append(f"token file unusable: {exc}")
     r["health_status"], r["ready_status"] = health_status, ready_status
+    try:
+        ready_data = json.loads(ready_body or b"{}")
+        policy = ready_data.get("capabilities", {}).get("policies", {}).get("mutations")
+    except (ValueError, AttributeError, UnicodeError):
+        policy = None
+    r["mutation_policy"] = policy if isinstance(policy, dict) else None
+    if r["mutation_policy"] is None:
+        info.append("deployed mutation policy unavailable; no confinement claim can be made")
+    else:
+        from ..fact_updates import mutation_policy
+        if r["mutation_policy"] != mutation_policy():
+            anomalies.append("deployed mutation policy differs from the explicit-only contract")
     if health_status != 200:
         anomalies.append(f"server /health status {health_status}")
     if ready_status == 404:
@@ -142,19 +156,24 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
             anomalies.append("items.jsonl does not end with a newline: uncertain write, see RB-08")
     except Exception as exc:
         anomalies.append(f"store scan failed: {type(exc).__name__}: {exc}")
-    settings.ops_dir.mkdir(parents=True, exist_ok=True)
+    settings.ops_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     known_file = settings.ops_dir / "known_supersessions.json"
     try:
         if not known_file.exists():
-            known_file.write_text(json.dumps({"baseline_at": r["at"], "ids": sup}, indent=1))
+            # First observation is not an operator acknowledgement.
+            from .auth import write_secret_file
+            try:
+                write_secret_file(known_file, json.dumps({"baseline_at": r["at"], "ids": []}, indent=1).encode())
+            except FileExistsError:
+                pass  # Another observer created the baseline; never overwrite it.
         known = set(json.loads(known_file.read_text())["ids"])
     except Exception as exc:
-        known = set(sup)
+        known = set()
         anomalies.append(f"supersession baseline unreadable: {type(exc).__name__}")
     r["superseded_total"] = len(sup)
     r["superseded_new"] = [i for i in sup if i not in known]
-    if confined and r["superseded_new"]:
-        anomalies.append(f"{len(r['superseded_new'])} new supersession(s) while confined (S1)")
+    if r["superseded_new"]:
+        anomalies.append(f"{len(r['superseded_new'])} unacknowledged supersession(s): operator review required; legitimacy not inferred")
     try:
         age = last_good_backup_age(settings)
     except Exception as exc:
@@ -205,6 +224,7 @@ def render(r: dict) -> str:
         f"- Receipts (SQLite): {r.get('receipts', 'not available')}",
         f"- Storage margin: {r.get('storage_margin', 'not available')}",
         f"- Last restore drill (level matters): {r.get('last_restore_drill', 'not available')}",
+        f"- Deployed mutation policy: {r.get('mutation_policy') or 'unavailable; no confinement claim'}",
         "",
         "## Anomalies",
         *(f"- {a}" for a in r["anomalies"] or ["none"]),

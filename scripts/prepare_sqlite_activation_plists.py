@@ -43,12 +43,14 @@ def render(server, backup, health, data_dir, runtime_python, *, work_state):
                MEMORY_V4_WORK_STATE='1' if work_state else '0', MEMORY_V4_WRITE_MODE='read_only',
                MEMORY_V4_SQLITE_EMBEDDING_NAMESPACE=env.get('MEMORY_V4_SQLITE_EMBEDDING_NAMESPACE', 'v1'),
                HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1')
+    env.pop('MEMORY_V4_SUPERSEDE_COS', None)
+    env.pop('MEMORY_V4_DEDUP_COS', None)
     # Preserve key/token FILE paths and all production profile knobs, never their contents.
     result = {}
     for original, command in ((server, [str(runtime_python), '-m', 'memory_os_v4.server', '--transport',
                                          'http', '--host', '127.0.0.1', '--port', '8765', '--warm']),
             (backup, [str(runtime_python), '-m', 'memory_os_v4.ops.cli', 'backup', '--backend', 'sqlite', '--online', '--apply']),
-            (health, [str(runtime_python), '-m', 'memory_os_v4.ops.cli', 'health', '--confined'])):
+            (health, [str(runtime_python), '-m', 'memory_os_v4.ops.cli', 'health'])):
         target = copy.deepcopy(original)
         target['ProgramArguments'] = command
         target['EnvironmentVariables'] = dict(env)

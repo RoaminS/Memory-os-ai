@@ -239,8 +239,6 @@ def cmd_setup(args, s: OpsSettings) -> int:
         "MEMORY_V4_BACKUP_DIR": str(s.backup_dir),
         "MEMORY_V4_BACKUP_KEY": str(s.backup_key),
         "MEMORY_V4_OPS_DIR": str(s.ops_dir),
-        "MEMORY_V4_SUPERSEDE_COS": "1.01",  # INC-001 confinement
-        "MEMORY_V4_DEDUP_COS": "1.01",  # INC-002 confinement
         "HF_HUB_OFFLINE": "1",
         "TOKENIZERS_PARALLELISM": "false",
     }
@@ -412,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("token")
     t.add_argument("action", choices=["create"])
     h = sub.add_parser("health")
-    h.add_argument("--confined", action="store_true")
+    h.add_argument("--confined", action="store_true", help="Deprecated: no longer a mutation control; explicit-only policy is enforced by the engine")
     b = sub.add_parser("backup")
     b.add_argument("--backend", choices=("jsonl", "sqlite"), default="jsonl")
     b.add_argument("--online", action="store_true")

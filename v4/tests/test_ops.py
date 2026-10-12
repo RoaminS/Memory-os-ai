@@ -441,7 +441,7 @@ def test_setup_propagates_settings_and_both_confinements(settings, tmp_path, mon
     assert "MEMORY_V4_URL=http://127.0.0.1:9/mcp/" in out
     server = plistlib.loads((tmp_path / "la" / "test.memory-os.plist").read_bytes())
     env = server["EnvironmentVariables"]
-    assert env["MEMORY_V4_SUPERSEDE_COS"] == "1.01" and env["MEMORY_V4_DEDUP_COS"] == "1.01"
+    assert "MEMORY_V4_SUPERSEDE_COS" not in env and "MEMORY_V4_DEDUP_COS" not in env
     assert env["MEMORY_V4_BACKUP_DIR"] == str(settings.backup_dir) and server["ProgramArguments"][-2] == "9"
     assert all("Bearer" not in v for v in env.values())
     hooks_cmds = [line for line in out.splitlines() if "hook session-start" in line or "hook stop-nudge" in line]

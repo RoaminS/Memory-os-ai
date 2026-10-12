@@ -206,7 +206,8 @@ def _h_session_brief(engine: MemoryV4, args: models.SessionBriefIn) -> dict:
     project = _project_of(args.project)
     from .brief import build, expand_detailed
     if args.mode == "compact":
-        return build(engine, project, args.focus_query, args.expand)
+        return build(engine, project, args.focus_query, args.expand,
+                     wire_format=args.wire_format, budget_tokens=args.budget_tokens)
     if args.expand:
         return expand_detailed(engine, project, args.expand)
     brief = engine.session_brief(focus_query=args.focus_query, max_tokens=args.max_tokens, project=project)
@@ -689,7 +690,11 @@ def dispatch(name: str, arguments: dict | None) -> dict:
     def normalize(result):
         if name == "memory_session_brief" and (arguments or {}).get("mode", "compact") != "detailed" and result.get("ok") is False:
             from .brief import compact_error
-            return compact_error(result)
+            raw = arguments or {}
+            budget = raw.get("budget_tokens")
+            budget = budget if isinstance(budget, int) and not isinstance(budget, bool) and 200 <= budget <= 1500 else None
+            return compact_error(result, wire_format="compact_v2" if raw.get("wire_format") == "compact_v2" else "legacy",
+                                 budget_tokens=budget)
         return result
     if not _qualification.enabled:
         return normalize(_dispatch(name, arguments))

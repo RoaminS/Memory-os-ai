@@ -145,6 +145,8 @@ class SessionBriefIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["compact", "detailed"] = Field("compact", description="compact bounds the entire MCP envelope; detailed explicitly requests the legacy full structure.")
+    wire_format: Literal["legacy", "compact_v2"] = Field("legacy", description="Negotiate compact_v2 for one JSON body in content.text; legacy also returns structuredContent. Detailed mode is legacy only.")
+    budget_tokens: int | None = Field(None, ge=200, le=1500, description="Compact mode only: exact cl100k_base budget for the entire final MCP envelope (default 1500); separate from detailed max_tokens.")
     expand: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(default_factory=list, max_length=20, description="Expand IDs within this project, including valid direct children. detailed returns full item text.")
 
     focus_query: str | None = Field(
@@ -154,6 +156,12 @@ class SessionBriefIn(BaseModel):
         3000, ge=200, le=20000, description="Detailed mode only: approximate rendered-text budget. Compact always bounds the full envelope to 6000 bytes and 1500 cl100k_base tokens."
     )
     project: str | None = Field(None, description=_PROJECT_DESC)
+
+    @model_validator(mode="after")
+    def compact_options(self):
+        if self.mode == "detailed" and (self.wire_format != "legacy" or self.budget_tokens is not None):
+            raise ValueError("wire_format=compact_v2 and budget_tokens require compact mode")
+        return self
 
 
 class MutationIn(BaseModel):

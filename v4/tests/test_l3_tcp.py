@@ -428,6 +428,15 @@ def test_L1a_real_tcp_compact_and_offline_counter_failure(harness):
                 proof.update(measured=True,bytes=len(wire.encode()),tokens=counter()(wire))
                 assert proof['bytes']<=6000 and proof['tokens']<=1500
                 assert data['mode']=='compact' and data['references']
+                # A1: negotiated relay default is one body; direct legacy remains
+                # explicitly available. Budget includes relay-local notices.
+                assert compact.structuredContent is None
+                assert data['wire_format']=='compact_v2'
+                for fmt in ('legacy','compact_v2'):
+                    bounded=await session.call_tool('memory_session_brief',{'project':'brief-test','wire_format':fmt,'budget_tokens':600})
+                    bounded_wire=json.dumps(bounded.model_dump(mode='json',by_alias=True,exclude_none=True),ensure_ascii=False,separators=(',',':'))
+                    assert len(bounded_wire.encode())<=6000 and counter()(bounded_wire)<=600
+                    assert (bounded.structuredContent is None)==(fmt=='compact_v2')
                 detailed=payload(await session.call_tool('memory_session_brief',{'project':'brief-test','mode':'detailed','expand':[data['references'][0]['id']]}))
                 assert detailed['items'][0]['text']=='Synthetic current task: verify compact brief.'
             else:
