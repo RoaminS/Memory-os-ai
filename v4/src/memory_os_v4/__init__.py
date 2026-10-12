@@ -19,4 +19,4 @@ from .store import MemoryItem  # noqa: E402
 
 __all__ = ["MemoryV4", "Config", "MemoryItem", "SearchHit"]
 
-__version__ = "4.0.6"
+__version__ = "4.0.6.dev0"

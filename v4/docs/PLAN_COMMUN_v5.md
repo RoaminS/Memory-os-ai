@@ -1,6 +1,12 @@
 # PLAN COMMUN v5 — brief utile, intégrité vérifiable, partage natif sélectif, distribution
 
-**12 octobre 2026 — proposé et signé par Codex ; contre-signature Claude en attente.**
+**12 octobre 2026 — signé par Codex et Claude, approuvé par Romain.**
+
+Amendement opérateur : production maintenue en 4.0.5, bascule 4.0.6 annulée ;
+correctif cache intégré au périmètre 4.0.7. Import natif sélectif différé,
+aperçu/allowlist sous GO ; aucun import maintenant. Romain acquitte explicitement
+les alertes par l’IA en session, jamais automatiquement. Les mentions antérieures
+d’une bascule 4.0.6 en cours sont historiques et remplacées par cet amendement.
 Ce document consolide le plan v4 et le plan de distribution signé. Les verdicts
 ci-dessous remplacent les propositions incompatibles du brouillon examiné.
 Cette livraison est documentaire : aucun code runtime, aucune campagne,
@@ -217,12 +223,12 @@ formatives pour ce produit, pas preuve d'un score leaderboard.
 
 | Ordre | Lot / livrable | Propriétaire / dépendance / charge |
 |---|---|---|
-| **0** | Finir bascule 4.0.6, copie SQLite/relais/manifeste, amendements a8, ready/doctor, jobs et rollback même store | **Claude**, revue Codex ; GO déjà donné, pas à redemander. Run 64 prioritaire ; aucun import de ce bundle ni changement clone pendant son exécution. |
+| **0** | Production maintenue en 4.0.5 ; bascule 4.0.6 annulée ; refus et artefacts conservés. Correctif cache intégré à la future 4.0.7. | **Romain**, décision du 12/10 ; **Claude** opérations ultérieures, **Codex** branche isolée. Aucun nouveau GO de bascule déduit de celui de 4.0.6. |
 | **1** | B6 diagnostic/visibilité client et B7 contrat vérité/public warning préparés ; documenter que COS est inerte | **Claude** hors dépôt ; **Codex** contrats/docs puis correctif produit dans branche isolée. Retrait du plist live seulement selon procédure/GO ; ne pas croire qu'un retrait répare rétroactivement santé 4.0.6. |
 | **2 — voies parallèles bornées** | **Produit 4.0.7 : A1→A2→A4→A3→A7, puis B3/B2→B4/B5→B9 ; A6/C5 dépend de B5 et du contrat documentaire.** | **Codex**, revue Claude ; ~12–19 JA moteur/contrats/tests, pas les 2–3 JA du seul brief. Préférer incréments de contrats, pas release partielle annoncée complète. |
 | **2 — client** | A8/B1/B6, A5 après capacité budget/format, C1–C4 dry run seulement | **Claude**, revue Codex ; ~5–9 JA. État temporaire/hook seuls dans son périmètre ; aucune écriture native ni import partagé. |
 | **2 — distribution préparée** | Registre, accueil README PyPI, boutons Cursor/VS Code, prototype .mcpb relais ; publication seulement sous GO | **Claude** textes/liens/opérations ; **Codex** manifests/qualification ; ~2–4 JA. Préparation parallèle permise ; aides n'affirment pas que 4.0.7 est publiée. |
-| **3** | A9 + B9, T05 complet 4.0.7, copy/schema/caches/retour 4.0.6 après écritures nouvelles, profils MPS et JSONL/SQLite supportés | **Claude** hors sandbox, **Codex** harnais/revue ; ~2–4 JA. Aucun corpus/modèle nouveau, aucun basculement implicite de profil. Tous contrôles requis verts avant soumettre release. |
+| **3** | A9 + B9, T05 complet 4.0.7, copy/schema/caches/retour 4.0.5 après écritures nouvelles, profils MPS et JSONL/SQLite supportés | **Claude** hors sandbox, **Codex** harnais/revue ; ~2–4 JA. Aucun corpus/modèle nouveau, aucun basculement implicite de profil. Tous contrôles requis verts avant soumettre release. |
 | **3 — option native** | C6 import sélectif et vérification des reçus après dry run, mapping/exclusions/protocole signés | **Claude + Romain** sous GO contenu. Peut rester désactivé sans bloquer publication 4.0.7 ni D4 ; changements de schéma nécessitent gate distinct. |
 | **4** | D1c/P-D et D3 usage J+7 ; corrections des parcours/frictions constatées | **Claude**, revue Codex ; ~1–2 JA + attente terrain. Auth native existante, aucun contournement du refus L11. |
 | **5** | D4 lancement ciblé : produit Mac multi-assistants, démo locale, PyPI/registry/liens, posts autorisés individuellement | **Claude**, exactitude technique Codex, GO Romain. Gates A9/T05, P-D, D2 minimum et suivi D3 atteints. Pas dépendant d'un import natif privé. |
@@ -268,7 +274,7 @@ pas exclusivité absolue, « plus complet que tous » ou top 1.
 
 ## 9. Décisions de Romain, numérotées
 
-**Déjà actées, non redemandées :** publication/bascule 4.0.6, maintien des deux
+**Déjà actées, non redemandées :** publication 4.0.6, annulation de sa bascule, production 4.0.5 jusqu’à qualification 4.0.7, maintien des deux
 mémoires, GitHub gelé, cible Mac multi-assistants puis Linux/Windows,
 SQLite+tâches pour installs neuves, profil production auto/MPS/native/batch32/C4.
 
@@ -299,7 +305,7 @@ SQLite+tâches pour installs neuves, profil production auto/MPS/native/batch32/C
 **Codex — ACCORD sur ce texte consolidé, 12 octobre 2026.** Accord sur les
 objectifs et l'ordre ; aucun accord supposé de Claude ni GO supplémentaire de Romain.
 
-**Claude — CONTRE-SIGNATURE EN ATTENTE.** Confirmer notamment : format JSON
+**Claude — CONTRE-SIGNATURE reçue, reproduite ci-dessous.** Points confirmés : format JSON
 compatible/négocié ; entité = avis ; compensation plutôt que réouverture ;
 notifications déjà existantes mais non attestées ; classification sans preuve
 automatique de légitimité ; documents natifs/scanner/known_refs sélectifs ;
@@ -312,3 +318,16 @@ import de tous les fichiers ; mtime présenté comme connaissance passée ;
 suppression native assimilée à autorisation de purger/à obligation de conserver ;
 import privé rendu obligatoire pour lancer le produit. Si Claude refuse un
 amendement, consigner le point et résoudre avant déclarer v5 définitif.
+
+**Claude — COUNTERSIGNATURE, 12 October 2026.** Agreement on the consolidated text (Codex bundle `c4f8739`, SHA
+`34d687f3…`), including: format negotiated server↔relay; shared entity = notice, not a refusal; compensating
+correction rather than reopening the past; health notifications existing but not attested (B6 = attest
++ make visible); classification with no automatic proof of legitimacy; selective native import (allowlist, quarantine,
+scanner not infallible); **C6 optional, does not block D4** (I withdraw the mandatory dependency); efforts, measures
+and S4 reserves maintained. Amendment of step 0 (Codex run 66 fact, after the signature): the 4.0.6 SQLite copy
+qualification **failed** on "0 corpus encoding" (cache key including `__version__`: 1825 re-encodings, 26.9 s,
++3.89 MB, 292 vectors with max deviation 0.0078, identical top-10). Cache fix `8084ae7` (base 211ed06) goes
+into the **4.0.7** scope. Step 0 becomes: **production stays 4.0.5** until 4.0.7 is qualified (Codex recommendation,
+which I share), unless Romain explicitly accepts the one-time re-encoding of 4.0.6 — his decision. Note: bundles
+`c4f8739` (plan) and `8084ae7` (cache) both branch from `211ed06`: to be integrated on a single line by Codex before
+any 4.0.7 qualification.
