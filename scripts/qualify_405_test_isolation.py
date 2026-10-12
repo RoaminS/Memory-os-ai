@@ -19,6 +19,9 @@ import xml.etree.ElementTree as ET
 from test_home_guard import operator_home
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'v4/src'))
+from memory_os_v4.ops.provision import min_free_bytes  # noqa: E402
+
 TCP = ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py', 'v4/tests/test_l3_tcp.py']
 EXPECTED_TCP = (
     'test_l3_tcp::test_405_preflight_refusal_through_sdk_then_manual_retry[outage-preflight_unavailable]',
@@ -108,6 +111,7 @@ def unreadable(snapshot):
 
 
 def resource_sample(require_swap):
+    minimum = min_free_bytes()
     free = shutil.disk_usage(ROOT).free
     swap = None
     if sys.platform == 'darwin':
@@ -116,11 +120,11 @@ def resource_sample(require_swap):
         match = re.search(r'used\s*=\s*([0-9.]+)([KMG])', probe.stdout)
         if probe.returncode == 0 and match:
             swap = float(match[1]) * {'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}[match[2]]
-    if free < 5_000_000_000 or (swap is not None and swap > 8_500_000_000):
-        raise RuntimeError(f'Machine guard stopped: disk={free}, swap={swap}')
+    if free < minimum or (swap is not None and swap > 8_500_000_000):
+        raise RuntimeError(f'Machine guard stopped: disk={free}, min_free_bytes={minimum}, swap={swap}')
     if require_swap and swap is None:
         raise RuntimeError('Swap unavailable; full outside-sandbox qualification refused')
-    return {'free_bytes': free, 'swap_bytes': swap}
+    return {'free_bytes': free, 'swap_bytes': swap, 'min_free_bytes': minimum}
 
 
 def main():
@@ -146,6 +150,7 @@ def main():
     if args.suite == 'unit':
         cases[1][1].extend('--ignore=' + p for p in TCP)
     try:
+        report['min_free_bytes'] = min_free_bytes()
         for name, paths in cases:
             command = [sys.executable, '-B', '-m', 'pytest', '-c', str(ROOT / 'pyproject.toml'),
                        '-q', '-p', 'no:cacheprovider', '-o', 'faulthandler_timeout=60',

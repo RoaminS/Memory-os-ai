@@ -71,7 +71,7 @@ def command(argv, cwd, env, log, monitor=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--build", action="store_true", help="Requires disk >=5 GB, measured swap <=8.5 GB; no downloads")
+    parser.add_argument("--build", action="store_true", help="Disk default >=5 GB (operator override >=3 GB), measured swap <=8.5 GB; no downloads")
     parser.add_argument("--source-commit", help="Exact sealed SHA required with --build")
     parser.add_argument("--build-python", type=Path, help="Already-equipped interpreter for offline build (defaults to current Python)")
     args = parser.parse_args()
@@ -89,6 +89,10 @@ def main():
     if args.build_python:
         env["MEMORY_TEST_BUILD_PYTHON"] = str(args.build_python.resolve())
     try:
+        provision = load("d1_guard", ROOT / "v4/src/memory_os_v4/ops/provision.py")
+        report["min_free_bytes"] = provision.min_free_bytes()
+        if "MEMORY_V4_MIN_FREE_BYTES" in os.environ:
+            env["MEMORY_V4_MIN_FREE_BYTES"] = str(report["min_free_bytes"])
         xml = output / "unit.xml"
         report["steps"]["unit"] = command([sys.executable, "-B", "-m", "pytest", "-c", "pyproject.toml", *UNITS,
             "-q", "-p", "no:cacheprovider", "--basetemp=" + str(output / "pytest-tmp"),
@@ -101,7 +105,7 @@ def main():
         report["unit_counts"] = counts
         shutil.rmtree(output / "pytest-tmp")  # disposable fixtures only; failed runs/logs/XML remain
         if args.build:
-            guard = load("d1_guard", ROOT / "v4/src/memory_os_v4/ops/provision.py").guard
+            guard = provision.guard
             guard(output)
             os.setpriority(os.PRIO_PROCESS, 0, 15)
             env["MEMORY_OS_BUILD_SOURCE_COMMIT"] = args.source_commit

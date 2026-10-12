@@ -42,6 +42,9 @@
   max(seuil effectif, pic de provisioning + 1 GB), seuils exposés dans le rapport.
   Plafond de swap 8,5 GB inchangé. Dérogation non recommandée aux utilisateurs,
   non persistée dans les configurations du service ou des clients.
+- Harnais de qualification source, artefacts et résolution alignés sur cette
+  même garde ; seuil effectif `min_free_bytes` dans chaque rapport. La
+  dérogation validée est conservée dans les sous-processus du harnais D1.
 - Correction du défaut réel d'installation neuve des 4.0.4/4.0.5 et de la
   candidate pré-fix : `mcp>=1.26` pouvait résoudre MCP 2.3.0, API `list_tools`
   absente. MCP **1.26.0** et fermeture exacte du runtime qualifié désormais

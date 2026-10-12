@@ -71,11 +71,15 @@ def test_resolution_gate_attests_exact_wheel_metadata_hash_and_full_plan(tmp_pat
     assert not gate.check(report, '4.0.6', wheel=wheel)['ok']
 
 
-def test_network_gate_uses_guarded_dry_run_private_home_and_no_credentials(tmp_path, monkeypatch):
+@pytest.mark.parametrize('override,minimum', [(None, 5_000_000_000), ('3000000000', 3_000_000_000)])
+def test_network_gate_uses_guarded_dry_run_private_home_and_no_credentials(tmp_path, monkeypatch, override, minimum):
     import hashlib
     import importlib.util
     import zipfile
     monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    monkeypatch.delenv('MEMORY_V4_MIN_FREE_BYTES', raising=False)
+    if override is not None:
+        monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', override)
     spec = importlib.util.spec_from_file_location('network_gate', ROOT / 'scripts/qualify_runtime_resolution.py')
     gate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gate)
@@ -104,7 +108,94 @@ def test_network_gate_uses_guarded_dry_run_private_home_and_no_credentials(tmp_p
     monkeypatch.setattr(gate, 'command', command)
     monkeypatch.setattr(sys, 'argv', ['tool', '--wheel', str(wheel), '--output', str(output)])
     assert gate.main() == 0
-    assert json.loads((output / 'report.json').read_text())['installed'] is False
+    proof = json.loads((output / 'report.json').read_text())
+    assert proof['installed'] is False and proof['min_free_bytes'] == minimum
+
+
+def qualification_script(name, monkeypatch):
+    import importlib.util
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    spec = importlib.util.spec_from_file_location(name, ROOT / f'scripts/{name}.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize('override,minimum', [(None, 5_000_000_000), ('3000000000', 3_000_000_000)])
+def test_full_suite_guard_uses_shared_threshold_and_keeps_swap_limit(monkeypatch, override, minimum):
+    from types import SimpleNamespace
+    gate = qualification_script('qualify_405_test_isolation', monkeypatch)
+    monkeypatch.delenv('MEMORY_V4_MIN_FREE_BYTES', raising=False)
+    if override is not None:
+        monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', override)
+    monkeypatch.setattr(gate.sys, 'platform', 'darwin')
+    monkeypatch.setattr(gate.shutil, 'disk_usage', lambda p: SimpleNamespace(free=minimum))
+    monkeypatch.setattr(gate.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=0, stdout='used = 100M'))
+    assert gate.resource_sample(True)['min_free_bytes'] == minimum
+    monkeypatch.setattr(gate.shutil, 'disk_usage', lambda p: SimpleNamespace(free=minimum - 1))
+    with pytest.raises(RuntimeError, match=f'min_free_bytes={minimum}'):
+        gate.resource_sample(True)
+    monkeypatch.setattr(gate.shutil, 'disk_usage', lambda p: SimpleNamespace(free=minimum))
+    monkeypatch.setattr(gate.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=0, stdout='used = 9G'))
+    with pytest.raises(RuntimeError, match='Machine guard'):
+        gate.resource_sample(True)
+    monkeypatch.setattr(gate.subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=1, stdout=''))
+    with pytest.raises(RuntimeError, match='Swap unavailable'):
+        gate.resource_sample(True)
+
+
+@pytest.mark.parametrize('script', ['qualify_405_test_isolation', 'qualify_distribution_d1a'])
+@pytest.mark.parametrize('override,minimum', [(None, 5_000_000_000), ('3000000000', 3_000_000_000),
+                                           ('2999999999', None), ('invalid', None)])
+def test_qualification_reports_threshold_and_refuses_invalid_before_work(tmp_path, monkeypatch, script, override, minimum):
+    from memory_os_v4.ops import provision
+    gate = qualification_script(script, monkeypatch)
+    monkeypatch.setattr(gate, 'ROOT', tmp_path)
+    monkeypatch.delenv('MEMORY_V4_MIN_FREE_BYTES', raising=False)
+    if override is not None:
+        monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', override)
+    output = tmp_path / '.local-qualification/proof'
+    monkeypatch.setattr(sys, 'argv', ['tool', '--output', str(output)])
+    calls = []
+    if script == 'qualify_405_test_isolation':
+        for name in ('conftest.py', 'MANIFEST.in'):
+            (tmp_path / name).write_text('# synthetic source inventory\n')
+        monkeypatch.setattr(gate, 'snapshots', lambda home: {})
+        def sample(require_swap):
+            calls.append('sample')
+            raise RuntimeError('synthetic stop before pytest')
+        monkeypatch.setattr(gate, 'resource_sample', sample)
+    else:
+        monkeypatch.setattr(gate, 'load', lambda *a: provision)
+        monkeypatch.setenv('MEMORY_V4_UNRELATED_PRIVATE_SETTING', 'must-not-forward')
+        def command(argv, cwd, env, log):
+            calls.append('command')
+            assert 'MEMORY_V4_UNRELATED_PRIVATE_SETTING' not in env
+            assert env.get('MEMORY_V4_MIN_FREE_BYTES') == (str(minimum) if override is not None else None)
+            raise RuntimeError('synthetic stop before pytest')
+        monkeypatch.setattr(gate, 'command', command)
+    assert gate.main() == 1
+    proof = json.loads((output / 'report.json').read_text())
+    assert not proof['ok']
+    if minimum is None:
+        assert not calls and 'integer bytes >= 3000000000' in proof['error']
+    else:
+        assert len(calls) == 1 and proof['min_free_bytes'] == minimum
+
+
+@pytest.mark.parametrize('override', ['2999999999', 'invalid'])
+def test_network_guard_refuses_invalid_override_before_resolution(tmp_path, monkeypatch, override):
+    from memory_os_v4.ops.provision import ProvisionError
+    gate = qualification_script('qualify_runtime_resolution', monkeypatch)
+    monkeypatch.setattr(gate, 'ROOT', tmp_path)
+    monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', override)
+    output = tmp_path / '.local-qualification/proof'
+    monkeypatch.setattr(sys, 'argv', ['tool', '--wheel', str(tmp_path / 'fixture.whl'), '--output', str(output)])
+    monkeypatch.setattr(gate, 'command', lambda *a: pytest.fail('must not resolve'))
+    monkeypatch.setattr(gate, 'guard', lambda *a: pytest.fail('must validate threshold first'))
+    with pytest.raises(ProvisionError, match='integer bytes >= 3000000000'):
+        gate.main()
+    assert not output.exists()
 
 
 def test_project_pins_match_shipped_qualified_profile():

@@ -17,7 +17,7 @@ import tomllib
 
 from check_runtime_resolution import check
 from qualify_distribution_d1a import command
-from memory_os_v4.ops.provision import guard
+from memory_os_v4.ops.provision import guard, min_free_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,6 +30,7 @@ def main():
     wheel, output = args.wheel.resolve(), args.output.resolve()
     if output.exists() or not output.is_relative_to(ROOT / '.local-qualification'):
         parser.error('Fresh output below clone .local-qualification required')
+    minimum = min_free_bytes()
     guard(output.parent)
     output.mkdir(parents=True, mode=0o700)
     for name in ('home', 'tmp'):
@@ -39,7 +40,8 @@ def main():
                XDG_CONFIG_HOME=str(output / 'home/.config'),
                XDG_CACHE_HOME=str(output / 'home/.cache'),
                PYTHONDONTWRITEBYTECODE='1', PYTHONNOUSERSITE='1', PIP_CONFIG_FILE=os.devnull)
-    result = {'ok': False, 'model_calls': 0, 'api_calls': 0, 'installed': False}
+    result = {'ok': False, 'model_calls': 0, 'api_calls': 0, 'installed': False,
+              'min_free_bytes': minimum}
     try:
         os.setpriority(os.PRIO_PROCESS, 0, 15)
         result['command'] = command([sys.executable, '-B', '-m', 'pip', 'install', '--dry-run',
