@@ -5,6 +5,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,17 @@ import sqlite_activation_worker as worker
 import migrate_sqlite_activation as adapter
 import prepare_sqlite_activation_plists as plists
 import qualify_sqlite_prepared_store as prepared
+
+
+@pytest.fixture
+def activation_disk_capacity(monkeypatch):
+    """Simulate the disk, not the reserve policy; never read operator capacity."""
+    def set_free_bytes(free):
+        monkeypatch.setattr(runner.shutil, 'disk_usage',
+                            lambda path: SimpleNamespace(total=20_000_000_000,
+                                                         used=20_000_000_000 - free, free=free))
+    set_free_bytes(9_000_000_000)
+    return set_free_bytes
 
 
 @pytest.fixture
@@ -107,7 +119,7 @@ def test_copy_profile_never_inherits_live_paths_or_secrets(tmp_path):
         runner.profile_environment(path)
 
 
-def test_snapshot_only_is_immutable_and_existing_output_is_refused(tmp_path, monkeypatch):
+def test_snapshot_only_is_immutable_and_existing_output_is_refused(tmp_path, monkeypatch, activation_disk_capacity):
     monkeypatch.setattr(runner, 'ROOT', tmp_path)
     monkeypatch.setattr(runner, 'resources', lambda path: {'free_bytes': 9_000_000_000})
     monkeypatch.setattr(runner.os, 'getpriority', lambda *args: 15)
@@ -128,7 +140,7 @@ def test_snapshot_only_is_immutable_and_existing_output_is_refused(tmp_path, mon
     shutil.rmtree(tmp_path)
 
 
-def test_worker_executable_preserves_venv_symlink_and_plan_precedes_work(tmp_path, monkeypatch):
+def test_worker_executable_preserves_venv_symlink_and_plan_precedes_work(tmp_path, monkeypatch, activation_disk_capacity):
     import verify_release_manifest as gate
     monkeypatch.setattr(runner, 'ROOT', tmp_path)
     monkeypatch.setattr(runner, 'resources', lambda path: {})
@@ -161,6 +173,38 @@ def test_worker_executable_preserves_venv_symlink_and_plan_precedes_work(tmp_pat
     assert runner.main() == 0
     assert json.loads((out / 'report.json').read_text())['ok']
     shutil.rmtree(tmp_path)
+
+
+@pytest.mark.parametrize('boundary', ['below_floor', 'below_total_reserve', 'exact_reserve'])
+def test_activation_reserve_is_hermetic_and_not_lowered_by_provision_override(
+        tmp_path, monkeypatch, activation_disk_capacity, boundary):
+    monkeypatch.setattr(runner, 'ROOT', tmp_path)
+    monkeypatch.setattr(runner, 'resources', lambda path: {'free_bytes': runner.shutil.disk_usage(path).free})
+    monkeypatch.setattr(runner.os, 'getpriority', lambda *args: 15)
+    monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', '3000000000')
+    original = tmp_path / 'source'
+    source(original)
+    before = runner.inventory(original)
+    footprint = sum((original / name).stat().st_size for name in before)
+    assert footprint > 0
+    required = 5_000_000_000 + 10 * footprint
+    free = {'below_floor': 4_999_999_999, 'below_total_reserve': required - 1,
+            'exact_reserve': required}[boundary]
+    activation_disk_capacity(free)
+    out = tmp_path / '.local-qualification/reserve-test'
+    monkeypatch.setattr(sys, 'argv', ['tool', '--source', str(original), '--output', str(out), '--snapshot-only'])
+    if boundary != 'exact_reserve':
+        monkeypatch.setattr(runner, 'snapshot', lambda *args: pytest.fail('Refuse before any source copy'))
+    assert runner.main() == (0 if boundary == 'exact_reserve' else 1)
+    report = json.loads((out / 'report.json').read_text())
+    assert report['production_modified'] is False and runner.inventory(original) == before
+    assert report['resources_before']['free_bytes'] == free
+    if boundary == 'exact_reserve':
+        assert report['ok'] and (out / 'snapshot').is_dir()
+    else:
+        assert not report['ok'] and 'Need 5 GB reserve plus ten source footprints' in report['error']
+        assert not (out / 'snapshot').exists() and not (out / 'worker.log').exists()
+    shutil.rmtree(tmp_path)  # Successful synthetic test only, including asserted refusal.
 
 
 def test_normal_migration_keeps_modern_l3_status_and_original_export(tmp_path, activation_405_contract):
