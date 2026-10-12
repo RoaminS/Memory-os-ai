@@ -42,6 +42,21 @@
   max(seuil effectif, pic de provisioning + 1 GB), seuils exposés dans le rapport.
   Plafond de swap 8,5 GB inchangé. Dérogation non recommandée aux utilisateurs,
   non persistée dans les configurations du service ou des clients.
+- Correction du défaut réel d'installation neuve des 4.0.4/4.0.5 et de la
+  candidate pré-fix : `mcp>=1.26` pouvait résoudre MCP 2.3.0, API `list_tools`
+  absente. MCP **1.26.0** et fermeture exacte du runtime qualifié désormais
+  imposés dans METADATA : 61 core + 4 pour brief, dont transport/pydantic,
+  cryptography/filelock et autres transitives. Contraintes/catalogue embarqués,
+  contrôle préflight et doctor local/déployé ; périmètre macOS arm64 CPython 3.11.
+  Aucun support MCP 2.x ni garantie de sécurité par le seul pinning.
+- Quickstart : échec de lancement détecté via runs/dernier code de sortie,
+  diagnostic borné de server.err avec token masqué ; arrêt du seul nouveau
+  job réattesté, avant modification des configs clients. Évite l'attente de 180 s
+  sur l'import SDK en échec ; conserve journal/token/plist/fixtures.
+- Gate avant trial : vérification hors ligne du plan pip, puis résolution réseau
+  gardée par Claude sur le wheel exact. Le rapport réel du trial du 2026-10-12
+  est rejeté avec 39 écarts et 6 paquets inattendus, sans aucune requête réseau
+  par le contrôleur. Le nouvel essai reste requis, pas encore déclaré réussi.
 - Qualification de ce commit/ces artefacts et essai d'installation neuve encore
   requis. Aucun gain de productivité mesuré : L11 non exécuté ; LME-S/BEAM
   descriptifs, profils/limites explicités, aucun classement officiel revendiqué.

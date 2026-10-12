@@ -427,7 +427,7 @@ def _service_plan(settings, home, python, resource_env, *, backend=None):
             "state": state, "sha256": _sha(path)}
 
 
-def _job_state(service, *, run):
+def _job_observation(service, *, run):
     result = run(["launchctl", "print", f"gui/{os.getuid()}/{service['label']}"],
                  capture_output=True, text=True, timeout=5)
     if result.returncode == 0:
@@ -439,15 +439,44 @@ def _job_state(service, *, run):
             return text.strip().strip('"')
         actual_args = [unquote(line) for line in args.group(1).splitlines() if line.strip()] if args else []
         if not program or not args or unquote(program.group(1)) != service['argv'][0] or actual_args != service['argv']:
-            return "foreign-or-unattested"
+            return {'state': 'foreign-or-unattested'}
         for key in ('MEMORY_V4_TOKEN_FILE', 'MEMORY_V4_DIR'):
             match = re.search(r"(?m)^\s*" + re.escape(key) + r" => (.+?)\s*$", result.stdout)
             if not match or unquote(match.group(1)) != service['env'][key]:
-                return 'foreign-or-unattested'
-        return "loaded"
+                return {'state': 'foreign-or-unattested'}
+        def number(key):
+            match = re.search(r'(?m)^\s*' + re.escape(key) + r' = (-?\d+)\s*$', result.stdout)
+            return int(match[1]) if match else None
+        process_state = re.search(r'(?m)^\s*state = (.+?)\s*$', result.stdout)
+        return {'state': 'loaded', 'runs': number('runs'), 'last_exit_code': number('last exit code'),
+                'pid': number('pid'), 'process_state': process_state[1] if process_state else None}
     if "Could not find service" in (result.stdout + result.stderr):
-        return "absent"
-    return "unknown"  # permissions/syntax/IPC failures are not evidence of absence
+        return {'state': 'absent'}
+    return {'state': 'unknown'}  # permissions/syntax/IPC failures are not evidence of absence
+
+
+def _job_state(service, *, run):
+    return _job_observation(service, run=run)['state']
+
+
+def _startup_log_tail(settings, home):
+    """Bounded private diagnostic; never follow links or return a bearer token."""
+    from .auth import read_token
+    path = settings.ops_dir / 'logs/server.err'
+    try:
+        _safe_path(path, home)
+        with path.open('rb') as stream:
+            stream.seek(0, 2)
+            stream.seek(max(0, stream.tell() - 8192))
+            text = stream.read(8192).decode('utf-8', errors='replace')
+        text = '\n'.join(text.splitlines()[-24:])
+        token = read_token(settings.token_file)
+        if token:
+            text = text.replace(token, '[REDACTED]')
+        text = re.sub(r'(?i)bearer\s+[^\s"\']+', 'Bearer [REDACTED]', text)
+        return text.replace(str(home), '~')[-4096:]
+    except (OSError, ValueError, RuntimeError):
+        return 'Server log unavailable or unsafe; inspect the retained private log manually.'
 
 
 def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backend=None, run=subprocess.run):
@@ -468,8 +497,10 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
                      token_file=settings.token_file, provision_plan=resource_plan)
     identity = build_identity()
     service = _service_plan(settings, home, python, resource_plan['env'], backend=backend)
-    runtime = inspect_current()
+    runtime = inspect_current(extras=('ops', 'brief'))
     blockers = []
+    if sys.version_info[:2] != (3, 11):
+        blockers.append('runtime_unqualified: macOS Python 3.11 closure required for quickstart')
     if sys.platform != 'darwin' or platform.machine().lower() not in {'arm64', 'aarch64'}:
         blockers.append('macOS Apple Silicon launchd onboarding only; other platforms remain manual')
     if identity.get('identity_source') != 'embedded_descriptor' or not identity.get('commit') or identity.get('source_dirty'):
@@ -697,6 +728,22 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
             ready = _ready(settings, plan['identity'], backend=plan['backend'])
             if ready:
                 break
+            observed = _job_observation(service, run=run)
+            if (observed['state'] == 'loaded' and (observed.get('runs') or 0) >= 1
+                    and observed.get('last_exit_code') not in (None, 0)
+                    and ((observed.get('runs') or 0) >= 2 or
+                         (not observed.get('pid') and observed.get('process_state') != 'running'))):
+                progress['startup_failure'] = {**observed, 'stderr_tail': _startup_log_tail(settings, home)}
+                # Only our new, unchanged plist and re-attested job can be stopped.
+                if (service['state'] == 'absent' and _sha(plist) == progress['steps']['service']['plist_sha256']
+                        and _job_state(service, run=run) == 'loaded'):
+                    stopped = run(['launchctl', 'bootout', f"gui/{os.getuid()}/{service['label']}"],
+                                  capture_output=True, text=True, timeout=15)
+                    progress['startup_failure']['stop_attempted'] = True
+                    progress['startup_failure']['stopped'] = stopped.returncode == 0
+                raise QuickstartError('Server startup failed: ' + str(observed.get('runs')) +
+                                      ' runs, last exit code ' + str(observed.get('last_exit_code')) +
+                                      '; retained server.err tail: ' + progress['startup_failure']['stderr_tail'])
             time.sleep(.25)
         if not ready:
             raise QuickstartError('Readiness timeout; preserve logs/plist; no client config written')

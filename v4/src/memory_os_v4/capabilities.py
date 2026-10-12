@@ -7,10 +7,12 @@ from . import __version__
 
 def deployed(engine, build: dict) -> dict:
     from .brief_tokens import status
+    from .ops.qualified_runtime import inspect_current
 
     cfg = engine.config
     return {
         "schema_version": 1,
+        "runtime": inspect_current(extras=('ops', 'brief')),
         "engine": {"name": "memory-os-v4", "version": __version__, **build},
         "store": {
             "backend": cfg.store_backend,

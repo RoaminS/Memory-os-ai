@@ -200,10 +200,16 @@ def _clients(home: Path) -> list[Check]:
 
 
 def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[Check]:
+    from .qualified_runtime import inspect_current
+    local_runtime = inspect_current(extras=('ops', 'brief'))
     settings = settings or OpsSettings.from_env()
     home = home or Path.home()
     checks = [_secret(settings.token_file, "token", required=True),
               _secret(settings.backup_key, "backup-key", required=False, key=True)]
+    checks.append(Check('local-runtime', 'PASS' if local_runtime['ok'] else 'FAIL',
+                        'doctor/relay environment runtime versions (not the server): ' +
+                        (local_runtime['profile_id'] if local_runtime['ok'] else
+                         ', '.join(sorted(local_runtime['mismatches'])))))
     checks += _server(settings)
     checks += [_service(settings), _store(settings), _backup(settings), _storage(settings)]
     from .request_journal import directory, scan, key, RESOLVED
@@ -270,6 +276,14 @@ def _capabilities(info: dict) -> list[Check]:
         return [Check("capabilities", "FAIL", "malformed deployed capability contract")]
     tokenizer = caps.get("brief", {}).get("tokenizer", {})
     from .qualified_runtime import compare
+    deployed_runtime = caps.get('runtime')
+    if isinstance(deployed_runtime, dict) and isinstance(deployed_runtime.get('actual'), dict):
+        proof = compare(deployed_runtime['actual'], extras=('ops', 'brief'))
+        checks.append(Check('server-runtime', 'PASS' if proof['ok'] else 'FAIL',
+                            'deployed core/ops/brief runtime versions' if proof['ok'] else
+                            'deployed runtime drift: ' + ', '.join(sorted(proof['mismatches']))))
+    else:
+        checks.append(Check('server-runtime', 'WARN', 'deployed core runtime attestation unavailable'))
     runtime = caps.get('encoding', {}).get('profile', {}).get('runtime')
     if isinstance(runtime, dict):
         proof = compare(runtime, encoding_only=True)

@@ -270,6 +270,44 @@ def test_complete_preview_is_zero_write_and_no_activation(install_context):
     assert p['service']['env']['MEMORY_V4_LEXICAL_GUARD_K'] == '3'
 
 
+@pytest.mark.parametrize('runs,process_state,pid', [(2, 'running', 123), (1, 'spawn scheduled', None)])
+@pytest.mark.parametrize('ownership_changed', [False, True])
+def test_crashing_new_service_fails_fast_with_masked_tail_and_attested_stop(
+        install_context, monkeypatch, runs, process_state, pid, ownership_changed):
+    c = install_context
+    client_before = (c.home / '.cursor/mcp.json').read_bytes()
+    p = installation(c)
+    monkeypatch.setattr(qs, '_ready', lambda *a, **k: None)
+    original = c.run
+    def run(argv, **kwargs):
+        result = original(argv, **kwargs)
+        if argv[:2] == ['launchctl', 'bootstrap']:
+            from memory_os_v4.ops.auth import read_token
+            token = read_token(c.settings.token_file)
+            log = c.settings.ops_dir / 'logs/server.err'
+            log.write_text('x' * 9000 + '\nBearer ' + token +
+                           "\nAttributeError: 'Server' object has no attribute 'list_tools'\n")
+            if ownership_changed:
+                monkeypatch.setattr(qs, '_job_state', lambda *a, **k: 'foreign-or-unattested')
+        if argv[:2] == ['launchctl', 'print'] and c.loaded[0]:
+            result.stdout += f'\nruns = {runs}\nlast exit code = 1\nstate = {process_state}\n'
+            if pid:
+                result.stdout += f'pid = {pid}\n'
+        return result
+    monkeypatch.setattr(qs.time, 'sleep', lambda *a: pytest.fail('Known failure must not wait for timeout'))
+    result = qs.apply_install(p, c.settings, home=c.home, run=run, timeout=180)
+    assert not result['ok'] and 'Server startup failed' in result['error']
+    failed = result['startup_failure']
+    assert failed['runs'] == runs and failed['last_exit_code'] == 1
+    assert 'AttributeError' in failed['stderr_tail'] and len(failed['stderr_tail']) <= 4096
+    from memory_os_v4.ops.auth import read_token
+    assert read_token(c.settings.token_file) not in json.dumps(result)
+    stopped = [a for a in c.calls if a[:2] == ['launchctl', 'bootout']]
+    assert bool(stopped) is (not ownership_changed)
+    assert 'clients' not in result and (c.home / '.cursor/mcp.json').read_bytes() == client_before
+    assert c.settings.token_file.exists()  # Evidence retained, no unsafe cleanup.
+
+
 @pytest.mark.parametrize('case', ['unknown', 'json-invalid', 'foreign-port', 'foreign-job',
                                   'foreign-plist', 'store-nonempty', 'token-mode', 'bad-build'])
 def test_preflight_refuses_before_any_write(install_context, monkeypatch, case):
@@ -695,7 +733,7 @@ def test_runtime_drift_blocks_preview_apply_before_all_mutations(install_context
     c = install_context
     expected = qualified_runtime.catalog()['versions']
     drifted = {**expected, 'torch': '2.14.1', 'transformers': '5.19.0'}
-    monkeypatch.setattr(qualified_runtime, 'inspect_current', lambda: qualified_runtime.compare(drifted))
+    monkeypatch.setattr(qualified_runtime, 'inspect_current', lambda **kw: qualified_runtime.compare(drifted))
     before = tree(c.home)
     plan = installation(c)
     assert not plan['ok'] and any('runtime_unqualified' in b for b in plan['blockers'])

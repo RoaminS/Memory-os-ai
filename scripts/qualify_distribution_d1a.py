@@ -161,7 +161,7 @@ from memory_os_v4.ops.qualified_runtime import check_requirements, inspect_curre
 info = build_identity()
 assert info['identity_source'] == 'embedded_descriptor', info
 assert check_requirements(importlib.metadata.distribution('memory-os-ai').requires)['ok']
-assert inspect_current()['ok'], inspect_current()
+assert inspect_current(extras=('ops', 'brief'))['ok'], inspect_current(extras=('ops', 'brief'))
 import memory_os_v4
 assert pathlib.Path(memory_os_v4.__file__).is_relative_to(pathlib.Path(sys.prefix)), memory_os_v4.__file__
 for entry in importlib.metadata.distribution('memory-os-ai').entry_points:

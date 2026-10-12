@@ -15,9 +15,19 @@ def catalog() -> dict:
     return record
 
 
-def compare(actual: dict, *, encoding_only: bool = False) -> dict:
+def expected_versions(*, extras=()) -> dict:
     record = catalog()
-    expected = record['versions']
+    versions = dict(record['versions'])
+    for extra in extras:
+        if extra not in record.get('extra_versions', {}):
+            raise ValueError('Unknown qualified extra: ' + extra)
+        versions.update(record['extra_versions'][extra])
+    return versions
+
+
+def compare(actual: dict, *, encoding_only: bool = False, extras=()) -> dict:
+    record = catalog()
+    expected = expected_versions(extras=extras)
     if encoding_only:
         expected = {k: expected[k] for k in record['encoding_runtime_keys']}
     mismatches = {key: {'expected': value, 'actual': actual.get(key)}
@@ -27,28 +37,28 @@ def compare(actual: dict, *, encoding_only: bool = False) -> dict:
             'mismatches': mismatches, 'attestation': 'package versions only; no numerical equivalence claim'}
 
 
-def inspect_current(*, version_getter=None) -> dict:
+def inspect_current(*, version_getter=None, extras=()) -> dict:
     get = version_getter or metadata.version
     actual = {}
-    for key in catalog()['versions']:
+    for key in expected_versions(extras=extras):
         try:
             actual[key] = get(key)
         except metadata.PackageNotFoundError:
             actual[key] = None
-    return compare(actual)
+    return compare(actual, extras=extras)
 
 
-def check_requirements(requirements: list[str]) -> dict:
+def check_requirements(requirements: list[str], *, extras=()) -> dict:
     """Validate core wheel/project pins independently of the executing environment."""
     from packaging.requirements import Requirement
     from packaging.utils import canonicalize_name
     core = {}
     for text in requirements:
         item = Requirement(text)
-        if item.marker is None:
+        if item.marker is None or any(item.marker.evaluate({'extra': extra}) for extra in ('', *extras)):
             core.setdefault(canonicalize_name(item.name), []).append(str(item.specifier))
-    wanted = catalog()['versions']
+    wanted = expected_versions(extras=extras)
     mismatches = {name: {'expected': '==' + version, 'actual': core.get(canonicalize_name(name))}
                   for name, version in wanted.items()
-                  if core.get(canonicalize_name(name)) != ['==' + version]}
+                  if sorted(set(core.get(canonicalize_name(name), []))) != ['==' + version]}
     return {'ok': not mismatches, 'mismatches': mismatches}

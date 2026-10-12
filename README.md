@@ -40,14 +40,12 @@ Optional `--demo` explicitly saves/searches a fact in a unique demo project. Thi
 packaged relay; it does not measure a real handoff between assistants. See the packaged client matrix
 in `docs/CLIENTS.md`. Keep the environment for the service; the canonical project registry remains inactive.
 
-The **published 4.0.5** release requires manual provisioning and service setup by an operator. It is not yet a
-qualified ten-minute installation for a new user. Install into a durable environment (not a `uvx` daemon):
+**Known fresh-install defect (2026-10-12):** published 4.0.4/4.0.5 allow an incompatible MCP 2.x
+resolution, which can prevent the server from starting. Already qualified/pinned installations are
+unaffected. Unconstrained fresh installation of these releases is not a qualified onboarding path.
+The 4.0.6 candidate fixes dependency resolution, but its replacement clean-install trial is still pending.
 
-```bash
-uv tool install 'memory-os-ai[ops,brief]==4.0.5'  # requires uv; current published package
-memory-os-admin --help
-```
-
+For an **existing qualified 4.0.5 installation**, keep its qualified environment.
 Before starting the server: explicitly provision Granite (~220.2 MB, revision
 `835ad14087e140460703cf0fae09f97d469d65c2`), tiktoken 0.12.0 and the cl100k table (1.68 MB); create a 0600
 token with `memory-os-admin token create`; prepare the qualified release commit declaration required by 4.0.5;
@@ -69,8 +67,10 @@ and a clean-install trial before release; they are absent from published 4.0.5.
 For **new 4.0.6 quickstart installs**, SQLite with work state/tasks is the default;
 `--backend jsonl` is the explicit alternative. Existing installations are never migrated implicitly.
 The fresh SQLite default directory is `~/.local/share/memory-os/store`; JSONL retains its historical directory.
-The candidate pins the qualified numerical stack (torch 2.10.0, sentence-transformers 5.2.3,
-transformers 5.2.0, numpy 2.4.2, plus its numerical/tokenizer dependencies).
+The candidate pins the full active runtime closure for macOS arm64 CPython 3.11:
+61 core packages plus 4 with brief, including MCP 1.26.0, pydantic 2.12.5, the qualified
+transport stack, torch 2.10.0 and the numerical/tokenizer dependencies. Versioned constraints
+and the METADATA provenance ledger are embedded; optional cloud/document/dev extras are outside this lock.
 Quickstart refuses a different installed profile before activation. A matching version list is an attestation,
 not a guarantee of identical computation on every machine. Use the returned `ops_env` for administration
 in a fresh shell; quickstart does not change your shell defaults or schedule backup jobs.
