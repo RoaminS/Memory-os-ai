@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from memory_os_v4.ops import quickstart as qs
+from memory_os_v4.ops.provision import guard as provision_guard
+from memory_os_v4.ops.provision import plan as provision_plan
 
 PY = "/opt/venv/bin/python"
 ENV = {"MEMORY_V4_URL": "http://127.0.0.1:8765/mcp/", "MEMORY_V4_TOKEN_FILE": "/x/http.token"}
@@ -159,6 +161,101 @@ def install_context(home, monkeypatch):
 
 def installation(c, clients=('cursor',), backend=None):
     return qs.prepare(c.settings, home=c.home, python=c.python, clients=clients, backend=backend, run=c.run)
+
+
+def synthetic_resource_guard(monkeypatch, free):
+    """Actual provision guard with synthetic disk/swap; no sysctl or heavy job."""
+    from types import SimpleNamespace
+    from memory_os_v4.ops import provision
+    monkeypatch.setattr(provision.shutil, 'disk_usage', lambda *a: SimpleNamespace(free=free))
+    monkeypatch.setattr(provision, 'sys_platform', lambda: 'darwin')
+    monkeypatch.setattr(provision.subprocess, 'run', lambda *a, **k:
+                        SimpleNamespace(returncode=0, stdout='used = 0.00M', stderr=''))
+
+
+@pytest.mark.parametrize('override,minimum', [
+    (None, 5_000_000_000), ('3000000000', 3_000_000_000), ('4500000000', 4_500_000_000),
+    ('8000000000', 8_000_000_000), ('0003000000000', 3_000_000_000)])
+@pytest.mark.parametrize('offset', [-1, 0, 1])
+def test_operator_disk_minimum_preview_and_real_guard_align(
+        install_context, monkeypatch, override, minimum, offset):
+    from memory_os_v4.ops import provision
+    if override is None:
+        monkeypatch.delenv('MEMORY_V4_MIN_FREE_BYTES', raising=False)
+    else:
+        monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', override)
+    c = install_context
+    synthetic_resource_guard(monkeypatch, minimum + offset)
+    before = tree(c.home)
+    p = installation(c)
+    assert provision.min_free_bytes() == minimum
+    assert p['disk_min_free_bytes'] == p['disk_required_free_bytes'] == minimum
+    assert qs.report(p)['disk_min_free_bytes'] == minimum
+    assert qs.report(p)['disk_required_free_bytes'] == minimum
+    assert p['ok'] is (offset >= 0), p['blockers']
+    if offset < 0:
+        assert any(f'effective minimum {minimum} bytes' in b for b in p['blockers'])
+        with pytest.raises(provision.ProvisionError, match=f'effective minimum {minimum} bytes'):
+            provision_guard(c.home)
+    else:
+        provision_guard(c.home)
+    assert tree(c.home) == before
+
+
+@pytest.mark.parametrize('free', [4_999_999_999, 5_000_000_000])
+def test_operator_override_keeps_full_peak_plus_margin(install_context, monkeypatch, free):
+    c = install_context
+    monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', '3000000000')
+    c.resource['peak_additional_bytes_upper_bound'] = 4_000_000_000
+    synthetic_resource_guard(monkeypatch, free)
+    p = installation(c)
+    assert p['disk_min_free_bytes'] == 3_000_000_000
+    assert p['disk_required_free_bytes'] == 5_000_000_000
+    assert p['ok'] is (free >= 5_000_000_000)
+    # A resource peak may make the preview stricter than the runtime floor.
+    provision_guard(c.home)
+
+
+@pytest.mark.parametrize('override', [
+    '2999999999', '0', '-1', '', 'invalid', '3000000000.0', '3e9', '+3000000000', ' 3000000000'])
+def test_invalid_operator_disk_policy_refuses_preview_guard_and_resources_without_writes(
+        install_context, monkeypatch, override):
+    from memory_os_v4.ops import provision
+    monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', override)
+    monkeypatch.setattr(provision.shutil, 'disk_usage', lambda *a: pytest.fail('Invalid policy before disk access'))
+    monkeypatch.setattr(provision, 'catalog', lambda: pytest.fail('Invalid policy before resource reads'))
+    c = install_context
+    before = tree(c.home)
+    for action in (provision.min_free_bytes, lambda: provision_guard(c.home),
+                   lambda: installation(c), provision_plan):
+        with pytest.raises(provision.ProvisionError, match='MEMORY_V4_MIN_FREE_BYTES.*3000000000'):
+            action()
+    assert tree(c.home) == before and c.calls == []
+
+
+def test_invalid_operator_disk_policy_cli_refuses_cleanly(install_context, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from memory_os_v4.ops import cli
+    c = install_context
+    monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', '2999999999')
+    before = tree(c.home)
+    args = SimpleNamespace(undo=None, clients='cursor', backend='sqlite', apply=False, report=False)
+    assert cli.cmd_quickstart(args, c.settings) == 1
+    refusal = json.loads(capsys.readouterr().out)
+    assert refusal['ok'] is False and refusal['code'] == 'quickstart_refused'
+    assert 'MEMORY_V4_MIN_FREE_BYTES' in refusal['error'] and '3000000000' in refusal['error']
+    assert tree(c.home) == before
+
+
+def test_operator_disk_override_never_relaxes_swap_limit(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from memory_os_v4.ops import provision
+    monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', '3000000000')
+    synthetic_resource_guard(monkeypatch, 3_000_000_000)
+    monkeypatch.setattr(provision.subprocess, 'run', lambda *a, **k:
+                        SimpleNamespace(returncode=0, stdout='used = 8200.00M', stderr=''))
+    with pytest.raises(provision.ProvisionError, match='Swap guard: more than 8.5 GB'):
+        provision_guard(tmp_path)
 
 
 def test_complete_preview_is_zero_write_and_no_activation(install_context):

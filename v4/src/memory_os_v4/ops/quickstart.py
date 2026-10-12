@@ -348,6 +348,7 @@ def report(plan: dict) -> dict:
             "backend": plan.get('backend'), "work_state": plan.get('work_state'),
             "runtime_qualified": plan.get('runtime_qualification', {}).get('ok'),
             "disk_free_gb": round(plan["disk_free_bytes"] / 1e9, 1), "downloads_required_bytes": plan["downloads_required_bytes"],
+            **{key: plan[key] for key in ('disk_min_free_bytes', 'disk_required_free_bytes') if key in plan},
             "clients": [{"client": c["client"], "path": anon(c["path"]), "current_class": c["current_class"],
                          "action": c["action"]} for c in plan["clients"]]}
 
@@ -456,6 +457,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     from .qualified_runtime import inspect_current
     from .auth import read_token
     import importlib.util
+    minimum = provision.min_free_bytes()
     home = home or Path.home()
     python = python or str(Path(sys.executable).absolute())
     backend = _selected_backend(settings, home, backend)
@@ -488,8 +490,10 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         if desktop.returncode != 1:
             blockers.append('quit Claude Desktop before apply; live config may be rewritten by the app')
     token = read_token(settings.token_file)  # strict permissions/owner/format, never returned
-    if result['disk_free_bytes'] < max(5_000_000_000, resource_plan['peak_additional_bytes_upper_bound'] + 1_000_000_000):
-        blockers.append('disk guard: insufficient margin (minimum 5 GB)')
+    required = max(minimum, resource_plan['peak_additional_bytes_upper_bound'] + 1_000_000_000)
+    if result['disk_free_bytes'] < required:
+        blockers.append(f'disk guard: {result["disk_free_bytes"]} bytes free < required {required} bytes '
+                        f'(effective minimum {minimum} bytes; provisioning peak + 1000000000 bytes margin)')
     loaded = _job_state(service, run=run) if sys.platform == 'darwin' else 'unsupported'
     service['loaded_state'] = loaded
     if service['state'] not in {'absent', 'owned'} or loaded in {'unknown', 'foreign-or-unattested'}:
@@ -516,6 +520,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     if 'gemini-cli' in clients:
         notices.append('Gemini CLI folder trust is a separate user choice; configuration does not prove a connection')
     return {**result, 'ok': not blockers, 'identity': identity, 'service': service, 'blockers': blockers, 'notices': notices,
+            'disk_min_free_bytes': minimum, 'disk_required_free_bytes': required,
             'backend': backend, 'work_state': backend == 'sqlite', 'runtime_qualification': runtime,
             'client_env': client_env, 'writes': 'none (preview)', 'stage': 'preview'}
 

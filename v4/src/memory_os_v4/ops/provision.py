@@ -27,6 +27,23 @@ class ProvisionError(RuntimeError):
     pass
 
 
+def min_free_bytes() -> int:
+    """Conservative default; an explicit operator override cannot go below 3 GB."""
+    raw = os.environ.get("MEMORY_V4_MIN_FREE_BYTES")
+    if raw is None:
+        return 5_000_000_000
+    message = "MEMORY_V4_MIN_FREE_BYTES must be integer bytes >= 3000000000 (3 GB)"
+    if not re.fullmatch(r"[0-9]+", raw):
+        raise ProvisionError(message)
+    try:
+        minimum = int(raw)
+    except ValueError as exc:
+        raise ProvisionError(message) from exc
+    if minimum < 3_000_000_000:
+        raise ProvisionError(message)
+    return minimum
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -45,6 +62,7 @@ def matches(path: Path, record: dict) -> bool:
 
 def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) -> dict:
     """Read-only plan used by quickstart. Environment returned contains paths, not secrets."""
+    min_free_bytes()  # Invalid operator policies are refused even in a read-only preview.
     chosen = tuple(resources)
     if not chosen or len(set(chosen)) != len(chosen) or set(chosen) - {"granite", "cl100k"}:
         raise ProvisionError("Select granite and/or cl100k, without duplicate resources")
@@ -89,11 +107,13 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
 
 
 def guard(path: Path) -> None:
+    minimum = min_free_bytes()
     existing = path
     while not existing.exists():
         existing = existing.parent
-    if shutil.disk_usage(existing).free < 5_000_000_000:
-        raise ProvisionError("Disk guard: less than 5 GB free")
+    free = shutil.disk_usage(existing).free
+    if free < minimum:
+        raise ProvisionError(f"Disk guard: {free} bytes free < effective minimum {minimum} bytes")
     if sys_platform() == "darwin":
         try:
             result = subprocess.run(["/usr/sbin/sysctl", "vm.swapusage"], text=True, capture_output=True, timeout=3)

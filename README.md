@@ -75,6 +75,12 @@ Quickstart refuses a different installed profile before activation. A matching v
 not a guarantee of identical computation on every machine. Use the returned `ops_env` for administration
 in a fresh shell; quickstart does not change your shell defaults or schedule backup jobs.
 
+Provisioning/quickstart keeps a conservative **5 GB free-disk default**. An explicit operator override
+`MEMORY_V4_MIN_FREE_BYTES` must be integer bytes ≥ 3,000,000,000; invalid/lower values are refused.
+Preview retains the provisioning-peak + 1 GB margin; the 8.5 GB swap cap is unchanged.
+This override is **not a user recommendation**, does not alter historical campaign guards,
+and is not persisted in service or client configurations.
+
 ## Supported assistants
 
 | Assistant | Configured | Connection verified | Real usage observed |
