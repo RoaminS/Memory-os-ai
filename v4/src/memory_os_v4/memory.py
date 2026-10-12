@@ -392,12 +392,11 @@ class MemoryV4:
     def _encode_index_texts(self, texts):
         if self.config.store_backend != "sqlite_s1":
             return self.embedder.encode(texts)
-        from . import __version__
         profile = {"model": self.config.embed_model, "dim": self.embedder.dim,
                    "max_seq_length": self.config.embed_max_seq_length,
                    "batch_size": self.config.embed_batch_size,
                    "device": getattr(self.embedder, "device", "hash"),
-                   "implementation": __version__, "namespace": self.config.sqlite_embedding_namespace}
+                   "cache_schema": 2, "namespace": self.config.sqlite_embedding_namespace}
         if self.config.embed_dtype != "native":
             profile["dtype"] = self.config.embed_dtype
         profile["attestation"] = self._compute_profile()
