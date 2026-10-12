@@ -158,15 +158,26 @@ class DurableRelay:
             if name == "memory_session_brief":
                 report = journal.status()
                 if args.get("mode", "compact") == "compact":
-                    data = result.structuredContent
-                    if data is None:
-                        data = json.loads("".join(c.text for c in result.content if isinstance(c, types.TextContent)))
-                    if isinstance(data, dict) and data.get("ok") is False:
+                    try:
+                        data = result.structuredContent
+                        if data is None:
+                            data = json.loads("".join(c.text for c in result.content if isinstance(c, types.TextContent)))
+                    except (ValueError, TypeError, AttributeError):
+                        return brief_error({"code": "brief_unavailable"})
+                    if not isinstance(data, dict):
+                        return brief_error({"code": "brief_unavailable"})
+                    if data.get("ok") is False:
                         return brief_error(data)
                     if data.get("mode") == "compact":
                         from ..brief import rebudget, envelope
+                        from ..brief_tokens import TokenizerUnavailable
                         notices = ["unresolved_requests"] if (report["unresolved_count"] or report["errors"] or report["journal_poisoned"]) else []
-                        return envelope(rebudget(data, notices, wire_format=brief_wire, budget_tokens=brief_budget))
+                        try:
+                            return envelope(rebudget(data, notices, wire_format=brief_wire, budget_tokens=brief_budget))
+                        except TokenizerUnavailable:
+                            return brief_error({"code": "tokenizer_unavailable"})
+                        except (ValueError, TypeError, AttributeError):
+                            return brief_error({"code": "brief_unavailable"})
                     return brief_error({"code": "brief_unavailable"})
                 if report["unresolved_count"] or report["errors"] or report["journal_poisoned"]:
                     data = body(result)

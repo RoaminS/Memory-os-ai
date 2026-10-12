@@ -4,6 +4,7 @@ import json
 import anyio
 from mcp import ClientSession
 from mcp.types import Tool
+from mcp.types import CallToolResult, TextContent
 import pytest
 
 from memory_os_v4 import Config, MemoryV4, brief, server
@@ -156,4 +157,19 @@ def test_error_and_oversized_project_never_hide_unresolved_operations(engine, wi
     assert brief.measures(data(result))[1] <= 200
     result = anyio.run(relay.call, "memory_session_brief", {"invalid": True, "wire_format": wire, "budget_tokens": 200})
     assert "unresolved_requests" in data(result)["notices"]
+    assert brief.measures(data(result))[1] <= 200
+
+
+@pytest.mark.parametrize("raw", ["not JSON: PRIVATE_UPSTREAM_ERROR", "[]", '{"mode":"compact","notices":null}'])
+def test_malformed_upstream_is_bounded_and_preserves_local_uncertainty(engine, raw):
+    class Broken:
+        async def submit(self, op, *, replay):
+            return CallToolResult(content=[TextContent(type="text", text=raw)])
+    relay = DurableRelay(Broken(), None)
+    relay.journal = Ledger()
+    relay.brief_wire_formats = {"legacy", "compact_v2"}
+    result = anyio.run(relay.call, "memory_session_brief", {"budget_tokens": 200})
+    assert data(result)["code"] == "brief_unavailable"
+    assert "unresolved_requests" in data(result)["notices"]
+    assert "PRIVATE_UPSTREAM_ERROR" not in result.content[0].text
     assert brief.measures(data(result))[1] <= 200
