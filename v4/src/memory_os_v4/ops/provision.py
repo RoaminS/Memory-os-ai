@@ -60,6 +60,22 @@ def matches(path: Path, record: dict) -> bool:
     return path.is_file() and path.stat().st_size == record["bytes"] and sha256(path) == record["sha256"]
 
 
+def checked_ref(path: Path, revision: str) -> bool:
+    """HF reads refs verbatim. Never normalize or repair another cache's ref."""
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_symlink() or not path.is_file():
+        raise ProvisionError("Existing Granite refs/main is not a regular ref; preserve it and use a fresh owned cache")
+    try:
+        exact = path.read_bytes() == revision.encode('ascii')
+    except OSError as exc:
+        raise ProvisionError("Existing Granite refs/main unreadable; preserve it and investigate") from exc
+    if not exact:
+        raise ProvisionError("Existing Granite refs/main bytes differ from the pinned revision; "
+                             "no silent profile change or repair; use a fresh owned cache")
+    return True
+
+
 def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) -> dict:
     """Read-only plan used by quickstart. Environment returned contains paths, not secrets."""
     min_free_bytes()  # Invalid operator policies are refused even in a read-only preview.
@@ -74,10 +90,10 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
     model = cache / ("models--" + record["model_id"].replace("/", "--"))
     snapshot = model / "snapshots" / record["revision"]
     files = []
+    ref_present = False
     if "granite" in chosen:
         ref = model / "refs/main"
-        if ref.exists() and ref.read_text().strip() != record["revision"]:
-            raise ProvisionError("Existing Granite refs/main points to another revision; no silent profile change")
+        ref_present = checked_ref(ref, record["revision"])
         for item in record["files"]:
             target = snapshot / item["path"]
             present = matches(target, item)
@@ -96,7 +112,7 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
     missing = sum(item["bytes"] for item in files if not item["present"])
     if sum(item["bytes"] for item in files) > CAP:
         raise ProvisionError("Resource manifest exceeds 300 MB cap")
-    ready = not missing and ("granite" not in chosen or (model / "refs/main").is_file())
+    ready = not missing and ("granite" not in chosen or ref_present)
     return {"schema_version": 1, "ok": True, "mode": "preview", "ready": ready,
             "resources": list(chosen), "revision": record["revision"], "model_id": record["model_id"],
             "catalog_sha256": sha256(CATALOG), "cache_dir": str(cache), "table_path": str(table),
@@ -289,13 +305,10 @@ def apply(preview: dict, *, download_approved: bool = False) -> dict:
             if "granite" in expected["resources"]:
                 ref = cache / ("models--" + record["model_id"].replace("/", "--")) / "refs/main"
                 _safe_parent(ref)
-                if ref.exists():
-                    if ref.read_text().strip() != record["revision"]:
-                        raise ProvisionError("Granite revision changed concurrently")
-                else:
+                if not checked_ref(ref, record["revision"]):
                     ready_ref = stage / "main.ref"
-                    with ready_ref.open("x", encoding="utf-8") as out:
-                        out.write(record["revision"] + "\n")
+                    with ready_ref.open("xb") as out:
+                        out.write(record["revision"].encode('ascii'))
                         out.flush()
                         os.fsync(out.fileno())
                     _install(ready_ref, ref)

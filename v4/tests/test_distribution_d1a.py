@@ -405,9 +405,85 @@ def test_provision_pinned_success_offline_reapply_and_no_profile_change(tiny_res
     repeated = provision.apply(provision.plan(**paths))
     assert repeated["ready"] and not repeated["modified"]
     ref = paths["cache_dir"] / "models--owner--model/refs/main"
+    assert ref.read_bytes() == record['revision'].encode('ascii')
     ref.write_text("b" * 40)
     with pytest.raises(provision.ProvisionError, match="profile change"):
         provision.plan(**paths)
+
+
+def test_provisioned_ref_resolves_with_real_hf_cache_reader_without_model(tiny_resources, monkeypatch):
+    content, record, paths = tiny_resources
+    record['files'][0]['path'] = 'modules.json'
+    provision.CATALOG.write_text(json.dumps(record))
+    monkeypatch.setattr(provision, 'opener', lambda: Source(content, record))
+    result = provision.apply(provision.plan(**paths), download_approved=True)
+    assert result['ok'], result.get('error')
+    model = paths['cache_dir'] / 'models--owner--model'
+    expected = model / 'snapshots' / record['revision'] / 'modules.json'
+    assert (model / 'refs/main').read_bytes() == record['revision'].encode('ascii')
+    code = '''import sys
+from huggingface_hub import try_to_load_from_cache
+for revision in (None, 'main'):
+ found = try_to_load_from_cache('owner/model', 'modules.json', cache_dir=sys.argv[1], revision=revision)
+ assert found == sys.argv[2], (revision, found)
+assert 'torch' not in sys.modules and 'sentence_transformers' not in sys.modules
+print('HF offline ref resolves exactly without model import')
+'''
+    run = subprocess.run([sys.executable, '-B', '-c', code, str(paths['cache_dir']), str(expected)],
+                         env={**os.environ, 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1'},
+                         capture_output=True, text=True, timeout=10)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+@pytest.mark.parametrize('suffix', [b'\n', b'\r\n', b' ', b'\x00'])
+def test_noncanonical_existing_ref_refused_in_preview_and_apply_without_repair(tiny_resources, monkeypatch, suffix):
+    content, record, paths = tiny_resources
+    monkeypatch.setattr(provision, 'opener', lambda: Source(content, record))
+    preview = provision.plan(**paths)
+    assert provision.apply(preview, download_approved=True)['ok']
+    good = provision.plan(**paths)
+    ref = paths['cache_dir'] / 'models--owner--model/refs/main'
+    ref.write_bytes(record['revision'].encode('ascii') + suffix)
+    before = {str(p): p.read_bytes() for p in paths['cache_dir'].rglob('*') if p.is_file()}
+    monkeypatch.setattr(provision, 'opener', lambda: pytest.fail('Ref refusal before network'))
+    for action in (lambda: provision.plan(**paths), lambda: provision.apply(good)):
+        with pytest.raises(provision.ProvisionError, match='refs/main bytes differ.*no silent profile change or repair'):
+            action()
+        assert {str(p): p.read_bytes() for p in paths['cache_dir'].rglob('*') if p.is_file()} == before
+
+
+def test_ref_changed_during_download_is_never_repaired(tiny_resources, monkeypatch):
+    content, record, paths = tiny_resources
+    ref = paths['cache_dir'] / 'models--owner--model/refs/main'
+    class RacingSource(Source):
+        def open(self, url, timeout):
+            if '/api/models/' in url:
+                ref.parent.mkdir(parents=True)
+                ref.write_bytes(record['revision'].encode('ascii') + b'\n')
+            return super().open(url, timeout)
+    monkeypatch.setattr(provision, 'opener', lambda: RacingSource(content, record))
+    result = provision.apply(provision.plan(**paths), download_approved=True)
+    assert not result['ok'] and 'refs/main bytes differ' in result['error']
+    assert ref.read_bytes() == record['revision'].encode('ascii') + b'\n'
+    assert Path(result['staging_dir']).exists()
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'directory'])
+def test_nonregular_existing_ref_is_refused_without_touching_target(tiny_resources, monkeypatch, kind):
+    _, record, paths = tiny_resources
+    ref = paths['cache_dir'] / 'models--owner--model/refs/main'
+    ref.parent.mkdir(parents=True)
+    target = paths['cache_dir'] / 'third-party-ref'
+    target.write_bytes(record['revision'].encode('ascii'))
+    if kind == 'symlink':
+        ref.symlink_to(target)
+    else:
+        ref.mkdir()
+    monkeypatch.setattr(provision, 'opener', lambda: pytest.fail('No network for invalid ref'))
+    with pytest.raises(provision.ProvisionError, match='not a regular ref'):
+        provision.plan(**paths)
+    assert target.read_bytes() == record['revision'].encode('ascii')
+    assert ref.is_symlink() if kind == 'symlink' else ref.is_dir()
 
 
 @pytest.mark.parametrize("mode", ["revision", "hash", "length", "redirect"])

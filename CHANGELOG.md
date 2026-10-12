@@ -57,6 +57,12 @@
   gardée par Claude sur le wheel exact. Le rapport réel du trial du 2026-10-12
   est rejeté avec 39 écarts et 6 paquets inattendus, sans aucune requête réseau
   par le contrôleur. Le nouvel essai reste requis, pas encore déclaré réussi.
+- Correction du deuxième défaut de clean install : HF 1.5.0 lit refs/main
+  sans strip ; provision écrit désormais exactement la révision sans LF.
+  Ref existante comparée en bytes, format différent refusé sans réparation
+  silencieuse. Test réel HF cache reader hors ligne sur fichiers synthétiques,
+  sans modèle. `embed.py`/encoder_source_sha256 et profil qualifié inchangés ;
+  passage d'une revision explicite au chargeur différé à une qualification dédiée.
 - Qualification de ce commit/ces artefacts et essai d'installation neuve encore
   requis. Aucun gain de productivité mesuré : L11 non exécuté ; LME-S/BEAM
   descriptifs, profils/limites explicités, aucun classement officiel revendiqué.
