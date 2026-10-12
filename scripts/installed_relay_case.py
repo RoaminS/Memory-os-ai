@@ -125,7 +125,7 @@ def main() -> int:
                                                             {'project': 'package-probe', 'query': first_text, 'top_k': 5})
                             assert not found.isError and first_id in {h['id'] for h in json.loads(found.content[0].text)['hits']}
                             report['roundtrip'] = True
-                            if args.version in {'4.0.4', '4.0.5'}:
+                            if args.version in {'4.0.4', '4.0.5', '4.0.6'}:
                                 brief = await session.call_tool('memory_session_brief', {'project': 'package-probe'})
                                 from memory_os_v4.brief_tokens import counter
                                 wire = json.dumps(brief.model_dump(mode='json', by_alias=True, exclude_none=True), ensure_ascii=False, separators=(',', ':'))
@@ -141,7 +141,7 @@ def main() -> int:
                             assert down.isError and any(word in down.content[0].text.lower()
                                                         for word in ('uncertain', 'unreachable', 'unavailable'))
                             report['failure_reported'] = True
-                            if args.version in {'4.0.4', '4.0.5'}:
+                            if args.version in {'4.0.4', '4.0.5', '4.0.6'}:
                                 local = await session.call_tool('memory_request_status', {})
                                 assert not local.isError and 'connection' in json.loads(local.content[0].text)
                                 report['local_status_during_outage'] = True

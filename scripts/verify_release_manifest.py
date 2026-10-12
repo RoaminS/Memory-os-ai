@@ -44,6 +44,9 @@ def validate_source(proof, manifest):
 
 
 def validate_copy(proof, manifest):
+    if manifest.get('version') == '4.0.6':
+        from release_406_checks import validate_copy as validate_sqlite
+        return validate_sqlite(proof, manifest)
     version = manifest.get('version', '4.0.3')
     if (proof.get('ok') is not True or proof.get('version') != version
             or proof.get('source_commit') != manifest['source_commit']
@@ -99,6 +102,9 @@ def validate_brief(proof, manifest):
 
 
 def validate_local(manifest, directory, *, require_source=True, require_copy=True, require_brief=True):
+    if manifest.get('version') == '4.0.6':
+        from release_406_checks import validate_local as validate_distribution
+        return validate_distribution(manifest, directory, require_copy=require_copy)
     expected = expected_artifacts(manifest.get('version'))
     if not re.fullmatch(r'[0-9a-f]{40}', manifest.get('source_commit', '')):
         raise ValueError('identité version/source invalide')
@@ -153,7 +159,7 @@ def validate_relay(proof, manifest):
                 or case.get('artifact_sha256') != artifact['sha256']
                 or not all(case.get(check) is True for check in CASE_CHECKS)):
             raise ValueError('cas installé incomplet/en échec ou autre artefact : ' + case['kind'])
-        if manifest['version'] in {'4.0.4', '4.0.5'}:
+        if manifest['version'] in {'4.0.4', '4.0.5', '4.0.6'}:
             brief = case.get('brief', {})
             if (case.get('local_status_during_outage') is not True or not brief.get('ok')
                     or not 0 < brief.get('bytes', 0) <= 6000 or not 0 < brief.get('tokens', 0) <= 1500):
@@ -194,7 +200,7 @@ def main(argv=None) -> int:
         if args.copy_review and not args.record_copy_proof:
             raise ValueError('--copy-review nécessite --record-copy-proof')
         if args.record_copy_proof:
-            if args.record_source_proof or args.record_relay_proof or manifest['version'] not in {'4.0.3', '4.0.4', '4.0.5'}:
+            if args.record_source_proof or args.record_relay_proof or manifest['version'] not in {'4.0.3', '4.0.4', '4.0.5', '4.0.6'}:
                 raise ValueError('enregistrer la preuve copie 4.0.3/4.0.4 séparément')
             validate_local(manifest, args.manifest.parent, require_copy=False)
             proof = json.loads(args.record_copy_proof.read_text())
