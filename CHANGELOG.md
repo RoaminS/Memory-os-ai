@@ -31,6 +31,10 @@
   test séparé hash/warm. Qualification TCP par les **28 identités attendues**.
 - Préparation finale : versions alignées, notes et docs de release embarquées ;
   aucun nouveau changement fonctionnel au-dessus de `62d906f`.
+- Tests de l'adaptateur d'activation historique : contrat de version 4.0.5
+  simulé explicitement dans les fixtures de migration/panne. La garde réelle
+  reste 4.0.5 uniquement ; 4.0.6 refusée avant accès au magasin, sans élargir
+  la qualification de cet outil. Les installations neuves n'en ont pas besoin.
 - Qualification de ce commit/ces artefacts et essai d'installation neuve encore
   requis. Aucun gain de productivité mesuré : L11 non exécuté ; LME-S/BEAM
   descriptifs, profils/limites explicités, aucun classement officiel revendiqué.

@@ -16,6 +16,31 @@ import prepare_sqlite_activation_plists as plists
 import qualify_sqlite_prepared_store as prepared
 
 
+@pytest.fixture
+def activation_405_contract(monkeypatch):
+    """Isolate the historical adapter's version gate, not installed-wheel qualification.
+
+    Only synthetic migration/lifecycle tests opt in. The installed CLI still
+    requires the qualified 4.0.5 wheel/build; newer releases are NOT admitted.
+    """
+    import memory_os_v4
+    monkeypatch.setattr(memory_os_v4, '__version__', '4.0.5')
+
+
+@pytest.mark.parametrize('version', ['4.0.4', '4.0.6', '4.0.7', '4.0.5rc1', '', 'unqualified'])
+@pytest.mark.parametrize('apply', [False, True])
+def test_adapter_refuses_unqualified_versions_before_store_access(tmp_path, monkeypatch, version, apply):
+    import memory_os_v4
+    from memory_os_v4 import sqlite_migrate as s3
+    monkeypatch.setattr(memory_os_v4, '__version__', version)
+    monkeypatch.setattr(s3, '_paths', lambda *a: pytest.fail('Refused version must not access store paths'))
+    monkeypatch.setattr(s3, 'migrate', lambda *a, **k: pytest.fail('Refused version must not migrate'))
+    before = list(tmp_path.iterdir())
+    with pytest.raises(ValueError, match='Adapter qualified for installed 4.0.5 only'):
+        adapter.migrate_with_attestation(tmp_path / 'absent-source', tmp_path / 'absent-target', apply=apply)
+    assert list(tmp_path.iterdir()) == before
+
+
 def source(directory):
     from memory_os_v4 import Config, MemoryV4
     with MemoryV4(config=Config(data_dir=str(directory), embed_model='hash', hash_dim=16)) as engine:
@@ -24,7 +49,8 @@ def source(directory):
         engine.blocks.set('project_state', 'Synthetic initial state', project='p')
 
 
-def test_copy_lifecycle_keeps_identity_cache_history_and_post_write_rollback(tmp_path, monkeypatch):
+def test_copy_lifecycle_keeps_identity_cache_history_and_post_write_rollback(
+        tmp_path, monkeypatch, activation_405_contract):
     from memory_os_v4.ops import sqlite_backup as s4
     source(tmp_path / 'snapshot')
     before = runner.inventory(tmp_path / 'snapshot')
@@ -137,7 +163,7 @@ def test_worker_executable_preserves_venv_symlink_and_plan_precedes_work(tmp_pat
     shutil.rmtree(tmp_path)
 
 
-def test_normal_migration_keeps_modern_l3_status_and_original_export(tmp_path):
+def test_normal_migration_keeps_modern_l3_status_and_original_export(tmp_path, activation_405_contract):
     from memory_os_v4 import Config, MemoryV4, server
     from memory_os_v4.sqlite_migrate import export, _files
     original, target = tmp_path / 'source', tmp_path / 'sql'
@@ -169,7 +195,7 @@ def test_normal_migration_keeps_modern_l3_status_and_original_export(tmp_path):
 
 @pytest.mark.parametrize('boundary', ['after_s3_import', 'after_receipt_attestation',
                                     'after_attestation_commit', 'before_activation_publish'])
-def test_adapter_failure_never_publishes_partial_or_changes_source(tmp_path, boundary):
+def test_adapter_failure_never_publishes_partial_or_changes_source(tmp_path, boundary, activation_405_contract):
     from memory_os_v4 import Config, MemoryV4
     from memory_os_v4.sqlite_migrate import _files
     original, target = tmp_path / 'source', tmp_path / 'sql'
