@@ -34,6 +34,14 @@ distincte. Une erreur de gold dev DEV-11 (deux phrases attendues) est amendée
 et tracée ; paramètres/moteur et gold caché inchangés. Aucun test physique TCP
 ni mesure de latence 10k annoncé comme exécuté par Codex.
 
+## Nouvelles preuves de restauration (13 octobre)
+
+256/256 tests A1+A2/A4+100 fixtures ×2 backends verts (17,27 s), interpréteur
+persistant qual-envs ; source fonctionnelle reconstruite à partir des patches
+originaux, paramètres P-A SHA identique. Les nouveaux résultats sont dans
+.local-qualification/recovered-increment2-unit-v1.log et XML. La qualification
+physique TCP reste à refaire par Claude ; aucune preuve perdue déclarée rejouée.
+
 ## Claude : qualification séquentielle, sorties neuves
 
 Après import du bundle incrément 2, arbre au HEAD propre, mêmes dépendances
@@ -41,7 +49,7 @@ qualifiées/interpréteur que l'incrément 1 ; aucune qualification concomitante
 aux modifications d'une autre session.
 
 ```sh
-PYTHON=$HOME/memory-os-local/qual-envs/release406-installed-2zfywl93/wheel/bin/python
+PYTHON="$HOME/memory-os-local/qual-envs/release406-installed-2zfywl93/wheel/bin/python"
 export PYTHONDONTWRITEBYTECODE=1
 export MEMORY_V4_MIN_FREE_BYTES=3000000000
 export MEMORY_V4_CL100K_PATH="$HOME/.config/memory-os/cl100k_base.tiktoken"
