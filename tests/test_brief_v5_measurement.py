@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tarfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -54,19 +55,62 @@ def test_private_environment_unsets_registry_without_mutating_parent(value):
     assert parent==before
 
 
+def invoke_worker_entry(tmp_path,monkeypatch,arm,stub):
+    # main() is a CLI entry point: unlike a subprocess, this test shares the
+    # caller's environment. Restore *all* keys, including direct updates/pop
+    # inside main(), on success and on failure.
+    source=tmp_path/arm
+    with monkeypatch.context() as isolated:
+        isolated.setattr(sys,'argv',['tool','--worker-source',str(source),'--output',str(tmp_path/'out'),
+                                    '--table',str(tmp_path/'table')])
+        isolated.setattr(perf,'worker',stub)
+        with patch.dict(os.environ, {'MEMORY_V4_PROJECT_REGISTRY':''}):
+            return perf.main()
+
+
 @pytest.mark.parametrize('arm', ['baseline','candidate'])
 def test_worker_entry_clears_registry_before_worker_or_engine_import(tmp_path,monkeypatch,arm):
-    monkeypatch.setenv('MEMORY_V4_PROJECT_REGISTRY','')
-    source=tmp_path/arm
-    monkeypatch.setattr(sys,'argv',['tool','--worker-source',str(source),'--output',str(tmp_path/'out'),
-                                  '--table',str(tmp_path/'table')])
+    before=dict(os.environ)
     observed=[]
     def stub(*args):
         assert 'MEMORY_V4_PROJECT_REGISTRY' not in os.environ
+        assert os.environ['MEMORY_V4_CL100K_PATH']==str((tmp_path/'table').resolve())
         observed.append(args[0])
-    monkeypatch.setattr(perf,'worker',stub)
-    assert perf.main()==0
-    assert observed==[source]
+    assert invoke_worker_entry(tmp_path,monkeypatch,arm,stub)==0
+    assert observed==[tmp_path/arm]
+    assert dict(os.environ)==before
+
+
+@pytest.mark.parametrize('order', [('worker','consumer'),('consumer','worker')])
+@pytest.mark.parametrize('fails', [False,True])
+def test_worker_entry_restores_environment_in_both_orders_even_on_failure(tmp_path,monkeypatch,order,fails):
+    qualified_table=tmp_path/'qualified-table'
+    qualified_table.write_bytes(b'inherited-table-fixture')
+    monkeypatch.setenv('MEMORY_V4_CL100K_PATH',str(qualified_table))
+    monkeypatch.setenv('MEMORY_V4_PROJECT_REGISTRY','/operator/registry.json')
+    monkeypatch.setenv('HF_HUB_OFFLINE','operator-value')
+    monkeypatch.delenv('TRANSFORMERS_OFFLINE',raising=False)
+    monkeypatch.delenv('PYTHONDONTWRITEBYTECODE',raising=False)
+    before=dict(os.environ)
+    def stub(*args):
+        assert 'MEMORY_V4_PROJECT_REGISTRY' not in os.environ
+        for key in ('HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','PYTHONDONTWRITEBYTECODE'):
+            assert os.environ[key]=='1'
+        if fails:
+            raise RuntimeError('worker failed')
+    def consumer():
+        assert dict(os.environ)==before
+        assert Path(os.environ['MEMORY_V4_CL100K_PATH']).read_bytes()==b'inherited-table-fixture'
+    for step in order:
+        if step=='consumer':
+            consumer()
+        elif fails:
+            with pytest.raises(RuntimeError,match='worker failed'):
+                invoke_worker_entry(tmp_path,monkeypatch,'candidate',stub)
+        else:
+            assert invoke_worker_entry(tmp_path,monkeypatch,'candidate',stub)==0
+        assert dict(os.environ)==before
+    consumer()
 
 
 @pytest.mark.parametrize('revision', ['fdd60cb','9bd4f73'])

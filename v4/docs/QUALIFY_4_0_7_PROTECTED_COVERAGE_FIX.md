@@ -48,6 +48,35 @@ au contrat existant ; une référence seule ne satisfait pas un besoin de texte.
 A3 accepté par Claude : change/update ET provenance autre client. Aucun
 curseur temporel ajouté. B3/B2 → B4/B5 → B9 et RC attendent la gate v2.
 
+## Isolation du test d’entrée worker — reprise du 13 octobre 2026
+
+Le run `407-protected-fallback-full-claude-v1` reste **REFUSÉ** : quatre
+échecs v3, provoqués par une fuite du chemin cl100k depuis un test précédent.
+Le test appelait le CLI `main()` dans le processus pytest : ses mutations
+directes de `os.environ` échappaient au monkeypatch du registre seulement.
+
+Correctif exclusivement dans les tests : invocation sous une copie restaurable
+complète de l’environnement (`patch.dict`) et un contexte monkeypatch local
+pour argv/worker. La restauration s’applique aussi aux exceptions. Quatre
+régressions couvrent worker→consommateur et consommateur→worker, avec succès
+ou exception ; elles vérifient les valeurs héritées, les clés initialement
+absentes, le registre et le chemin du tokenizer. Aucun changement du CLI,
+du moteur, des paramètres P-A, des inputs, des seals ou du candidat ceedb5c.
+
+Preuves locales, séquentielles, sans modèle/réseau/TCP :
+
+- `pytest tests/test_brief_v5_measurement.py tests/test_brief_v5_validation_runner.py` :
+  **50 passed**, 6,17 s ;
+- mêmes fichiers dans l’ordre inverse : **50 passed**, 6,53 s ;
+- les quatre cas réels exact/negotiate × fdd60cb/324aa68 passent dans chaque
+  ordre avec la table cl100k provisionnée ;
+- les deux scopes Ruff de qualification et `git diff --check` passent.
+
+Les logs/JUnit locaux sont conservés dans le worktree persistant
+`.local-qualification/worktrees/407-test-env-fix-v1/.local-qualification/`
+(`order-worker-first.*`, `order-consumer-first.*`). La qualification complète
+avec ses 28 TCP reste à Claude. Ne jamais remplacer les rapports refusés.
+
 ## Claude — qualification séquentielle, sorties fraîches
 
 Importer le bundle nommé release/4.0.7, arbre propre, sans édition concurrente.
@@ -59,13 +88,13 @@ PYTHON="$HOME/memory-os-local/qual-envs/release406-installed-2zfywl93/wheel/bin/
 export PYTHONDONTWRITEBYTECODE=1 MEMORY_V4_MIN_FREE_BYTES=3000000000
 export MEMORY_V4_CL100K_PATH="$HOME/.config/memory-os/cl100k_base.tiktoken"
 "$PYTHON" -B scripts/qualify_405_test_isolation.py --suite full \
-  --output .local-qualification/407-protected-fallback-full-claude-v1
+  --output .local-qualification/407-protected-fallback-full-claude-v2
 PYTHONPATH=src:v4/src:v4 "$PYTHON" -B scripts/qualify_407_a1.py \
   --table "$MEMORY_V4_CL100K_PATH" \
-  --output .local-qualification/407-protected-fallback-exact-claude-v1
+  --output .local-qualification/407-protected-fallback-exact-claude-v2
 nice -n 15 "$PYTHON" -B scripts/qualify_brief_v5_performance.py \
   --table "$MEMORY_V4_CL100K_PATH" \
-  --output .local-qualification/407-protected-fallback-pa-10k-claude-v1
+  --output .local-qualification/407-protected-fallback-pa-10k-claude-v2
 ```
 
 Le run full garde ses 28 TCP attendus, aucun ajouté par ce correctif. Le
@@ -93,7 +122,7 @@ INPUTS="<chemin du JSONL v2 sans expect>"
 MANIFEST="<chemin du manifeste v2 scellé>"
 AMENDMENT="<chemin de compatibility_v2 lié aux inputs>"
 CASE_PREFIX="V5-VAL2-" # ou V5-VAL- selon les IDs scellés ; aucun ID réécrit
-BINDING=".local-qualification/v5-candidate-binding-v2.json"
+BINDING=".local-qualification/v5-candidate-binding-v2-env-fix.json"
 export INPUTS MANIFEST BINDING
 "$PYTHON" -B - <<'PY'
 import datetime, hashlib, json, os
@@ -120,7 +149,7 @@ nice -n 15 "$PYTHON" -B scripts/run_brief_v5_validation.py \
   --amendment "$AMENDMENT" --case-id-prefix "$CASE_PREFIX" \
   --candidate-commit ceedb5cfdfd0d61929276dbcd1417ea077044412 \
   --candidate-binding "$BINDING" --table "$MEMORY_V4_CL100K_PATH" \
-  --output .local-qualification/407-pa-validation-v2-audit-claude-v1
+  --output .local-qualification/407-pa-validation-v2-audit-claude-v2
 ```
 
 Après audit complet et vérification des identités/arguments, même commande
@@ -132,7 +161,7 @@ nice -n 15 "$PYTHON" -B scripts/run_brief_v5_validation.py --run \
   --amendment "$AMENDMENT" --case-id-prefix "$CASE_PREFIX" \
   --candidate-commit ceedb5cfdfd0d61929276dbcd1417ea077044412 \
   --candidate-binding "$BINDING" --table "$MEMORY_V4_CL100K_PATH" \
-  --output .local-qualification/407-pa-validation-v2-collect-claude-v1
+  --output .local-qualification/407-pa-validation-v2-collect-claude-v2
 ```
 
 Claude score avec son gold privé et la gate originale, garde les 40 cas et les
