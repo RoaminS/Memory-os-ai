@@ -1,5 +1,8 @@
 # B2 — contrat de correction contrôlée, proposition v1
 
+**Document historique remplacé par INTEGRITY_V5_B2_CONTRACT_v2.md et
+l'amendement A–D ; ne pas utiliser les seuils proposés ici comme API actuelle.**
+
 **À relire par Claude avant intégration B2.** Ce contrat n'est pas une API déjà
 implémentée. B3 seul est livré dans cet incrément. Protocole P-B scellé
 `a8a037ead1d1dd9f065aa77f7d286182de85e4d72a3327640b0ea38b165ed8fc`.

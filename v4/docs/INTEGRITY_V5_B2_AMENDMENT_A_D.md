@@ -2,7 +2,7 @@
 
 A accepté : un impact explicite unique + revision lue + reason + request_id
 s'applique en un appel sur SQLite. Révisions offertes dans search, get_context
-et lectures détaillées. La lecture ne périme pas le CAS.
+avec spans des références dans le contexte rendu. La lecture ne périme pas le CAS.
 
 B accepté en transition 4.0.7, avec limite du plan v5 : appels legacy jusqu'à
 trois invalidations = correction_unverified, aucun CAS prétendu, impacts retournés.
