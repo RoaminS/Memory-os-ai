@@ -59,7 +59,8 @@ def main():
     shutil.copyfile(a.artifacts / 'twine-check-strict.log', twine)
     manifest['twine_evidence'] = {'path': str(twine.relative_to(output)), 'sha256': digest(twine)}
     for name, leaf in [('runner', 'qualify_sqlite_release_copy.py'), ('worker', 'sqlite_release_worker.py'),
-                       ('doctor', 'qualify_release_copy.py'), ('profile', 'qualify_sqlite_activation.py')]:
+                       ('doctor', 'qualify_release_copy.py'), ('profile', 'qualify_sqlite_activation.py'),
+                       ('search_gate', 'search_qualification.py')]:
         manifest['copy_scripts_sha256'][name] = digest(ROOT / 'scripts' / leaf)
     manifest['copy_scripts_sha256']['guard'] = digest(ROOT / 'v4/src/memory_os_v4/ops/provision.py')
     manifest['installed_relay_scripts_sha256'] = {'runner': digest(ROOT / 'scripts/installed_relay_e2e.py'),

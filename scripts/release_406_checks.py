@@ -5,6 +5,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from search_qualification import search_hit_counts
+
 SOURCE = '50edb029d57a20dfc339c5a6ec7d1d62c1f2b5a1'
 WHEEL = '2cf484d882c824e98776e3fc5d9e83f5b62f06e6d4d34c3b1216fe089ed0e201'
 SDIST = '5384a1c535f2561a22827a08f3bfaacd25327db275372b6cca15668a5da51c0d'
@@ -101,6 +103,7 @@ def validate_copy(proof, manifest):
     from release_copy_worker import QUERIES
     require(set(reference['search']) == set(QUERIES), 'frozen probe set changed')
     for name, row in proof['workers'].items():
+        search_hit_counts(row['search'], QUERIES, worker=name, reported=row.get('search_hit_counts'))
         require(row['ok'] is True and row['version'] == ('4.0.5' if name == 'baseline' else '4.0.6')
                 and row['store_instance_id'] == INSTANCE and row['authority'] == reference['authority']
                 and row['encoding_profile'] == reference['encoding_profile']

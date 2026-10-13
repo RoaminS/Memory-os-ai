@@ -7,7 +7,7 @@ import sys
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from qualify_schema8_copy import compare  # noqa: E402
+from qualify_schema8_copy import compare, QUERIES  # noqa: E402
 
 
 def rows():
@@ -16,7 +16,7 @@ def rows():
         "store_instance_id": "id",
         "total": 10,
         "encoding_profile": {"device": "mps"},
-        "search": {"fixed-query": ["one", "two"]},
+        "search": {q: ["one", "two"] for q in QUERIES},
         "corpus_encoded_texts": 0,
         "cache_misses": 0,
         "startup_seconds": 2,
@@ -59,7 +59,7 @@ def test_source_copy_refuses_each_drift(damage):
     if damage == "identity":
         cold["store_instance_id"] = "another"
     elif damage == "ranks":
-        cold["search"] = {"fixed-query": ["two", "one"]}
+        cold["search"] = {q: ["two", "one"] for q in QUERIES}
     elif damage == "profile":
         cold["encoding_profile"] = {"device": "cpu"}
     elif damage == "cold_encode":
@@ -107,3 +107,28 @@ def test_private_home_preserves_real_offline_cache_and_drops_hash_override(tmp_p
     assert env["PYTHONPATH"] == ""
     assert "MEMORY_V4_DIR" not in env and "MEMORY_V4_TOKEN_FILE" not in env
     assert env["MEMORY_V4_WRITE_MODE"] == "read_only"
+
+
+@pytest.mark.parametrize("kind", ["all", "baseline", "candidate", "candidate-warm"])
+def test_non_vacuity_refuses_identical_empty_rankings_or_one_empty_worker(kind):
+    result = rows()
+    for name, row in result.items():
+        if kind == "all" or kind == name:
+            row["search"] = {q: [] for q in QUERIES}
+    with pytest.raises(ValueError, match="Non-vacuity"):
+        compare(result, "id")
+
+
+def test_non_vacuity_refuses_a_single_empty_baseline_probe_and_faked_counts():
+    result = rows()
+    for row in result.values():
+        row["search"][QUERIES[0]] = []
+        row["search_hit_counts"] = {q: 2 for q in QUERIES}
+    with pytest.raises(ValueError, match="Non-vacuity"):
+        compare(result, "id")
+
+
+def test_source_reports_recounted_hits_for_each_worker_and_query():
+    result = compare(rows(), "id")
+    assert result["search_hit_counts"] == {
+        name: {q: 2 for q in QUERIES} for name in ("baseline", "candidate", "candidate-warm")}

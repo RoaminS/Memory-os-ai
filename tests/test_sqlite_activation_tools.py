@@ -97,7 +97,7 @@ def test_frozen_probe_comparison_refuses_reordered_missing_and_extra_queries():
     baseline = {'q': {'ids': ['a', 'b']}}
     worker.compare_probes(baseline, {'cold': baseline, 'warm': baseline})
     for bad in ({'q': {'ids': ['b', 'a']}}, {}, {**baseline, 'extra': {'ids': []}}):
-        with pytest.raises(ValueError, match='Frozen search probes differ'):
+        with pytest.raises(ValueError, match='Frozen search probes differ|Non-vacuity'):
             worker.compare_probes(baseline, {'cold': bad})
 
 

@@ -255,3 +255,13 @@ def test_baseline_snapshot_worker_runs_without_provision_in_installed_405(
         assert s4.inventory(engine.store._connection) == before
     assert calls and all(p == root for p in calls)
     assert json.loads((root / "snapshot.json").read_text()) == before
+
+
+@pytest.mark.parametrize("kind", ["all", "baseline", "wheel", "sdist", "wheel-warm", "sdist-warm"])
+def test_sqlite_release_refuses_empty_equal_rankings(kind):
+    proof, manifest = proof_and_manifest()
+    for name, row in proof["workers"].items():
+        if kind == "all" or name == kind:
+            row["search"] = {q: {"ids": []} for q in QUERIES}
+    with pytest.raises(ValueError, match="Non-vacuity"):
+        validate_copy(proof, manifest)

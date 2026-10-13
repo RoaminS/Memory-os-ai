@@ -20,6 +20,7 @@ import time
 
 from qualify_release_copy import inventory, snapshot
 from source_release_checks import resources
+from search_qualification import SEARCH_CRITERION
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_ENV_KEYS = set(re.findall(r'["\'](MEMORY_V4_[A-Z0-9_]+)["\']',
@@ -27,7 +28,7 @@ CONFIG_ENV_KEYS = set(re.findall(r'["\'](MEMORY_V4_[A-Z0-9_]+)["\']',
 QUERIES = ('memory-os-ai', 'SQLite', 'Romain', 'Claude', 'Codex', 'MPS', 'C4',
            'préférences utilisateur', 'production et sauvegarde', 'shared memory protocol')
 CRITERION = {'migration_seconds_max': 120, 'total_seconds_max': 900,
-             'frozen_rankings_identical': True, 'warm_corpus_encoded_texts': 0,
+             'frozen_rankings_identical': True, 'search_non_vacuity': SEARCH_CRITERION, 'warm_corpus_encoded_texts': 0,
              'normal_migration_identity_preserved': True, 'private_restore_identity_new': True,
              'rollback_after_new_writes_verified': True, 'private_reopen_required': True}
 # Data/key/token paths never come from an operational environment into a copy.
@@ -135,7 +136,8 @@ def main():
                     'wheel': str(directory / 'artifacts' / artifact['name']), 'wheel_sha256': artifact['sha256'],
                     'runner_sha256': sha(Path(__file__)),
                     'migration_adapter_sha256': sha(Path(__file__).with_name('migrate_sqlite_activation.py')),
-                    'worker_sha256': sha(Path(__file__).with_name('sqlite_activation_worker.py'))}
+                    'worker_sha256': sha(Path(__file__).with_name('sqlite_activation_worker.py')),
+                    'search_gate_sha256': sha(Path(__file__).with_name('search_qualification.py'))}
             plan_path = output / 'plan.json'
             plan_path.write_text(json.dumps(plan, indent=2) + '\n')  # Frozen BEFORE worker/inference.
             report['plan_sha256'] = sha(plan_path)
@@ -152,6 +154,8 @@ def main():
             shutil.copyfile(Path(__file__).with_name('sqlite_activation_worker.py'), worker)
             shutil.copyfile(Path(__file__).with_name('migrate_sqlite_activation.py'),
                             output / 'migrate_sqlite_activation.py')
+            shutil.copyfile(Path(__file__).with_name('search_qualification.py'),
+                            output / 'search_qualification.py')
             # Preserve the venv executable spelling: resolving its symlink runs
             # the base interpreter and loses the qualified installation.
             run_worker([str(args.runtime_python.absolute()), '-B', str(worker), '--plan', str(plan_path.resolve())],

@@ -21,6 +21,8 @@ import tarfile
 import time
 
 from schema8_inventory import fingerprint, inventory, readonly, verify_upgrade
+from search_qualification import SEARCH_CRITERION, search_hit_counts
+from release_copy_worker import QUERIES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -137,7 +139,7 @@ def worker(plan_path, kind, layout):
             queries[query] = [
                 h.item.id
                 for h in engine.search(
-                    query, project="*", top_k=10, at_time=plan["at_time"], rerank=False
+                    query, project=None, top_k=10, at_time=plan["at_time"], rerank=False
                 )
             ]
         after = inventory(engine.store._connection)
@@ -158,6 +160,7 @@ def worker(plan_path, kind, layout):
             "cache_misses": engine._embedding_cache.misses,
             "encoding_profile": engine.status()["encoding_profile"],
             "search": queries,
+            "search_hit_counts": {q: len(ids) for q, ids in queries.items()},
             "store_instance_id": engine.store.meta["store_instance_id"],
             "total": engine.status()["total"],
             "authority_sha256": engine_authority(after),
@@ -174,10 +177,15 @@ def worker(plan_path, kind, layout):
 
 
 def compare(rows, expected_identity):
+    if set(rows) != {"baseline", "candidate", "candidate-warm"}:
+        raise ValueError("Missing/unexpected copy workers")
     base, first, warm = (
         rows[name] for name in ("baseline", "candidate", "candidate-warm")
     )
+    counts = {}
     for name, row in rows.items():
+        counts[name] = search_hit_counts(row["search"], QUERIES, worker=name,
+                                        reported=row.get("search_hit_counts"))
         if (
             not row["ok"]
             or row["store_instance_id"] != expected_identity
@@ -202,6 +210,8 @@ def compare(rows, expected_identity):
     return {
         "ok": True,
         "search_identical_to_baseline": True,
+        "search_non_vacuity": SEARCH_CRITERION,
+        "search_hit_counts": counts,
         "corpus_encoded_texts": 0,
         "release_qualified": False,
         "production_activation": False,
@@ -305,6 +315,8 @@ def main():
         for relative in (
             "scripts/qualify_schema8_copy.py",
             "scripts/schema8_inventory.py",
+            "scripts/search_qualification.py",
+            "scripts/release_copy_worker.py",
             "scripts/qualify_distribution_d1a.py",
             "scripts/qualify_sqlite_activation.py",
             "v4/src/memory_os_v4/ops/provision.py",
@@ -353,6 +365,7 @@ def main():
             "criterion": {
                 "exact_authority": True,
                 "exact_top10": True,
+                "search_non_vacuity": SEARCH_CRITERION,
                 "corpus_encoded_texts": 0,
                 "cache_misses": 0,
                 "startup_seconds_max": 120,

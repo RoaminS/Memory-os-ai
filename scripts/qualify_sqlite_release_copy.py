@@ -14,6 +14,7 @@ from qualify_distribution_d1a import command
 from qualify_release_copy import private_doctor
 from qualify_sqlite_activation import profile_environment
 from release_copy_worker import QUERIES
+from search_qualification import SEARCH_CRITERION, search_hit_counts
 from release_406_checks import SOURCE, INSTANCE, digest, validate_copy, validate_local
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +44,8 @@ def main():
     tools = {'runner': Path(__file__), 'worker': Path(__file__).with_name('sqlite_release_worker.py'),
              'guard': ROOT / 'v4/src/memory_os_v4/ops/provision.py',
              'doctor': Path(__file__).with_name('qualify_release_copy.py'),
-             'profile': Path(__file__).with_name('qualify_sqlite_activation.py')}
+             'profile': Path(__file__).with_name('qualify_sqlite_activation.py'),
+             'search_gate': Path(__file__).with_name('search_qualification.py')}
     report = {'ok': False, 'version': '4.0.6', 'baseline_version': '4.0.5', 'source_commit': SOURCE,
               'artifacts': manifest['artifacts'], 'source_sql_writes': False, 'production_modified': False,
               'min_free_bytes': min_free_bytes(), 'workers': {},
@@ -71,7 +73,8 @@ def main():
         plan = {'format': 'sqlite-release-406-v1', 'source_commit': SOURCE, 'queries': list(QUERIES),
                 'at_time': time.time(), 'expected_instance_id': INSTANCE,
                 'criterion': {'startup_seconds_max': 120, 'total_seconds_max': 900,
-                              'corpus_encoded_texts': 0, 'exact_rankings': True, 'authority_identical': True}}
+                              'corpus_encoded_texts': 0, 'exact_rankings': True, 'authority_identical': True,
+                              'search_non_vacuity': SEARCH_CRITERION}}
         plan_path = root / 'plan.json'
         plan_path.write_text(json.dumps(plan, indent=2) + '\n')
         (root / 'copy-owner.json').write_text('{"owner":"sqlite-release-406-v1"}\n')
@@ -115,6 +118,8 @@ def main():
         if digest(a.production_plist) != report['production_plist_sha256']:
             raise ValueError('Production definition changed during qualification')
         report['source_cut_sha256'] = cut_sha
+        report['search_hit_counts'] = {name: search_hit_counts(row['search'], QUERIES, worker=name,
+                    reported=row.get('search_hit_counts')) for name, row in report['workers'].items()}
         report.update(authority_identical=True, search_identical_to_baseline=True,
                       rankings_identical_between_artifacts_and_reopen=True, warm_encoded_texts=0)
         # Reuse the established private --warm HTTP/doctor drill, with this

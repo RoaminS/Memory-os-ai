@@ -107,6 +107,14 @@ def run(command, cwd, env, log, timeout):
 
 
 def compare(reports, *, baseline_version="4.0.2"):
+    from release_copy_worker import QUERIES
+    from search_qualification import search_hit_counts
+
+    expected_workers = {"baseline", "wheel", "sdist", "wheel-warm", "sdist-warm"}
+    if set(reports) != expected_workers:
+        raise ValueError("Missing/unexpected copy workers")
+    hit_counts = {name: search_hit_counts(row["search"], QUERIES, worker=name,
+                    reported=row.get("search_hit_counts")) for name, row in reports.items()}
     if baseline_version not in {"4.0.2", "4.0.3", "4.0.4"}:
         raise ValueError("Unqualified baseline")
     baseline = reports['baseline']
@@ -145,7 +153,7 @@ def compare(reports, *, baseline_version="4.0.2"):
            for candidate in candidates[1:]):
         raise ValueError('Wheel/sdist/warm search rankings differ')
     changed = [q for q in reference if reference[q]['ids'] != baseline['search'][q]['ids']]
-    return {'search_identical_to_baseline': not changed, 'baseline_version': baseline_version,
+    return {'search_hit_counts': hit_counts, 'search_identical_to_baseline': not changed, 'baseline_version': baseline_version,
             'search_identical_to_402': not changed if baseline_version == '4.0.2' else None, 'changed_queries': changed,
             'rankings_identical_between_artifacts_and_reopen': True,
             'encoding_profile': p, 'warm_encoded_texts': 0, 'store_instance_ids': identities,
@@ -262,7 +270,8 @@ def main(argv=None):
     report = {'ok': False, 'version': version, 'baseline_version': baseline_version, 'source_commit': manifest['source_commit'],
               'artifacts': manifest['artifacts'], 'production_modified': False, 'reports': {},
               'scripts_sha256': {n: digest(Path(__file__).with_name(f)) for n, f in
-                                [('runner', 'qualify_release_copy.py'), ('worker', 'release_copy_worker.py')]}}
+                                [('runner', 'qualify_release_copy.py'), ('worker', 'release_copy_worker.py'),
+                                 ('search_gate', 'search_qualification.py')]}}
     try:
         if report['scripts_sha256'] != manifest['copy_scripts_sha256']:
             raise ValueError('Copy scripts changed since artifact qualification')

@@ -15,7 +15,7 @@ séquentiel, nice15, aucune acquisition de poids.
 | Autorité | toutes les lignes et objets SQL du schéma7 inchangés ; seuls migration8, table/index/trigger du journal et son état sont ajoutés |
 | Histoire | reçus explicites, versions d'items/blocs/tâches, métadonnées et identité préservés ; journal vide, couverture prospective datée, génération stable au reopen |
 | Cache | copie intégrale ; 0 texte du corpus ré-encodé et 0 cache miss au démarrage ET au reopen ; profil attesté strictement identique à celui de4.0.5 |
-| Recherche | mêmes 10 requêtes, même instant figé, C4/scoped_literal/guard3, rerank=false, top10 ordonné exact ; pas de touch sur les copies |
+| Recherche | mêmes 10 requêtes, même instant figé, C4/scoped_literal/guard3, rerank=false, top10 ordonné exact ; scope moteur `project=None` ; **chaque requête de chaque worker ≥1 hit**, comptes recalculés ; pas de touch sur les copies |
 | Coût | migration ≤120 s, chaque démarrage chaud ≤120 s, campagne ≤900 s ; un dépassement refuse, jamais une dérogation automatique |
 | Profil | production auto→MPS/native/batch32/max512, mêmes poids/runtime/empreinte d'encodeur ; registre INACTIF, tasks actives ; aucun download/réseau externe |
 | Suite RC | wheel+sdist et reopen égaux ; HTTP privé --warm ready/doctor0FAIL ; relay installé et TCP ; preuve d'artefacts scellée |
@@ -45,7 +45,7 @@ nice -n 15 "$PYTHON" -B scripts/qualify_schema8_copy.py \
   --source-dir "$HOME/memory-os-local/stores/sqlite-20261011-v1" \
   --production-plist "$HOME/Library/LaunchAgents/com.romain.memory-os-v4.plist" \
   --expected-instance-id 286dfcb0357940468aedb9617a2ccd9c \
-  --output .local-qualification/407-schema8-production-copy-source-claude-v1
+  --output .local-qualification/407-schema8-production-copy-source-claude-v2
 ~~~
 
 Le lanceur remplace l'environnement du worker par le profil réel du plist ;
@@ -106,3 +106,13 @@ encore** ; elles seront scellées avec ces empreintes, sans réutiliser les whee
 
 Ces limites doivent figurer dans le futur runbook de bascule ; elles évitent de
 promettre un rollback immédiat incompatible avec le changement de schéma.
+
+## Amendement non-vacuité — 13 octobre 2026, avant le run v2
+
+Le run source `407-schema8-production-copy-source-claude-v1` n'a **PAS
+DÉMONTRÉ** l'identité des recherches : ses dix listes étaient vides dans les
+deux bras. Son rapport reste conservé sans réécriture. Inventaire/migration,
+identité, cache et profil restent des preuves distinctes. Le v2 ci-dessus
+remplace uniquement la tentative de qualification, sans héritage de son
+`search_identical_to_baseline=true`. Le seuil et le périmètre sont scellés dans
+[QUALIFICATION_SEARCH_NON_VACUITY_4_0_7.md](QUALIFICATION_SEARCH_NON_VACUITY_4_0_7.md).

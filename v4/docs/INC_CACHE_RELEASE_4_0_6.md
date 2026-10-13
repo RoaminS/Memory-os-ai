@@ -157,3 +157,18 @@ un amendement daté doit précéder une nouvelle qualification dans un dossier
 neuf. Les autres critères (autorité, identité, top-10 figés, runtime, relais,
 doctor, sauvegarde et rollback conservant les écritures récentes) restent
 obligatoires. Codex n'autorise ni la bascule ni le changement de critère.
+
+
+## Rectification du registre de preuves — 13 octobre 2026
+
+**Classements identiques : NON DÉMONTRÉS** pour
+`.local-qualification/copy-4.0.6-sqlite-v1`. Baseline, wheel, sdist et leurs
+réouvertures ont renvoyé zéro hit sur chacune des dix requêtes : l'égalité des
+listes vides ne démontre pas la compatibilité de recherche. Le rapport d'origine
+reste inchangé ; ses booléens d'égalité ne constituent plus une preuve recevable.
+La production est restée **4.0.5**, la bascule 4.0.6 a été annulée. Les autres
+preuves indépendantes restent inchangées (dont les refus/cache, identité,
+autorité, TCP et installations propres) ; cette rectification ne les requalifie
+pas automatiquement. La future 4.0.7 exige une nouvelle copie et un seuil de
+non-vacuité gelé avant exécution. Voir
+[le protocole](QUALIFICATION_SEARCH_NON_VACUITY_4_0_7.md).

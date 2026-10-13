@@ -105,13 +105,14 @@ def main():
         for query in plan['queries']:
             guard(root)
             t = time.monotonic()
-            hits = engine.search(query, top_k=10, project='*', at_time=plan['at_time'], rerank=False)
+            hits = engine.search(query, top_k=10, project=None, at_time=plan['at_time'], rerank=False)
             rows[query] = {'ids': [h.item.id for h in hits], 'scores': [h.score for h in hits],
                            'seconds': time.monotonic() - t}
         after = authority(engine.store._connection)
         if before != after:
             raise ValueError('Authoritative history/receipts/tasks/identity changed')
         report = {'ok': True, 'version': version, 'authority': after, 'search': rows,
+                  'search_hit_counts': {q: len(h['ids']) for q, h in rows.items()},
                   'store_instance_id': engine.store.meta['store_instance_id'],
                   'encoding_profile': engine.status()['encoding_profile'],
                   'startup_seconds': startup_seconds, 'corpus_encoded_texts': corpus_encoded_texts,

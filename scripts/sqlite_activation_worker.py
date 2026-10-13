@@ -12,6 +12,8 @@ import shutil
 import time
 import zipfile
 
+from search_qualification import search_hit_counts
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
@@ -47,15 +49,20 @@ def probe(engine, queries, at_time, guard):
     for query in queries:
         guard()
         start = time.monotonic()
-        hits = engine.search(query, top_k=10, at_time=at_time, rerank=False, project='*')
+        hits = engine.search(query, top_k=10, at_time=at_time, rerank=False, project=None)
         rows[query] = {'ids': [h.item.id for h in hits], 'scores': [h.score for h in hits],
-                       'seconds': time.monotonic() - start}
+                       'seconds': time.monotonic() - start, 'hit_count': len(hits)}
     if heads(engine) != before:
         raise ValueError('Search probes changed authoritative items')
     return rows
 
 
 def compare_probes(baseline, candidates):
+    search_hit_counts(baseline, tuple(baseline), worker='baseline')
+    if not candidates:
+        raise ValueError('Non-vacuity: no candidate workers')
+    for name, row in candidates.items():
+        search_hit_counts(row, tuple(baseline), worker=name)
     expected = {q: v['ids'] for q, v in baseline.items()}
     changed = {name: [q for q in expected if report.get(q, {}).get('ids') != expected[q]]
                for name, report in candidates.items()}

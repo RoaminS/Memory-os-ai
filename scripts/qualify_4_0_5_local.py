@@ -152,7 +152,7 @@ def main():
                      *sorted((root / 'v4/tests/fixtures/work_l7b').glob('*.json*')),
                      *sorted((root / 'v4/docs/contracts').glob('*.json'))]},
                 'installed_relay_scripts_sha256': {n: digest(root / 'scripts' / f) for n, f in [('runner', 'installed_relay_e2e.py'), ('case', 'installed_relay_case.py')]},
-                'copy_scripts_sha256': {n: digest(root / 'scripts' / f) for n, f in [('runner', 'qualify_release_copy.py'), ('worker', 'release_copy_worker.py')]},
+                'copy_scripts_sha256': {n: digest(root / 'scripts' / f) for n, f in [('runner', 'qualify_release_copy.py'), ('worker', 'release_copy_worker.py'), ('search_gate', 'search_qualification.py')]},
                 'evidence': {'python': sys.version.split()[0], 'dependency_downloads': False, 'models_downloaded': False,
                              'production_modified': False, 'real_encoder_runs': 0, 'v3_unit_encoder': 'explicit synthetic; not semantic qualification', 'sqlite_opt_in': True, 'registry_active': False, 'encoding_defaults': ['auto', 'native', 32], 'c4': ['scoped_literal', 3], 'tokenizer': status()},
                 'pending_at_build': ['27 source TCP tests', 'L1a exact offline 400 measurements + TCP envelope', '1 cached MiniLM test', 'full v3 cached actual encoder suite', 'copy/native-profile/cache/timing/search/doctor',

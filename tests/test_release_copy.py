@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / 'scripts'))
 spec = importlib.util.spec_from_file_location('copy_drill', Path(__file__).parents[1] / 'scripts/qualify_release_copy.py')
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+from release_copy_worker import QUERIES
 
 
 def test_snapshot_never_modifies_source_or_copies_symlinks(tmp_path):
@@ -74,7 +75,7 @@ def record():
             'encoding_profile': {'device': 'mps', 'parameter_devices': ['mps'], 'parameter_dtypes': ['torch.float32'],
                                  'dtype': 'native', 'batch_size': 32, 'max_seq_length': 512,
                                  'model_revision': 'fixed', 'runtime': {'torch': 'fixed'}},
-            'search': {'query': {'ids': ['fact']}}}
+            'search': {q: {'ids': ['fact']} for q in QUERIES}}
 
 
 def identity_reports():
@@ -117,13 +118,13 @@ def test_404_baseline_keeps_compute_warm_and_ranking_gates():
     with pytest.raises(ValueError, match='reencoded'):
         module.compare(reports, baseline_version='4.0.4')
     reports = identity_reports()
-    reports['sdist']['search']['query']['ids'] = ['other']
+    reports['sdist']['search'][QUERIES[0]]['ids'] = ['other']
     with pytest.raises(ValueError, match='rankings differ'):
         module.compare(reports, baseline_version='4.0.4')
     reports = identity_reports()
-    reports['baseline']['search']['query']['ids'] = ['other']
+    reports['baseline']['search'][QUERIES[0]]['ids'] = ['other']
     result = module.compare(reports, baseline_version='4.0.4')
-    assert result['changed_queries'] == ['query']
+    assert result['changed_queries'] == [QUERIES[0]]
     assert result['search_identical_to_baseline'] is False
 
 
@@ -136,9 +137,9 @@ def test_unqualified_future_or_old_baselines_remain_refused(version):
 def test_search_change_is_explicit_and_does_not_qualify_silently():
     reports = {k: record() for k in ('baseline', 'wheel', 'sdist', 'wheel-warm', 'sdist-warm')}
     assert module.compare(reports)['search_identical_to_402']
-    reports['baseline']['search']['query']['ids'] = ['other']
+    reports['baseline']['search'][QUERIES[0]]['ids'] = ['other']
     outcome = module.compare(reports)
-    assert not outcome['search_identical_to_402'] and outcome['changed_queries'] == ['query']
+    assert not outcome['search_identical_to_402'] and outcome['changed_queries'] == [QUERIES[0]]
     reports['sdist-warm']['startup_encoded_texts'] = 1
     with pytest.raises(ValueError, match='reencoded'):
         module.compare(reports)
@@ -177,3 +178,13 @@ def test_review_must_bind_changed_rankings_to_original_copy_report():
     gate.validate_copy({**proof, 'search_change_review': review}, manifest)
     with pytest.raises(ValueError):
         gate.validate_copy({**proof, 'search_change_review': {**review, 'report_sha256': 'e' * 64}}, manifest)
+
+
+@pytest.mark.parametrize("kind", ["all", "baseline", "wheel", "sdist", "wheel-warm", "sdist-warm"])
+def test_jsonl_release_refuses_empty_equal_rankings(kind):
+    reports = identity_reports()
+    for name, row in reports.items():
+        if kind == "all" or name == kind:
+            row["search"] = {q: {"ids": []} for q in QUERIES}
+    with pytest.raises(ValueError, match="Non-vacuity"):
+        module.compare(reports, baseline_version="4.0.4")
