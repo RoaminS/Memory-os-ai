@@ -72,6 +72,7 @@ class MemoryItem:
     # Explicit caller-supplied identity; never inferred from entity names.
     identity: dict | None = None
     replaces: list[str] = field(default_factory=list)
+    correction: dict | None = None  # Durable B2 audit; never an authorization.
     importance: float = 0.5
     confidence: float = 1.0
     access_count: int = 0
@@ -80,7 +81,10 @@ class MemoryItem:
     deleted: bool = False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        record = asdict(self)
+        if self.correction is None:
+            record.pop('correction')  # Do not rewrite existing ADD-only authority on access flush.
+        return record
 
     @classmethod
     def from_dict(cls, d: dict) -> "MemoryItem":

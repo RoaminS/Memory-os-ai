@@ -510,3 +510,56 @@ def test_L7b_warm_available_hash_ready_before_first_tool(harness):
             await session.initialize()
             assert payload(await session.call_tool('memory_search', {'project': 'p', 'query': 'synthetic'}))['hits'] == []
     anyio.run(run)
+
+
+def test_B2_fast_correction_revision_and_relay_clientinfo(harness):
+    import sqlite3
+    from memory_os_v4.sqlite_store import MIN_SQLITE
+    if sqlite3.sqlite_version_info < MIN_SQLITE:
+        pytest.skip('Qualified SQLite runtime required')
+    from mcp.types import Implementation
+    h=harness
+    h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1',MEMORY_V4_WORK_STATE='1')
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r,w), ClientSession(r,w,client_info=Implementation(name='synthetic-b2',version='1')) as session:
+            await session.initialize()
+            seed={'project':'P','facts':[{'item_id':'old','text':'Service uses port 8000.','event_time':'2026-10-12T10:00:00Z'}]}
+            assert payload(await session.call_tool('memory_add_facts',seed))['added']==['old']
+            found=payload(await session.call_tool('memory_search',{'project':'P','query':'Service port','top_k':1}))['hits'][0]
+            context=payload(await session.call_tool('memory_get_context',{'project':'P','query':'Service port'}))
+            assert context['references'][0]['revision']==found['revision']
+            applied=payload(await session.call_tool('memory_add_facts',{
+                'project':'P','reason':'Operator changed port.','expected_revisions':{'old':found['revision']},
+                'client_provenance':{'client_id':'model-forgery'},
+                'facts':[{'item_id':'new','text':'Service uses port 9000.','event_time':'2026-10-13T10:00:00Z','replaces':['old']}]}))
+            assert applied['superseded']==[['old','new']] and len(applied['impacts'])==1
+            assert applied['changed_by']['client_id']=='synthetic-b2' and applied['changed_by']['authenticated'] is False
+            assert applied['notices']==[]
+    anyio.run(run)
+
+
+def test_B2_relay_preview_is_read_only_and_has_no_receipt(harness):
+    import sqlite3
+    from memory_os_v4.sqlite_store import MIN_SQLITE
+    if sqlite3.sqlite_version_info < MIN_SQLITE:
+        pytest.skip('Qualified SQLite runtime required')
+    h=harness
+    h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1',MEMORY_V4_WORK_STATE='1')
+    h.start()
+    def snapshot():
+        with sqlite3.connect(f"file:{h.root/'store/store.sqlite3'}?mode=ro",uri=True) as db:
+            return {t:db.execute(f'SELECT * FROM {t} ORDER BY 1,2').fetchall()
+                    for t in ('items','item_versions','request_receipts','receipt_counter','store_metadata','embedding_cache')}
+    async def run():
+        async with stdio_client(h.params()) as (r,w), ClientSession(r,w) as session:
+            await session.initialize()
+            assert payload(await session.call_tool('memory_add_facts',{'project':'P','facts':[{'item_id':'old','text':'Old value.','event_time':'2026-10-12T10:00:00Z'}]}))['added']
+            before=snapshot()
+            p=payload(await session.call_tool('memory_add_facts',{'project':'P','mode':'preview','request_id':'preview-only','reason':'Inspect.',
+                'facts':[{'item_id':'new','text':'New value.','event_time':'2026-10-13T10:00:00Z','replaces':['old']}]}))
+            assert p['ok'] and p['outcome']=='not_started' and len(p['impacts'])==1
+            assert snapshot()==before
+            local=payload(await session.call_tool('memory_request_status',{}))
+            assert local['unresolved_count']==0
+    anyio.run(run)

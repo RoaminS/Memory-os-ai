@@ -94,7 +94,7 @@ def _requires_open(method):
     def guarded(self, *args, **kwargs):
         with self._lock:
             self._ensure_open()
-            if method.__name__ not in {'status', 'flush', 'session_brief'}:
+            if method.__name__ not in {'status', 'flush', 'session_brief', 'add_facts'}:
                 self.ensure_retrieval()
             return method(self, *args, **kwargs)
     return guarded
@@ -104,18 +104,22 @@ def _atomic_mutation(method):
     """JSONL keeps its existing semantics; SQLite commits the whole facade call."""
     @wraps(method)
     def guarded(self, *args, **kwargs):
+        if method.__name__ == 'add_facts' and kwargs.get('mode') == 'preview':
+            return method(self, *args, **kwargs)
         self.require_writes()
         if self.config.store_backend != "sqlite_s1":
             return method(self, *args, **kwargs)
+        request_id = kwargs.get('request_id') if method.__name__ == 'add_facts' and not self._mutation_depth else None
+        scope = str(kwargs.get('project', args[1] if len(args) > 1 else 'default')) if request_id else '__engine_internal__'
         return self._sql_mutation(method.__name__, {"args": args, "kwargs": kwargs},
-                                  lambda: method(self, *args, **kwargs))
+                                  lambda: method(self, *args, **kwargs), request_id=request_id, scope=scope)
     return guarded
 
 
 class MemoryV4:
     """Local-first long-term memory engine façade. Thread-safe via a single RLock."""
 
-    def __init__(self, data_dir: str | None = None, config: Config | None = None) -> None:
+    def __init__(self, data_dir: str | None = None, config: Config | None = None, *, defer_retrieval=False) -> None:
         self.config = config or Config.from_env()
         if data_dir is not None:
             self.config.data_dir = data_dir
@@ -176,7 +180,7 @@ class MemoryV4:
             # model weights or importing neural runtimes. Retrieval is explicit
             # on its first operation; JSONL/default behavior is unchanged.
             self._retrieval_ready = not (self.config.store_backend == 'sqlite_s1'
-                                          and self.config.work_state and self.config.embed_model != 'hash')
+                                          and (self.config.work_state or defer_retrieval) and self.config.embed_model != 'hash')
             self._retrieval_initializing = False
             self.embedder = _make_embedder(self.config) if self._retrieval_ready else None
             if self.config.store_backend == "sqlite_s1":
@@ -744,9 +748,60 @@ class MemoryV4:
         parent_ids: list[str] | None = None,
         event_time: float | None = None,
         source: str = "client",
+        *, mode=None, reason=None, expected_revisions=None, confirmed_impacts=None,
+        preview_digest=None, request_id=None, client_provenance=None, _context=None,
     ) -> dict:
+        from . import corrections as corr
         with self._lock:
-            normalized = normalize_client_facts(facts)
+            if mode not in (None, 'preview', 'apply'):
+                raise corr.CorrectionError('invalid_input')
+            verified = corr.controlled(mode, expected_revisions, confirmed_impacts, preview_digest)
+            if verified and self.config.store_backend != 'sqlite_s1':
+                raise corr.CorrectionError('backend_unsupported')
+            if verified and mode != 'preview':
+                corr.precheck(self.store, expected_revisions, project)
+            normalized = normalize_client_facts(facts)  # Validate the complete batch before writes.
+            potential = any(n.get('replaces') or (n.get('identity') or {}).get('cardinality') == 'single' for n in normalized)
+            plan = None
+            if verified or potential:
+                try:
+                    plan = corr.prepare(self, facts, project, parent_ids, event_time, source, reason, _context)
+                except corr.CorrectionError:
+                    if verified:
+                        raise
+                    # Legacy JSONL keeps its prior partial-error semantics; no
+                    # verified promise is inferred from an unplannable batch.
+                if mode == 'preview':
+                    return plan
+                if plan is not None:
+                    corr.guard(plan, verified=verified, reason=reason, expected_revisions=expected_revisions,
+                               confirmed_impacts=confirmed_impacts, preview_digest=preview_digest, request_id=request_id)
+                    if verified:
+                        facts = plan['prepared_facts']
+                        normalized = normalize_client_facts(facts)
+            self.ensure_retrieval()
+            result = self._add_normalized_facts(normalized, facts, project, parent_ids, event_time, source,
+                                                reason, corr.actor(client_provenance), verified)
+            if not verified and len(result.get('impacts', [])) > 3:
+                details = {k: result[k] for k in ('impacts', 'changed_by', 'notices') if k in result}
+                if self.config.store_backend == 'sqlite_s1':
+                    details['planned_impacts'] = details.pop('impacts')
+                raise corr.CorrectionError('impacts_confirmation_required', outcome='uncertain' if self.config.store_backend == 'jsonl' else 'not_started',
+                                           details=details)
+            if verified and plan is not None:
+                actual = [(i['target_id'], i['successor_id']) for i in result.get('impacts', [])]
+                expected = [(i['target_id'], i['successor_id']) for i in plan['impacts']]
+                if actual != expected:
+                    raise RuntimeError('Correction plan changed during application; transaction must roll back')
+            if verified:
+                result['superseded'] = [list(pair) for pair in result['superseded']]
+            return result
+
+    def _add_normalized_facts(self, normalized, facts, project, parent_ids, event_time, source, reason, changed_by, verified):
+        from . import corrections as corr
+        with self._lock:
+            impacts = []
+            # Existing batching/embedding path is preserved for ordinary ADD-only writes.
             # `normalize_client_facts` (extract.py) whitelists a fixed set of
             # output keys and doesn't know about `keywords` -- it always
             # returns exactly one normalized dict per input dict, in order
@@ -776,54 +831,75 @@ class MemoryV4:
                     added.extend(it.id for it in pending)
                     pending.clear()
 
-            for nf in normalized:
-                if nf.get("identity") or nf.get("replaces"):
-                    flush_pending()
-                if nf.get("item_id") and any(it.id == nf["item_id"] for it in pending):
-                    # Preserve duplicate-id failure semantics, including the
-                    # preceding JSONL writes (SQLite rolls back the whole call).
-                    flush_pending()
-                kind = nf.get("kind", "fact")
-                ev_time = nf.get("event_time")
-                if ev_time is None:
-                    ev_time = event_time if event_time is not None else time.time()
-
-                spec = dict(nf)
-                spec["item_id"] = nf.get("item_id")
-                spec["project"] = project
-                spec["parent_ids"] = parent_ids
-                spec["event_time"] = ev_time
-                spec["source"] = source
-                try:
-                    item = self._build_items([spec], kind=kind)[0]
-                except Exception:
-                    flush_pending()
-                    raise
-                validate_replacements(item, self.store)
-                duplicate_id = self._find_duplicate(item, pending)
-                if duplicate_id:
-                    deduped.append(duplicate_id)
-                    continue
-
-                if not item.identity and not item.replaces:
-                    pending.append(item)
-                    if len(pending) >= batch_size:
+            try:
+                for nf in normalized:
+                    if nf.get("identity") or nf.get("replaces"):
                         flush_pending()
-                    continue
+                    if nf.get("item_id") and any(it.id == nf["item_id"] for it in pending):
+                        # Preserve duplicate-id failure semantics, including the
+                        # preceding JSONL writes (SQLite rolls back the whole call).
+                        flush_pending()
+                    kind = nf.get("kind", "fact")
+                    ev_time = nf.get("event_time")
+                    if ev_time is None:
+                        ev_time = event_time if event_time is not None else time.time()
 
-                # Embeddings serve retrieval, never duplicate decisions. Reuse
-                # this vector for indexing rather than computing it twice.
-                probe_text = index_text(item, self.config)
-                vec = self._encode_index_texts([probe_text])[0]
+                    spec = dict(nf)
+                    spec["item_id"] = nf.get("item_id")
+                    spec["project"] = project
+                    spec["parent_ids"] = parent_ids
+                    spec["event_time"] = ev_time
+                    spec["source"] = source
+                    try:
+                        item = self._build_items([spec], kind=kind)[0]
+                    except Exception:
+                        flush_pending()
+                        raise
+                    validate_replacements(item, self.store)
+                    duplicate_id = self._find_duplicate(item, pending)
+                    if duplicate_id:
+                        deduped.append(duplicate_id)
+                        continue
 
-                self._index_items([item], vecs=np.asarray([vec]))
-                added.append(item.id)
-                if kind == "fact" and (item.replaces or
-                                       (item.identity and item.identity["cardinality"] == "single")):
-                    superseded.extend(replacement_sweep(self.store, project=project, focus=item))
+                    if not item.identity and not item.replaces:
+                        pending.append(item)
+                        if len(pending) >= batch_size:
+                            flush_pending()
+                        continue
 
-            flush_pending()
-            return {"added": added, "deduped": deduped, "superseded": superseded}
+                    # Embeddings serve retrieval, never duplicate decisions. Reuse
+                    # this vector for indexing rather than computing it twice.
+                    probe_text = index_text(item, self.config)
+                    vec = self._encode_index_texts([probe_text])[0]
+
+                    self._index_items([item], vecs=np.asarray([vec]))
+                    added.append(item.id)
+                    if kind == "fact" and (item.replaces or
+                                           (item.identity and item.identity["cardinality"] == "single")):
+                        predicted, _ = corr.focus_impacts(self.store, item)
+                        pairs = replacement_sweep(self.store, project=project, focus=item)
+                        by_pair = {(i['target_id'], i['successor_id']): i for i in predicted}
+                        step = [by_pair[pair] for pair in pairs]
+                        superseded.extend(pairs)
+                        impacts.extend(step)
+                        if step:
+                            item.correction = {'audit_id': corr.digest({'item_id': item.id, 'project': str(project), 'impacts': step, 'reason': reason, 'changed_by': changed_by}), 'reason': reason,
+                                               'changed_by': changed_by, 'verified': verified, 'impacts': step}
+                            self.store.append(item)  # Same transaction, reconstructible B5 audit.
+
+                flush_pending()
+                result = {"added": added, "deduped": deduped, "superseded": superseded}
+                if impacts:
+                    result.update(impacts=impacts, changed_by=changed_by,
+                                  notices=[] if verified else ['correction_unverified'])
+                return result
+
+            except Exception as exc:
+                if impacts and self.config.store_backend == 'jsonl':
+                    raise corr.CorrectionError('legacy_partial', str(exc), outcome='uncertain',
+                                               details={'impacts': impacts, 'changed_by': changed_by,
+                                                        'notices': ['correction_unverified']}) from exc
+                raise
 
     @_requires_open
     @_atomic_mutation
@@ -933,7 +1009,8 @@ class MemoryV4:
         queries: list[str] | None = None,
         hypotheses: list[str] | None = None,
         facets: list[dict] | None = None,
-    ) -> str:
+        *, with_revisions: bool = False,
+    ) -> str | dict:
         with self._lock:
             facet_pool = self.retriever.facet_pool(facets, project=project, at_time=at_time)
             if queries or hypotheses or facet_pool:
@@ -952,11 +1029,12 @@ class MemoryV4:
                 )
             vectors = {h.item.id: v for h in hits if (v := self.vector_index.get_one(h.item.id)) is not None}
             diversified = mmr(hits, vectors, lambda_=0.7, k=len(hits))
-            return self._render_hits(diversified, max_tokens)
+            return self._render_hits(diversified, max_tokens, with_revisions=with_revisions)
 
-    def _render_hits(self, hits: list[SearchHit], max_tokens: int) -> str:
+    def _render_hits(self, hits: list[SearchHit], max_tokens: int, *, with_revisions=False) -> str | dict:
         budget_chars = max_tokens * 4
         lines: list[str] = []
+        references = []
         total = 0
         for h in hits:
             tag = f"[{h.item.kind}|{date_str(h.item.event_time)}|{h.item.project}]"
@@ -964,8 +1042,12 @@ class MemoryV4:
             if lines and total + len(line) + 1 > budget_chars:
                 break
             lines.append(line)
+            if with_revisions and h.item.kind == 'fact':
+                from .corrections import revision
+                references.append({'id': h.item.id, 'kind': 'fact', 'revision': revision(h.item, self.store), 'span': [total, total + len(line)]})
             total += len(line) + 1
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        return {'context': text, 'n_items': len([line for line in text.split('\n') if line.strip()]), 'references': references, 'offset_basis': 'unicode code points in context'} if with_revisions else text
 
     def _is_pending(self, item: MemoryItem) -> bool:
         if "todo" in item.tags or "pending" in item.tags:

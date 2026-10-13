@@ -35,6 +35,7 @@ from pydantic import BaseModel, ValidationError
 from .config import Config
 from .brief_tokens import TokenizerUnavailable
 from .instructions import build_instructions
+from .corrections import CorrectionError
 from .memory import MemoryV4
 from .idempotency import raw_args_sha256
 from .maintenance import MaintenanceDenied, MaintenancePolicy, MaintenanceWindow, WritePolicy
@@ -61,12 +62,12 @@ _engine: MemoryV4 | None = None
 _engine_init_lock = Lock()
 
 
-def get_engine() -> MemoryV4:
+def get_engine(*, model_free=False) -> MemoryV4:
     global _engine
     if _engine is None:
         with _engine_init_lock:
             if _engine is None:
-                _engine = MemoryV4(config=Config.from_env())
+                _engine = MemoryV4(config=Config.from_env(), defer_retrieval=model_free)
     return _engine
 
 
@@ -165,7 +166,8 @@ def _convert_item_dict(d: dict) -> dict:
     return _round_floats(out)
 
 
-def _hit_dict(hit) -> dict:
+def _hit_dict(hit, store=None) -> dict:
+    from .corrections import revision
     it = hit.item
     return _round_floats(
         {
@@ -181,6 +183,7 @@ def _hit_dict(hit) -> dict:
             "replaces": it.replaces,
             "project": it.project,
             "signals": hit.signals,
+            **({'revision': revision(it, store)} if it.kind == 'fact' else {}),
         }
     )
 
@@ -221,9 +224,39 @@ def _h_session_brief(engine: MemoryV4, args: models.SessionBriefIn) -> dict:
     return _round_floats(out)
 
 
+def _fact_controls(args):
+    return {key: getattr(args, key) for key in
+            ('mode', 'reason', 'expected_revisions', 'confirmed_impacts', 'preview_digest', 'request_id')} | {
+            'client_provenance': args.client_provenance.model_dump(exclude_none=True) if args.client_provenance else None}
+
+
 def _h_chat_save(engine: MemoryV4, args: models.ChatSaveIn) -> dict:
     project = _write_project_of(args.project_label)
     ev = parse_iso(args.event_time)
+    from . import corrections as corr
+    controls = _fact_controls(args)
+    verified = corr.controlled(args.mode, args.expected_revisions, args.confirmed_impacts, args.preview_digest)
+    if verified and engine.config.store_backend != 'sqlite_s1':
+        raise corr.CorrectionError('backend_unsupported')
+    if verified and args.mode != 'preview':
+        corr.precheck(engine.store, args.expected_revisions, project)
+    context = corr.digest({'messages': [m.model_dump(exclude_none=True) for m in args.messages],
+                           'summary': args.summary, 'event_time': args.event_time})
+    fact_dicts = [f.model_dump(exclude_none=True) for f in args.facts or []]
+    plan = None
+    if verified or any(f.get('replaces') or (f.get('identity') or {}).get('cardinality') == 'single' for f in fact_dicts):
+        try:
+            plan = corr.prepare(engine, fact_dicts, project, event_time=ev, reason=args.reason, context=context)
+        except corr.CorrectionError:
+            if verified:
+                raise
+        if args.mode == 'preview':
+            return plan
+        if plan is not None:
+            corr.guard(plan, verified=verified, reason=args.reason, expected_revisions=args.expected_revisions,
+                       confirmed_impacts=args.confirmed_impacts, preview_digest=args.preview_digest, request_id=args.request_id)
+            if verified:
+                fact_dicts = plan['prepared_facts']
 
     episode_specs = [
         {
@@ -254,8 +287,8 @@ def _h_chat_save(engine: MemoryV4, args: models.ChatSaveIn) -> dict:
 
     facts_result = {"added": [], "deduped": [], "superseded": []}
     if args.facts:
-        fact_dicts = [f.model_dump(exclude_none=True) for f in args.facts]
-        facts_result = engine.add_facts(fact_dicts, project=project, parent_ids=episode_ids, event_time=ev)
+        facts_result = engine.add_facts(fact_dicts, project=project, parent_ids=episode_ids, event_time=ev,
+                                        _context=context, **controls)
 
     engine.flush()
     return {
@@ -265,19 +298,24 @@ def _h_chat_save(engine: MemoryV4, args: models.ChatSaveIn) -> dict:
             "added": facts_result["added"],
             "deduped": facts_result["deduped"],
             "superseded": [list(p) for p in facts_result["superseded"]],
+            **{k: facts_result[k] for k in ('impacts', 'changed_by', 'notices') if k in facts_result},
         },
+        **{k: facts_result[k] for k in ('impacts', 'changed_by', 'notices') if k in facts_result},
     }
 
 
 def _h_add_facts(engine: MemoryV4, args: models.AddFactsIn) -> dict:
     project = _write_project_of(args.project)
     fact_dicts = [f.model_dump(exclude_none=True) for f in args.facts]
-    result = engine.add_facts(fact_dicts, project=project, parent_ids=args.parent_ids)
+    result = engine.add_facts(fact_dicts, project=project, parent_ids=args.parent_ids, **_fact_controls(args))
+    if args.mode == 'preview':
+        return result
     engine.flush()
     return {
         "added": result["added"],
         "deduped": result["deduped"],
         "superseded": [list(p) for p in result["superseded"]],
+        **{k: result[k] for k in ('impacts', 'changed_by', 'notices') if k in result},
     }
 
 
@@ -296,7 +334,7 @@ def _h_search(engine: MemoryV4, args: models.SearchIn) -> dict:
         hypotheses=args.hypotheses,
         facets=facets,
     )
-    return {"hits": [_hit_dict(h) for h in hits]}
+    return {"hits": [_hit_dict(h, engine.store) for h in hits]}
 
 
 def _h_get_context(engine: MemoryV4, args: models.GetContextIn) -> dict:
@@ -310,8 +348,10 @@ def _h_get_context(engine: MemoryV4, args: models.GetContextIn) -> dict:
         project=project,
         queries=args.queries,
         hypotheses=args.hypotheses,
-        facets=facets,
+        facets=facets, with_revisions=True,
     )
+    if isinstance(context, dict):
+        return context
     n_items = len([line for line in context.split("\n") if line.strip()])
     return {"context": context, "n_items": n_items}
 
@@ -738,7 +778,8 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
             if planned_cls and issubclass(planned_cls, models.MutationIn):
                 preview = (planned_args.get("dry_run", True) is True if isinstance(planned_args, dict)
                            else getattr(planned_args, "dry_run", False) is True)
-                if planned_name not in {"memory_consolidate", "memory_compact"} or not preview:
+                fact_preview = planned_name in {'memory_add_facts', 'memory_chat_save'} and getattr(parsed, 'mode', None) == 'preview'
+                if not fact_preview and (planned_name not in {"memory_consolidate", "memory_compact"} or not preview):
                     WritePolicy(Config.from_env().write_mode).require()
         if name in {"memory_consolidate", "memory_compact"} and _engine is None:
             # Refuse a cold disabled server without opening its store or loading an encoder.
@@ -748,7 +789,16 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
             if cfg.store_backend != 'sqlite_s1' or not cfg.work_state:
                 return {'ok': False, 'code': 'backend_unsupported' if cfg.store_backend != 'sqlite_s1' else 'capability_disabled',
                         'backend': cfg.store_backend, 'outcome': 'not_started'}
-        engine = get_engine()
+        if name in {'memory_add_facts', 'memory_chat_save'} and _engine is None:
+            from .corrections import controlled
+            if controlled(parsed.mode, parsed.expected_revisions, parsed.confirmed_impacts, parsed.preview_digest) and Config.from_env().store_backend != 'sqlite_s1':
+                return {'ok': False, 'code': 'backend_unsupported', 'outcome': 'not_started'}
+        model_free = name in {'memory_add_facts', 'memory_chat_save'} and (parsed.mode is not None or parsed.expected_revisions is not None or parsed.confirmed_impacts is not None or parsed.preview_digest is not None)
+        engine = get_engine(model_free=True) if model_free and _engine is None else get_engine()
+        if name in {'memory_add_facts', 'memory_chat_save'} and parsed.mode == 'preview':
+            with engine._lock:
+                engine._ensure_open()
+                return handler(engine, parsed)
         if name == 'memory_block_set' and engine.store.meta.get('inactive_block_cas'):
             return {'ok': False, 'code': 'backend_unsupported', 'outcome': 'not_started'}
         if name in WORK_MODELS:
@@ -771,6 +821,8 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         return engine.execute_request(operation, scope, payload, getattr(parsed, "request_id", None),
                                       lambda: handler(engine, parsed),
                                       raw_args_sha256=raw_args_sha256(arguments))
+    except CorrectionError as exc:
+        return {'ok': False, 'code': exc.code, 'error': str(exc), 'outcome': exc.outcome, **exc.details}
     except RetrievalUnavailable:
         return {'ok': False, 'code': 'retrieval_unavailable', 'outcome': 'not_started',
                 'error': 'Retrieval encoder unavailable; tasks remain usable.'}

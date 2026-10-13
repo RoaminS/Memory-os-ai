@@ -24,6 +24,8 @@ from memory_os_v4.ops.provision import min_free_bytes  # noqa: E402
 
 TCP = ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py', 'v4/tests/test_l3_tcp.py']
 EXPECTED_TCP = (
+    'test_l3_tcp::test_B2_fast_correction_revision_and_relay_clientinfo',
+    'test_l3_tcp::test_B2_relay_preview_is_read_only_and_has_no_receipt',
     'test_l3_tcp::test_405_preflight_refusal_through_sdk_then_manual_retry[outage-preflight_unavailable]',
     'test_l3_tcp::test_405_preflight_refusal_through_sdk_then_manual_retry[warming-upstream_not_ready]',
     'test_l3_tcp::test_C02_C04_C08_disconnect_and_new_relay_adopts_journal[committed-completed]',

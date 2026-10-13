@@ -25,10 +25,10 @@ def cases():
     return result
 
 
-def test_all_28_named_cases_qualify_regardless_of_order():
-    assert len(gate.EXPECTED_TCP) == len(set(gate.EXPECTED_TCP)) == 28
+def test_all_30_named_cases_qualify_regardless_of_order():
+    assert len(gate.EXPECTED_TCP) == len(set(gate.EXPECTED_TCP)) == 30
     result = gate.tcp_evidence(list(reversed(cases())) + [ET.Element('testcase', classname='tests.other', name='unrelated')])
-    assert result == {'ok': True, 'expected_cases': 28, 'observed_cases': 28,
+    assert result == {'ok': True, 'expected_cases': 30, 'observed_cases': 30,
                       'missing': [], 'unexpected': [], 'unsuccessful': []}
 
 
@@ -46,7 +46,7 @@ def test_case_identity_change_cannot_pass_even_with_equal_count(change):
     proof = gate.tcp_evidence(nodes)
     assert not proof['ok'] and (proof['missing'] or proof['unexpected'])
     if change in ('renamed', 'duplicate-replaces-missing'):
-        assert proof['observed_cases'] == 28  # former bare-count gate would accept
+        assert proof['observed_cases'] == 30  # former bare-count gate would accept
 
 
 @pytest.mark.parametrize('status', ['failure', 'error', 'skipped'])

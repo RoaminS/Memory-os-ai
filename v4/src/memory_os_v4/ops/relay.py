@@ -296,6 +296,9 @@ class SessionToolCatalog:
                 return {"legacy", *(["compact_v2"] if "compact_v2" in formats else [])}, "budget_tokens" in props
         return {"legacy"}, False
 
+    def fact_client_supported(self, name):
+        return any(tool.name == name and 'client_provenance' in tool.inputSchema.get('properties', {}) for tool in self._tools)
+
     def brief_client_supported(self):
         return any(tool.name == 'memory_session_brief' and 'client_id' in tool.inputSchema.get('properties', {})
                    for tool in self._tools)
@@ -334,6 +337,9 @@ async def serve(settings: OpsSettings) -> None:
         async def call_tool(name: str, arguments: dict):
             if name == 'memory_session_brief' and durable.brief_client_supported:
                 arguments = brief_client_arguments(arguments, server.request_context.session.client_params.clientInfo)
+            if name in {'memory_add_facts', 'memory_chat_save'} and catalog.fact_client_supported(name):
+                info = server.request_context.session.client_params.clientInfo
+                arguments = {**(arguments or {}), 'client_provenance': {'client_id': info.name[:200], 'client_version': info.version[:80]}}
             if name in {'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'}:
                 arguments = task_owner_arguments(arguments, server.request_context.session.client_params.clientInfo,
                                                  creation=name == 'memory_task_create')

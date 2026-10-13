@@ -184,7 +184,22 @@ class MutationIn(BaseModel):
     )
 
 
-class ChatSaveIn(MutationIn):
+class FactClientIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    client_id: str = Field(min_length=1, max_length=200)
+    client_version: str | None = Field(None, max_length=80)
+
+
+class FactMutationIn(MutationIn):
+    mode: Literal["preview", "apply"] | None = Field(None, description="Controlled SQLite path; absent = legacy unless CAS fields supplied.")
+    reason: str | None = Field(None, max_length=2000)
+    expected_revisions: dict[str, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]] | None = None
+    confirmed_impacts: list[str] | None = Field(None, max_length=1000)
+    preview_digest: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
+    client_provenance: FactClientIn | None = Field(None, description="Relay-filled clientInfo; declarative, never authentication.")
+
+
+class ChatSaveIn(FactMutationIn):
     model_config = ConfigDict(extra="forbid")
 
     messages: list[MessageIn] = Field(
@@ -204,7 +219,7 @@ class ChatSaveIn(MutationIn):
     )
 
 
-class AddFactsIn(MutationIn):
+class AddFactsIn(FactMutationIn):
     model_config = ConfigDict(extra="forbid")
 
     facts: list[FactIn] = Field(..., min_length=1, description="Atomic ADD-only facts to add.")

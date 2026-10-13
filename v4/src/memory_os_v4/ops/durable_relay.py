@@ -107,7 +107,7 @@ class DurableRelay:
                 return response({"status": "unknown", "reason": "local_identity_missing_or_ambiguous", "replay_permitted": False})
             row = next(iter(matches.values()))
             return response(await self.control(lambda s: self._status(s, row)))
-        mutation = name in MUTATIONS
+        mutation = name in MUTATIONS and not (name in {'memory_add_facts', 'memory_chat_save'} and args.get('mode') == 'preview')
         compact_brief = name == "memory_session_brief" and args.get("mode", "compact") == "compact"
         brief_wire = args.get("wire_format", "compact_v2" if "compact_v2" in self.brief_wire_formats else "legacy")
         brief_budget = args.get("budget_tokens")
