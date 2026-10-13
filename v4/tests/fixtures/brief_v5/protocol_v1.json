@@ -1,0 +1,116 @@
+{
+  "protocol_id": "brief-v5-pa-v1",
+  "sealed_at": "2026-10-12",
+  "base_commit": "fdd60cb0c9fee95f2f32471e93d77a2873a3d946",
+  "status": "sealed_before_A2_A4_A3_A7_implementation_and_results",
+  "memory_pool_limit": 40,
+  "block_pool_limit": 16,
+  "task_pool_limit": 10,
+  "block_initial_share": 0.3,
+  "task_initial_share": 0.2,
+  "shares_apply_to": [
+    "remaining_tokens",
+    "remaining_bytes"
+  ],
+  "unused_capacity": "reassigned_in_global_rank_order",
+  "relay_reservation": "measure exact prospective envelope including unresolved_requests",
+  "variants": {
+    "memory": [
+      "full",
+      "first_complete_sentence",
+      "reference_only"
+    ],
+    "block": [
+      "full",
+      "first_complete_sentence",
+      "reference_only"
+    ],
+    "task": [
+      "full",
+      "reference_only"
+    ]
+  },
+  "whole_units_only": true,
+  "neural_calls": 0,
+  "byte_limit": 6000,
+  "token_budgets": [
+    200,
+    600,
+    1500
+  ],
+  "tokenizer": "cl100k_base_offline_attested",
+  "task_status_final": [
+    "blocked",
+    "open"
+  ],
+  "task_stale_days": 14,
+  "priority": [
+    "explicit_expansion",
+    "critical_constraint",
+    "nonstale_blocked_task",
+    "nonstale_open_task",
+    "decision_or_constraint",
+    "procedure",
+    "attested_other_client_change",
+    "fact_or_summary_or_episode_or_doc",
+    "stale_task"
+  ],
+  "critical_tags": [
+    "constraint",
+    "critical"
+  ],
+  "decision_tags": [
+    "decision"
+  ],
+  "constraint_tags": [
+    "constraint"
+  ],
+  "change_tags": [
+    "change",
+    "update"
+  ],
+  "provenance": "source client:<id> or exactly one client:<id> tag; caller client_id declarative; unknown is never other",
+  "tie_break": [
+    "focus_bm25_desc",
+    "importance_desc",
+    "event_time_desc",
+    "id_asc"
+  ],
+  "performance": {
+    "seed_items": 10000,
+    "warmups": 10,
+    "sequential_calls": 100,
+    "server_p95_ms": 250,
+    "transport_p95_ms": 750,
+    "nice": 15,
+    "concurrency": 1,
+    "memory_swap_max_bytes": 8500000000,
+    "min_disk_default_bytes": 5000000000,
+    "operator_min_disk_bytes": 3000000000
+  },
+  "validation": {
+    "cases": 40,
+    "fr": 20,
+    "en": 20,
+    "families": 5,
+    "critical_coverage_min": 38,
+    "invalid_or_out_of_scope_or_sensitive": 0,
+    "cut_fragments": 0,
+    "invalid_references": 0,
+    "owner": "Claude",
+    "gold_hidden_from_tuning": true
+  },
+  "coverage_schema": {
+    "by_kind_columns": [
+      "eligible",
+      "pool",
+      "content",
+      "reference_only",
+      "omitted"
+    ],
+    "omitted_definition": "pool-content-reference_only",
+    "outside_pool_definition": "eligible-pool",
+    "scope": "requested scope only",
+    "small_budget_fallback": "exact scoped totals with coverage_detail_omitted; never invent per-kind values"
+  }
+}
