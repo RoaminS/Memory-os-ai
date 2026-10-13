@@ -14,7 +14,7 @@ def test_sealed_secret_controls():
 def test_compensation(tmp_path,monkeypatch):
     with MemoryV4(config=Config(data_dir=str(tmp_path),store_backend='sqlite_s1',embed_model='hash',hash_dim=16)) as m:
         monkeypatch.setattr(server,'_engine',m)
-        m.add_facts([{'item_id':'old','text':'Service uses port 8000.','event_time':time.time()-120}],project='P')
+        m.add_facts([{'item_id':'old','text':'Service uses port 8000.','tags':['critical','constraint'],'importance':0.9,'entities':['service:a'],'event_time':time.time()-120}],project='P')
         rev=revision(m.store.get('old'),m.store)
         f={'item_id':'new','text':'Service uses port 9000.','event_time':datetime.fromtimestamp(time.time()-60,timezone.utc).isoformat(),'replaces':['old']}
         r=server.dispatch('memory_add_facts',{'project':'P','facts':[f],'reason':'Mistake.','expected_revisions':{'old':rev},'request_id':'first'})
@@ -23,6 +23,9 @@ def test_compensation(tmp_path,monkeypatch):
         p=server.dispatch('memory_add_facts',{'project':'P','facts':[comp],'mode':'preview','reason':'Restore correct port.'})
         assert p['ok'],p
         assert p['prepared_facts'][0]['compensates']==comp['compensates']
+        assert p['prepared_facts'][0]['tags']==['critical','constraint']
+        assert p['prepared_facts'][0]['importance']==0.9
+        assert p['prepared_facts'][0]['entities']==['service:a']
         a=server.dispatch('memory_add_facts',{'project':'P','facts':p['prepared_facts'],'mode':'apply','reason':'Restore correct port.','expected_revisions':p['expected_revisions'],'preview_digest':p['preview_digest'],'confirmed_impacts':['new'],'request_id':'comp'})
         assert 'error' not in a,a
         assert a['audits'][0]['compensates']==comp['compensates']
@@ -68,3 +71,10 @@ def test_compensation_not_accepted_in_chat_and_jsonl(tmp_path,monkeypatch):
         result=server.dispatch('memory_add_facts',{'project':'P','facts':[comp],'mode':'preview'})
         assert result['code']=='backend_unsupported'
         assert m.store.all()==[]
+
+
+def test_secret_record_in_metadata_is_not_restorable_and_plain_refs_are_safe():
+    from memory_os_v4.compensation import secret_record
+    assert secret_record({'keywords':['password=synthetic-value']})
+    assert secret_record({'api_key':'synthetic-private-value'})
+    assert not secret_record({'sha256':'a'*64,'url':'https://example.invalid/docs','uuid':'286dfcb0-1111-2222-3333-abcdefabcdef'})

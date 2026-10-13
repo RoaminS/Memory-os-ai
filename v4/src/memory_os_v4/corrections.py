@@ -83,8 +83,12 @@ def prepare(engine, facts, project, parent_ids=None, event_time=None, source='cl
             if raw.get(key) is not None and (_coerce_time(raw[key]) is None or not math.isfinite(_coerce_time(raw[key]))):
                 raise CorrectionError('invalid_correction_time')
         from .compensation import check
-        check(engine, raw, project, now)
+        restored = check(engine, raw, project, now)
         p = dict(nf)
+        if restored:
+            for key in ('entities','tags','importance','confidence','keywords','facets'):
+                if key in restored:
+                    p[key] = deepcopy(restored[key])
         if raw.get('compensates') is not None:
             p['compensates'] = deepcopy(raw['compensates'])
         p['item_id'] = raw.get('item_id') or uuid.uuid4().hex

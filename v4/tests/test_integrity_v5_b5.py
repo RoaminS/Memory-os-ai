@@ -126,3 +126,16 @@ def test_journal_stats_alert_and_health_render(memory,monkeypatch,tmp_path):
     r=health.report(s)
     assert r['alerts'][0]['category']=='journal_size'
     assert 'journal_size' in health.render(r)
+
+
+def test_changes_cold_without_work_state_and_read_only(tmp_path,monkeypatch):
+    from memory_os_v4.maintenance import WritePolicy
+    with MemoryV4(config=Config(data_dir=str(tmp_path),store_backend='sqlite_s1',embed_model='missing-no-download',work_state=False),defer_retrieval=True) as m:
+        monkeypatch.setattr(server,'_engine',m)
+        monkeypatch.setattr(m,'_write_policy',WritePolicy('read_only'))
+        monkeypatch.setattr(m,'ensure_retrieval',lambda:(_ for _ in ()).throw(AssertionError('No model for feed')))
+        before=m.store._connection.execute('SELECT * FROM store_metadata').fetchall()
+        r=server.dispatch('memory_timeline',{'view':'changes','project':'P'})
+        assert r['ok'] and r['events']==[]
+        assert m.store._connection.execute('SELECT * FROM store_metadata').fetchall()==before
+        assert not m._retrieval_ready

@@ -98,7 +98,7 @@ def record(engine, operation, payload, result, before):
         journal['high'] = sequence
         last = {'event_id':value['event_id'], 'sequence':sequence}
     engine.store.write('journal_state', "UPDATE store_metadata SET value_json=? WHERE key='change_journal'", (_json(journal),))
-    if isinstance(result, dict) and operation in {'memory_add_facts', 'memory_chat_save', 'memory_forget', 'memory_block_set', 'memory_block_append', 'memory_task_create', 'memory_task_update'}:
+    if isinstance(result, dict) and operation.startswith('memory_'):
         result['change_event'] = last
     return last
 

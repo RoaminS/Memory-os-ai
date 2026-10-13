@@ -17,8 +17,23 @@ def secret_like(text):
                  r'\b(?:api[_ -]?key|password|passwd|mot de passe|jeton(?: accès)?|access[_ -]?token)'
                  r'\s*[:=]\s*["\x27]?[A-Za-z0-9_!./+~-]{6,}', text, re.I):
         return True
-    return any(urlsplit(url).username is not None or urlsplit(url).password is not None
-               for url in re.findall(r'https?://[^\s<>"\x27]+', text))
+    for url in re.findall(r'https?://[^\s<>"\x27]+', text):
+        try:
+            if urlsplit(url).username is not None or urlsplit(url).password is not None:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def secret_record(value):
+    if isinstance(value,str):
+        return secret_like(value)
+    if isinstance(value,dict):
+        return any(secret_record(v) or (isinstance(v,str) and secret_like(str(k)+'='+v)) for k,v in value.items())
+    if isinstance(value,list):
+        return any(secret_record(v) for v in value)
+    return False
 
 
 def check(engine, raw, project, now=None):
@@ -30,7 +45,7 @@ def check(engine, raw, project, now=None):
     source = engine.store.get(mark['restore_id'])
     if (source is None or source.deleted or source.kind != 'fact' or source.project != project
             or {'sensitive', 'secret', 'credential'} & {t.casefold() for t in source.tags}
-            or secret_like(source.text)):
+            or secret_record(source.to_dict())):
         raise CorrectionError('source_not_restorable')
     historical = None
     for record in engine.store.raw_history(source.id):
@@ -50,7 +65,7 @@ def check(engine, raw, project, now=None):
         if audit:
             break
     if (historical is None or audit is None or historical.get('deleted')
-            or secret_like(historical['text']) or {'sensitive', 'secret', 'credential'} &
+            or secret_record(historical) or {'sensitive', 'secret', 'credential'} &
             {t.casefold() for t in historical.get('tags', [])}
             or raw.get('text') != historical['text'] or raw.get('identity') != historical.get('identity')
             or raw.get('kind', 'fact') != 'fact'):
@@ -66,3 +81,4 @@ def check(engine, raw, project, now=None):
             raise CorrectionError('invalid_correction_time')
     if raw.get('valid_until') is not None:
         raise CorrectionError('invalid_correction_time')
+    return historical
