@@ -37,6 +37,10 @@ au contrat existant ; une référence seule ne satisfait pas un besoin de texte.
   vrai handler/relais logiciel hash sans encodage, répétition déterministe.
 - **303 tests brief/oracle verts** (16,75 s), puis **63 tests runners/oracle
   verts** (5,76 s), Ruff ciblé/diff --check verts. Pas de modèle ni TCP local.
+- **12/12 enveloppes exactes** qualifiées localement au runner 9e0df58,
+  moteur byte-identique à ceedb5c : max 1498 tokens / 4119 octets dans ce jeu
+  synthétique (distinct du P-A 10k). Lints de qualification verts : scopes
+  src/tests/scripts avec pyproject racine, puis E9,F sur src/tests/v4/scripts.
 - Les inputs v2, leur gold et leurs résultats n'ont pas été lus/exécutés.
   V1 reste FAIL 24/40 ; attribution exploratoire 15/16 au gold/infaisabilité
   rapportée par Claude, jamais substituée au verdict officiel.
@@ -68,7 +72,7 @@ Le run full garde ses 28 TCP attendus, aucun ajouté par ce correctif. Le
 performance runner atteste le HEAD du bundle : son moteur est identique au
 candidat ceedb5c (le vérifier avec git diff avant lancement), baseline fdd60cb
 inchangée. Nice 15, concurrence 1, disque opérateur 3 Go/5 Go défaut, swap
-8,5 Go. Aucune bascule, publication, réseau, modèle ou garde contournée.
+8,5 Go. Aucune bascule, publication, réseau externe, modèle ou garde contournée.
 
 ## Liaison explicite à V5-VAL v2, sans changer les seals
 
