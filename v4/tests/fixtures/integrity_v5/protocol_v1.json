@@ -1,0 +1,47 @@
+{
+  "b2": {
+    "cas": "exact target revisions and impact list, recomputed before apply",
+    "common_entity_required": false,
+    "max_impacts_without_explicit_confirmation": 3,
+    "preview_mutates_store": false,
+    "preview_neural_calls": 0,
+    "reason_required": "effective_invalidation",
+    "request_id_required_for_correction_apply": true
+  },
+  "b3": {
+    "control_normalization": [
+      "nfkc",
+      "casefold",
+      "strip"
+    ],
+    "generic_single_predicates": [
+      "default",
+      "other",
+      "unknown"
+    ],
+    "historical_identity_read_unchanged": true,
+    "multi_generic_allowed": true,
+    "persistent_identity_rewrite": false
+  },
+  "baseline_commit": "d003e54e169f0abcca13b9d1116977b6c57ecabd",
+  "date": "2026-10-13",
+  "execution": {
+    "heavy_jobs": "Claude only, nice 15 concurrency 1, disk/swap guards",
+    "maintenance_execution": false,
+    "model_download_or_api_calls": false,
+    "production_modified": false,
+    "synthetic_unit_tests": "sequential, hash encoder only"
+  },
+  "id": "integrity-v5-p-b-v1",
+  "scope": "B3/B2 puis B4/B5 puis B9 ; protocol avant nouveau code produit",
+  "validation": {
+    "cases": 40,
+    "false_success_on_partial_batch": 0,
+    "hard_safety_failures": 0,
+    "held_by": "Claude",
+    "legitimate_cross_entity_replacements": "all annotated cases must pass",
+    "sealed_before_frozen_candidate": true,
+    "threshold_changes_after_result": false,
+    "unexpected_invalidations": 0
+  }
+}
