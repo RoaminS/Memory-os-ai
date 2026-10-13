@@ -2,7 +2,6 @@
 import importlib.util
 from pathlib import Path
 import sys
-from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -13,7 +12,10 @@ support = importlib.util.module_from_spec(support_spec)
 support_spec.loader.exec_module(support)
 spec = importlib.util.spec_from_file_location('qualification_tcp_gate', ROOT/'scripts/qualify_405_test_isolation.py')
 gate = importlib.util.module_from_spec(spec)
-with patch.dict(sys.modules, {'test_home_guard': support}):
+# Restore only this injected name. patch.dict(sys.modules) would remove every
+# dependency first imported inside the block, splitting Pydantic class caches.
+with pytest.MonkeyPatch.context() as override:
+    override.setitem(sys.modules, 'test_home_guard', support)
     spec.loader.exec_module(gate)
 
 
@@ -25,10 +27,10 @@ def cases():
     return result
 
 
-def test_all_30_named_cases_qualify_regardless_of_order():
-    assert len(gate.EXPECTED_TCP) == len(set(gate.EXPECTED_TCP)) == 30
+def test_all_31_named_cases_qualify_regardless_of_order():
+    assert len(gate.EXPECTED_TCP) == len(set(gate.EXPECTED_TCP)) == 31
     result = gate.tcp_evidence(list(reversed(cases())) + [ET.Element('testcase', classname='tests.other', name='unrelated')])
-    assert result == {'ok': True, 'expected_cases': 30, 'observed_cases': 30,
+    assert result == {'ok': True, 'expected_cases': 31, 'observed_cases': 31,
                       'missing': [], 'unexpected': [], 'unsuccessful': []}
 
 
@@ -46,7 +48,7 @@ def test_case_identity_change_cannot_pass_even_with_equal_count(change):
     proof = gate.tcp_evidence(nodes)
     assert not proof['ok'] and (proof['missing'] or proof['unexpected'])
     if change in ('renamed', 'duplicate-replaces-missing'):
-        assert proof['observed_cases'] == 30  # former bare-count gate would accept
+        assert proof['observed_cases'] == 31  # former bare-count gate would accept
 
 
 @pytest.mark.parametrize('status', ['failure', 'error', 'skipped'])
@@ -56,3 +58,8 @@ def test_unsuccessful_case_never_qualifies(status):
     proof = gate.tcp_evidence(nodes)
     assert not proof['ok'] and proof['unsuccessful'] == [gate.EXPECTED_TCP[0]]
     assert not proof['missing'] and not proof['unexpected']
+
+
+def test_gate_import_preserves_pydantic_class_identity():
+    from pydantic import RootModel,BaseModel
+    assert BaseModel in RootModel.__mro__

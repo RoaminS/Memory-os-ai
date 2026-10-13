@@ -563,3 +563,28 @@ def test_B2_relay_preview_is_read_only_and_has_no_receipt(harness):
             local=payload(await session.call_tool('memory_request_status',{}))
             assert local['unresolved_count']==0
     anyio.run(run)
+
+
+def test_B4_B5_compensation_and_scoped_feed_through_relay(harness):
+    h=harness
+    h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1',MEMORY_V4_WORK_STATE='1')
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r,w),ClientSession(r,w) as session:
+            await session.initialize()
+            initial=payload(await session.call_tool('memory_timeline',{'view':'changes','project':'P'}))
+            await session.call_tool('memory_add_facts',{'project':'P','facts':[{'item_id':'old','text':'Synthetic correct port 8000.','event_time':'2026-10-12T10:00:00Z'}]})
+            rev=payload(await session.call_tool('memory_search',{'project':'P','query':'Synthetic port'}))['hits'][0]['revision']
+            wrong=payload(await session.call_tool('memory_add_facts',{'project':'P','reason':'Synthetic mistake.','expected_revisions':{'old':rev},'facts':[{'item_id':'new','text':'Synthetic incorrect port 9000.','replaces':['old'],'event_time':'2026-10-13T10:00:00Z'}]}))
+            preview=payload(await session.call_tool('memory_add_facts',{'project':'P','mode':'preview','reason':'Restore correct port.','facts':[{'text':'Synthetic correct port 8000.','replaces':['new'],'compensates':{'audit_id':wrong['audits'][0]['audit_id'],'restore_id':'old','restore_revision':rev}}]}))
+            assert preview['ok']
+            applied=payload(await session.call_tool('memory_add_facts',{'project':'P','mode':'apply','reason':'Restore correct port.','facts':preview['prepared_facts'],'expected_revisions':preview['expected_revisions'],'preview_digest':preview['preview_digest'],'confirmed_impacts':['new']}))
+            assert applied['audits'][0]['compensates']['restore_id']=='old'
+            changes=payload(await session.call_tool('memory_timeline',{'view':'changes','project':'P','since_cursor':initial['next_cursor']}))
+            assert len(changes['events'])==3
+            assert changes['events'][-1]['audit_ids']==[applied['audits'][0]['audit_id']]
+            assert changes['events'][-1]['event_id']==applied['change_event']['event_id']
+            assert payload(await session.call_tool('memory_timeline',{'view':'changes','project':'P','since_cursor':changes['next_cursor']}))['events']==[]
+            refused=payload(await session.call_tool('memory_timeline',{'view':'changes','project':'Q','since_cursor':changes['next_cursor']}))
+            assert refused['code']=='cursor_invalid'
+    anyio.run(run)
