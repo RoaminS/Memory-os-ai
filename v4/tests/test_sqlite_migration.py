@@ -207,10 +207,25 @@ def test_hash_search_brief_timeline_unchanged_on_comparison_copy(tmp_path, monke
         args = TimelineIn(project="A", query="Synthetic user lives")
         assert _h_timeline(jsonl, args) == _h_timeline(sql, args)
         before_brief, after_brief = jsonl.session_brief(project="A"), sql.session_brief(project="A")
+        # Detailed mode explicitly includes status diagnostics; compact mode does not.
+        assert after_brief["stats"]["change_journal"]["alert_bytes"] == 10 * 1024 * 1024
+        from memory_os_v4 import brief as wire, server
+        compact = []
+        for engine in (jsonl, sql):
+            with monkeypatch.context() as patch:
+                patch.setattr(server, "_engine", engine)
+                patch.setattr(server, "get_engine", lambda: engine)
+                data = server.dispatch("memory_session_brief", {"project": "A", "wire_format": "compact_v2"})
+                assert "change_journal" not in wire.serialized(data)
+                size, tokens = wire.measures(data)
+                assert size <= 6000 and tokens <= 1500
+                compact.append(wire.serialized(data))
+        assert compact[0] == compact[1]
         # Deployment path and SQLite-only operational counters aren't user memory.
         for brief in (before_brief, after_brief):
             brief["stats"].pop("data_dir")
             brief["stats"].pop("receipts", None)
+            brief["stats"].pop("change_journal", None)
         assert before_brief == after_brief
     assert _files(source) == before
 

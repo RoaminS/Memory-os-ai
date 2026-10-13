@@ -105,7 +105,7 @@ def test_projection_rollback_is_atomic(engine):
 
 def test_known_schema6_copy_upgrades_lookup_without_changing_task_authority(tmp_path):
     import sqlite3
-    from memory_os_v4.sqlite_store import SQLiteStore
+    from memory_os_v4.sqlite_store import SCHEMA_VERSION, SQLiteStore
     path = tmp_path / 'schema6'
     with MemoryV4(config=Config(data_dir=str(path), store_backend='sqlite_s1', embed_model='hash',
                                hash_dim=16, work_state=True)) as value:
@@ -119,13 +119,17 @@ def test_known_schema6_copy_upgrades_lookup_without_changing_task_authority(tmp_
     con.execute('DROP TRIGGER task_lookup_update')
     con.execute('DROP TABLE task_lookup')
     con.execute('DROP INDEX task_versions_cut')
-    con.execute('DELETE FROM schema_migrations WHERE version=7')
+    # This deliberately simulated fixture removes ALL post-six objects;
+    # the genuine schema-seven migration has a separate archived-source test.
+    con.execute('DROP TABLE change_events')
+    con.execute("DELETE FROM store_metadata WHERE key='change_journal'")
+    con.execute('DELETE FROM schema_migrations WHERE version>=7')
     con.execute('PRAGMA user_version=6')
     con.commit()
     con.close()
     from contextlib import closing
     with closing(SQLiteStore(path)) as store:
-        assert store._connection.execute('PRAGMA user_version').fetchone()[0] == 7
+        assert store._connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         assert store._connection.execute('SELECT * FROM task_versions').fetchall() == authority
         assert store._connection.execute('SELECT count(*) FROM task_lookup').fetchone()[0] == 1
         assert store.check_integrity()
