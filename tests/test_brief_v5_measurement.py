@@ -1,6 +1,11 @@
 """Pure protocol/measurement tests, no performance run, TCP, or real machine guard."""
 import importlib.util
+import io
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tarfile
 from types import SimpleNamespace
 
 import pytest
@@ -35,3 +40,54 @@ def test_measurement_refuses_dirty_protocol_seal(tmp_path,monkeypatch):
     (tmp_path/'protocol_v1.sha256').write_text('0'*64)
     with pytest.raises(ValueError,match='seal mismatch'):
         perf.sealed_protocol()
+
+
+@pytest.mark.parametrize('value', [None, '', '/operator/registry.json'])
+def test_private_environment_unsets_registry_without_mutating_parent(value):
+    parent={'MEMORY_V4_BUILD_COMMIT':'a'*40,'HF_HUB_OFFLINE':'1'}
+    if value is not None:
+        parent['MEMORY_V4_PROJECT_REGISTRY']=value
+    before=dict(parent)
+    child=perf.without_project_registry(parent)
+    assert 'MEMORY_V4_PROJECT_REGISTRY' not in child
+    assert child=={k:v for k,v in before.items() if k!='MEMORY_V4_PROJECT_REGISTRY'}
+    assert parent==before
+
+
+@pytest.mark.parametrize('arm', ['baseline','candidate'])
+def test_worker_entry_clears_registry_before_worker_or_engine_import(tmp_path,monkeypatch,arm):
+    monkeypatch.setenv('MEMORY_V4_PROJECT_REGISTRY','')
+    source=tmp_path/arm
+    monkeypatch.setattr(sys,'argv',['tool','--worker-source',str(source),'--output',str(tmp_path/'out'),
+                                  '--table',str(tmp_path/'table')])
+    observed=[]
+    def stub(*args):
+        assert 'MEMORY_V4_PROJECT_REGISTRY' not in os.environ
+        observed.append(args[0])
+    monkeypatch.setattr(perf,'worker',stub)
+    assert perf.main()==0
+    assert observed==[source]
+
+
+@pytest.mark.parametrize('revision', ['fdd60cb','9bd4f73'])
+def test_real_baseline_and_candidate_registry_loader_with_clean_environment(tmp_path,revision):
+    # No engine/encoder/server or resource workload: reproduce the failing
+    # Config.from_env -> ProjectRegistry.load path against the actual sources.
+    source=tmp_path/'source'
+    source.mkdir()
+    archive=subprocess.run(['git','archive',revision,'v4/src'],cwd=ROOT,
+                           capture_output=True,check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(source,filter='data')
+    parent={**os.environ,'PYTHONPATH':str(source/'v4/src'),'MEMORY_V4_PROJECT_REGISTRY':'',
+            'PYTHONDONTWRITEBYTECODE':'1','HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1'}
+    program='''
+from memory_os_v4.config import Config
+from memory_os_v4.projects import ProjectRegistry
+c=Config.from_env()
+assert c.project_registry is None
+assert ProjectRegistry.load(c.project_registry).document is None
+'''
+    result=subprocess.run([sys.executable,'-B','-c',program],cwd=tmp_path,
+                          env=perf.without_project_registry(parent),capture_output=True,text=True,timeout=20)
+    assert result.returncode==0,result.stderr

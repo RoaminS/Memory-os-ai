@@ -48,6 +48,13 @@ def query(index):
             'wire_format':'compact_v2', 'budget_tokens':1500}
 
 
+def without_project_registry(environ):
+    """Literal synthetic labels in BOTH arms; empty is not an absent path."""
+    result = dict(environ)
+    result.pop('MEMORY_V4_PROJECT_REGISTRY', None)
+    return result
+
+
 def run_guarded(command, *, env, log):
     """Own process group; a guard/timeout also stops its private TCP/relay children."""
     process=subprocess.Popen(command,cwd=ROOT,env=env,stdout=log,stderr=log,start_new_session=True)
@@ -142,13 +149,13 @@ def worker(source, directory, protocol):
         port=sock.getsockname()[1]
     token=directory/'token'
     create_token(token)
-    env={**os.environ,'PYTHONPATH':str(source/'v4/src'),'MEMORY_V4_DIR':str(store),
+    env=without_project_registry({**os.environ,'PYTHONPATH':str(source/'v4/src'),'MEMORY_V4_DIR':str(store),
          'MEMORY_V4_STORE_BACKEND':'sqlite_s1','MEMORY_V4_WORK_STATE':'1','MEMORY_V4_EMBED_MODEL':'hash',
          'MEMORY_V4_HASH_DIM':'16','MEMORY_V4_TOKEN_FILE':str(token),'MEMORY_V4_OPS_DIR':str(directory/'ops'),
          'MEMORY_V4_RELAY_JOURNAL_DIR':str(directory/'ops/relay'),
-         'MEMORY_V4_PROJECT_REGISTRY':'','MEMORY_V4_URL':f'http://127.0.0.1:{port}/mcp/',
+         'MEMORY_V4_URL':f'http://127.0.0.1:{port}/mcp/',
          'MEMORY_V4_QUALIFICATION_METRICS':'0','MEMORY_V4_MAINTENANCE_MODE':'disabled',
-         'MEMORY_V4_WRITE_MODE':'read_write','MEMORY_V4_CLIENT_ID':'P-A-synthetic'}
+         'MEMORY_V4_WRITE_MODE':'read_write','MEMORY_V4_CLIENT_ID':'P-A-synthetic'})
     code='''
 import sys
 from memory_os_v4 import server
@@ -212,6 +219,7 @@ def main():
     args=parser.parse_args()
     protocol,digest=sealed_protocol()
     os.environ.update(MEMORY_V4_CL100K_PATH=str(args.table.resolve()),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',PYTHONDONTWRITEBYTECODE='1')
+    os.environ.pop('MEMORY_V4_PROJECT_REGISTRY', None)
     if args.worker_source:
         worker(args.worker_source.resolve(),args.output.resolve(),protocol)
         return 0
@@ -246,7 +254,7 @@ def main():
                 report['last_resources']=guarded()
                 directory=private/label
                 directory.mkdir()
-                env={**os.environ,'MEMORY_V4_BUILD_COMMIT':commit}
+                env=without_project_registry({**os.environ,'MEMORY_V4_BUILD_COMMIT':commit})
                 with (output/(label+'.log')).open('w') as log:
                     command=[sys.executable,'-B',str(Path(__file__).resolve()),'--worker-source',str(source),
                              '--table',str(args.table.resolve()),'--output',str(directory)]
