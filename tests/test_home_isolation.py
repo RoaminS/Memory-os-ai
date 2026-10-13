@@ -121,3 +121,43 @@ def test_sdist_manifest_ships_both_isolation_files():
     manifest = (ROOT / 'MANIFEST.in').read_text()
     assert 'include conftest.py' in manifest
     assert 'recursive-include scripts *.py' in manifest
+
+
+@pytest.mark.parametrize('operation', ['unlink', 'unlink_dir_fd', 'write', 'os_open', 'truncate'])
+def test_owned_symlink_entry_cleanup_never_allows_writing_interpreter_target(tmp_path, operation):
+    protected = tmp_path / 'operator'
+    owned = protected / 'fixture'
+    owned.mkdir(parents=True)
+    target = protected / 'qualified-env/bin/python'
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'qualified-interpreter-sentinel')
+    link = owned / 'python'
+    link.symlink_to(target)
+    program = '''
+import importlib.util, os, sys
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('guard',sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+home,owned,target,link=map(Path,sys.argv[2:6]); op=sys.argv[6]
+g=m.HomeWriteGuard(home,(owned,)); g.install()
+if op in {'unlink','unlink_dir_fd'}:
+    if op=='unlink': link.unlink()
+    else:
+        fd=os.open(owned,os.O_RDONLY)
+        try: os.unlink('python',dir_fd=fd)
+        finally: os.close(fd)
+    assert not link.is_symlink() and not g.violations
+else:
+    try:
+        if op=='write': link.write_bytes(b'bad')
+        elif op=='os_open': os.open(link,os.O_WRONLY|os.O_TRUNC)
+        else: os.truncate(link,0)
+    except PermissionError: assert len(g.violations)==1
+    else: raise AssertionError('target write was allowed')
+assert target.read_bytes()==b'qualified-interpreter-sentinel'
+'''
+    result = subprocess.run([sys.executable, '-B', '-c', program, str(ROOT / 'scripts/test_home_guard.py'),
+                             str(protected), str(owned), str(target), str(link), operation],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert target.read_bytes() == b'qualified-interpreter-sentinel'

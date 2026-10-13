@@ -51,7 +51,7 @@ class HomeWriteGuard:
 
         os.open = checked_open
 
-    def check(self, path, dir_fd=None):
+    def check(self, path, dir_fd=None, *, directory_entry=False):
         if path is None:
             return
         if isinstance(path, int):
@@ -63,7 +63,13 @@ class HomeWriteGuard:
         if not os.path.isabs(path) and dir_fd not in (None, -1):
             parent = self.fd_path(dir_fd)
             path = os.path.join(parent, path)
-        path = os.path.realpath(path)
+        if directory_entry and os.path.basename(path) not in {'', '.', '..'}:
+            # unlink/rmdir operate on an entry, not its final symlink target.
+            # Resolve all parents (including aliases and ..), retaining the
+            # basename only. Opening/truncating/chmod still follows the target.
+            path = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+        else:
+            path = os.path.realpath(path)
         if path == self.home or path.startswith(self.home + os.sep):
             if any(path == p or path.startswith(p + os.sep) for p in self.allowed):
                 return
@@ -83,7 +89,7 @@ class HomeWriteGuard:
         elif event in {'os.mkdir', 'os.chmod', 'os.chown'}:
             self.check(args[0], args[-1])
         elif event in {'os.remove', 'os.rmdir'}:
-            self.check(args[0], args[1])
+            self.check(args[0], args[1], directory_entry=True)
         elif event in {'os.rename', 'os.link'}:
             self.check(args[0], args[2])
             self.check(args[1], args[3])

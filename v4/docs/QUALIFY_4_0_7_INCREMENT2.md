@@ -42,6 +42,16 @@ originaux, paramètres P-A SHA identique. Les nouveaux résultats sont dans
 .local-qualification/recovered-increment2-unit-v1.log et XML. La qualification
 physique TCP reste à refaire par Claude ; aucune preuve perdue déclarée rejouée.
 
+## Garde de tests et environnement persistant
+
+Le premier run global restauré a refusé la suppression d’un lien de fixture
+vers l’interpréteur persistant (garde suivant à tort le dernier symlink).
+Correctif test-only : supprimer une entrée autorisée ne suit pas sa cible ;
+les parents sont résolus et les écritures/open/truncate continuent à suivre
+la cible. 45 tests isolation/activation verts, dont cinq régressions ; aucune
+permission ajoutée sur qual-envs ni modification du moteur. Rapport initial
+refusé conservé, configurations clients inchangées.
+
 ## Claude : qualification séquentielle, sorties neuves
 
 Après import du bundle incrément 2, arbre au HEAD propre, mêmes dépendances
