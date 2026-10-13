@@ -213,3 +213,47 @@ def test_worker_audit_or_missing_amendment_never_opens_a_store(tmp_path,monkeypa
     audit=json.loads((tmp_path/'audit.json').read_text())
     assert audit['cases']==40 and audit['amendment_required']
     assert not (tmp_path/'outputs.jsonl').exists()
+
+
+@pytest.mark.parametrize('mutation',[None,'inputs','manifest','candidate','baseline','date','extra','head'])
+def test_frozen_candidate_binding_is_explicit_and_seal_specific(tmp_path,mutation):
+    candidate='b'*40
+    value={'inputs_sha256':'a'*64,'manifest_sha256':'c'*64,'candidate_commit':candidate,
+           'baseline_commit':runner.BASELINE,'bound_at':'2026-10-13T16:00:00Z',
+           'bound_by':'synthetic-operator','reason':'Independent dev candidate binding.'}
+    if mutation in {'inputs','manifest'}:
+        value[mutation+'_sha256']='d'*64
+    elif mutation in {'candidate','baseline'}:
+        value[mutation+'_commit']='e'*40
+    elif mutation=='date':
+        value['bound_at']='2026-10-13T16:00:00'
+    elif mutation=='extra':
+        value['auto_approve']=True
+    elif mutation=='head':
+        candidate='HEAD'
+    path=tmp_path/'binding.json'
+    path.write_text(json.dumps(value))
+    if mutation is None:
+        assert runner.candidate_binding(path,candidate,'a'*64,'c'*64)==value
+    else:
+        with pytest.raises(ValueError):
+            runner.candidate_binding(path,candidate,'a'*64,'c'*64)
+
+
+def test_new_candidate_never_defaults_to_unbound_and_v1_stays_frozen():
+    assert runner.candidate_binding(None,runner.CANDIDATE,'a'*64,'c'*64) is None
+    with pytest.raises(ValueError,match='binding'):
+        runner.candidate_binding(None,'b'*40,'a'*64,'c'*64)
+
+
+def test_v2_prefix_requires_all_40_ordered_new_inputs_and_its_seal(tmp_path):
+    rows=[{**development_case(),'id':f'V5-VAL2-{i:03}', 'language':'fr' if i<=20 else 'en'} for i in range(1,41)]
+    raw=''.join(json.dumps(c)+'\n' for c in rows).encode()
+    digest=runner.sha(raw)
+    path=tmp_path/'inputs-v2.jsonl'
+    path.write_bytes(raw)
+    manifest=tmp_path/'manifest-v2.json'
+    manifest.write_text(json.dumps({'cases':40,'inputs_sha256':digest,'fr':20,'en':20,'families':{'units':40}}))
+    assert len(runner.load_inputs(path,manifest,digest,'V5-VAL2-')[0])==40
+    with pytest.raises(ValueError,match='case IDs'):
+        runner.load_inputs(path,manifest,digest)

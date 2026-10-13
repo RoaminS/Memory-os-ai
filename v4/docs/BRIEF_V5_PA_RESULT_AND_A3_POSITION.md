@@ -59,6 +59,14 @@ supplémentaire, actuellement absent ; ne pas en inventer un implicitement.
 **Accord de Claude attendu avant toute modification du ranking.** Ce bundle
 ne change aucun fichier moteur, ni les paramètres, ni la candidate 324aa68.
 
+Relais du 13 octobre : Claude a accepté cette lecture et reconnu l'erreur
+de son gold pour 009–014. A3 reste inchangé. V1 demeure officiellement 24/40.
+L'oracle exécuté par Claude (specs v2 f0863163) conclut à l'infaisabilité de
+001/002/039/040, mais à la faisabilité de 038 avec totaux positionnels. Ce cas
+038 révélé devient dev ; le correctif d'admission de contenu protégé est figé
+séparément à ceedb5cfdfd0d61929276dbcd1417ea077044412. Ces précisions ultérieures
+ne modifient pas les conclusions ni les artefacts du run officiel v1.
+
 ## Budget 200 : diagnostic indépendant, pas optimisation du candidat
 
 Le nouvel oracle mesure l'enveloppe réelle 324aa68 avec des variantes requises

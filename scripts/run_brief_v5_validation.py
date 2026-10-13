@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -96,7 +97,7 @@ def forbid_neural():
         Embedder.encode, Embedder._ensure_model = encode, load
 
 
-def load_inputs(path, manifest_path, expected):
+def load_inputs(path, manifest_path, expected, case_id_prefix='V5-VAL-'):
     if path.name == 'cases_v1.jsonl' or 'sealed_v1' in path.parts:
         raise ValueError('Gold source path forbidden; use the inputs-only copy')
     raw = path.read_bytes()
@@ -107,7 +108,9 @@ def load_inputs(path, manifest_path, expected):
     no_gold(cases)
     if len(cases) != 40 or manifest['cases'] != 40:
         raise ValueError('Expected all 40 sealed inputs')
-    if [c['id'] for c in cases] != [f'V5-VAL-{i:03}' for i in range(1, 41)]:
+    if case_id_prefix not in {'V5-VAL-', 'V5-VAL2-'}:
+        raise ValueError('Explicit supported case ID prefix required')
+    if [c['id'] for c in cases] != [f'{case_id_prefix}{i:03}' for i in range(1, 41)]:
         raise ValueError('Missing, duplicate or reordered case IDs')
     for key in ('fr', 'en'):
         if sum(c['language'] == key for c in cases) != manifest[key]:
@@ -131,6 +134,24 @@ def compatibility(path, inputs_sha):
             or value['baseline_client_id'] not in {'negotiate', 'exact'}
             or value['baseline_metadata'] != 'unavailable'):
         raise ValueError('Explicit client-id policy and unavailable baseline metadata required')
+    return value
+
+
+def candidate_binding(path, candidate, inputs_sha, manifest_sha):
+    if re.fullmatch(r'[0-9a-f]{40}', candidate) is None:
+        raise ValueError('Candidate must be a full lowercase frozen Git SHA, never HEAD')
+    if path is None:
+        if candidate != CANDIDATE:
+            raise ValueError('New frozen candidate requires an explicit input-seal binding')
+        return None
+    value = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    required = {'inputs_sha256', 'manifest_sha256', 'candidate_commit', 'baseline_commit',
+                'bound_at', 'bound_by', 'reason'}
+    if (set(value) != required or value['inputs_sha256'] != inputs_sha
+            or value['manifest_sha256'] != manifest_sha or value['candidate_commit'] != candidate
+            or value['baseline_commit'] != BASELINE or not value['bound_by'] or not value['reason']):
+        raise ValueError('Frozen candidate binding mismatches inputs/manifest/arms')
+    timestamp(value['bound_at'])
     return value
 
 
@@ -305,7 +326,8 @@ def worker(args):
     from memory_os_v4 import models
     from memory_os_v4.store import MemoryItem
     from memory_os_v4.readiness import build_identity
-    cases, _ = load_inputs(args.inputs, args.manifest, args.inputs_sha256)
+    cases, _ = load_inputs(args.inputs, args.manifest, args.inputs_sha256,
+                           getattr(args, 'case_id_prefix', 'V5-VAL-'))
     amendment = compatibility(args.amendment, args.inputs_sha256)
     identity = build_identity()
     if identity.get('commit') != args.arm_commit or identity['identity_source'] != 'env_declared':
@@ -349,11 +371,16 @@ def main():
         parser.add_argument('--'+flag, type=Path, required=True)
     parser.add_argument('--inputs-sha256', required=True)
     parser.add_argument('--amendment', type=Path)
+    parser.add_argument('--candidate-commit', default=CANDIDATE,
+                        help='Explicit full frozen SHA; v1 default remains 324aa68')
+    parser.add_argument('--candidate-binding', type=Path,
+                        help='Required seal binding for any new candidate')
+    parser.add_argument('--case-id-prefix', choices=['V5-VAL-', 'V5-VAL2-'], default='V5-VAL-')
     parser.add_argument('--run', action='store_true', help='Explicit collection; default is zero-execution schema audit')
     parser.add_argument('--worker-source', type=Path, help=argparse.SUPPRESS)
     parser.add_argument('--arm-commit', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    for key in ('inputs', 'manifest', 'table', 'output', 'amendment', 'worker_source'):
+    for key in ('inputs', 'manifest', 'table', 'output', 'amendment', 'worker_source', 'candidate_binding'):
         if getattr(args, key) is not None:
             setattr(args, key, getattr(args, key).resolve())
     if args.worker_source:
@@ -368,14 +395,23 @@ def main():
         if hasattr(os, 'getpriority') and os.getpriority(os.PRIO_PROCESS, 0) < 15:
             os.nice(15 - os.getpriority(os.PRIO_PROCESS, 0))
         _, protocol_sha = sealed_protocol()
-        cases, manifest = load_inputs(args.inputs, args.manifest, args.inputs_sha256)
+        cases, manifest = load_inputs(args.inputs, args.manifest, args.inputs_sha256, args.case_id_prefix)
         amendment = compatibility(args.amendment, args.inputs_sha256)
+        manifest_sha = sha(args.manifest.read_bytes())
+        binding = candidate_binding(args.candidate_binding, args.candidate_commit, args.inputs_sha256, manifest_sha)
         report.update(inputs_sha256=args.inputs_sha256, manifest_sha256=sha(args.manifest.read_bytes()),
                       protocol_sha256=protocol_sha, amendment=amendment,
-                      tokenizer_sha256=sha(args.table.read_bytes()), cases=len(cases))
-        if subprocess.run(['git', 'diff', '--quiet', manifest['candidate_frozen'], CANDIDATE, '--', 'v4/src'], cwd=ROOT).returncode:
+                      tokenizer_sha256=sha(args.table.read_bytes()), cases=len(cases),
+                      candidate_commit=args.candidate_commit, candidate_binding=binding, case_id_prefix=args.case_id_prefix)
+        if re.fullmatch(r'[0-9a-f]{40}', manifest['candidate_frozen']) is None:
+            raise ValueError('Manifest source anchor must be a full frozen SHA')
+        difference = subprocess.run(['git', 'diff', '--quiet', manifest['candidate_frozen'],
+                                     args.candidate_commit, '--', 'v4/src'], cwd=ROOT).returncode
+        if difference not in {0, 1}:
+            raise ValueError('Cannot attest manifest/candidate source comparison')
+        if difference and binding is None:
             raise ValueError('Manifest candidate differs from requested frozen engine')
-        report['manifest_candidate_engine_identical'] = True
+        report['manifest_candidate_engine_identical'] = difference == 0
         runner = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
         if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=ROOT, text=True).strip():
             raise ValueError('Dirty runner source refused')
@@ -388,7 +424,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='validation-private-', dir=args.output) as temporary:
             private = Path(temporary)
             jobs = []
-            for label, commit in (('baseline', BASELINE), ('candidate', CANDIDATE)):
+            for label, commit in (('baseline', BASELINE), ('candidate', args.candidate_commit)):
                 source = private/(label+'-source')
                 export_arm(commit, source)
                 output = args.output/label
@@ -403,7 +439,8 @@ def main():
                     'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'PYTHONDONTWRITEBYTECODE': '1'})
                 command = [sys.executable, '-B', str(Path(__file__).resolve()), '--worker-source', str(source),
                     '--arm-commit', commit, '--inputs', str(args.inputs), '--manifest', str(args.manifest),
-                    '--inputs-sha256', args.inputs_sha256, '--table', str(args.table), '--output', str(output)]
+                    '--inputs-sha256', args.inputs_sha256, '--table', str(args.table), '--output', str(output),
+                    '--case-id-prefix', args.case_id_prefix]
                 if args.amendment:
                     command += ['--amendment', str(args.amendment)]
                 jobs.append((label, output, env, command))
