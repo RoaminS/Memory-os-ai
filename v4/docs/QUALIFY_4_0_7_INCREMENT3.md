@@ -1,6 +1,7 @@
 # Incrément 3 — A3+A7, développement 4.0.6.dev0
 
-Base restaurée incrément 2 : **cff2958** (original perdu 1bbab24).
+Base restaurée incrément 2 : **7655c3a** (produit cff2958, garde test-only ;
+original perdu 1bbab24).
 Même ligne release/4.0.7 ; protocole original 184b5e9 restauré à 4845974,
 fichier JSON/SHA inchangé. Huit fichiers moteur/serveur/relais sont
 byte-identiques aux empreintes de la preuve source c84c9f3 du 12 octobre. Aucun gain d'utilité annoncé,
@@ -75,6 +76,15 @@ rapports ne constituent pas une qualification des nouveaux commits. Arbre
 persistant wt-407 ; bundles et qual-envs persistants dans memory-os-local.
 Les paramètres et le gold caché restent inchangés. Les nouvelles preuves
 seront datées séparément ; la qualification physique reste à Claude.
+
+Nouvelles preuves : 256 tests A2/A4 verts ; 45 tests garde/activation verts ;
+**675 v3 + 1951 v4 sans TCP verts**, client_configs_unchanged=true ; **12/12**
+enveloppes exactes et compteurs, source propre 4e32721, runtime persistant
+qualifié, lints projet/v4 verts. Le premier run global a refusé une suppression
+de lien de fixture suivant à tort l'interpréteur cible sous qual-envs. Correctif
+isolé dans le garde, aucune autorisation ajoutée sur l'environnement protégé ;
+ouvrir/écrire/tronquer au travers du lien demeure interdit. Rapport refusé
+conservé. Aucun modèle, TCP ou P-A 10k exécuté ici.
 
 ## Claude — commandes séquentielles, sorties fraîches
 
