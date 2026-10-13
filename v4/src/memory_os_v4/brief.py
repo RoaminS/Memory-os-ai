@@ -51,7 +51,7 @@ def eligible(item, project, now):
 
 
 def rebudget(data, notices=(), *, wire_format=None, budget_tokens=None):
-    """Budget the FINAL relay envelope too; raw journal/error messages never enter it."""
+    """Rebudget whole units after adding local notices, never slice memory text."""
     out = deepcopy(data)
     if wire_format == "compact_v2":
         out["wire_format"] = wire_format
@@ -60,62 +60,14 @@ def rebudget(data, notices=(), *, wire_format=None, budget_tokens=None):
     limit = out.get("budget_tokens", TOKEN_LIMIT)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 200 <= limit <= TOKEN_LIMIT:
         raise ValueError("Invalid compact token budget")
-    wire = out.get("wire_format", "legacy")
-    codes = list(dict.fromkeys([*out.get("notices", []), *notices]))
-    count = counter()
-    # Strip our own prior prefix only; preserve memory content as data.
-    body = out.get("text", "")
-    if body.startswith(WARNING + "\n"):
-        body = body[len(WARNING) + 1 :]
-        if body.startswith("Notices: "):
-            body = body.split("\n", 1)[1] if "\n" in body else ""
-
-    def render():
-        out["notices"] = codes
-        out["text"] = WARNING + "\n" + ("Notices: " + ", ".join(codes) + "\n" if codes else "") + body
-
-    render()
-
-    def fits():
-        size, tokens = measures(out, count)
-        return size <= BYTE_LIMIT and tokens <= limit
-
-    if not fits() and "budget_saturated" not in codes:
-        codes.append("budget_saturated")
-        render()
-    while not fits():
-        if body:
-            body = body[: max(0, len(body) - max(1, len(body) // 8))]
-        elif out.get("references"):
-            out["references"].pop()
-        elif out.get("blocks"):
-            out["blocks"].pop(next(reversed(out["blocks"])))
-        else:
-            # Unbounded caller-supplied project strings must not break error budgets.
-            out = {"ok": False, "mode": "compact", "code": "budget_saturated"}
-            if wire == "compact_v2":
-                out["wire_format"] = wire
-            if limit != TOKEN_LIMIT:
-                out["budget_tokens"] = limit
-            codes = ["budget_saturated", *(["unresolved_requests"] if "unresolved_requests" in codes else [])]
-        render()
-        if not body and not out.get("references") and not out.get("blocks") and not fits():
-            # The minimum error envelope cannot retain an unbounded project.
-            out = {"ok": False, "mode": "compact", "code": "budget_saturated"}
-            if wire == "compact_v2":
-                out["wire_format"] = wire
-            if limit != TOKEN_LIMIT:
-                out["budget_tokens"] = limit
-            out["text"] = "Memory brief unavailable: budget_saturated."
-            out["notices"] = codes
-            if not fits():
-                raise ValueError("Compact error envelope cannot fit the validated budget")
-    return out
+    from .brief_selection import rebudget_units
+    return rebudget_units(out, notices, counter(), BYTE_LIMIT, limit)
 
 
 def build(engine, project, focus_query=None, expand=(), *, wire_format="legacy", budget_tokens=None):
     """No neural encoding, writes, touches, tools, or implicit project widening."""
-    count = counter()  # refuse before work if exact offline counter is unavailable
+    from .brief_selection import Unit, select, task_text
+    count = counter()
     with engine._lock:
         engine._ensure_open()
         now = time.time()
@@ -147,74 +99,33 @@ def build(engine, project, focus_query=None, expand=(), *, wire_format="legacy",
             expanded_ids = {t['task_id'] for t in expanded_tasks}
             tasks = expanded_tasks + [t for t in tasks if t['task_id'] not in expanded_ids]
         task_refs = {'task:' + t['task_id'] for t in tasks}
+        block_refs = {'block:' + k for k in blocks}
         found = requested & by_id.keys()
-        if requested - found - task_refs:
+        if requested - found - task_refs - block_refs:
             notices.append("reference_not_found")
         expanded = found | {it.id for it in live if found.intersection(it.parent_ids)}
         lexical = engine.bm25.scoped(set(by_id))
         scores = dict(lexical.search(lexical_tokens(focus_query or "", engine.config), top_k=len(live)))
-        live.sort(
-            key=lambda it: (
-                it.id not in found,
-                it.id not in expanded,
-                not engine._is_pending(it),
-                -scores.get(it.id, 0),
-                -it.event_time,
-                -it.importance,
-                it.id,
-            )
-        )
+        live.sort(key=lambda it: (it.id not in found, it.id not in expanded,
+                                 not engine._is_pending(it), -scores.get(it.id, 0),
+                                 -it.event_time, -it.importance, it.id))
         if not live and not blocks and not tasks:
             notices.append("empty_project")
-        selected = live[:40]
-        if len(live) > len(selected):
+        if len(live) > 40 or len(blocks) > 16 or len(tasks) > 10:
             notices.append("budget_saturated")
-        rows = [{"id": it.id, "kind": it.kind, "text": it.text[:480]} for it in selected]
-        rows = [{'id': 'task:' + t['task_id'], 'kind': 'task',
-                 'text': (f"{t['status']} | {t['title']} | owner={(t.get('owner') or {}).get('client_id')} | "
-                          f"next={t['next_action']} | blocked={t['blocked_reason']} | stale={t['stale']}")[:480]}
-                for t in tasks[:10]] + rows
-        if any(len(it.text) > 480 for it in selected):
-            notices.append("item_truncated")
-        if any(len(v) > 480 for v in blocks.values()):
-            notices.append("block_truncated")
-        blocks = {k: v[:480] for k, v in sorted(blocks.items())}
-
-        def assemble():
-            data = {
-                "mode": "compact",
-                "project": str(project) if project is not None else "*",
-                "text": WARNING
-                + "\n"
-                + ("Notices: " + ", ".join(dict.fromkeys(notices)) + "\n" if notices else "")
-                + "\n".join(
-                    [f"[block:{k}] {v}" for k, v in blocks.items()]
-                    + [f"[{r['id']}] {r['text']}" for r in rows]
-                ),
-                "blocks": {k: {"reference": "block:" + k} for k in blocks},
-                "references": [{"id": r["id"], "kind": r["kind"]} for r in rows],
-                "notices": list(dict.fromkeys(notices)),
-            }
-            if wire_format == "compact_v2":
-                data["wire_format"] = wire_format
-            if budget_tokens is not None:
-                data["budget_tokens"] = budget_tokens
-            return data
-
-        data = assemble()
-        # Reserve space for relay-local unresolved notices, budget verified again there.
-        reserve_tokens = min(1350, (budget_tokens or TOKEN_LIMIT) - 100)
-        while rows and (measures(data, count)[0] > 5500 or measures(data, count)[1] > reserve_tokens):
-            if len(rows) > 1:
-                rows.pop()
-                notices.append("budget_saturated")
-            elif len(rows[0]["text"]) > 40:
-                rows[0]["text"] = rows[0]["text"][: len(rows[0]["text"]) // 2]
-                notices.append("item_truncated")
-            else:
-                break
-            data = assemble()
-        return rebudget(data)
+        pool = [Unit('block:' + k, 'block', 'block', v, (-1, k))
+                for k, v in sorted(blocks.items(), key=lambda row: ('block:' + row[0] not in requested, row[0]))[:16]]
+        pool += [Unit('task:' + t['task_id'], 'task', 'task', task_text(t), (0, i),
+                      t['status'] in {'open', 'blocked'} and not t['stale']) for i, t in enumerate(tasks[:10])]
+        pool += [Unit(it.id, it.kind, 'memory', it.text, (1, i),
+                      {'constraint','critical'} <= {tag.casefold() for tag in it.tags}) for i, it in enumerate(live[:40])]
+        pool.sort(key=lambda u: u.order)
+        base = {"mode": "compact", "project": str(project) if project is not None else "*"}
+        if wire_format == "compact_v2":
+            base['wire_format'] = wire_format
+        if budget_tokens is not None:
+            base['budget_tokens'] = budget_tokens
+        return rebudget(select(base, pool, notices, count, BYTE_LIMIT, budget_tokens or TOKEN_LIMIT))
 
 
 def expand_detailed(engine, project, ids):
@@ -232,18 +143,30 @@ def expand_detailed(engine, project, ids):
             except ValueError:
                 pass  # ambiguous or absent block, no guessed expansion
         found_refs = found | {"block:" + key for key in blocks}
+        from . import work_state as work
+        tasks = []
+        if work.enabled(engine) and project is not None:
+            for reference in ids:
+                if reference.startswith('task:'):
+                    task = work.head(engine, reference[5:], project)
+                    if task is not None:
+                        tasks.append(work.view(engine, task))
+            found_refs |= {'task:' + task['task_id'] for task in tasks}
         items = sorted(
             (it for it in live if it.id in found or found.intersection(it.parent_ids)), key=lambda it: it.id
         )
         return {
             "mode": "detailed",
             "items": [it.to_dict() for it in items],
+            "tasks": tasks,
+            "references": [{"id": 'task:' + t['task_id'], "kind": 'task'} for t in tasks],
             "blocks": blocks,
             "notices": ["reference_not_found"] if set(ids) - found_refs else [],
             "text": WARNING
             + "\n"
             + "\n".join(
                 [f"[block:{k}] {v}" for k, v in blocks.items()] + [f"[{it.id}] {it.text}" for it in items]
+                + [f"[task:{t['task_id']}] {t['title']} | next={t['next_action']} | blocked={t['blocked_reason']}" for t in tasks]
             ),
         }
 
@@ -268,7 +191,12 @@ def compact_error(data, *, wire_format="legacy", budget_tokens=None, notices=())
         out["wire_format"] = wire_format
     if budget_tokens is not None:
         out["budget_tokens"] = budget_tokens
-    if "unresolved_requests" in notices:
-        out["notices"] = ["unresolved_requests"]
+    allowed_notices = {'unresolved_requests', 'critical_omitted', 'critical_reference_only', 'coverage_detail_omitted'}
+    inherited = data.get('notices', [])
+    inherited = inherited if isinstance(inherited, list) else []
+    preserved = [n for n in [*inherited, *notices] if isinstance(n, str) and n in allowed_notices]
+    if preserved:
+        out['notices'] = list(dict.fromkeys(preserved))
+    if "unresolved_requests" in preserved:
         out["text"] += " Unresolved requests: inspect memory_request_status."
     return out

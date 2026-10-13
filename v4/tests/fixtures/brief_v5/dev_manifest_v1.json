@@ -2,6 +2,13 @@
   "sealed_at": "2026-10-12",
   "before_engine_implementation": true,
   "cases": 12,
-  "sha256": "99407dc3c4ae6bb7534604d7540a88750012f8b7a45f1cfb7cd440f3dafd8d6f",
-  "validation_gold_read": false
+  "sha256": "20371220a3338cd598f23e30f0d0bb39a63cd325ad372671b176dab388c4d757",
+  "validation_gold_read": false,
+  "amendments": [
+    {
+      "date": "2026-10-12",
+      "id": "DEV-11",
+      "reason": "Clerical oracle error: expected two sentences instead of the first complete sentence; protocol and algorithm unchanged; hidden validation not accessed."
+    }
+  ]
 }
