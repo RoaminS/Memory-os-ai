@@ -413,10 +413,12 @@ def test_L5_capabilities_roundtrip_and_client_observation(harness):
 
 
 def test_L1a_real_tcp_compact_and_offline_counter_failure(harness):
+    from mcp.types import Implementation
     h=harness
     h.start()
     async def run():
-        async with stdio_client(h.params()) as (r,w), ClientSession(r,w) as session:
+        async with stdio_client(h.params()) as (r,w), ClientSession(
+                r,w,client_info=Implementation(name='Codex',version='brief-v5-test')) as session:
             await session.initialize()
             payload(await session.call_tool('memory_add_facts',{'project':'brief-test','facts':[{'text':'Synthetic current task: verify compact brief.'}]}))
             compact=await session.call_tool('memory_session_brief',{'project':'brief-test'})
@@ -439,6 +441,20 @@ def test_L1a_real_tcp_compact_and_offline_counter_failure(harness):
                     assert (bounded.structuredContent is None)==(fmt=='compact_v2')
                 detailed=payload(await session.call_tool('memory_session_brief',{'project':'brief-test','mode':'detailed','expand':[data['references'][0]['id']]}))
                 assert detailed['items'][0]['text']=='Synthetic current task: verify compact brief.'
+                # A3: relay-filled caller overrides a model declaration. Only
+                # explicit provenance plus change tag promotes another client.
+                added=payload(await session.call_tool('memory_add_facts',{'project':'brief-test','facts':[
+                    {'text':'Other client changed the approved boundary.','tags':['change','client:Claude']},
+                    {'text':'An ordinary recent fact.'}]}))
+                changed,ordinary=added['added']
+                ranked=payload(await session.call_tool('memory_session_brief',{'project':'brief-test','client_id':'Claude'}))
+                from memory_os_v4.brief_selection import read_units
+                order=[unit.id for unit in read_units(ranked)]
+                assert order.index(changed)<order.index(ordinary)
+                from memory_os_v4.brief_coverage import COLUMNS
+                counts=ranked['coverage']['totals']
+                counts=dict(zip(COLUMNS,counts)) if isinstance(counts,list) else counts
+                assert counts['eligible']==3 and counts['pool']==3
             else:
                 assert data['code']=='tokenizer_unavailable'
             (h.root/'brief-envelope.json').write_text(json.dumps(proof))

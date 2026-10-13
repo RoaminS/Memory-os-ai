@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import Counter
 import json
 import time
 
@@ -64,9 +65,11 @@ def rebudget(data, notices=(), *, wire_format=None, budget_tokens=None):
     return rebudget_units(out, notices, counter(), BYTE_LIMIT, limit)
 
 
-def build(engine, project, focus_query=None, expand=(), *, wire_format="legacy", budget_tokens=None):
+def build(engine, project, focus_query=None, expand=(), *, wire_format="legacy", budget_tokens=None, client_id=None):
     """No neural encoding, writes, touches, tools, or implicit project widening."""
     from .brief_selection import Unit, select, task_text
+    from .brief_value import memory_order, task_order
+    from .brief_coverage import population
     count = counter()
     with engine._lock:
         engine._ensure_open()
@@ -84,6 +87,7 @@ def build(engine, project, focus_query=None, expand=(), *, wire_format="legacy",
         requested = set(expand)
         from . import work_state as work
         tasks = []
+        task_count = 0
         if work.enabled(engine) and project is not None:
             from .models import TaskListIn
             page = work.listing(engine, TaskListIn(project=str(project), limit=10), project)
@@ -98,6 +102,12 @@ def build(engine, project, focus_query=None, expand=(), *, wire_format="legacy",
                         expanded_tasks.append(work.view(engine, task))
             expanded_ids = {t['task_id'] for t in expanded_tasks}
             tasks = expanded_tasks + [t for t in tasks if t['task_id'] not in expanded_ids]
+            labels = tuple(getattr(project, 'labels', (project,)))
+            task_count = sum(engine.store._connection.execute(
+                "SELECT COUNT(*) FROM task_lookup WHERE project=? AND status IN ('blocked','open')", (label,)
+            ).fetchone()[0] for label in labels)
+            task_count += sum(t['status'] == 'done' for t in expanded_tasks)
+            tasks.sort(key=lambda task: task_order(task, requested))
         task_refs = {'task:' + t['task_id'] for t in tasks}
         block_refs = {'block:' + k for k in blocks}
         found = requested & by_id.keys()
@@ -106,21 +116,32 @@ def build(engine, project, focus_query=None, expand=(), *, wire_format="legacy",
         expanded = found | {it.id for it in live if found.intersection(it.parent_ids)}
         lexical = engine.bm25.scoped(set(by_id))
         scores = dict(lexical.search(lexical_tokens(focus_query or "", engine.config), top_k=len(live)))
-        live.sort(key=lambda it: (it.id not in found, it.id not in expanded,
-                                 not engine._is_pending(it), -scores.get(it.id, 0),
-                                 -it.event_time, -it.importance, it.id))
+        live.sort(key=lambda it: memory_order(it, expanded, scores, client_id))
         if not live and not blocks and not tasks:
             notices.append("empty_project")
         if len(live) > 40 or len(blocks) > 16 or len(tasks) > 10:
             notices.append("budget_saturated")
-        pool = [Unit('block:' + k, 'block', 'block', v, (-1, k))
+        pool = [Unit('block:' + k, 'block', 'block', v,
+                     (0 if 'block:' + k in requested else 4, 0, 0, 0, 'block:' + k))
                 for k, v in sorted(blocks.items(), key=lambda row: ('block:' + row[0] not in requested, row[0]))[:16]]
-        pool += [Unit('task:' + t['task_id'], 'task', 'task', task_text(t), (0, i),
-                      t['status'] in {'open', 'blocked'} and not t['stale']) for i, t in enumerate(tasks[:10])]
-        pool += [Unit(it.id, it.kind, 'memory', it.text, (1, i),
-                      {'constraint','critical'} <= {tag.casefold() for tag in it.tags}) for i, it in enumerate(live[:40])]
+        pool += [Unit('task:' + t['task_id'], 'task', 'task', task_text(t), task_order(t, requested),
+                      t['status'] in {'open', 'blocked'} and not t['stale']) for t in tasks[:10]]
+        pool += [Unit(it.id, it.kind, 'memory', it.text, memory_order(it, expanded, scores, client_id),
+                      {'constraint','critical'} <= {tag.casefold() for tag in it.tags}) for it in live[:40]]
         pool.sort(key=lambda u: u.order)
+        pooled_ids = {unit.id for unit in pool}
+        if any({'constraint','critical'} <= {tag.casefold() for tag in it.tags} and it.id not in pooled_ids for it in live):
+            notices.append('critical_omitted')
+        if tasks:
+            fresh_tasks = sum(engine.store._connection.execute(
+                "SELECT COUNT(*) FROM task_lookup WHERE project=? AND status IN ('blocked','open') AND updated_epoch>=?",
+                (label, now - 14*86400)).fetchone()[0] for label in labels)
+            if fresh_tasks > sum(unit.protected and unit.kind == 'task' for unit in pool):
+                notices.append('critical_omitted')
         base = {"mode": "compact", "project": str(project) if project is not None else "*"}
+        eligible_counts = Counter(it.kind for it in live)
+        eligible_counts.update(block=len(blocks), task=task_count)
+        base['coverage'] = population(dict(eligible_counts), pool)
         if wire_format == "compact_v2":
             base['wire_format'] = wire_format
         if budget_tokens is not None:
@@ -185,7 +206,7 @@ def compact_error(data, *, wire_format="legacy", budget_tokens=None, notices=())
         "ok": False,
         "mode": "compact",
         "code": code,
-        "text": "Memory brief unavailable: " + code + ".",
+        "text": "Brief unavailable.",
     }
     if wire_format == "compact_v2":
         out["wire_format"] = wire_format
@@ -198,5 +219,8 @@ def compact_error(data, *, wire_format="legacy", budget_tokens=None, notices=())
     if preserved:
         out['notices'] = list(dict.fromkeys(preserved))
     if "unresolved_requests" in preserved:
-        out["text"] += " Unresolved requests: inspect memory_request_status."
+        out["text"] += " Unresolved requests."
+    if data.get('coverage'):
+        from .brief_coverage import update
+        out['coverage'] = update(data['coverage'], [])
     return out

@@ -55,6 +55,7 @@ class DurableRelay:
         self.preflight_failure = None
         self.brief_wire_formats = {"legacy"}
         self.brief_budget_supported = False
+        self.brief_client_supported = False
 
     def ledger(self):
         if self.journal is None:
@@ -132,6 +133,8 @@ class DurableRelay:
                 upstream_args.pop("wire_format", None)
             if not self.brief_budget_supported:
                 upstream_args.pop("budget_tokens", None)
+            if not self.brief_client_supported:
+                upstream_args.pop('client_id', None)
         if name in {"memory_consolidate", "memory_compact"} and args.get("dry_run", True) is True:
             mutation = False
         if not mutation:

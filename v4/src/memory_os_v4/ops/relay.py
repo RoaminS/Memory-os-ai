@@ -296,6 +296,10 @@ class SessionToolCatalog:
                 return {"legacy", *(["compact_v2"] if "compact_v2" in formats else [])}, "budget_tokens" in props
         return {"legacy"}, False
 
+    def brief_client_supported(self):
+        return any(tool.name == 'memory_session_brief' and 'client_id' in tool.inputSchema.get('properties', {})
+                   for tool in self._tools)
+
 
 async def serve(settings: OpsSettings) -> None:
     send, recv = anyio.create_memory_object_stream(16)
@@ -328,6 +332,8 @@ async def serve(settings: OpsSettings) -> None:
 
         @server.call_tool(validate_input=False)
         async def call_tool(name: str, arguments: dict):
+            if name == 'memory_session_brief' and durable.brief_client_supported:
+                arguments = brief_client_arguments(arguments, server.request_context.session.client_params.clientInfo)
             if name in {'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'}:
                 arguments = task_owner_arguments(arguments, server.request_context.session.client_params.clientInfo,
                                                  creation=name == 'memory_task_create')
@@ -346,6 +352,7 @@ async def serve(settings: OpsSettings) -> None:
         try:
             await catalog.prefetch(relay)
             durable.brief_wire_formats, durable.brief_budget_supported = catalog.brief_contract()
+            durable.brief_client_supported = catalog.brief_client_supported()
             async with stdio_server() as (r, w):
                 await server.run(r, w, server.create_initialization_options())
         finally:
@@ -365,6 +372,11 @@ def task_owner_arguments(arguments, client_info, *, creation=True):
         result['owner'] = {**(result.get('owner') or {}), **client}
     result['client_provenance'] = client
     return result
+
+
+def brief_client_arguments(arguments, client_info):
+    """Do not trust a model override; initialize clientInfo is still declarative."""
+    return {**(arguments or {}), 'client_id': client_info.name[:200]}
 
 
 if __name__ == "__main__":

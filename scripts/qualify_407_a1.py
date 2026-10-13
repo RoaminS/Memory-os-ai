@@ -46,7 +46,8 @@ def main():
         dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
                                text=True, capture_output=True, check=True).stdout.strip()
         report.update(source_commit=source, source_dirty=bool(dirty))
-        files = ["brief.py", "models.py", "server.py", "ops/durable_relay.py", "ops/relay.py"]
+        files = ["brief.py", "brief_selection.py", "brief_value.py", "brief_coverage.py",
+                 "models.py", "server.py", "ops/durable_relay.py", "ops/relay.py"]
         report["source_sha256"] = {name: hashlib.sha256((ROOT / "v4/src/memory_os_v4" / name).read_bytes()).hexdigest()
                                    for name in files}
         class Ledger:
@@ -80,6 +81,18 @@ def main():
                                 else:
                                     result = anyio.run(relay.call, "memory_session_brief", arguments)
                                 data = json.loads(result.content[0].text)
+                                from memory_os_v4.brief_coverage import COLUMNS
+                                from memory_os_v4.brief_selection import read_units
+                                if 'coverage' not in data:
+                                    raise ValueError('Scoped counts lost')
+                                totals = data['coverage']['totals']
+                                totals = dict(zip(COLUMNS, totals)) if isinstance(totals, list) else totals
+                                units = read_units(data) or []
+                                if (totals['eligible'] != 20 or totals['pool'] != 20
+                                        or totals['content'] != sum(u.representation != 'reference' for u in units)
+                                        or totals['reference_only'] != sum(u.representation == 'reference' for u in units)
+                                        or totals['omitted'] != 20 - len(units)):
+                                    raise ValueError('Final coverage accounting failed')
                                 wire = json.dumps(result.model_dump(mode="json", by_alias=True, exclude_none=True),
                                                   ensure_ascii=False, separators=(",", ":"))
                                 size, tokens = len(wire.encode()), count(wire)

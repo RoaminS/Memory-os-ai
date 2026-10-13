@@ -56,7 +56,7 @@ def task_text(task):
 def notices_for(units, pool, notices):
     codes = list(dict.fromkeys(notices))
     chosen = {u.id for u in units}
-    if len(chosen) < len(pool):
+    if len(chosen) < len(pool) or any(u.representation != 'full' for u in units):
         codes.append("budget_saturated")
     if any(u.representation != "full" and u.kind == "block" for u in units):
         codes.append("block_truncated")
@@ -72,6 +72,10 @@ def notices_for(units, pool, notices):
 def assemble(base, units, codes):
     from .brief import WARNING
     out = deepcopy(base)
+    units = list(units)
+    if out.get('coverage'):
+        from .brief_coverage import update
+        out['coverage'] = update(out['coverage'], units)
     out.update(unit_layout=LAYOUT, blocks={}, references=[], notices=list(dict.fromkeys(codes)))
     lines, at = [], 0
     for unit in sorted(units, key=lambda u: u.order):
@@ -151,6 +155,15 @@ def fits(data, count, byte_limit, token_limit, *, prospective=True):
 def select(base, pool, notices, count, byte_limit, token_limit):
     """Protected pass, initial section caps, memory, then reassigned leftovers."""
     chosen = {}
+    # Optional detail must not make an otherwise feasible minimum frame fail.
+    # Freeze this representation before selection so trial units cannot cause
+    # oscillation in available content capacity.
+    from .brief_coverage import collapse
+    base = deepcopy(base)
+    while not fits(assemble(base, [], notices_for([], pool, notices)), count, byte_limit, token_limit):
+        if not collapse(base):
+            break
+        notices = list(dict.fromkeys([*notices, *base.get('notices', [])]))
 
     def candidate(unit, *, cap=None):
         for variant in unit.variants():
@@ -173,7 +186,7 @@ def select(base, pool, notices, count, byte_limit, token_limit):
             return
 
     for unit in pool:
-        if unit.protected:
+        if unit.protected or unit.order[0] == 0:
             candidate(unit)
     from .brief import measures
     empty = assemble(base, chosen.values(), notices_for(chosen.values(), pool, notices))
@@ -220,6 +233,10 @@ def rebudget_units(data, notices, count, byte_limit, token_limit):
         if size <= byte_limit and tokens <= token_limit:
             return out
         codes.append('budget_saturated')
+        from .brief_coverage import collapse
+        if collapse(out):
+            codes = list(dict.fromkeys([*codes, *out['notices']]))
+            continue
         if units:
             # Drop one whole lowest-priority non-protected unit, never characters.
             removable = [u for u in units if not u.protected]
@@ -228,7 +245,7 @@ def rebudget_units(data, notices, count, byte_limit, token_limit):
             if victim.protected:
                 codes.append('critical_omitted')
             continue
-        error = compact_error({'code': 'budget_saturated'}, wire_format=out.get('wire_format', 'legacy'),
+        error = compact_error({'code': 'budget_saturated', 'coverage': out.get('coverage')}, wire_format=out.get('wire_format', 'legacy'),
                               budget_tokens=out.get('budget_tokens'), notices=codes)
         if 'critical_omitted' in codes:
             error['notices'] = list(dict.fromkeys([*error.get('notices', []), 'critical_omitted']))

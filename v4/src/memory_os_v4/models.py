@@ -144,6 +144,8 @@ class MessageIn(BaseModel):
 class SessionBriefIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    client_id: str | None = Field(None, min_length=1, max_length=200, description="Declarative caller ID for other-client change ranking; the relay fills it from clientInfo. Never authentication or project authorization.")
+
     mode: Literal["compact", "detailed"] = Field("compact", description="compact bounds the entire MCP envelope; detailed explicitly requests the legacy full structure.")
     wire_format: Literal["legacy", "compact_v2"] = Field("legacy", description="Negotiate compact_v2 for one JSON body in content.text; legacy also returns structuredContent. Detailed mode is legacy only.")
     budget_tokens: int | None = Field(None, ge=200, le=1500, description="Compact mode only: exact cl100k_base budget for the entire final MCP envelope (default 1500); separate from detailed max_tokens.")

@@ -207,7 +207,7 @@ def _h_session_brief(engine: MemoryV4, args: models.SessionBriefIn) -> dict:
     from .brief import build, expand_detailed
     if args.mode == "compact":
         return build(engine, project, args.focus_query, args.expand,
-                     wire_format=args.wire_format, budget_tokens=args.budget_tokens)
+                     wire_format=args.wire_format, budget_tokens=args.budget_tokens, client_id=args.client_id)
     if args.expand:
         return expand_detailed(engine, project, args.expand)
     brief = engine.session_brief(focus_query=args.focus_query, max_tokens=args.max_tokens, project=project)

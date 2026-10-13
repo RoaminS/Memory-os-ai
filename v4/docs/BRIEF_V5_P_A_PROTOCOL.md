@@ -10,7 +10,8 @@ statut exploratoire. Incrément 2 = A2+A4 ; incrément 3 = A3+A7.
 
 Une unité = un item, un bloc ou une tâche ; aucune duplication via focus,
 parents ou expansion. Ordre déterministe. Représentations, essayées dans cet
-ordre : texte complet, première phrase complète extractive + référence,+référence seule. Tâches : texte complet ou référence seule, jamais couper
+ordre : texte complet, première phrase complète extractive + référence,
+référence seule. Tâches : texte complet ou référence seule, jamais couper
 title/next_action/blocked_reason ni inventer un résumé. Les références restent
 développables dans le même scope, sans révéler du contenu interdit.
 
@@ -56,6 +57,17 @@ exacts et notice de saturation. Si le détail par type ne tient pas au budget
 minimal, totaux seuls + `coverage_detail_omitted`, pas une valeur inventée.
 Les statistiques finales sont recalculées après rebudget du relais.
 
+Précisions de représentation, sans changement des paramètres scellés :
+`coverage.totals` est normalement un dictionnaire nommé ; au budget minimal,
+il peut devenir le tableau `[eligible,pool,content,reference_only,omitted,outside_pool]`,
+ordre fixé par `scoped_candidates_v1`, accompagné de coverage_detail_omitted.
+Les erreurs de saturation conservent ces totaux, contenu=références=0.
+Blocs de contexte : ordre stable au niveau décisions/contraintes, après ces
+items à score/importance positifs ; une expansion explicite reste prioritaire.
+Les tâches exigent un projet explicite : l'absence de tâche dans le scope `*`
+ne mesure pas la population globale de tâches. Aucune tâche fermée ajoutée
+implicitement ; seule son expansion explicite la rend éligible.
+
 ## Mesures et gates gelés
 
 - CallToolResult sérialisé UTF-8 excluant None, final après avis locaux :
@@ -90,7 +102,6 @@ Le format reprend L1a, étendu ainsi (champs expect tenus secrets par Claude) :
 {
   "id": "V5-VAL-001", "language": "fr", "family": "units",
   "now": "2026-10-12T10:00:00Z",
-  "registry": {"version": 1, "projects": [], "contexts": []},
   "items": [{"id": "fact-1", "kind": "fact", "text": "Texte entier.",
              "project": "P", "tags": ["constraint", "critical"]}],
   "blocks": [], "tasks": [],
@@ -115,6 +126,11 @@ Items = champs MemoryItem ; dates ISO converties ; sensibilité via tag sensitiv
 Blocs = name/text/project/scope. Tâches = entrée TaskCreateIn (UUID, project,
 title, next_action…), puis optional update pour blocked/done et dated_fixture
 pour stale dans le seed privé ; ETags obtenus via API, jamais inventés.
+Préciser dated_fixture comme date ISO absolue de création/modification du seed,
+et obtenir une nouvelle ETag par l'API si update est fourni ; pas d'ETag écrite
+par le gold. Les cas avec tâches utilisent sqlite_s1+work_state dans leur magasin
+privé. L'exemple sans registry utilise les labels littéraux ; un registry actif
+vide serait un autre scénario, de refus, et ne permettrait pas de lire P.
 `client_id` optionnel est un identifiant déclaratif. References tasks = task:UUID,
 blocs = block:name. required_ids peut exiger une référence seulement ; les
 critical_requirements exigent le contenu/phrase exacts admis, séparément.
