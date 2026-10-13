@@ -156,8 +156,8 @@ def select(base, pool, notices, count, byte_limit, token_limit):
     """Protected pass, initial section caps, memory, then reassigned leftovers."""
     chosen = {}
     # Optional detail must not make an otherwise feasible minimum frame fail.
-    # Freeze this representation before selection so trial units cannot cause
-    # oscillation in available content capacity.
+    # Reduce empty-frame overhead first. A protected content admission can
+    # reduce it further below, monotonically and only after a successful fit.
     from .brief_coverage import collapse
     base = deepcopy(base)
     while not fits(assemble(base, [], notices_for([], pool, notices)), count, byte_limit, token_limit):
@@ -166,23 +166,41 @@ def select(base, pool, notices, count, byte_limit, token_limit):
         notices = list(dict.fromkeys([*notices, *base.get('notices', [])]))
 
     def candidate(unit, *, cap=None):
+        nonlocal base, notices
         for variant in unit.variants():
             proposal = {**chosen, unit.id: variant}
-            value = assemble(base, proposal.values(), notices_for(proposal.values(), pool, notices))
-            if not fits(value, count, byte_limit, token_limit):
+            trial_base, trial_notices = base, notices
+            while True:
+                value = assemble(trial_base, proposal.values(),
+                                 notices_for(proposal.values(), pool, trial_notices))
+                if fits(value, count, byte_limit, token_limit):
+                    break
+                # Optional counters cannot displace feasible protected text or
+                # an explicit expansion. Keep reference-only fallback unchanged.
+                if not (unit.protected or unit.order[0] == 0) or variant.representation == 'reference':
+                    value = None
+                    break
+                reduced = deepcopy(trial_base)
+                if not collapse(reduced):
+                    value = None
+                    break
+                trial_base = reduced
+                trial_notices = list(dict.fromkeys([*trial_notices, *reduced.get('notices', [])]))
+            if value is None:
                 continue
             if cap is not None:
                 # Marginal section cost from the real final envelope, including
                 # metadata/escaping and the worst local unresolved notice.
                 section = [u for u in proposal.values() if u.group == unit.group and not u.protected]
-                empty = assemble(base, [], [*notices, 'unresolved_requests'])
-                filled = assemble(base, section, [*notices, 'unresolved_requests'])
+                empty = assemble(trial_base, [], [*trial_notices, 'unresolved_requests'])
+                filled = assemble(trial_base, section, [*trial_notices, 'unresolved_requests'])
                 from .brief import measures
                 eb, et = measures(empty, count)
                 fb, ft = measures(filled, count)
                 if max(0, fb-eb) > cap[0] or max(0, ft-et) > cap[1]:
                     continue
             chosen[unit.id] = variant
+            base, notices = trial_base, trial_notices
             return
 
     for unit in pool:
