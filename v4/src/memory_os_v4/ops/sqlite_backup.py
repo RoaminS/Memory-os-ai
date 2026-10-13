@@ -225,6 +225,9 @@ def inventory(con, guard=lambda: None):
     try:
         if version >= 6:
             check_integrity(SimpleNamespace(_connection=con))
+        if version >= 8:
+            from ..changes import check_integrity as check_changes
+            check_changes(SimpleNamespace(_connection=con))
     except ValueError as exc:
         raise BackupError('Task authority integrity failed') from exc
     return {"schema_version": version, "schema_sha256": hashlib.sha256(_json(_schema(con)).encode()).hexdigest(),

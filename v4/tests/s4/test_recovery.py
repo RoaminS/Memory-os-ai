@@ -83,6 +83,8 @@ def test_attested_schema5_historical_copy_is_verified_before_current_upgrade(res
     before_source.close()
     # Construct a historical v5 fixture from an EMPTY v6 extension, copy only.
     con = sqlite3.connect(target / s4.DB)
+    con.execute('DROP TABLE change_events')
+    con.execute("DELETE FROM store_metadata WHERE key='change_journal'")
     con.execute('DROP TABLE task_lookup')
     con.execute('DROP TRIGGER task_lookup_insert')
     con.execute('DROP TRIGGER task_lookup_update')
@@ -98,7 +100,7 @@ def test_attested_schema5_historical_copy_is_verified_before_current_upgrade(res
     original.close()
     assert manifest['logical_inventory']['schema_version'] == 5
     result = recovery.prepare_recovery(target / s4.DB, source.store.db_path, manifest)
-    assert result['schema_upgrade'] == {'from': 5, 'to': 7}
+    assert result['schema_upgrade'] == {'from': 5, 'to': __import__('memory_os_v4.sqlite_store',fromlist=['SCHEMA_VERSION']).SCHEMA_VERSION}
     restored_store = SQLiteStore(target)
     assert restored_store._connection.execute('SELECT count(*) FROM task_current').fetchone()[0] == 0
     assert restored_store.get('erase').deleted

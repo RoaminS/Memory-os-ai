@@ -17,7 +17,7 @@ from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
 APPLICATION_ID = 0x4D4F5334
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA = (
     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at REAL NOT NULL)",
@@ -107,7 +107,12 @@ SCHEMA_WORK_LOOKUP = (
            "revision=excluded.revision,project=excluded.project,status=excluded.status,"
            "updated_epoch=excluded.updated_epoch,owner_id=excluded.owner_id; END" for operation in ("INSERT", "UPDATE")),
 )
-MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION, SCHEMA_LEGACY, SCHEMA_WORK, SCHEMA_WORK_LOOKUP)
+SCHEMA_CHANGES = (
+    'CREATE TABLE change_events(sequence INTEGER PRIMARY KEY,event_id TEXT NOT NULL UNIQUE,operation TEXT NOT NULL,project TEXT NOT NULL,record_json TEXT NOT NULL,record_sha256 TEXT NOT NULL,committed_at REAL NOT NULL)',
+    'CREATE INDEX change_events_page ON change_events(project,sequence)',
+    "CREATE TRIGGER change_events_no_update BEFORE UPDATE ON change_events BEGIN SELECT RAISE(ABORT,'immutable event'); END",
+)
+MIGRATIONS = (SCHEMA, SCHEMA_S2, SCHEMA_CACHE, SCHEMA_RETENTION, SCHEMA_LEGACY, SCHEMA_WORK, SCHEMA_WORK_LOOKUP, SCHEMA_CHANGES)
 
 
 def schema_checksums():
@@ -211,6 +216,8 @@ class SQLiteStore(Store):
                 finally:
                     os.close(fd)
             super().__init__(data_dir)
+            from .changes import initialize
+            initialize(self)
             if not self.check_integrity():
                 raise RuntimeError("SQLite source integrity failed")
         except BaseException:
@@ -395,7 +402,7 @@ class SQLiteStore(Store):
                 for row in self._connection.execute("SELECT value_json FROM store_metadata"):
                     if not isinstance(json.loads(row[0]), dict):
                         return False
-                for table in ("block_versions", "request_receipts", "legacy_request_log", "legacy_pending_requests"):
+                for table in ("block_versions", "request_receipts", "legacy_request_log", "legacy_pending_requests", "change_events"):
                     for record, checksum in self._connection.execute(
                         f"SELECT record_json,record_sha256 FROM {table}"
                     ):
@@ -410,6 +417,8 @@ class SQLiteStore(Store):
                     return False
                 from .work_state import check_integrity
                 check_integrity(self)
+                from .changes import check_integrity as check_changes
+                check_changes(self)
                 return True
             except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
                 return False

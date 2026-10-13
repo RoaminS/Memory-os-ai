@@ -150,6 +150,10 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         scan = scan_store(settings.store_dir)
         sup = scan.pop("superseded_ids")
         r.update(scan)
+        if scan.get('change_journal', {}).get('alert'):
+            anomalies.append('journal_size: change journal >= 10 MiB; explicit maintenance review required')
+            r.setdefault('alerts', []).append({'category':'journal_size', 'severity':'warning',
+                                               'json_bytes':scan['change_journal']['json_bytes']})
         if scan["malformed_lines"]:
             anomalies.append(f"{scan['malformed_lines']} malformed line(s) in items.jsonl")
         if scan["truncated_tail"]:
@@ -221,6 +225,7 @@ def render(r: dict) -> str:
         f"- Added 24 h: {r.get('added_24h')} · forgotten 24 h: {r.get('forgotten_24h')} · supersessions "
         f"{r.get('superseded_total')} (new {len(r.get('superseded_new', []))})",
         f"- Last verified backup: {r.get('last_backup_age_h')} h · free disk {r.get('disk_free_gib')} GiB",
+        f"- Change journal: {r.get('change_journal', 'not available')}",
         f"- Receipts (SQLite): {r.get('receipts', 'not available')}",
         f"- Storage margin: {r.get('storage_margin', 'not available')}",
         f"- Last restore drill (level matters): {r.get('last_restore_drill', 'not available')}",

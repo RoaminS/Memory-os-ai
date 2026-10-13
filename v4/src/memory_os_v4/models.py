@@ -277,7 +277,17 @@ class GetContextIn(BaseModel):
 class TimelineIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    query: str = Field(..., min_length=1, description="Entity or topic to trace the evolution of over time.")
+    query: str | None = Field(None, min_length=1, description="History query; omit for changes.")
+    view: Literal["history", "changes"] = "history"
+    since_cursor: str | None = Field(None, max_length=2048)
+
+    @model_validator(mode="after")
+    def timeline_options(self):
+        if self.view == 'history' and (self.query is None or self.since_cursor is not None):
+            raise ValueError('History requires query and does not accept a changes cursor')
+        if self.view == 'changes' and (self.query is not None or self.project is None or self.project == '*'):
+            raise ValueError('Changes requires an explicit project and no query')
+        return self
     project: str | None = Field(None, description=_PROJECT_DESC)
     limit: int = Field(30, ge=1, le=200, description="Maximum number of facts/summaries to return.")
 

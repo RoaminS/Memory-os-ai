@@ -221,6 +221,14 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
                         f"{journal['active_journals']} active (unresolved count not inspected); "
                         f"{journal['bytes']} bytes; oldest {journal['oldest_age_s']:.0f} s",
                         "memory_request_status without ID via each relay; never repeat an unresolved mutation"))
+    if (settings.store_dir / 'store.sqlite3').exists():
+        try:
+            from ..sqlite_stats import scan_sqlite
+            journal = scan_sqlite(settings.store_dir / 'store.sqlite3')['change_journal']
+            checks.append(Check('journal_size', 'WARN' if journal.get('alert') else 'PASS',
+                                f"change journal {journal['json_bytes']} bytes / alert {journal['alert_bytes']}; no automatic purge"))
+        except (OSError, ValueError):
+            checks.append(Check('journal_size','WARN','change journal size unavailable'))
     checks += _clients(home)
     from .connection_proof import inspect_proofs
     current_identity = None

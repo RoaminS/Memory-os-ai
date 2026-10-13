@@ -386,11 +386,50 @@ def cmd_doctor(args, s: OpsSettings) -> int:
     return 1 if any(c.status == "FAIL" for c in checks) else 0
 
 
+def cmd_journal_prune(args, s: OpsSettings) -> int:
+    from ..config import Config
+    from ..memory import MemoryV4
+    from ..changes import prune
+    from ..temporal import parse_iso
+    try:
+        cfg=Config.from_env()
+        if cfg.store_backend!='sqlite_s1':
+            raise ValueError('SQLite journal required; no implicit backend change')
+        cfg.data_dir=str(s.store_dir)
+        from .sqlite_backup import readonly
+        from ..sqlite_store import SCHEMA_VERSION
+        con=readonly(s.store_dir/'store.sqlite3')
+        try:
+            if con.execute('PRAGMA user_version').fetchone()[0]!=SCHEMA_VERSION:
+                raise ValueError('Journal schema not active; qualify an upgrade separately')
+        finally:
+            con.close()
+        at=parse_iso(args.before)
+        if at is None:
+            raise ValueError('Absolute retention cut required')
+        # Existing writer lease refuses an active server; offline operator only.
+        with MemoryV4(config=cfg,defer_retrieval=True) as engine:
+            if args.apply:
+                result=engine.execute_request('journal_prune','operator:journal',{'before':at},args.request_id,
+                                              lambda:prune(engine,before=at,dry_run=False))
+            else:
+                result=prune(engine,before=at,dry_run=True)
+            _print_json(result)
+        return 0
+    except (OSError,ValueError,RuntimeError,PermissionError) as exc:
+        _print_json({'ok':False,'code':'journal_prune_refused','error':str(exc)})
+        return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="memory-os-admin", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     sub = p.add_subparsers(dest="cmd", required=True)
+    jp=sub.add_parser('journal-prune',help='offline operator maintenance; preview by default, no automatic purge')
+    jp.add_argument('--before',required=True)
+    jp.add_argument('--apply',action='store_true')
+    jp.add_argument('--request-id',default=None)
     qs = sub.add_parser('quickstart', help='macOS onboarding: preview by default; explicit apply/download/demo')
     qs.add_argument('--clients', help='comma-separated chosen clients (default: claude-code,codex)')
     qs.add_argument('--backend', choices=('sqlite', 'jsonl'), default=None,
@@ -437,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         p.error('--download-approved/--demo require --apply')
     s = OpsSettings.from_env()
     handler = {
+        "journal-prune": cmd_journal_prune,
         "provision": cmd_provision,
         "quickstart": cmd_quickstart,
         "token": cmd_token,

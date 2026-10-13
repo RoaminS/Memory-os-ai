@@ -71,6 +71,7 @@ def deployed(engine, build: dict) -> dict:
             "legacy": "correction_unverified", "legacy_max_impacts": 3,
             "caller_identity": "declarative_not_authenticated",
         },
+        "change_journal": {"available": cfg.store_backend == "sqlite_s1", "coverage": "prospective", "automatic_purge": False, "alert_bytes": 10*1024*1024},
         "retrieval_ready": engine._retrieval_ready,
         "client_relays": "unknown_to_server",
         "work_state": cfg.store_backend == 'sqlite_s1' and cfg.work_state,

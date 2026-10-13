@@ -336,10 +336,13 @@ class MemoryV4:
             self._mutation_failed = False
             try:
                 with self.store.transaction():
+                    from .changes import cut, record
+                    before_changes = cut(self.store)
                     result = action()
                     if self._mutation_failed:
                         raise RuntimeError("Nested mutation failed; whole request must roll back")
                     self._flush_sql_sources()
+                    record(self, operation, payload, result, before_changes)
                     # This is the final source write; COMMIT must precede return.
                     self.requests.complete(scope, request_id, operation, payload, result, implicit=implicit, attestation=attestation)
                 return result
@@ -1231,6 +1234,8 @@ class MemoryV4:
         if self.config.store_backend == "sqlite_s1":
             from .sqlite_stats import receipt_statistics
             result["receipts"] = receipt_statistics(self.store._connection, self.store.db_path)
+            from .changes import statistics
+            result["change_journal"] = statistics(self.store._connection)
         return result
 
     @_requires_open

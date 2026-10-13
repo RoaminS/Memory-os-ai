@@ -147,6 +147,8 @@ def prepare_recovery(target_db, source_db, manifest, *, guard=lambda: None, faul
                     'restored_from_instance_id': snapshot['store_instance_id'],
                     'recovery_history': [*store.meta.get('recovery_history', []), event]}
             store.save_meta(meta)
+            from ..changes import initialize
+            initialize(store, reset=True)
             result = {'reconciliation': proof, 'forgets_replayed': replayed,
                       'store_instance_id': new_id, 'restored_from_instance_id': snapshot['store_instance_id'],
                       'recovery_request_id': recovery_id, 'recovery_event_sha256': digest(event),

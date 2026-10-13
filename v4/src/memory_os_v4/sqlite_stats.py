@@ -88,6 +88,8 @@ def scan_sqlite(path):
             "superseded_ids": sorted(row["id"] for row in rows if row.get("invalidated_by")),
             "receipts": receipt_statistics(connection, path),
         }
+        from .changes import statistics
+        result["change_journal"] = statistics(connection)
         return result
     finally:
         connection.close()

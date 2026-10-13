@@ -358,6 +358,9 @@ def _h_get_context(engine: MemoryV4, args: models.GetContextIn) -> dict:
 
 def _h_timeline(engine: MemoryV4, args: models.TimelineIn) -> dict:
     project = _project_of(args.project)
+    if args.view == 'changes':
+        from .changes import listing
+        return listing(engine, project, args.since_cursor, args.limit)
     hits = engine.search(
         args.query, top_k=args.limit, kinds=["fact", "summary", "belief", "procedure"], project=project
     )
@@ -793,8 +796,13 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
             from .corrections import controlled
             if controlled(parsed.mode, parsed.expected_revisions, parsed.confirmed_impacts, parsed.preview_digest) and Config.from_env().store_backend != 'sqlite_s1':
                 return {'ok': False, 'code': 'backend_unsupported', 'outcome': 'not_started'}
+        changes_read = name == 'memory_timeline' and parsed.view == 'changes'
+        if changes_read and Config.from_env().store_backend != 'sqlite_s1' and _engine is None:
+            return {'ok': False, 'code': 'backend_unsupported', 'outcome': 'not_started'}
         model_free = name in {'memory_add_facts', 'memory_chat_save'} and (parsed.mode is not None or parsed.expected_revisions is not None or parsed.confirmed_impacts is not None or parsed.preview_digest is not None)
-        engine = get_engine(model_free=True) if model_free and _engine is None else get_engine()
+        engine = get_engine(model_free=True) if (model_free or changes_read) and _engine is None else get_engine()
+        if changes_read:
+            return handler(engine, parsed)
         if name in {'memory_add_facts', 'memory_chat_save'} and parsed.mode == 'preview':
             with engine._lock:
                 engine._ensure_open()
