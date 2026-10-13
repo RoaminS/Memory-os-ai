@@ -1,0 +1,12 @@
+{
+  "A": "SQLite fast apply exactly one explicit impact with reason/revisions/request_id; otherwise preview binding",
+  "B": "legacy <=3 impacts accepted with correction_unverified; never downgrade controlled errors; >3 requires preview",
+  "C": "JSONL controlled preview/apply unsupported; legacy non-atomic semantics retained",
+  "D": "every acknowledged invalidation exposes actual impacts and declarative changed_by; durable audit in fact history",
+  "base_protocol_sha256": "a8a037ead1d1dd9f065aa77f7d286182de85e4d72a3327640b0ea38b165ed8fc",
+  "date": "2026-10-13",
+  "id": "p-b-amendment-a-d-v1",
+  "thresholds_changed": false,
+  "validation_frozen": false,
+  "validation_gold_holder": "Claude"
+}
