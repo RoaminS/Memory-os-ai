@@ -12,6 +12,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .identity_policy import validate_new_identity
+
 _PROJECT_DESC = (
     "Project label to scope this call to; defaults to MEMORY_V4_PROJECT or 'default'. "
     "'*' reads across all projects (writes then go to 'default')."
@@ -72,8 +74,13 @@ class FactIdentityIn(BaseModel):
     """Opaque, caller-declared subject/property identity; never name inference."""
     model_config = ConfigDict(extra="forbid")
     subject_id: str = Field(..., min_length=1, description="Stable unique subject id; distinguish homonyms.")
-    predicate: str = Field(..., min_length=1, description="Property represented by this fact.")
+    predicate: str = Field(..., min_length=1, description="Specific, extensible property; single rejects other/unknown/default. Distinct from retrieval facets.")
     cardinality: Literal["single", "multi"] = Field(..., description="single permits temporal state replacement; multi preserves multiple values.")
+
+    @model_validator(mode="after")
+    def guard_single_predicate(self):
+        validate_new_identity(self.model_dump())
+        return self
 
 
 class FactIn(BaseModel):

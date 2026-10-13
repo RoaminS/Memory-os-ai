@@ -12,6 +12,7 @@ from collections import defaultdict
 import unicodedata
 
 from .store import MemoryItem, Store
+from .identity_policy import validate_new_identity
 
 
 def mutation_policy():
@@ -58,6 +59,8 @@ def equivalent_assertions(a: MemoryItem, b: MemoryItem) -> bool:
 
 
 def validate_replacements(item: MemoryItem, store: Store) -> None:
+    if item.identity is not None:
+        validate_new_identity(item.identity)
     if (item.identity or item.replaces) and item.valid_until is not None and item.valid_until <= start(item):
         raise ValueError("valid_until must be later than valid_from")
     for old_id in item.replaces:

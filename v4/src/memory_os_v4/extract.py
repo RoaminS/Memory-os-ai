@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .entities import extract_entities
+from .identity_policy import validate_new_identity
 from .llm import LLMClient
 from .temporal import parse_absolute_dates
 from .text import split_sentences, tokenize
@@ -82,6 +83,7 @@ def normalize_client_facts(facts: list[dict]) -> list[dict]:
             if identity["cardinality"] not in {"single", "multi"}:
                 raise ValueError("identity cardinality must be single or multi")
             norm["identity"] = {k: v.strip() for k, v in identity.items()}
+            validate_new_identity(norm["identity"])
         replaces = f.get("replaces") or []
         if not isinstance(replaces, list) or not all(isinstance(x, str) and x for x in replaces):
             raise ValueError("replaces must be a list of item ids")
