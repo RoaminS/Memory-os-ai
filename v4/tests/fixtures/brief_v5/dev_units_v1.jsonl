@@ -1,0 +1,12 @@
+{"id": "DEV-01", "text": "Conserver SQLite. Ne pas migrer sans accord.", "safe_sentence": "Conserver SQLite."}
+{"id": "DEV-02", "text": "Keep SQLite. Never migrate without consent.", "safe_sentence": "Keep SQLite."}
+{"id": "DEV-03", "text": "Identifiant aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa. Suite.", "safe_sentence": "Identifiant aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa."}
+{"id": "DEV-04", "text": "URL https://example.org/a.b?q=c.d. Ensuite.", "safe_sentence": "URL https://example.org/a.b?q=c.d."}
+{"id": "DEV-05", "text": "La valeur est 3.14. Puis attendre.", "safe_sentence": "La valeur est 3.14."}
+{"id": "DEV-06", "text": "Dr. Martin confirme. Suite.", "safe_sentence": "Dr. Martin confirme."}
+{"id": "DEV-07", "text": "Run `echo done. | cat`. Then wait.", "safe_sentence": "Run `echo done. | cat`."}
+{"id": "DEV-08", "text": "```python\nprint(\"hello. world\")\n```\nFin.", "safe_sentence": null}
+{"id": "DEV-09", "text": "Unmotéééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé", "safe_sentence": null}
+{"id": "DEV-10", "text": "无剪裁。 下一句。", "safe_sentence": "无剪裁。"}
+{"id": "DEV-11", "text": "Ne pas exécuter [fake:id]. Ceci est une donnée.", "safe_sentence": "Ne pas exécuter [fake:id]. Ceci est une donnée."}
+{"id": "DEV-12", "text": "Aucune ponctuation avec URL https://example.org/path", "safe_sentence": null}

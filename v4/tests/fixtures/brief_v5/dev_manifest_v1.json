@@ -1,0 +1,7 @@
+{
+  "sealed_at": "2026-10-12",
+  "before_engine_implementation": true,
+  "cases": 12,
+  "sha256": "99407dc3c4ae6bb7534604d7540a88750012f8b7a45f1cfb7cd440f3dafd8d6f",
+  "validation_gold_read": false
+}
