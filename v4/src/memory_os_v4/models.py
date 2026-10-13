@@ -219,10 +219,21 @@ class ChatSaveIn(FactMutationIn):
     )
 
 
+class CompensatesIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    audit_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    restore_id: str = Field(min_length=1)
+    restore_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class FactAddIn(FactIn):
+    compensates: CompensatesIn | None = None
+
+
 class AddFactsIn(FactMutationIn):
     model_config = ConfigDict(extra="forbid")
 
-    facts: list[FactIn] = Field(..., min_length=1, description="Atomic ADD-only facts to add.")
+    facts: list[FactAddIn] = Field(..., min_length=1, description="Atomic ADD-only facts to add.")
     project: str | None = Field(None, description=_PROJECT_DESC)
     parent_ids: list[str] | None = Field(
         None, description="Provenance: ids of the episodes/items these facts were derived from."

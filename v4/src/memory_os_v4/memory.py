@@ -755,7 +755,12 @@ class MemoryV4:
         with self._lock:
             if mode not in (None, 'preview', 'apply'):
                 raise corr.CorrectionError('invalid_input')
+            is_compensation = any(f.get('compensates') is not None for f in facts)
+            if is_compensation and self.config.store_backend != 'sqlite_s1':
+                raise corr.CorrectionError('backend_unsupported')
             verified = corr.controlled(mode, expected_revisions, confirmed_impacts, preview_digest)
+            if is_compensation and not verified:
+                raise corr.CorrectionError('compensation_preview_required')
             if verified and self.config.store_backend != 'sqlite_s1':
                 raise corr.CorrectionError('backend_unsupported')
             if verified and mode != 'preview':
@@ -801,6 +806,10 @@ class MemoryV4:
         from . import corrections as corr
         with self._lock:
             impacts = []
+            audits = []
+            for nf, raw in zip(normalized, facts):
+                if raw.get('compensates') is not None:
+                    nf['compensates'] = raw['compensates']
             # Existing batching/embedding path is preserved for ordinary ADD-only writes.
             # `normalize_client_facts` (extract.py) whitelists a fixed set of
             # output keys and doesn't know about `keywords` -- it always
@@ -847,7 +856,7 @@ class MemoryV4:
                     spec = dict(nf)
                     spec["item_id"] = nf.get("item_id")
                     spec["project"] = project
-                    spec["parent_ids"] = parent_ids
+                    spec["parent_ids"] = list(dict.fromkeys([*(parent_ids or []), nf["compensates"]["restore_id"]])) if nf.get("compensates") else parent_ids
                     spec["event_time"] = ev_time
                     spec["source"] = source
                     try:
@@ -885,12 +894,16 @@ class MemoryV4:
                         if step:
                             item.correction = {'audit_id': corr.digest({'item_id': item.id, 'project': str(project), 'impacts': step, 'reason': reason, 'changed_by': changed_by}), 'reason': reason,
                                                'changed_by': changed_by, 'verified': verified, 'impacts': step}
+                            if nf.get('compensates'):
+                                item.correction['compensates'] = nf['compensates']
                             self.store.append(item)  # Same transaction, reconstructible B5 audit.
+                            audits.append({'item_id': item.id, 'audit_id': item.correction['audit_id'],
+                                           'verified': verified, **({'compensates': nf['compensates']} if nf.get('compensates') else {})})
 
                 flush_pending()
                 result = {"added": added, "deduped": deduped, "superseded": superseded}
                 if impacts:
-                    result.update(impacts=impacts, changed_by=changed_by,
+                    result.update(impacts=impacts, changed_by=changed_by, audits=audits,
                                   notices=[] if verified else ['correction_unverified'])
                 return result
 

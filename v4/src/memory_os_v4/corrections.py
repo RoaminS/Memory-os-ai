@@ -82,7 +82,11 @@ def prepare(engine, facts, project, parent_ids=None, event_time=None, source='cl
         for key in ('event_time', 'valid_from', 'valid_until'):
             if raw.get(key) is not None and (_coerce_time(raw[key]) is None or not math.isfinite(_coerce_time(raw[key]))):
                 raise CorrectionError('invalid_correction_time')
+        from .compensation import check
+        check(engine, raw, project, now)
         p = dict(nf)
+        if raw.get('compensates') is not None:
+            p['compensates'] = deepcopy(raw['compensates'])
         p['item_id'] = raw.get('item_id') or uuid.uuid4().hex
         if p['item_id'] in shadow.items:
             raise CorrectionError('invalid_target', 'duplicate proposed item id')
@@ -113,9 +117,11 @@ def prepare(engine, facts, project, parent_ids=None, event_time=None, source='cl
     expected = {i['target_id']: i['expected_revision'] for i in impacts if i['expected_revision'] is not None}
     payload = {'instance': engine.store.meta.get('store_instance_id'), 'project': str(project), 'facts': prepared,
                'parent_ids': list(parent_ids or []) if context is None else [], 'context': context,
+               'compensation': any(f.get('compensates') for f in prepared),
                'reason': reason, 'expected_revisions': expected, 'impacts': impacts}
     return {'ok': True, 'outcome': 'not_started', 'prepared_facts': prepared, 'expected_revisions': expected,
-            'impacts': impacts, 'preview_digest': digest(payload), 'store_instance_id': payload['instance']}
+            'impacts': impacts, 'preview_digest': digest(payload), 'store_instance_id': payload['instance'],
+            'compensation': payload['compensation']}
 
 
 def precheck(store, expected_revisions, project):
@@ -130,6 +136,8 @@ def precheck(store, expected_revisions, project):
 def guard(plan, *, verified, reason=None, expected_revisions=None, confirmed_impacts=None,
           preview_digest=None, request_id=None):
     impacts = plan['impacts']
+    if plan.get('compensation') and (not verified or preview_digest is None):
+        raise CorrectionError('compensation_preview_required')
     if not verified:
         if len(impacts) > 3:
             raise CorrectionError('impacts_confirmation_required', 'Legacy >3 impacts requires controlled preview/apply')

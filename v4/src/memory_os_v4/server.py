@@ -298,9 +298,9 @@ def _h_chat_save(engine: MemoryV4, args: models.ChatSaveIn) -> dict:
             "added": facts_result["added"],
             "deduped": facts_result["deduped"],
             "superseded": [list(p) for p in facts_result["superseded"]],
-            **{k: facts_result[k] for k in ('impacts', 'changed_by', 'notices') if k in facts_result},
+            **{k: facts_result[k] for k in ('impacts', 'changed_by', 'notices', 'audits') if k in facts_result},
         },
-        **{k: facts_result[k] for k in ('impacts', 'changed_by', 'notices') if k in facts_result},
+        **{k: facts_result[k] for k in ('impacts', 'changed_by', 'notices', 'audits') if k in facts_result},
     }
 
 
@@ -315,7 +315,7 @@ def _h_add_facts(engine: MemoryV4, args: models.AddFactsIn) -> dict:
         "added": result["added"],
         "deduped": result["deduped"],
         "superseded": [list(p) for p in result["superseded"]],
-        **{k: result[k] for k in ('impacts', 'changed_by', 'notices') if k in result},
+        **{k: result[k] for k in ('impacts', 'changed_by', 'notices', 'audits') if k in result},
     }
 
 
