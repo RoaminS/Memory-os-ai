@@ -70,5 +70,24 @@ comptes non nuls. Une nouvelle comparaison wheel/sdist4.0.7 sera exigée au RC.
 
 ## Preuves locales
 
-À compléter après les suites légères, sous garde disque ≥3 Go et sans encodage
-neuronal ; les tests TCP restent à Claude lorsque le sandbox interdit les binds.
+- Tests ciblés : **121 passed**, 9,98 s ; `tests/test_search_qualification.py`,
+  `tests/test_release_406.py`, `tests/test_release_copy.py`,
+  `tests/test_sqlite_activation_tools.py`, `v4/tests/test_schema8_copy_contract.py`.
+  Hash synthétique uniquement, aucune copie de production ni téléchargement.
+  Preuve : `.local-qualification/nonvacuity-targeted-v2.{log,xml}` dans le
+  clone persistant de livraison sous `codex_runs/schema8-nonvacuity-work`.
+- Une première commande ciblée avait un répertoire parent basetemp manquant ;
+  ce lancement n'est pas une preuve verte. Le replay v2 ci-dessus utilise le
+  parent créé ; le test de refus accepte le nouveau diagnostic Non-vacuity.
+- Deux lints projet verts (`src tests scripts` et contrôle E9/F sur
+  `src tests v4/src v4/tests v4/bench scripts`), `git diff --check` vert.
+- **Suite complète non exécutée (disque)** : garde effective 3 000 000 000
+  octets, mesure au démarrage **2 718 740 480 octets**, zéro subprocess pytest
+  lancé par la campagne complète. Refus conservé dans
+  `.local-qualification/nonvacuity-full-v1/report.json`, source `4043680`.
+  La livraison n'est donc **pas full-qualified**, ni TCP-qualified, ni
+  release-qualified. Claude exécute la suite complète avant la copie v2,
+  quand le disque et le swap satisfont les gardes. Aucune autre activité
+  machine n'a été interrompue.
+- Aucun changement à `src`, `v4/src`, `pyproject.toml`, version ou poids.
+  Aucun ancien rapport/manifeste/artefact modifié.
