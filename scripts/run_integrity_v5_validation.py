@@ -604,6 +604,9 @@ def worker(args):
     sys.path.insert(0, str(args.worker_source / "v4/src"))
     from memory_os_v4 import models
     from memory_os_v4.store import MemoryItem
+    from memory_os_v4.brief_tokens import counter
+
+    counter()  # exact tokenizer must be usable BEFORE any case is seeded
     from memory_os_v4.readiness import build_identity
 
     if build_identity().get("commit") != args.candidate_commit:
@@ -703,6 +706,7 @@ def main():
             inputs_sha256=args.inputs_sha256,
             manifest_sha256=sha(args.manifest.read_bytes()),
             binding=binding,
+            tokenizer_sha256=sha(args.table.read_bytes()),
             resources=guarded(),
         )
         report["source_archive_sha256"] = sha(
