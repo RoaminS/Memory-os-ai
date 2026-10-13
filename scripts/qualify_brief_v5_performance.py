@@ -55,6 +55,32 @@ def without_project_registry(environ):
     return result
 
 
+def export_arm(revision, destination):
+    """Both arms are frozen source layouts, not descriptor-less installed wheels."""
+    archive = subprocess.run(['git', 'archive', revision, 'v4/src', 'pyproject.toml'],
+                             cwd=ROOT, capture_output=True, check=True).stdout
+    destination.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(destination, filter='data')
+
+
+def require_ready(status, data, commit):
+    if (status != 200 or data.get('ready') is not True
+            or data.get('commit') != commit or data.get('identity_source') != 'env_declared'):
+        raise ValueError('Private arm readiness refused: ' + json.dumps(data, sort_keys=True))
+    return data
+
+
+async def local_ready(server, token, commit):
+    """Exercise the authenticated /ready handler before ANY timed measurement."""
+    import httpx
+    app = server._build_http_app('127.0.0.1', 8765)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        response = await client.get('http://127.0.0.1:8765/ready',
+                                    headers={'Authorization': 'Bearer ' + token})
+    return require_ready(response.status_code, response.json(), commit)
+
+
 def run_guarded(command, *, env, log):
     """Own process group; a guard/timeout also stops its private TCP/relay children."""
     process=subprocess.Popen(command,cwd=ROOT,env=env,stdout=log,stderr=log,start_new_session=True)
@@ -117,6 +143,10 @@ def worker(source, directory, protocol):
     count = counter()
     store = directory / 'store'
     cfg = Config(data_dir=str(store),store_backend='sqlite_s1',work_state=True,embed_model='hash',hash_dim=16)
+    token=directory/'token'
+    create_token(token)
+    os.environ['MEMORY_V4_TOKEN_FILE']=str(token)
+    commit=os.environ['MEMORY_V4_BUILD_COMMIT']
     with MemoryV4(config=cfg) as seed:
         values=[]
         for i in range(protocol['performance']['seed_items']):
@@ -133,6 +163,8 @@ def worker(source, directory, protocol):
             raise AssertionError('Brief encoded a text')
         engine.embedder.encode = forbidden
         try:
+            preflight=anyio.run(local_ready,server,read_token(token),commit)
+            (directory/'readiness.json').write_text(json.dumps({'server':preflight},indent=2)+'\n')
             for index in range(protocol['performance']['warmups']+protocol['performance']['sequential_calls']):
                 sample=guarded()
                 started=time.perf_counter()
@@ -147,8 +179,6 @@ def worker(source, directory, protocol):
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0))
         port=sock.getsockname()[1]
-    token=directory/'token'
-    create_token(token)
     env=without_project_registry({**os.environ,'PYTHONPATH':str(source/'v4/src'),'MEMORY_V4_DIR':str(store),
          'MEMORY_V4_STORE_BACKEND':'sqlite_s1','MEMORY_V4_WORK_STATE':'1','MEMORY_V4_EMBED_MODEL':'hash',
          'MEMORY_V4_HASH_DIM':'16','MEMORY_V4_TOKEN_FILE':str(token),'MEMORY_V4_OPS_DIR':str(directory/'ops'),
@@ -176,10 +206,14 @@ server.run()
                 try:
                     req=urllib.request.Request(f'http://127.0.0.1:{port}/ready',headers={'Authorization':'Bearer '+read_token(token)})
                     with urllib.request.urlopen(req,timeout=1) as response:
-                        if response.status==200:
-                            break
-                except Exception:
+                        status,data=response.status,json.load(response)
+                except OSError:
                     pass
+                else:
+                    transport_ready=require_ready(status,data,commit)
+                    (directory/'readiness.json').write_text(json.dumps(
+                        {'server':preflight,'transport':transport_ready},indent=2)+'\n')
+                    break
                 if process.poll() is not None or time.monotonic()>=deadline:
                     raise ValueError('Private synthetic server not ready; inspect server.log')
                 time.sleep(.05)
@@ -205,7 +239,8 @@ server.run()
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-    result={'complete':True,'neural_calls':0,'measurements':rows}
+    result={'complete':True,'neural_calls':0,'measurements':rows,
+            'readiness':{'server':preflight,'transport':transport_ready}}
     for path in ('server','transport'):
         result[path]={field:stats([row[field] for row in rows if row['path']==path]) for field in ('ms','bytes','tokens')}
     (directory/'worker.json').write_text(json.dumps(result,indent=2)+'\n')
@@ -245,12 +280,9 @@ def main():
                       machine={'platform':sys.platform,'uname':list(os.uname())},tokenizer_sha256=hashlib.sha256(args.table.read_bytes()).hexdigest())
         with tempfile.TemporaryDirectory(prefix='private-synthetic-',dir=output) as temporary:
             private=Path(temporary)
-            baseline=private/'baseline-source'
-            baseline.mkdir()
-            archive=subprocess.run(['git','archive',protocol['base_commit'],'v4/src'],cwd=ROOT,capture_output=True,check=True).stdout
-            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-                tar.extractall(baseline,filter='data')
-            for label,source,commit in [('baseline',baseline,protocol['base_commit']),('candidate',ROOT,sha)]:
+            for label,commit in [('baseline',protocol['base_commit']),('candidate',sha)]:
+                source=private/(label+'-source')
+                export_arm(commit,source)
                 report['last_resources']=guarded()
                 directory=private/label
                 directory.mkdir()
@@ -261,7 +293,7 @@ def main():
                     try:
                         returncode=run_guarded(command,env=env,log=log)
                     finally:
-                        for evidence in ('server.log','measurements.jsonl'):
+                        for evidence in ('server.log','measurements.jsonl','readiness.json'):
                             if (directory/evidence).exists():
                                 shutil.copy2(directory/evidence,output/(label+'-'+evidence))
                 # Preserve failed worker logs but clean synthetic stores on exit.

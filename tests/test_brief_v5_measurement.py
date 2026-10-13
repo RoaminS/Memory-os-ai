@@ -91,3 +91,69 @@ assert ProjectRegistry.load(c.project_registry).document is None
     result=subprocess.run([sys.executable,'-B','-c',program],cwd=tmp_path,
                           env=perf.without_project_registry(parent),capture_output=True,text=True,timeout=20)
     assert result.returncode==0,result.stderr
+
+
+@pytest.mark.parametrize('revision', ['fdd60cb', 'HEAD'])
+def test_frozen_arm_authenticated_readiness_before_measurement(tmp_path, revision):
+    source=tmp_path/'arm-source'
+    perf.export_arm(revision,source)
+    commit=subprocess.run(['git','rev-parse',revision],cwd=ROOT,capture_output=True,
+                          text=True,check=True).stdout.strip()
+    assert (source/'pyproject.toml').is_file()
+    assert not (source/'.git').exists()
+    assert not (source/'v4/src/memory_os_v4/_build_identity.json').exists()
+    token=tmp_path/'token'
+    token.write_text('synthetic-pa-ready-'+'x'*40)
+    token.chmod(0o600)
+    env=perf.without_project_registry({**os.environ,'PYTHONPATH':str(source/'v4/src'),
+        'MEMORY_V4_BUILD_COMMIT':commit,'MEMORY_V4_TOKEN_FILE':str(token),
+        'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1','PYTHONDONTWRITEBYTECODE':'1'})
+    # No TCP, tokenizer, 10k seed or model: real frozen /ready, empty disposable
+    # hash store, then reproduce the missing-pyproject failure as a negative control.
+    program='''
+import importlib.util
+from pathlib import Path
+import sys
+import anyio
+from memory_os_v4 import Config, MemoryV4, server
+spec=importlib.util.spec_from_file_location('harness',sys.argv[1])
+harness=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(harness)
+token=Path(sys.argv[2]).read_text()
+with MemoryV4(config=Config(data_dir=sys.argv[3],store_backend='sqlite_s1',
+                          work_state=True,embed_model='hash',hash_dim=16)) as engine:
+    engine.ensure_retrieval()
+    server.set_engine(engine)
+    def forbidden(*args,**kwargs):
+        raise AssertionError('Readiness must not encode')
+    engine.embedder.encode=forbidden
+    try:
+        data=anyio.run(harness.local_ready,server,token,sys.argv[4])
+        assert data['ready'] is True and data['identity_source']=='env_declared'
+        project=Path(sys.argv[5])/'pyproject.toml'
+        content=project.read_bytes()
+        project.unlink()
+        try:
+            try:
+                anyio.run(harness.local_ready,server,token,sys.argv[4])
+            except ValueError as exc:
+                assert 'build_unqualified' in str(exc)
+            else:
+                raise AssertionError('Missing source layout must refuse readiness')
+        finally:
+            project.write_bytes(content)
+    finally:
+        server.set_engine(None)
+'''
+    result=subprocess.run([sys.executable,'-B','-c',program,str(ROOT/'scripts/qualify_brief_v5_performance.py'),
+                           str(token),str(tmp_path/'store'),commit,str(source)],cwd=tmp_path,
+                          env=env,capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stderr
+
+
+@pytest.mark.parametrize('status,patch', [(503,{}),(200,{'ready':False}),
+    (200,{'commit':'b'*40}),(200,{'identity_source':'unqualified'})])
+def test_measurement_requires_ready_and_the_arm_identity(status,patch):
+    data={'ready':True,'commit':'a'*40,'identity_source':'env_declared',**patch}
+    with pytest.raises(ValueError,match='readiness refused'):
+        perf.require_ready(status,data,'a'*40)
