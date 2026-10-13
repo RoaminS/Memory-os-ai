@@ -75,3 +75,28 @@ au tip importé. Ne pas modifier le seal/gold pour contourner un refus.
 La répétition **source** sur copie réelle est ensuite décrite dans
 [SWITCH_4_0_7_SQLITE.md](SWITCH_4_0_7_SQLITE.md). Elle n'autorise aucune bascule et
 ne remplace pas les preuves installées du futur RC.
+
+## Résultats Codex, avant livraison
+
+Sur ff6081f, commande complète `pytest -c pyproject.toml v4/tests -m "not slow"`
+(hash/offline/cl100k exact, JUnit/logs privés) : **2083 passed**, 29 erreurs de
+setup `PermissionError: Operation not permitted`, 2 skips `loopback bind forbidden`.
+Ces 31 cas sont exactement le manifeste TCP, sans ajout/retrait ni doublon.
+0 échec d'assertion, aucun autre skip ; 1 slow exclu comme dans le protocole full.
+Le code de sortie global reste **1**, donc aucune qualification full/TCP ni
+release_ready n'est revendiquée. La suite v3 complète : **749 passed**, code 0.
+27 nouveaux contrôles ciblés verts ; inclus dans la suite, ne pas les additionner.
+Ruff projet, E9/F et diff --check verts. Diff `v4/src` depuis72591df : vide.
+
+Sur fixture privée SQLite/hash vide, le journal ajoute **273 octets / 77 tokens
+cl100k** à l'enveloppe détaillée legacy (corps dupliqué par ce format).
+Ce chiffre est descriptif pour cette fixture, pas une limite universelle.
+Le test de migration exige au contraire zéro différence de l'enveloppe compact_v2.
+Les deux dossiers locaux antérieurs restent conservés ; le dernier est
+`.local-qualification/schema8-delivery-full-v1/` dans le worktree de livraison,
+avec XML/logs, refus TCP et `report.json`. Aucun output existant n'a été réutilisé.
+
+Pannes sur vraie copie7 : avant CREATE INDEX8, avant reçu de migration8,
+après commit DDL8/avant état du journal ; toutes récupérées, autorité identique.
+La séparation DDL / état initial est documentée, sans prétendre qu'elle constitue
+une transaction unique : l'état est initialisé idempotemment à la réouverture.
