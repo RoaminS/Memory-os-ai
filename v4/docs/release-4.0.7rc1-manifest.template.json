@@ -1,0 +1,25 @@
+{
+  "template_only": true,
+  "version": "4.0.7rc1",
+  "source_commit": "TO_BE_SEALED_FROM_IMPORTED_RC_COMMIT",
+  "engine_gate_base": "f9d366813aaabb9e0c9111257938bc9a008f31e2",
+  "release_ready": false,
+  "artifacts": [],
+  "evidence": {},
+  "expected_artifacts": [
+    "memory_os_ai-4.0.7rc1-py3-none-any.whl",
+    "memory_os_ai-4.0.7rc1.tar.gz"
+  ],
+  "pending": [
+    "full_31_tcp",
+    "artifacts_installed",
+    "source_cached_semantic",
+    "schema7_to8_installed_copy",
+    "gate_b_rc_recollection",
+    "installed_relays"
+  ],
+  "generator": "scripts/make_release_407.py",
+  "verifier": "scripts/verify_release_manifest.py",
+  "publication_authorized": false,
+  "production_switch_authorized": false
+}

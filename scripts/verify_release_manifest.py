@@ -102,6 +102,9 @@ def validate_brief(proof, manifest):
 
 
 def validate_local(manifest, directory, *, require_source=True, require_copy=True, require_brief=True):
+    if manifest.get('version', '').startswith('4.0.7'):
+        from release_407_checks import validate_local as validate_rc
+        return validate_rc(manifest, directory, require_copy=require_copy, require_source=require_source)
     if manifest.get('version') == '4.0.6':
         from release_406_checks import validate_local as validate_distribution
         return validate_distribution(manifest, directory, require_copy=require_copy)
@@ -159,7 +162,7 @@ def validate_relay(proof, manifest):
                 or case.get('artifact_sha256') != artifact['sha256']
                 or not all(case.get(check) is True for check in CASE_CHECKS)):
             raise ValueError('cas installé incomplet/en échec ou autre artefact : ' + case['kind'])
-        if manifest['version'] in {'4.0.4', '4.0.5', '4.0.6'}:
+        if manifest['version'] in {'4.0.4', '4.0.5', '4.0.6', '4.0.7rc1', '4.0.7'}:
             brief = case.get('brief', {})
             if (case.get('local_status_during_outage') is not True or not brief.get('ok')
                     or not 0 < brief.get('bytes', 0) <= 6000 or not 0 < brief.get('tokens', 0) <= 1500):
@@ -176,12 +179,17 @@ def main(argv=None) -> int:
     parser.add_argument('--record-source-proof', type=Path,
                         help='Enregistre TCP source et MiniLM cached concordants, sans lever la garde relais')
     parser.add_argument('--record-copy-proof', type=Path)
+    parser.add_argument('--record-full-proof', type=Path)
+    parser.add_argument('--record-gate-proof', type=Path)
     parser.add_argument('--copy-review', type=Path, help='Revue Claude liée au SHA du rapport original si les classements changent')
     parser.add_argument('--record-brief-source', type=Path)
     parser.add_argument('--record-brief-exact', type=Path)
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(args.manifest.read_text())
+        if manifest.get('version', '').startswith('4.0.7'):
+            from release_407_checks import main as verify_rc
+            return verify_rc(args)
         if args.record_brief_source or args.record_brief_exact:
             if (not args.record_brief_source or not args.record_brief_exact or manifest['version'] not in {'4.0.4', '4.0.5'}
                     or args.record_source_proof or args.record_copy_proof or args.record_relay_proof):

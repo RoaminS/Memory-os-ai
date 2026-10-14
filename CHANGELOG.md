@@ -1,6 +1,33 @@
 # Changelog
 
-## 4.0.6 — candidate ALPHA (2026-10-12), non publiée / non déployée
+## 4.0.7rc1 — candidate ALPHA (2026-10-14), non publiée / non déployée
+
+- Brief compact négocié à corps unique, unités entières ou première phrase/référence,
+  parts du budget, priorité tâches/décisions/contraintes et saturation quantifiée.
+  Gate P-A acquis sur ceedb5c : 40/40 cas scellés, performance de source p95 193,9 ms
+  au rerun préenregistré ; pas de gain d'usage réel démontré.
+- Intégrité B2/B3/B4/B5/B9 qualifiée sur f9d3668 : corrections avec CAS de révisions,
+  impacts retournés, aperçu lié à l'application, compensation explicite sans
+  résurrection d'une donnée oubliée, journal prospectif paginé et tests de panne.
+- Gate P-B : 40/40 synthétiques, 160 lignes, 0 invalidation inattendue/lot partiel.
+  Limites : MAC exact exclu ; rejeu-oracle candidat pour les défauts non sécuritaires ;
+  classement de l'oubli par requête non évalué indépendamment ; hash/relais simulé,
+  périmètre non exhaustif ; authenticité locale conditionnelle, non signée.
+- SQLite 7→8 : autorité/histoire/reçus/tâches conservés, journal initial vide et
+  coverage_start prospective. Pas de downgrade automatique en 4.0.5 après écritures8.
+- Correctif du cache d'embeddings : réutilisation conditionnelle au profil attesté
+  identique, sans ré-encodage prouvé sur la répétition source d'une copie. La bascule
+  4.0.6 avait été annulée ; la production reste 4.0.5. Preuve installée RC à produire.
+- Non-vacuité : les dix recherches figées exigent ≥1 hit chacune dans chaque worker.
+  Les anciennes égalités sur listes vides ne démontraient pas l'identité des résultats.
+- Réglages cosine historiques inertes supprimés des nouveaux plists ; confinement
+  visible selon les règles réellement appliquées, pas selon ces anciennes variables.
+- README PyPI macOS/Python3.11 explicite, extras [ops,brief], libellé projet commun,
+  liens HTTPS Cursor/VS Code ciblant uniquement la future stable 4.0.7.
+- Cette RC ne modifie sous v4/src que __version__. Le report des gates sur le commit
+  RC exige la recollecte et la qualification installée ; aucune publication/bascule.
+
+## 4.0.6 — publiée sur PyPI (2026-10-12), non déployée sur la production locale
 
 - D0 : métadonnées et liens publics corrigés, manifeste MCP stdio relayé en
   4.0.6 (brouillon non publié), Docker explicitement historique v3, README et

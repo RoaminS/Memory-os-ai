@@ -30,7 +30,7 @@ def resources(root):
         raise RuntimeError('Swap measurement unavailable; no test may start')
     swap = float(match[1]) * {'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3}[match[2]]
     free = shutil.disk_usage(root).free
-    if swap > 8_500_000_000 or free < 5_000_000_000:
+    if swap > 8_500_000_000 or free < __import__('memory_os_v4.ops.provision', fromlist=['min_free_bytes']).min_free_bytes():
         raise RuntimeError(f'Resource guard stopped: swap={int(swap)}, free={free}')
     return {'swap_bytes': int(swap), 'free_bytes': free}
 
@@ -53,7 +53,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     directory = args.manifest.resolve().parent
     manifest = json.loads(args.manifest.read_text())
-    if manifest['version'] not in {'4.0.2', '4.0.3', '4.0.4', '4.0.5'}:
+    if manifest['version'] not in {'4.0.2', '4.0.3', '4.0.4', '4.0.5', '4.0.7rc1', '4.0.7'}:
         raise ValueError('This source qualification targets 4.0.2/4.0.3/4.0.4/4.0.5')
     files = manifest['qualification_source_sha256']
     if any(digest(root / name) != sha for name, sha in files.items()):
@@ -68,13 +68,14 @@ def main():
            'MEMORY_WORKSPACE': str(root), 'MEMORY_V4_BUILD_COMMIT': manifest['source_commit']}
     suites = [('source_tcp', ['v4/tests/test_server_http_e2e.py', 'v4/tests/test_ops_e2e.py'], 10),
               ('cached_semantic', ['v4/tests/test_core_slow_integration.py'], 1)]
-    if manifest['version'] in {'4.0.3', '4.0.4', '4.0.5'}:
+    if manifest['version'] in {'4.0.3', '4.0.4', '4.0.5', '4.0.7rc1', '4.0.7'}:
         suites.append(('v3_cached', ['tests'], manifest['source_expected_v3_tests']))
-    if manifest['version'] in {'4.0.4', '4.0.5'}:
-        suites[0] = ('source_tcp', [*suites[0][1], 'v4/tests/test_l3_tcp.py'], 27 if manifest['version'] == '4.0.5' else 20)
+    if manifest['version'] in {'4.0.4', '4.0.5', '4.0.7rc1', '4.0.7'}:
+        suites[0] = ('source_tcp', [*suites[0][1], 'v4/tests/test_l3_tcp.py'], 31 if manifest['version'].startswith('4.0.7') else (27 if manifest['version'] == '4.0.5' else 20))
         table = os.environ.get('MEMORY_V4_CL100K_PATH', '')
+        reserve = os.environ.get('MEMORY_V4_MIN_FREE_BYTES', '5000000000')
         env = {k: v for k, v in env.items() if not k.startswith('MEMORY_V4_')}
-        env.update(MEMORY_V4_CL100K_PATH=table, MEMORY_V4_BUILD_COMMIT=manifest['source_commit'],
+        env.update(MEMORY_V4_MIN_FREE_BYTES=reserve, MEMORY_V4_CL100K_PATH=table, MEMORY_V4_BUILD_COMMIT=manifest['source_commit'],
                    MEMORY_V4_DIR=str(directory / 'unused-store'), MEMORY_V4_OPS_DIR=str(directory / 'ops'))
         env.pop('PYTEST_ADDOPTS', None)
     if args.output.exists():

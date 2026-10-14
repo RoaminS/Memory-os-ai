@@ -1,8 +1,8 @@
 # 4.0.7 — qualification sur copie SQLite, puis conditions de bascule
 
 13 octobre 2026. **PRODUCTION RESTE EN 4.0.5.** Aucune commande de ce document ne
-bascule un service. La candidate actuelle reste 4.0.6.dev0, schéma8 ; pas de RC
-ni d'artefact 4.0.7 qualifié à ce stade. Les guards utilisent le seuil effectif
+bascule un service. La candidate est 4.0.7rc1, schéma8 ; aucun artefact installé
+qualifié à ce stade. Les guards utilisent le seuil effectif
 `min_free_bytes()` (5 Go, override opérateur ≥3 Go) et swap ≤8,5 Go. Travail
 séquentiel, nice15, aucune acquisition de poids.
 
@@ -62,8 +62,10 @@ L'empreinte de cette coupe et le plist sont contrôlés inchangés en fin de run
 Le vieil outil `qualify_sqlite_release_copy.py` / manifest4.0.6 n'est **pas**
 compatible avec cette migration : il attend schéma7 et une autorité strictement
 identique sans whitelist7→8. Ne pas passer une autre version ni modifier son
-rapport à la main. Au gel du RC, livrer un manifeste4.0.7 et un lanceur installé
-utilisant la comparaison exhaustive7→8 ci-dessus, puis exécuter successivement :
+rapport à la main. Le lanceur `qualify_sqlite_release_407.py` et le manifeste généré par
+`make_release_407.py` appliquent cette comparaison. Les commandes exactes et
+critères sont désormais dans [QUALIFY_4_0_7_RC1.md](QUALIFY_4_0_7_RC1.md).
+Exécuter successivement :
 
 1. nouvelle coupe via backup API4.0.5, baseline installée4.0.5 ;
 2. copies wheel4.0.7 et sdist4.0.7, metadata+descriptor source complet vérifié,
@@ -75,9 +77,9 @@ utilisant la comparaison exhaustive7→8 ci-dessus, puis exécuter successivemen
 6. manifest vérifié, revue Claude, GO distinct Romain, coupe finale sous fenêtre
    read_only avant toute modification du plist/pointer.
 
-Les commandes installées exactes dépendent des artefacts RC qui **n'existent pas
-encore** ; elles seront scellées avec ces empreintes, sans réutiliser les wheels
-4.0.6. Ne pas qualifier « release_ready » sur la seule répétition source.
+Les empreintes des artefacts RC seront calculées à leur construction,
+sans réutiliser les wheels 4.0.6. Le modèle de manifeste est explicitement
+un brouillon, pas une preuve vérifiable ni un manifeste prêt. Ne pas qualifier « release_ready » sur la seule répétition source.
 
 ## 4. Retour arrière / restauration : frontière de schéma
 

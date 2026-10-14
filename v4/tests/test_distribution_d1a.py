@@ -40,7 +40,7 @@ def test_release_versions_and_packaged_notes_are_consistent():
     assert registry["version"] == VERSION
     package = registry["packages"][0]
     assert package["version"] == VERSION
-    requirement = f"memory-os-ai[ops]=={VERSION}"
+    requirement = f"memory-os-ai[ops,brief]=={VERSION}"
     assert next(a["value"] for a in package["runtimeArguments"] if a.get("name") == "--from") == requirement
     launch = registry["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["launch"]
     assert launch["manual_pinned_command"] == f"uvx --from {requirement} memory-os-relay"
