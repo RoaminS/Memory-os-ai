@@ -7,7 +7,7 @@ Connected assistants — Claude Code, Codex, Cursor, VS Code Copilot, Gemini CLI
 the same project state on your machine: dated decisions, open tasks and verifiable history.
 
 > **Status: ALPHA — macOS Apple Silicon only** (Linux/Windows planned, not qualified). Local clients on the same Mac;
-> remote/cloud agents are not qualified. Current published release: **4.0.6**. Candidate: **4.0.7rc1**, not published or deployed.
+> remote/cloud agents are not qualified. Current published release: **4.0.6**. Candidate with final version: **4.0.7**, not published or deployed.
 > Limits and evaluation results: [see below](#limits-and-evaluations).
 
 ## Why
@@ -112,7 +112,7 @@ policy, dated append-only history, compare-and-set on tasks and core blocks.
 
 ## Release notes
 
-**4.0.7rc1** (candidate; final 4.0.7 not published): compact single-body brief within an exact token budget, whole items instead of mid-word
+**4.0.7** (candidate with final version; not published): compact single-body brief within an exact token budget, whole items instead of mid-word
 cuts, value-ranked selection with counted omissions; vector cache reused when the attested encoding profile is unchanged (zero-re-encoding upgrades require copy
 qualification);
 SQLite schema 8 adds a prospective change journal, explicit compensating corrections and revision CAS for facts.

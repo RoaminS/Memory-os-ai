@@ -1,7 +1,7 @@
 # 4.0.7 — qualification sur copie SQLite, puis conditions de bascule
 
 13 octobre 2026. **PRODUCTION RESTE EN 4.0.5.** Aucune commande de ce document ne
-bascule un service. La candidate est 4.0.7rc1, schéma8 ; aucun artefact installé
+bascule un service. La candidate utilise la chaîne finale 4.0.7, schéma8 ; aucun artefact installé
 qualifié à ce stade. Les guards utilisent le seuil effectif
 `min_free_bytes()` (5 Go, override opérateur ≥3 Go) et swap ≤8,5 Go. Travail
 séquentiel, nice15, aucune acquisition de poids.
@@ -64,7 +64,7 @@ compatible avec cette migration : il attend schéma7 et une autorité strictemen
 identique sans whitelist7→8. Ne pas passer une autre version ni modifier son
 rapport à la main. Le lanceur `qualify_sqlite_release_407.py` et le manifeste généré par
 `make_release_407.py` appliquent cette comparaison. Les commandes exactes et
-critères sont désormais dans [QUALIFY_4_0_7_RC1.md](QUALIFY_4_0_7_RC1.md).
+critères sont désormais dans [QUALIFY_4_0_7.md](QUALIFY_4_0_7.md).
 Exécuter successivement :
 
 1. nouvelle coupe via backup API4.0.5, baseline installée4.0.5 ;

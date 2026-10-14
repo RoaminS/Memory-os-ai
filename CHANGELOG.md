@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.0.7 — candidate à chaîne de version finale (2026-10-14), non publiée / non déployée
+
+- La chaîne finale 4.0.7 remplace 4.0.7rc1 uniquement pour la requalification :
+  doctor refuse les versions préliminaires PEP 440 (rc/dev), sans effet sur les
+  versions finales. Défaut connu, correction avec tests prévue pour 4.0.8 ;
+  doctor.py reste inchangé afin de préserver le report des gates A/B.
+- Depuis f9d3668, sous v4/src, seule __version__ change. Les fonctionnalités et
+  limites P-A/P-B décrites ci-dessous restent identiques : gate A 40/40 sur
+  ceedb5c, gate B 40/40 sur f9d3668, schéma8 et journal prospectif, compensation
+  explicite, CAS des révisions et correctif cache ; aucun gain d'usage revendiqué.
+- Limites du gate B conservées : MAC exact non vérifié ; rejeu-oracle candidat
+  pour les défauts non sécuritaires ; classement de l'oubli/requête non indépendant ;
+  scope synthétique/hash/relais simulé non exhaustif ; authenticité locale
+  conditionnelle, non signée. Le report sur ce commit exige une nouvelle collecte.
+- RC1 : suites/source/artefacts et cinq workers sur copie étaient verts (migration
+  0,57 s, 0 miss/encodage, dix requêtes × dix hits et classements identiques), mais
+  le FAIL du doctor a refusé la campagne et laissé release_ready=false. Les
+  preuves RC1 restent conservées et ne qualifient pas ces nouveaux artefacts.
+- Requalification COMPLÈTE 4.0.7 en dossiers v2 : nouveaux wheel/sdist/descriptor,
+  31 TCP, source/sémantique, copie7→8, doctor, cache/reopen, S4 backup/drill,
+  recollecte P-B et relais. Aucun artefact RC renommé, aucune publication/bascule ;
+  production4.0.5 maintenue jusqu'au GO distinct de Romain.
+
 ## 4.0.7rc1 — candidate ALPHA (2026-10-14), non publiée / non déployée
 
 - Brief compact négocié à corps unique, unités entières ou première phrase/référence,
