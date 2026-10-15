@@ -279,13 +279,18 @@ def main():
                 "MEMORY_V4_TOKEN_FILE": str(s4root / "never-production.token"),
                 "MEMORY_V4_SERVICE_LABEL": "",
             }
-            code = """import json; from memory_os_v4.ops.settings import OpsSettings
+            # S4 is an ONLINE backup: as in production, the writer stays open (WAL/SHM present)
+            # during backup + drill; never repair/create WAL from the backup side.
+            code = """import json, os; from contextlib import closing; from pathlib import Path
+from memory_os_v4.ops.settings import OpsSettings
 from memory_os_v4.ops.backup import load_or_create_key
 from memory_os_v4.ops import sqlite_backup as s4
+from memory_os_v4.sqlite_store import SQLiteStore
 s=OpsSettings.from_env(); load_or_create_key(s.backup_key)
-b=s4.backup(s,apply=True)
-if not b.get('ok'): raise RuntimeError(b)
-d=s4.restore_drill(s,apply=True,start_server=True,reconcile=True)
+with closing(SQLiteStore(Path(os.environ['MEMORY_V4_DIR']))):
+    b=s4.backup(s,apply=True)
+    if not b.get('ok'): raise RuntimeError(b)
+    d=s4.restore_drill(s,apply=True,start_server=True,reconcile=True)
 print(json.dumps({'backup':b,'drill':d}))
 if not d.get('ok'): raise RuntimeError(d)
 """
