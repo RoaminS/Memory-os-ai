@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -23,8 +24,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def guard():
-    if shutil.disk_usage(ROOT).free < 3_000_000_000:
+    free = shutil.disk_usage(ROOT).free
+    if free < 3_000_000_000:
         raise RuntimeError('Disk guard: 3 GB minimum')
+    if os.environ.get('MEMORY_READY_BENCH_REQUIRE_SWAP') == '1':
+        result = subprocess.run(['/usr/sbin/sysctl', '-n', 'vm.swapusage'], capture_output=True, text=True, timeout=5)
+        match = re.search(r'used\s*=\s*([0-9.]+)([KMG])', result.stdout)
+        if result.returncode or match is None:
+            raise RuntimeError('Swap unavailable; operator benchmark refused')
+        swap = float(match[1])*{'K':1024,'M':1024**2,'G':1024**3}[match[2]]
+        if swap > 8_500_000_000:
+            raise RuntimeError('Swap guard: 8.5 GB maximum')
 
 
 def distribution(values):
@@ -83,12 +93,21 @@ def worker(site, root, items, repeats):
                     res = await client.get('http://127.0.0.1:8765/ready', headers={'Authorization':'Bearer '+token.read_text()})
                     samples.append((time.perf_counter()-start)*1000)
                     assert res.status_code == 200 and res.json()['ready'] is True, res.text
-            return samples
-        samples = anyio.run(measure)
+                periodic = []
+                for _ in range(5):
+                    await anyio.sleep(1.01)
+                    guard()
+                    start = time.perf_counter()
+                    res = await client.get('http://127.0.0.1:8765/ready', headers={'Authorization':'Bearer '+token.read_text()})
+                    periodic.append((time.perf_counter()-start)*1000)
+                    assert res.status_code == 200 and res.json()['ready'] is True, res.text
+            return samples, periodic
+        samples, periodic = anyio.run(measure)
         assert engine_readiness(m)[0]
         report = {'ok':True, 'items':items, 'item_versions':len(rows)+items//4, 'blocks':20, 'tasks':30,
                   'samples':len(samples), 'components':components, 'first_ms':samples[0],
                   'requests_ms':samples, 'warm':distribution(samples[1:]), 'neural_calls':0,
+                  'periodic_after_ttl':distribution(periodic), 'periodic_ms':periodic,
                   'profile':m._compute_profile(), 'transport':'ASGI in process, authenticated, no TCP',
                   'descriptor':'synthetic coherent payload fixture, not a release qualification'}
         server._engine = None
@@ -103,7 +122,10 @@ def main():
     p.add_argument('--repeats', type=int, default=31)
     p.add_argument('--worker', type=Path)
     p.add_argument('--site', type=Path)
+    p.add_argument('--require-swap', action='store_true', help='Refuse if swap is not attestable or exceeds 8.5 GB')
     a = p.parse_args()
+    if a.require_swap:
+        os.environ['MEMORY_READY_BENCH_REQUIRE_SWAP'] = '1'
     guard()
     if a.worker:
         result = worker(a.site, a.worker, a.items, a.repeats)
@@ -125,7 +147,6 @@ def main():
         files = {str(f.relative_to(site)):hashlib.sha256(f.read_bytes()).hexdigest()
                  for f in sorted(site.rglob('*')) if f.is_file()}
         canonical = json.dumps(files, sort_keys=True, separators=(',',':')).encode()
-        import re
         version = re.search(r'__version__\s*=\s*"([^"]+)"', (site/'memory_os_v4/__init__.py').read_text())[1]
         descriptor = {'schema_version':1, 'version':version, 'source_commit':revision,
                       'source_inventory_sha256':hashlib.sha256(raw).hexdigest(), 'files':files,
@@ -142,7 +163,7 @@ def main():
     report['source_commit'] = revision
     report['method'] = 'synthetic fixed 3500 scale; same machine, concurrency 1, no semantic inference'
     report_path.write_text(json.dumps(report,indent=2)+'\n')
-    print(json.dumps({k:report[k] for k in ('ok','source_commit','components','first_ms','warm')}))
+    print(json.dumps({k:report[k] for k in ('ok','source_commit','components','first_ms','warm','periodic_after_ttl')}))
 
 
 if __name__ == '__main__':

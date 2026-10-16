@@ -27,3 +27,10 @@ La mesure locale peut ne pas attester swap/nice dans le sandbox. Pour une preuve
 opérateur : vérifier swap ≤8,5 Go, lancer sous nice15, concurrence1. Refus si swap
 non mesurable ou disque insuffisant. Rejouer deux bras dans des dossiers NEUFS ;
 un seul bras est actif à la fois. Aucun téléchargement.
+
+Complément figé avant exécution : cinq GET supplémentaires espacés de 1,01s
+(au-delà du TTL), publiés séparément. Ils doivent tous être prêts ; aucun gain de
+latence n'est requis après expiration. Cela évite de présenter le gain d'une
+rafale comme celui d'un audit exhaustif isolé. `--require-swap` impose la mesure
+opérateur de swap ; sans cette option les mesures locales sont non qualifiantes.
+Les premières exécutions de développement restent conservées, jamais écrasées.
