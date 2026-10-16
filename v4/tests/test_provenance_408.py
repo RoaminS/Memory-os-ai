@@ -49,6 +49,12 @@ def test_committed_events_all_authors_and_idempotence(tmp_path, monkeypatch, pat
             assert event['operation'] == name
             assert event['changed_by']['client_id'] == {'relay':'claude-code', 'direct':'direct-client', 'anonymous':'unknown'}[path]
             assert event['changed_by']['authenticated'] is False
+            if path != 'anonymous':
+                expected = {'client_id':{'relay':'claude-code', 'direct':'direct-client'}[path],
+                            'client_version':{'relay':'1', 'direct':'2'}[path], 'authenticated':False}
+                if name in {'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'}:
+                    expected['actor_label'] = None
+                assert event['changed_by'] == expected
             count = len(events)
             assert server.dispatch(name, args) == result
             assert len(listing(m, 'P')['events']) == count

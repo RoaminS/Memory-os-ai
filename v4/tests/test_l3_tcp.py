@@ -616,5 +616,9 @@ def test_408_all_mutation_authors_reach_change_events(harness):
                 'patch':{'next_action':'Synthetic next step'},'reason':'Progress','request_id':'update408'})
             events = payload(await session.call_tool('memory_timeline', {'project':'P','view':'changes'}))['events']
             assert len(events) == 7
-            assert all(e['changed_by'] == {'client_id':'synthetic-408','client_version':'1','authenticated':False} for e in events)
+            for event in events:
+                expected = {'client_id':'synthetic-408', 'client_version':'1', 'authenticated':False}
+                if event['operation'] in {'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'}:
+                    expected['actor_label'] = None  # WorkOwnerIn's preserved nullable field.
+                assert event['changed_by'] == expected
     anyio.run(run)
