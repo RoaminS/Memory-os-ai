@@ -168,6 +168,7 @@ class SQLiteStore(Store):
         version = 0
         self._sql_lock = RLock()
         self._depth = 0
+        self._readiness_generation = 0
         self._poisoned = False
         self.fault_hook = None  # Test-only callback; receives every mutation boundary.
         self._connection = sqlite3.connect(self.db_path, isolation_level=None, timeout=5,
@@ -233,6 +234,8 @@ class SQLiteStore(Store):
             level = self._depth
             savepoint = f"store_{level}"
             if level == 0:
+                # Invalidate even when BEGIN/action/COMMIT later fails or rolls back.
+                self._readiness_generation += 1
                 self._fault("before_begin")
             try:
                 self._connection.execute("BEGIN IMMEDIATE" if level == 0 else f"SAVEPOINT {savepoint}")

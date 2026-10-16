@@ -1,6 +1,8 @@
 """Verify installed payload coherence; hashes are not a publisher signature."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 import hashlib
 import json
 from pathlib import Path
@@ -9,7 +11,33 @@ import re
 NAME = "_build_identity.json"
 
 
-def verify(root: Path, version: str) -> dict:
+@lru_cache(maxsize=4)
+def _audit(root, version):
+    from .read_audit import ReadAudit
+    return ReadAudit()
+
+
+def _stamp(root):
+    from .read_audit import file_stamp
+    # Include directory entries, permissions and symlinks: additions/removals
+    # or replacements must invalidate without waiting for the TTL.
+    return tuple((str(p.relative_to(root)), file_stamp(p))
+                 for package in ('memory_os_v4', 'memory_os_ai')
+                 for p in (root/package, *sorted((root/package).rglob('*')))
+                 if '__pycache__' not in p.parts and p.suffix not in {'.pyc', '.pyo'})
+
+
+def verify(root: Path, version: str, *, max_age=0.0) -> dict:
+    if not max_age:
+        return _verify(root, version)
+    try:
+        return _audit(root, version).run(lambda: _stamp(root), lambda: _verify(root, version),
+                                         lambda result: result.get('ok') is True, max_age=max_age)
+    except (OSError, ValueError):
+        return {'ok': False, 'code': 'build_unqualified', 'error': 'Payload changed during verification'}
+
+
+def _verify(root: Path, version: str) -> dict:
     path = root / "memory_os_v4" / NAME
     try:
         if path.is_symlink() or path.stat().st_size > 1_000_000:

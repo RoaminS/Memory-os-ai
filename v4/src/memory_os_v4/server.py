@@ -918,7 +918,8 @@ def _build_http_app(host: str, port: int):
     async def ready(request):
         current = identity
         if identity.get("identity_source") == "embedded_descriptor":
-            current = await anyio.to_thread.run_sync(build_identity)
+            from functools import partial
+            current = await anyio.to_thread.run_sync(partial(build_identity, cache_for=1.0))
         ok, reason, capabilities = await anyio.to_thread.run_sync(readiness_snapshot, _engine, current)
         if ok and (current["commit"] is None or current["source_dirty"]):
             ok, reason = False, "build_unqualified"

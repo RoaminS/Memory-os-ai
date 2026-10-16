@@ -5,10 +5,11 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 
 
-def build_identity() -> dict:
+def build_identity(*, cache_for=0.0) -> dict:
     from . import __version__
 
     result = {"version": __version__, "commit": None, "commit_source": "unknown", "source_dirty": None,
@@ -21,7 +22,7 @@ def build_identity() -> dict:
                      and (root / "pyproject.toml").is_file())
     if not source_layout:
         from .build_descriptor import verify
-        checked = verify(Path(__file__).resolve().parent.parent, __version__)
+        checked = verify(Path(__file__).resolve().parent.parent, __version__, max_age=cache_for)
         if not checked["ok"]:
             return {**result, "identity_error": checked["error"]}
         if configured and configured != checked["commit"]:
@@ -66,14 +67,34 @@ def engine_readiness(engine) -> tuple[bool, str]:
             return False, "writer_lease_missing"
         if engine._retrieval_ready and engine.config.embed_model != "hash" and getattr(engine.embedder, "_model", None) is None:
             return False, "model_not_loaded"
-        if not engine.store.check_integrity():
-            return False, "store_integrity"
         if engine.config.store_backend == "sqlite_s1":
-            if not engine.blocks.check_integrity():
-                return False, "blocks_integrity"
-            if not engine.requests.check_integrity():
-                return False, "requests_integrity"
+            # The engine lock serializes semantic writers. Never serve a cached
+            # success from an open transaction or a poisoned/closed authority.
+            if engine.store._connection.in_transaction:
+                return False, "store_transaction_active"
+            from .read_audit import ReadAudit, file_stamp
+            audit = getattr(engine, '_ready_integrity_audit', None)
+            if audit is None:
+                audit = engine._ready_integrity_audit = ReadAudit()
+            def stamp():
+                store = engine.store
+                return (store._readiness_generation, store._connection.total_changes,
+                        store._connection.execute('PRAGMA data_version').fetchone()[0],
+                        *(file_stamp(Path(str(store.db_path)+suffix)) for suffix in ('', '-wal', '-shm')))
+            def check():
+                if not engine.store.check_integrity():
+                    return False, "store_integrity"
+                if not engine.blocks.check_integrity():
+                    return False, "blocks_integrity"
+                if not engine.requests.check_integrity():
+                    return False, "requests_integrity"
+                return True, "ready"
+            valid, reason = audit.run(stamp, check, lambda r: r[0] is True)
+            if not valid:
+                return False, reason
         else:
+            if not engine.store.check_integrity():
+                return False, "store_integrity"
             sources_ok, sources_reason = _jsonl_sources_ready(engine)
             if not sources_ok:
                 return False, sources_reason
@@ -87,7 +108,7 @@ def engine_readiness(engine) -> tuple[bool, str]:
                 or set(engine.entities.doc_entities) != live_ids or engine.facet_index.ids() != live_ids):
             return False, "indexes_not_ready"
         return True, "ready"
-    except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError):
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, AttributeError, sqlite3.Error):
         return False, "integrity_check_failed"
     finally:
         engine._lock.release()
