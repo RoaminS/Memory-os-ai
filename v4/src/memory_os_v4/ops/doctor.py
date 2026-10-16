@@ -12,6 +12,8 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+
+from packaging.version import InvalidVersion, Version
 from pathlib import Path
 
 from .auth import SecretFileError, http_get, read_token
@@ -42,6 +44,16 @@ def _secret(path: Path, label: str, *, required: bool, key: bool = False) -> Che
     if token is None:
         return Check(label, "FAIL" if required else "WARN", f"{path} missing", "memory-os-admin token create")
     return Check(label, "PASS", f"{path} (0600, content not shown)")
+
+
+def _pep440_version(value) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    try:
+        Version(value)
+        return True
+    except InvalidVersion:
+        return False
 
 
 def _server(settings: OpsSettings) -> list[Check]:
@@ -75,7 +87,7 @@ def _server(settings: OpsSettings) -> list[Check]:
                     and (info.get("commit_source") in {"deployment_manifest", "embedded_descriptor"}
                          or (info.get("commit_source") == "checkout" and info.get("source_dirty") is False))
                     and info.get("source_dirty") is not True and isinstance(version, str)
-                    and re.fullmatch(r"\d+\.\d+\.\d+", version)
+                    and _pep440_version(version)
                     and isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit))
         checks.append(Check("ready", "PASS" if attested else "FAIL",
                             f"/ready → ready, version {version}, commit {commit[:7]}" if attested
