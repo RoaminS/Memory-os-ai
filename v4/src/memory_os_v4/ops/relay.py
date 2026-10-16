@@ -29,7 +29,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
 from .auth import SecretFileError, http_client, read_token
-from .durable_relay import DurableRelay, PreflightRefusal
+from .durable_relay import DurableRelay, PreflightRefusal, MUTATIONS
 from .settings import OpsSettings
 
 UNCERTAIN = (
@@ -296,8 +296,11 @@ class SessionToolCatalog:
                 return {"legacy", *(["compact_v2"] if "compact_v2" in formats else [])}, "budget_tokens" in props
         return {"legacy"}, False
 
-    def fact_client_supported(self, name):
+    def mutation_client_supported(self, name):
         return any(tool.name == name and 'client_provenance' in tool.inputSchema.get('properties', {}) for tool in self._tools)
+
+    # Compatibility for existing callers of the 4.0.7 catalog API.
+    fact_client_supported = mutation_client_supported
 
     def brief_client_supported(self):
         return any(tool.name == 'memory_session_brief' and 'client_id' in tool.inputSchema.get('properties', {})
@@ -337,12 +340,9 @@ async def serve(settings: OpsSettings) -> None:
         async def call_tool(name: str, arguments: dict):
             if name == 'memory_session_brief' and durable.brief_client_supported:
                 arguments = brief_client_arguments(arguments, server.request_context.session.client_params.clientInfo)
-            if name in {'memory_add_facts', 'memory_chat_save'} and catalog.fact_client_supported(name):
-                info = server.request_context.session.client_params.clientInfo
-                arguments = {**(arguments or {}), 'client_provenance': {'client_id': info.name[:200], 'client_version': info.version[:80]}}
-            if name in {'memory_task_create', 'memory_task_update', 'memory_block_compare_and_set'}:
-                arguments = task_owner_arguments(arguments, server.request_context.session.client_params.clientInfo,
-                                                 creation=name == 'memory_task_create')
+            if name in MUTATIONS:
+                arguments = mutation_client_arguments(
+                    name, arguments, server.request_context.session.client_params.clientInfo, catalog)
             try:
                 res = await durable.call(name, arguments)
             except PreflightRefusal as exc:
@@ -377,6 +377,25 @@ def task_owner_arguments(arguments, client_info, *, creation=True):
     if creation:
         result['owner'] = {**(result.get('owner') or {}), **client}
     result['client_provenance'] = client
+    return result
+
+
+def mutation_client_arguments(name, arguments, client_info, catalog):
+    """Only send provenance accepted by the upstream schema; overwrite claimed authors.
+
+    clientInfo is a declaration made by the downstream application, not an
+    authenticated identity. Keep task ownership separate from mutation authorship.
+    """
+    result = dict(arguments or {})
+    if name == 'memory_task_create':
+        result['owner'] = {**(result.get('owner') or {}),
+                           'client_id': client_info.name[:200], 'client_version': client_info.version[:80]}
+    if name in MUTATIONS and catalog.mutation_client_supported(name):
+        result['client_provenance'] = {'client_id': client_info.name[:200],
+                                       'client_version': client_info.version[:80]}
+    else:
+        # A stale/model-supplied field must not break a legacy server's schema.
+        result.pop('client_provenance', None)
     return result
 
 

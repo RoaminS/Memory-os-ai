@@ -588,3 +588,33 @@ def test_B4_B5_compensation_and_scoped_feed_through_relay(harness):
             refused=payload(await session.call_tool('memory_timeline',{'view':'changes','project':'Q','since_cursor':changes['next_cursor']}))
             assert refused['code']=='cursor_invalid'
     anyio.run(run)
+
+
+def test_408_all_mutation_authors_reach_change_events(harness):
+    from mcp.types import Implementation
+    h = harness
+    h.env.update(MEMORY_V4_STORE_BACKEND='sqlite_s1', MEMORY_V4_WORK_STATE='1')
+    h.start()
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(
+                r, w, client_info=Implementation(name='synthetic-408', version='1')) as session:
+            await session.initialize()
+            async def call(name, args):
+                # Deliberately lie in the model arguments: relay must overwrite.
+                args['client_provenance'] = {'client_id':'forged'}
+                result = payload(await session.call_tool(name, args))
+                assert result.get('ok') is not False, result
+                return result
+            await call('memory_chat_save', {'project_label':'P', 'messages':[{'role':'user','content':'Synthetic chat.'}]})
+            await call('memory_add_facts', {'project':'P', 'facts':[{'item_id':'f408','text':'Synthetic evidence.'}]})
+            await call('memory_forget', {'project':'P','item_id':'f408','reason':'Synthetic cleanup'})
+            await call('memory_block_set', {'project':'P','name':'ordinary','text':'Synthetic rules'})
+            await call('memory_block_compare_and_set', {'project':'P','scope':'project','name':'cas',
+                'text':'Synthetic rules','expected_etag':None,'reason':'Create','request_id':'cas408'})
+            task = await call('memory_task_create', {'project':'P','title':'Synthetic 408','request_id':'task408'})
+            await call('memory_task_update', {'project':'P','task_id':task['task_id'],'expected_etag':task['etag'],
+                'patch':{'next_action':'Synthetic next step'},'reason':'Progress','request_id':'update408'})
+            events = payload(await session.call_tool('memory_timeline', {'project':'P','view':'changes'}))['events']
+            assert len(events) == 7
+            assert all(e['changed_by'] == {'client_id':'synthetic-408','client_version':'1','authenticated':False} for e in events)
+    anyio.run(run)
