@@ -373,3 +373,19 @@ def test_copy_budget_keeps_s4_reserve_even_with_three_gb_override(tmp_path, monk
     fake = SimpleNamespace(glob=lambda pattern:[SimpleNamespace(is_file=lambda:True,
                                         stat=lambda:SimpleNamespace(st_size=200_000_000))])
     assert start_disk_budget(fake, 5_200_000_000)['required_start_free_bytes'] == 9_000_000_000
+
+
+def test_exact_tool_inventory_cannot_be_downgraded_or_substituted():
+    import make_release_408 as make
+    hashes={name:gate.digest(make.ROOT/'scripts'/name) for name in make.TOOLS}
+    gate.verify_tooling(make.ROOT, hashes)
+    for change in ('missing','extra','changed'):
+        altered=dict(hashes)
+        if change == 'missing':
+            altered.pop('schema8_unchanged.py')
+        elif change == 'extra':
+            altered['unsealed.py']='0'*64
+        else:
+            altered['qualify_sqlite_release_408.py']='0'*64
+        with pytest.raises(ValueError):
+            gate.verify_tooling(make.ROOT, altered)

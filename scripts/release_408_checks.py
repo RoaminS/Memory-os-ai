@@ -53,6 +53,13 @@ def verify_engine_version_only(root, commit, version):
     )
 
 
+def verify_tooling(root, hashes):
+    from make_release_408 import TOOLS
+    require(isinstance(hashes, dict) and set(hashes) == set(TOOLS), "Incomplete tool inventory")
+    for path, sha in hashes.items():
+        require(Path(path).name == path and digest(root / "scripts" / path) == sha, "Tool changed: " + path)
+
+
 def validate_local(m, directory, *, require_copy=True, require_source=True, **kw):
     require(
         re.fullmatch(r"4\.0\.8", m["version"]) is not None,
@@ -65,12 +72,7 @@ def validate_local(m, directory, *, require_copy=True, require_source=True, **kw
     require(not m.get("open_blockers"), "Open blockers")
     root = Path(__file__).resolve().parents[1]
     verify_engine_version_only(root, m["source_commit"], m["version"])
-    require(bool(m["qualification_tooling_sha256"]), "Empty tool inventory")
-    for path, sha in m["qualification_tooling_sha256"].items():
-        require(
-            Path(path).name == path and digest(root / "scripts" / path) == sha,
-            "Tool changed: " + path,
-        )
+    verify_tooling(root, m["qualification_tooling_sha256"])
     wanted = {
         f"memory_os_ai-{m['version']}-py3-none-any.whl",
         f"memory_os_ai-{m['version']}.tar.gz",
@@ -173,6 +175,7 @@ def validate_local(m, directory, *, require_copy=True, require_source=True, **kw
         source = evidence(m, directory, "source")
         require(
             source.get("ok") is True
+            and source.get("client_configs_unchanged") is True
             and source["version"] == m["version"]
             and source["source_commit"] == m["source_commit"]
             and source["source_sha256"] == m["qualification_source_sha256"],
