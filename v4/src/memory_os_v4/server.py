@@ -824,6 +824,12 @@ def _dispatch(name: str, arguments: dict | None) -> dict:
         if name == "memory_request_status":
             return handler(engine, parsed)
         payload = parsed.model_dump(mode="json", exclude={"request_id"})
+        # These models gain the optional author field in 4.0.8. Keep the old
+        # canonical fingerprint for an unannotated retry of a 4.0.7 request.
+        # Fact/task/CAS models already included the field (including null).
+        if (name in {'memory_forget', 'memory_block_set', 'memory_ingest', 'memory_migrate_v3',
+                     'memory_consolidate', 'memory_compact'} and payload.get('client_provenance') is None):
+            payload.pop('client_provenance', None)
         scope = _request_scope(name, payload)
         operation = "memory_consolidate" if name == "memory_compact" else name
         return engine.execute_request(operation, scope, payload, getattr(parsed, "request_id", None),

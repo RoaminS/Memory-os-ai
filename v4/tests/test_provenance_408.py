@@ -76,3 +76,16 @@ def test_no_authentication_claim_accepted_in_provenance(name):
     with pytest.raises(ValidationError) as exc:
         server.TOOL_MODELS[name](client_provenance={'client_id':'x', 'authenticated':True})
     assert any(e['loc'] == ('client_provenance', 'authenticated') for e in exc.value.errors())
+
+
+def test_unannotated_legacy_request_fingerprint_replays_after_upgrade(tmp_path, monkeypatch):
+    with MemoryV4(config=Config(data_dir=str(tmp_path), embed_model='hash', store_backend='sqlite_s1')) as m:
+        monkeypatch.setattr(server, '_engine', m)
+        args = {'project':'P', 'name':'legacy', 'text':'Synthetic block', 'request_id':'old-request'}
+        payload = server.models.BlockSetIn(**args).model_dump(mode='json', exclude={'request_id','client_provenance'})
+        scope = server._request_scope('memory_block_set', payload)
+        # Emulate an explicit receipt made by the pre-field model. No authority
+        # modification or replayed action is necessary to verify compatibility.
+        old = m.execute_request('memory_block_set', scope, payload, args['request_id'], lambda:{'legacy':True})
+        assert server.dispatch('memory_block_set', args) == old
+        assert m.blocks.get('legacy', project='P') == ''
