@@ -213,6 +213,10 @@ def cmd_setup(args, s: OpsSettings) -> int:
         from ..readiness import build_identity
         try:
             cfg = Config.from_env()
+            from .sqlite_limits import configured
+            from .storage import policy
+            configured()
+            policy(0, sqlite=True)
             declared = build_identity()
         except ValueError:
             _print_json({'ok': False, 'code': 'sqlite_s4_not_configured',
@@ -251,6 +255,9 @@ def cmd_setup(args, s: OpsSettings) -> int:
                    MEMORY_V4_SQLITE_EMBEDDING_NAMESPACE=cfg.sqlite_embedding_namespace,
                    MEMORY_V4_BM25_PROFILE=cfg.bm25_profile,
                    MEMORY_V4_LEXICAL_GUARD_K=str(cfg.lexical_guard_k))
+        for option in ('MEMORY_V4_SQLITE_BACKUP_MAX_BYTES','MEMORY_V4_SQLITE_STORAGE_POLICY'):
+            if option in os.environ:
+                env[option] = os.environ[option]
     label = s.service_label or "local.memory-os-v4"
     host = urlsplit(s.url).hostname or "127.0.0.1"
     try:

@@ -27,6 +27,7 @@ def scan_store(store: Path) -> dict:
     items = store / "items.jsonl"
     if (store / "store.sqlite3").exists():
         from ..sqlite_stats import scan_sqlite
+
         return scan_sqlite(store / "store.sqlite3")
     if any(p.name.endswith(SQLITE_MARKERS) for p in store.iterdir()):
         raise ValueError("SQLite store: not supported by this report (ADR-001 S4)")
@@ -97,16 +98,22 @@ def last_drill(settings):
             continue
         archive = settings.backup_dir / row.get("archive", "")
         if archive.is_file() and sha256(archive) == row["archive_sha256"]:
-            return {"level": row.get("level"), "quarantined": row.get("quarantined"),
-                    "duration_s": row.get("duration_s"), "archive": archive.name,
-                    "completed_at": row.get("completed_at"), "reopening_allowed": row.get("reopening_allowed", False),
-                    "private_reopen_verified": row.get("private_reopen_verified", False)}
+            return {
+                "level": row.get("level"),
+                "quarantined": row.get("quarantined"),
+                "duration_s": row.get("duration_s"),
+                "archive": archive.name,
+                "completed_at": row.get("completed_at"),
+                "reopening_allowed": row.get("reopening_allowed", False),
+                "private_reopen_verified": row.get("private_reopen_verified", False),
+            }
     return None
 
 
 def report(settings: OpsSettings | None = None, confined: bool | None = None) -> dict:
     settings = settings or OpsSettings.from_env()
     from ..config import inert_cos_settings
+
     anomalies: list[str] = []
     info: list[str] = []
     r: dict = {"at": dt.datetime.now().isoformat(timespec="seconds")}
@@ -132,6 +139,7 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         info.append("deployed mutation policy unavailable; no confinement claim can be made")
     else:
         from ..fact_updates import mutation_policy
+
         if r["mutation_policy"] != mutation_policy():
             anomalies.append("deployed mutation policy differs from the explicit-only contract")
     if health_status != 200:
@@ -150,10 +158,15 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         scan = scan_store(settings.store_dir)
         sup = scan.pop("superseded_ids")
         r.update(scan)
-        if scan.get('change_journal', {}).get('alert'):
-            anomalies.append('journal_size: change journal >= 10 MiB; explicit maintenance review required')
-            r.setdefault('alerts', []).append({'category':'journal_size', 'severity':'warning',
-                                               'json_bytes':scan['change_journal']['json_bytes']})
+        if scan.get("change_journal", {}).get("alert"):
+            anomalies.append("journal_size: change journal >= 10 MiB; explicit maintenance review required")
+            r.setdefault("alerts", []).append(
+                {
+                    "category": "journal_size",
+                    "severity": "warning",
+                    "json_bytes": scan["change_journal"]["json_bytes"],
+                }
+            )
         if scan["malformed_lines"]:
             anomalies.append(f"{scan['malformed_lines']} malformed line(s) in items.jsonl")
         if scan["truncated_tail"]:
@@ -166,8 +179,11 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         if not known_file.exists():
             # First observation is not an operator acknowledgement.
             from .auth import write_secret_file
+
             try:
-                write_secret_file(known_file, json.dumps({"baseline_at": r["at"], "ids": []}, indent=1).encode())
+                write_secret_file(
+                    known_file, json.dumps({"baseline_at": r["at"], "ids": []}, indent=1).encode()
+                )
             except FileExistsError:
                 pass  # Another observer created the baseline; never overwrite it.
         known = set(json.loads(known_file.read_text())["ids"])
@@ -177,7 +193,9 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
     r["superseded_total"] = len(sup)
     r["superseded_new"] = [i for i in sup if i not in known]
     if r["superseded_new"]:
-        anomalies.append(f"{len(r['superseded_new'])} unacknowledged supersession(s): operator review required; legitimacy not inferred")
+        anomalies.append(
+            f"{len(r['superseded_new'])} unacknowledged supersession(s): operator review required; legitimacy not inferred"
+        )
     try:
         age = last_good_backup_age(settings)
     except Exception as exc:
@@ -188,23 +206,51 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         anomalies.append(f"no verified qualified backup in the last {BACKUP_MAX_AGE_H:.0f} h (age {age})")
     try:
         from .storage import margin
+
         r["storage_margin"] = margin(settings)
         r["disk_free_gib"] = round(r["storage_margin"]["volumes"]["source"]["free_bytes"] / 2**30, 1)
         if not r["storage_margin"]["ok"]:
-            anomalies.append("storage margin insufficient: reserve 5 GB plus DB/archive/drill; inspect storage_margin")
+            anomalies.append(
+                "storage margin insufficient: inspect effective policy/reserve in storage_margin"
+            )
         r["last_restore_drill"] = last_drill(settings)
         if (settings.store_dir / "store.sqlite3").exists():
+            from .sqlite_limits import capacity
+
+            r["backup_capacity"] = capacity(settings.store_dir)
+            if not r["backup_capacity"]["ok"] or r["backup_capacity"]["warning"]:
+                anomalies.append(
+                    f"backup capacity limit pressure: margin {r['backup_capacity']['margin_bytes']} bytes"
+                )
+                r.setdefault("alerts", []).append(
+                    {
+                        "category": "backup_capacity",
+                        "severity": "warning" if r["backup_capacity"]["ok"] else "error",
+                        "margin_bytes": r["backup_capacity"]["margin_bytes"],
+                    }
+                )
             drill = r["last_restore_drill"]
             try:
-                age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(drill["completed_at"])).total_seconds() / 3600 if drill else None
+                age = (
+                    (
+                        dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(drill["completed_at"])
+                    ).total_seconds()
+                    / 3600
+                    if drill
+                    else None
+                )
             except (ValueError, TypeError, KeyError):
                 age = None
             if age is None or age > 7 * 24:
                 anomalies.append("no intact SQLite restore drill within 7 days")
-            if drill and drill['private_reopen_verified']:
-                info.append("private SQLite reopening verified; production promotion requires separate operator approval")
+            if drill and drill["private_reopen_verified"]:
+                info.append(
+                    "private SQLite reopening verified; production promotion requires separate operator approval"
+                )
             elif drill:
-                info.append("last SQLite drill validates files in quarantine; semantic reopening is not qualified")
+                info.append(
+                    "last SQLite drill validates files in quarantine; semantic reopening is not qualified"
+                )
     except (OSError, ValueError) as exc:
         anomalies.append(f"disk check failed: {type(exc).__name__}")
     r["info"], r["anomalies"] = info, anomalies
@@ -228,6 +274,7 @@ def render(r: dict) -> str:
         f"- Change journal: {r.get('change_journal', 'not available')}",
         f"- Receipts (SQLite): {r.get('receipts', 'not available')}",
         f"- Storage margin: {r.get('storage_margin', 'not available')}",
+        f"- Backup capacity: {r.get('backup_capacity', 'not available')}",
         f"- Last restore drill (level matters): {r.get('last_restore_drill', 'not available')}",
         f"- Deployed mutation policy: {r.get('mutation_policy') or 'unavailable; no confinement claim'}",
         "",
@@ -243,5 +290,8 @@ def notify(r: dict) -> None:
     if not r["anomalies"] or shutil.which("osascript") is None:
         return
     msg = "; ".join(r["anomalies"])[:200].replace('"', "'").replace("\\", "/")
-    subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "memory-os anomaly"'],
-                   capture_output=True, check=False)
+    subprocess.run(
+        ["osascript", "-e", f'display notification "{msg}" with title "memory-os anomaly"'],
+        capture_output=True,
+        check=False,
+    )
