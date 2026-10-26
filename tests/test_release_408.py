@@ -369,6 +369,7 @@ def test_copy_budget_keeps_s4_reserve_even_with_three_gb_override(tmp_path, monk
     from types import SimpleNamespace
     from qualify_sqlite_release_408 import start_disk_budget
     monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', '3000000000')
+    monkeypatch.delenv('MEMORY_V4_SQLITE_STORAGE_POLICY', raising=False)
     assert start_disk_budget(tmp_path, 5_200_000_000)['required_start_free_bytes'] == 7_000_000_000
     fake = SimpleNamespace(glob=lambda pattern:[SimpleNamespace(is_file=lambda:True,
                                         stat=lambda:SimpleNamespace(st_size=200_000_000))])

@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.0.8 RC v3 — correctifs de qualification du2026-10-26, non publiée
+
+- Packaging : référence supprimée vers une note RC inexistante, note finale4.0.7
+  incluse. Contrôles statiques des data-files, points d'entrée et sources sdist,
+  exécutés aussi avant le build de qualification.
+- Tests du budget legacy et des plafonds isolés des variables du shell ; options
+  adaptive_v1/plafond explicite limitées à la copie privée dans le runbook.
+- Runtime sous v4/src inchangé depuis le gel9ecb4d0. Nouveaux artefacts/manifeste
+  et chaîne installée complète requis ; aucun report de release_ready.
+
 ## 4.0.8 RC v2 — amendement du2026-10-26, version inchangée / non publiée
 
 - S4 : plafond64MiB remplacé par4GiB par défaut, override explicite validé64MiB–16GiB,

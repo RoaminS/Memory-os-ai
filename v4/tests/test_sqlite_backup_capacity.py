@@ -56,6 +56,13 @@ def test_default_and_explicit_limits(monkeypatch):
     assert cap.db == 1024**3 and cap.encrypted > cap.compressed > cap.unpacked > cap.db
 
 
+@pytest.fixture(autouse=True)
+def explicit_capacity_environment(monkeypatch):
+    """Test defaults deliberately; individual override tests set their own values."""
+    monkeypatch.delenv("MEMORY_V4_SQLITE_BACKUP_MAX_BYTES", raising=False)
+    monkeypatch.delenv("MEMORY_V4_SQLITE_STORAGE_POLICY", raising=False)
+
+
 def seeded(root):
     store = root / "store"
     with MemoryV4(

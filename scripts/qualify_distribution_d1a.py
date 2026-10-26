@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-UNITS = ["v4/tests/test_distribution_d1a.py", "v4/tests/test_quickstart.py", "v4/tests/test_qualified_runtime.py",
+UNITS = ["tests/test_distribution_static.py", "v4/tests/test_distribution_d1a.py", "v4/tests/test_quickstart.py", "v4/tests/test_qualified_runtime.py",
          "v4/tests/test_distribution_d1c_fixes.py",
          "v4/tests/test_work_cold.py", "v4/tests/test_readiness.py",
          "v4/tests/test_ops.py", "v4/tests/test_ops_doctor.py", "v4/tests/test_server_handlers.py"]

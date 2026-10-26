@@ -177,7 +177,7 @@ include = ["memory_os_ai*", "memory_os_v4*"]
 memory_os_v4 = ["resources/*.json", "resources/*.txt"]
 
 [tool.setuptools.data-files]
-"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/CLIENTS.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md", "docs/releases/v4.0.6.md", "docs/releases/v4.0.6.dev0.md", "docs/releases/v4.0.8.md", "docs/releases/v4.0.8rc1.md"]
+"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/CLIENTS.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md", "docs/releases/v4.0.6.md", "docs/releases/v4.0.6.dev0.md", "docs/releases/v4.0.7.md", "docs/releases/v4.0.8.md"]
 "share/doc/memory-os-ai/v4" = ["v4/docs/*.md"]
 "share/doc/memory-os-ai/v4/contracts" = ["v4/docs/contracts/*.json"]
 
