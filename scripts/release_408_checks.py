@@ -29,35 +29,35 @@ def evidence(m, directory, name):
 
 
 def verify_engine_version_only(root, commit, version):
+    """Compatibility API name: RCv2 runtime is frozen byte-for-byte, version included.
+
+    Ops backup changes invalidate the earlier version-only transfer. New full,
+    installed S4 and recollected P-B proofs are mandatory on this frozen source.
+    """
     import subprocess
 
-    baseline = "6182aa581626013e74f6c1987262171671baaf23"
+    baseline = "9ecb4d06f68e2c7efddf77aad66f4ed5f147f356"
     names = subprocess.check_output(
         ["git", "diff", "--name-only", baseline, commit, "--", "v4/src"],
         cwd=root,
         text=True,
     ).splitlines()
-    require(
-        names == ["v4/src/memory_os_v4/__init__.py"], "Engine changed beyond version"
-    )
-    before = subprocess.check_output(
-        ["git", "show", baseline + ":" + names[0]], cwd=root, text=True
-    )
-    after = subprocess.check_output(
-        ["git", "show", commit + ":" + names[0]], cwd=root, text=True
-    )
-    require(
-        before.replace('__version__ = "4.0.7"', '__version__ = "' + version + '"')
-        == after,
-        "Engine version diff invalid",
-    )
+    require(names == [], "Engine changed beyond version/frozen RCv2 boundary")
+    require(version == "4.0.8", "Wrong RCv2 version")
 
 
 def verify_tooling(root, hashes):
     from make_release_408 import TOOLS
-    require(isinstance(hashes, dict) and set(hashes) == set(TOOLS), "Incomplete tool inventory")
+
+    require(
+        isinstance(hashes, dict) and set(hashes) == set(TOOLS),
+        "Incomplete tool inventory",
+    )
     for path, sha in hashes.items():
-        require(Path(path).name == path and digest(root / "scripts" / path) == sha, "Tool changed: " + path)
+        require(
+            Path(path).name == path and digest(root / "scripts" / path) == sha,
+            "Tool changed: " + path,
+        )
 
 
 def validate_local(m, directory, *, require_copy=True, require_source=True, **kw):
@@ -239,17 +239,34 @@ def validate_copy(p, m):
     # No migration or empty-journal exemption in 4.0.8.
     for name, r in rows.items():
         unchanged = r["schema_check"]
-        require(r["version"] == ("4.0.7" if name == "baseline" else m["version"]), "Worker version mismatch")
-        require(r["authority"] == base["authority"] and r["authority"]["schema_version"] == 8,
-                "Authority differs from baseline")
-        require(unchanged["ok"] is True and unchanged["from_schema"] == unchanged["to_schema"] == 8
-                and unchanged["store_instance_id"] == ident and unchanged["tables_preserved"]
-                and unchanged == base["schema_check"] and r["migration"] is None,
-                "Schema8 exact inventory changed or migration attempted")
-        require(r["journal"] == base["journal"] and r["journal"] is not None,
-                "Journal history/generation changed")
-    require(p["authority_identical"] is True and p["rankings_identical_between_artifacts_and_reopen"] is True
-            and p["warm_encoded_texts"] == 0, "Copy equality flags missing")
+        require(
+            r["version"] == ("4.0.7" if name == "baseline" else m["version"]),
+            "Worker version mismatch",
+        )
+        require(
+            r["authority"] == base["authority"]
+            and r["authority"]["schema_version"] == 8,
+            "Authority differs from baseline",
+        )
+        require(
+            unchanged["ok"] is True
+            and unchanged["from_schema"] == unchanged["to_schema"] == 8
+            and unchanged["store_instance_id"] == ident
+            and unchanged["tables_preserved"]
+            and unchanged == base["schema_check"]
+            and r["migration"] is None,
+            "Schema8 exact inventory changed or migration attempted",
+        )
+        require(
+            r["journal"] == base["journal"] and r["journal"] is not None,
+            "Journal history/generation changed",
+        )
+    require(
+        p["authority_identical"] is True
+        and p["rankings_identical_between_artifacts_and_reopen"] is True
+        and p["warm_encoded_texts"] == 0,
+        "Copy equality flags missing",
+    )
     profile = base["encoding_profile"]
     require(
         profile["device"] == "mps"
@@ -287,8 +304,12 @@ def validate_copy(p, m):
         "Private ready/doctor policy",
     )
     audit = caps.get("readiness_audit", {})
-    require(audit.get("max_reuse_seconds") == 1.0 and audit.get("live_checks_every_request") is True
-            and audit.get("untracked_memory_fault_detection_seconds") == 1.0, "Readiness cache policy missing")
+    require(
+        audit.get("max_reuse_seconds") == 1.0
+        and audit.get("live_checks_every_request") is True
+        and audit.get("untracked_memory_fault_detection_seconds") == 1.0,
+        "Readiness cache policy missing",
+    )
     for name in ("wheel", "sdist"):
         s = p["s4"][name]
         require(
@@ -304,14 +325,21 @@ def validate_copy(p, m):
             and s["drill"].get("restored_from_instance_id") == ident,
             "S4 backup/private reopening",
         )
-        b, d = s['backup'], s['drill']
-        service = d.get('server_check', {})
-        require(d.get('level') == 'service' and d.get('archive') == b.get('archive')
-                and d.get('archive_sha256') == b.get('archive_sha256') and b.get('archive_sha256')
-                and service.get('match') is True and service.get('version') == m['version']
-                and service.get('commit') == m['source_commit'] and service.get('corpus_reencodings') == 0
-                and service.get('private_only') is True and service.get('production_modified') is False,
-                "S4 must qualify this artifact/backup at service level")
+        b, d = s["backup"], s["drill"]
+        service = d.get("server_check", {})
+        require(
+            d.get("level") == "service"
+            and d.get("archive") == b.get("archive")
+            and d.get("archive_sha256") == b.get("archive_sha256")
+            and b.get("archive_sha256")
+            and service.get("match") is True
+            and service.get("version") == m["version"]
+            and service.get("commit") == m["source_commit"]
+            and service.get("corpus_reencodings") == 0
+            and service.get("private_only") is True
+            and service.get("production_modified") is False,
+            "S4 must qualify this artifact/backup at service level",
+        )
 
 
 def main(args):
@@ -424,7 +452,9 @@ def main(args):
             m["evidence"][name] = {"path": target.name, "sha256": digest(target)}
             # Validate a source record before publishing its reference; no ready guard opened here.
             validate_local(m, directory, require_copy=False, require_source=True)
-            m.setdefault("checks", {})["production_copy" if name == "copy" else "source"] = "passed"
+            m.setdefault("checks", {})[
+                "production_copy" if name == "copy" else "source"
+            ] = "passed"
             m["release_ready"] = False
             path.write_text(json.dumps(m, indent=2) + "\n")
             print("Proof recorded; guard remains closed. No publication.")

@@ -83,3 +83,15 @@ courants et diagnostiquer selon le contrat a9. Retour ultérieur sous GO sépar�
 Hook v7.1 reste en place ; aucune activation/configuration de hook ici. Le
 mapping explicite racine→projet est une décision client distincte. Pas de fusion
 de `Memory-os-ai`/`memory-os-ai`, ni de registre activé implicitement.
+
+
+## Amendement RCv2 du26/10 — incident de sauvegarde
+
+Le schéma/profil d'encodage restent inchangés. Les octets RCv1 ne sont plus la
+candidate : utiliser les artefacts/manifest v2 après qualification complète.
+S4 cap4GiB et streaming, réserve5Go par défaut ; éventuel adaptive_v1 UNIQUEMENT
+après choix explicite de Romain et répétition. Propager les choix approuvés aux
+jobs CLI backup/health/drill, pas simplement au shell ou au serveur. Un job4.0.7
+reste limité64MiB. Les seuils de la bascule a9 ne sont PAS abaissés par cette RC ;
+a9 doit rester revu/répété séparément. Vérifier nouveau backup qualifié + drill
+service avant de déclarer l'incident résolu. Le snapshot d'urgence est conservé.

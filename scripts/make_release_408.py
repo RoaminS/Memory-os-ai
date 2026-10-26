@@ -6,10 +6,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import tomllib
-from release_408_checks import digest, validate_local
+from release_408_checks import digest, validate_local, verify_engine_version_only
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = "6182aa581626013e74f6c1987262171671baaf23"
+BASE = "9ecb4d06f68e2c7efddf77aad66f4ed5f147f356"
 TOOLS = [
     "make_release_408.py",
     "release_408_checks.py",
@@ -51,24 +51,7 @@ def main():
     if commit != a.source_commit:
         raise ValueError("Complete source SHA required")
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
-    changes = subprocess.check_output(
-        ["git", "diff", "--name-only", BASE, commit, "--", "v4/src"],
-        cwd=ROOT,
-        text=True,
-    ).splitlines()
-    if changes != ["v4/src/memory_os_v4/__init__.py"]:
-        raise ValueError("Engine change beyond version: gate transfer refused")
-    before = subprocess.check_output(
-        ["git", "show", BASE + ":" + changes[0]], cwd=ROOT
-    ).decode()
-    after = subprocess.check_output(
-        ["git", "show", commit + ":" + changes[0]], cwd=ROOT
-    ).decode()
-    if (
-        before.replace('__version__ = "4.0.7"', '__version__ = "' + version + '"')
-        != after
-    ):
-        raise ValueError("Engine version-only diff required")
+    verify_engine_version_only(ROOT, commit, version)
     art = json.loads(a.artifact_proof.read_text())
     parent = a.artifact_proof.parent
     if not art.get("ok") or art["source_commit"] != commit:
@@ -81,8 +64,8 @@ def main():
         "source_commit": commit,
         "release_ready": False,
         "open_blockers": [],
-        "qualified_functional_base": BASE,
-        "engine_diff_only_version": True,
+        "frozen_functional_base": BASE,
+        "engine_diff_from_frozen_base_empty": True,
         "gate_transfer": "RC recollection required; no new usage/leaderboard claim",
         "checks": {
             "production_copy": "pending",
@@ -153,6 +136,9 @@ def main():
     m["copy_scripts_sha256"] = {
         n: digest(ROOT / "scripts" / v) for n, v in tools.items()
     }
+    m["copy_scripts_sha256"]["capacity"] = digest(
+        ROOT / "v4/src/memory_os_v4/ops/sqlite_limits.py"
+    )
     m["copy_scripts_sha256"]["guard"] = digest(
         ROOT / "v4/src/memory_os_v4/ops/provision.py"
     )

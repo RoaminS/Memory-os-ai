@@ -1,4 +1,4 @@
-"""Rebind the reviewed external P-B scorer to a version-only RC. Claude runs this."""
+"""Rebind the reviewed external P-B scorer to a frozen RCv2. Claude runs this."""
 
 import argparse
 import hashlib

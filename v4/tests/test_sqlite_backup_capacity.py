@@ -140,10 +140,16 @@ def test_real_database_beyond_64_mib_snapshot_archive_and_drill(tmp_path, monkey
             # Synthetic test only: real I/O/crypto/inventory, guarded at 3GB,
             # no syscall nice/swap privilege or service/network needed.
             monkeypatch.setattr(s4, "Budget", lambda _: SimpleNamespace(check=guard))
+            import tracemalloc
+
+            tracemalloc.start()
             backup = s4.backup(settings, apply=True)
             assert backup["ok"] and backup["verified"], backup
             drill = s4.restore_drill(settings, settings.backup_dir / backup["archive"], apply=True)
             assert drill["ok"] and drill["verified"] and drill["quarantined"], drill
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            assert peak < 24 * 1024**2, peak  # Python heap only; not native SQLite/RSS.
             assert not drill.get("private_reopen_verified")  # files only, never pretend service qualification
             # Actual DB cap is inclusive; reject without any source change.
             monkeypatch.setattr(s4, "MAX_DB", snapshot.stat().st_size - 1)

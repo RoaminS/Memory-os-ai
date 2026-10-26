@@ -330,7 +330,7 @@ def test_every_new_release_tool_is_attested():
             'score_release_408_gate.py','source_release_checks_408.py','schema8_unchanged.py'}
     assert wanted <= set(make.TOOLS)
     assert all((make.ROOT/'scripts'/name).is_file() for name in make.TOOLS)
-    assert make.BASE == '6182aa581626013e74f6c1987262171671baaf23'
+    assert make.BASE == '9ecb4d06f68e2c7efddf77aad66f4ed5f147f356'
 
 
 @pytest.mark.parametrize('bad', ['archive', 'version', 'corpus_reencodings', 'level'])
@@ -349,17 +349,17 @@ def test_s4_old_or_unlinked_service_proof_never_qualifies(bad):
 
 def test_version_only_guard_uses_qualified_functional_base(monkeypatch, tmp_path):
     import subprocess
-    old='__version__ = "4.0.7"\n'
+    old='__version__ = "4.0.8"\n'
     new='__version__ = "4.0.8"\n'
     calls=[]
     def query(argv, **kwargs):
         calls.append(argv)
         if argv[1] == 'diff':
-            return 'v4/src/memory_os_v4/__init__.py\n'
+            return ''
         return old if argv[2].startswith('6182aa5') else new
     monkeypatch.setattr(subprocess, 'check_output', query)
     gate.verify_engine_version_only(tmp_path, 'c'*40, '4.0.8')
-    assert calls[0][3] == '6182aa581626013e74f6c1987262171671baaf23'
+    assert calls[0][3] == '9ecb4d06f68e2c7efddf77aad66f4ed5f147f356'
     monkeypatch.setattr(subprocess, 'check_output', lambda *a,**k: 'v4/src/memory_os_v4/ops/doctor.py\n')
     with pytest.raises(ValueError, match='beyond version'):
         gate.verify_engine_version_only(tmp_path, 'c'*40, '4.0.8')

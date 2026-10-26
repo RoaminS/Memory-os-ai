@@ -24,10 +24,24 @@ from memory_os_v4.ops.provision import guard, min_free_bytes  # noqa: E402
 
 
 def start_disk_budget(source, free):
-    footprint = sum(path.stat().st_size for path in source.glob('store.sqlite3*') if path.is_file())
-    return {'source_footprint_bytes':footprint,
-            'required_start_free_bytes':max(7_000_000_000, 5_000_000_000 + 20*footprint),
-            'observed_start_free_bytes':free, 's4_not_reused':True}
+    from memory_os_v4.ops.storage import policy
+
+    footprint = sum(
+        path.stat().st_size for path in source.glob("store.sqlite3*") if path.is_file()
+    )
+    selected, reserve, work = policy(footprint)
+    required = (
+        max(7_000_000_000, 5_000_000_000 + 20 * footprint)
+        if selected == "legacy5gb"
+        else reserve + work + 4 * footprint + 256 * 1024**2
+    )
+    return {
+        "source_footprint_bytes": footprint,
+        "required_start_free_bytes": required,
+        "observed_start_free_bytes": free,
+        "s4_not_reused": True,
+        "storage_policy": selected,
+    }
 
 
 def main():
@@ -70,6 +84,7 @@ def main():
         "authority": Path(__file__).with_name("qualify_schema8_copy.py"),
         "no_migration_inventory": Path(__file__).with_name("schema8_unchanged.py"),
         "search_gate": Path(__file__).with_name("search_qualification.py"),
+        "capacity": ROOT / "v4/src/memory_os_v4/ops/sqlite_limits.py",
     }
     report = {
         "ok": False,
@@ -87,11 +102,15 @@ def main():
     try:
         if report["scripts_sha256"] != manifest["copy_scripts_sha256"]:
             raise ValueError("Copy tools differ from sealed manifest")
-        report['disk_budget'] = start_disk_budget(a.source_dir, shutil.disk_usage(root).free)
-        required = report['disk_budget']['required_start_free_bytes']
-        free = report['disk_budget']['observed_start_free_bytes']
+        report["disk_budget"] = start_disk_budget(
+            a.source_dir, shutil.disk_usage(root).free
+        )
+        required = report["disk_budget"]["required_start_free_bytes"]
+        free = report["disk_budget"]["observed_start_free_bytes"]
         if free < required:
-            raise ValueError(f'Installed S4 qualification needs {required} free bytes; wait, do not skip S4')
+            raise ValueError(
+                f"Installed S4 qualification needs {required} free bytes; wait, do not skip S4"
+            )
         os.setpriority(os.PRIO_PROCESS, 0, 15)
         declared = plistlib.loads(a.production_plist.read_bytes()).get(
             "EnvironmentVariables", {}
@@ -153,6 +172,7 @@ def main():
             Path(__file__).with_name("sqlite_release_worker_408.py"), worker
         )
         shutil.copyfile(tools["guard"], root / "qualification_guard.py")
+        shutil.copyfile(tools["capacity"], root / "qualification_limits.py")
         for module in (
             "schema8_inventory.py",
             "schema8_unchanged.py",
@@ -189,6 +209,13 @@ def main():
             VECLIB_MAXIMUM_THREADS="1",
         )
 
+        for setting in (
+            "MEMORY_V4_SQLITE_BACKUP_MAX_BYTES",
+            "MEMORY_V4_SQLITE_STORAGE_POLICY",
+        ):
+            if setting in os.environ:
+                env[setting] = os.environ[setting]
+
         def monitor(path):
             guard(path)
             if time.monotonic() - started > 900:
@@ -196,7 +223,7 @@ def main():
 
         command(
             [
-                str(interpreters["baseline"]),
+                str(interpreters["wheel"]),
                 "-B",
                 str(worker),
                 "--plan",

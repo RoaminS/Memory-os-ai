@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.0.8 RC v2 — amendement du2026-10-26, version inchangée / non publiée
+
+- S4 : plafond64MiB remplacé par4GiB par défaut, override explicite validé64MiB–16GiB,
+  bornes snapshot/archive/décrypté/décompressé/drill dérivées ; marges exposées doctor/health.
+- Archive MOSB1 AES-GCM inchangée, lecture/écriture par flux et authentification
+  avant extraction ; BLOB legacy hachés par flux. Test réel au-delà64MiB,
+  bornes inclusives et interop deux sens ; qualification installée encore requise.
+- Réserve5Go conservée par défaut ; proposition adaptive_v1 explicite, plancher3Go
+  et travail proportionnel6F+32MiB, pas d’activation automatique des jobs.
+- Diagnostic privé :20452/28281 versions sont des stats d’accès seules ;
+  7016clés actuelles+3504legacy expliquent10520entrées cache. Pas de purge,
+  pas de modification de persistance d’accès ni de schéma. Projection~82Mo/mois,
+  conditionnelle à deux observations et non garantie.
+- Coupe de qualification réalisée par S4 candidat (nouveau cap), baseline4.0.7
+  intacte sur snapshot privé immutable. Nouveaux artefacts et preuves v2 exigés ;
+  aucun report automatique du release_ready de v1, aucune publication/bascule.
+
+
 ## 4.0.8 — candidate à chaîne finale (2026-10-16), non publiée / non déployée
 
 - Provenance déclarative relayée selon le schéma pour toutes les mutations connues ;

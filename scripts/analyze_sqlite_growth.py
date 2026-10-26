@@ -109,6 +109,14 @@ def analyze(path):
                 for obj in previous.values()
             }
             matches[label] = len(keys & candidates)
+        prefix = _json(profile).encode() + b"\0"
+        live_keys = [
+            hashlib.sha256(
+                prefix + index_text(MemoryItem.from_dict(obj), cfg).encode()
+            ).hexdigest()
+            for obj in previous.values()
+            if not obj.get("deleted")
+        ]
         return {
             "bytes": path.stat().st_size,
             "counts": counts,
@@ -126,8 +134,17 @@ def analyze(path):
                 "unique_vector_checksums": vectors[1],
                 "vector_bytes": vectors[2],
                 "full_item_key_matches": matches,
+                "live_items": len(live_keys),
+                "distinct_live_keys": len(set(live_keys)),
+                "live_rows_cache_found": sum(k in keys for k in live_keys),
+                "live_missing_keys": len(set(live_keys) - keys),
                 "chunk_key_analysis": "full-item keys only; no model loaded",
             },
+            "journal_operations": dict(
+                con.execute(
+                    "SELECT operation,count(*) FROM change_events GROUP BY operation"
+                )
+            ),
             "neural_calls": 0,
             "source_sql_writes": False,
         }

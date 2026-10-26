@@ -49,10 +49,18 @@ def main():
     if Path(sys.executable).parent.parent not in Path(memory_os_v4.__file__).parents:
         raise ValueError("Checkout/foreign package forbidden")
     from memory_os_v4.ops import sqlite_backup as s4
+    from schema8_inventory import readonly
+    from qualification_limits import configured
 
     if args.snapshot_source:
-        if args.kind != "snapshot" or md.version("memory-os-ai") != "4.0.7":
-            raise ValueError("Snapshot requires installed baseline 4.0.7")
+        if args.kind != "snapshot" or md.version("memory-os-ai") != plan["version"]:
+            raise ValueError(
+                "Snapshot requires installed candidate with qualified capacity support"
+            )
+        from memory_os_v4.readiness import build_identity
+
+        if build_identity()["commit"] != plan["source_commit"]:
+            raise ValueError("Snapshot candidate build mismatch")
         logical = s4.snapshot(
             args.snapshot_source / s4.DB, root / "snapshot.sqlite3", lambda: guard(root)
         )
@@ -64,6 +72,8 @@ def main():
     store = root / (name.removesuffix("-warm") + "-store")
     if not store.is_relative_to(root) or store.is_symlink():
         raise ValueError("Private store only")
+
+    configured().check((store / "store.sqlite3").stat().st_size, "database")
 
     # Weights already cached. Any IP request is a qualification failure.
     def denied(*a, **kw):
@@ -109,15 +119,16 @@ def main():
         raise ValueError("Production C4/registry policy mismatch")
     if cfg.embed_model == "hash" or _resolve_device(cfg.device) != "mps":
         raise ValueError("Real production model/MPS required")
-    con = s4.readonly(store / s4.DB, sealed=True)
+    con = readonly(store / s4.DB)
     try:
         before = authority(con)
     finally:
         con.close()
-    with closing(s4.readonly(store / s4.DB, sealed=True)) as con:
+    with closing(readonly(store / s4.DB)) as con:
         before_inventory = inventory(con)
     # Explicit same-schema open, not an upgrade; compare EVERY SQL row/object.
     from memory_os_v4.sqlite_store import SQLiteStore
+
     opened = time.monotonic()
     with closing(SQLiteStore(store)) as checked:
         verify_unchanged(before_inventory, inventory(checked._connection))
