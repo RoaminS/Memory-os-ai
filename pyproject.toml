@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-os-ai"
-version = "4.0.8"
+version = "4.0.9.dev1"
 description = "Local project memory shared by MCP clients, with dated decisions and work state"
 readme = "README.md"
 license = "LGPL-3.0-or-later"

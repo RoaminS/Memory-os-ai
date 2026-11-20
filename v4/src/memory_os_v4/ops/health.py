@@ -21,6 +21,132 @@ from .settings import OpsSettings
 
 DISK_MIN_GIB = 5.0
 BACKUP_MAX_AGE_H = 26.0
+# /ready runs the store integrity audit under the engine lock: ~4.4 s measured on a 15k-item SQLite store
+# (2026-11-20). The former implicit 3 s probe timeout turned a healthy, authenticated 200 into "status -1".
+PROBE_TIMEOUT_S = 15.0
+EXPLICIT_MAX_TARGETS = 3
+# More explicit corrections than this within 24 h (by successor creation time) is a bulk/runaway pattern:
+# every one of them goes back to operator review instead of being reported as low risk.
+EXPLICIT_DAILY_MAX = 10
+EXPLICIT_CHAIN_MAX = 10
+
+
+def is_explicit_supersession(target: dict | None, successor: dict | None, *, now: float | None = None,
+                             live: bool = True) -> bool:
+    """One low-risk link: an explicit client correction of ``target`` by ``successor``.
+
+    The successor is a client fact of the same project that lists the target in ``replaces`` (a list of at most
+    EXPLICIT_MAX_TARGETS ids), is not deleted and does not expire before ``now``; when it carries the engine's
+    correction audit, that audit must record this pair as ``explicit_replaces``. The target is a closed fact, not
+    deleted. Anything else (missing successor, implicit invalidation, cross-project, consolidation, bulk
+    replacement, deletion) still requires review. ``live=False`` is used for an intermediate link of a chain, whose
+    successor is legitimately closed by the next explicit correction.
+    """
+    if not isinstance(target, dict) or not isinstance(successor, dict):
+        return False
+    now = time.time() if now is None else now
+    replaces = successor.get("replaces")
+    if not isinstance(replaces, list) or not all(isinstance(r, str) for r in replaces):
+        return False
+    until = successor.get("valid_until")
+    correction = successor.get("correction")
+    if correction is not None:
+        impacts = correction.get("impacts") if isinstance(correction, dict) else None
+        if not isinstance(impacts, list) or not any(
+                isinstance(i, dict) and i.get("target_id") == target.get("id")
+                and i.get("successor_id") == successor.get("id") and i.get("mechanism") == "explicit_replaces"
+                for i in impacts):
+            return False
+    return (
+        target.get("kind") == "fact" and successor.get("kind") == "fact"
+        and target.get("project") == successor.get("project")
+        and successor.get("source") == "client"
+        and not target.get("deleted") and not successor.get("deleted")
+        and target.get("id") in replaces and len(replaces) <= EXPLICIT_MAX_TARGETS
+        and target.get("valid_until") is not None
+        and (not live or until is None or (isinstance(until, (int, float)) and until > now))
+    )
+
+
+def explicit_chain_end(item_id: str, records: dict[str, dict], *, now: float | None = None) -> dict | None:
+    """Live record ending a chain of explicit corrections from ``item_id`` (A->B->C...), else None."""
+    current, seen = records.get(item_id), {item_id}
+    for _ in range(EXPLICIT_CHAIN_MAX):
+        nxt = (current or {}).get("invalidated_by")
+        if not isinstance(nxt, str) or nxt in seen:
+            return None
+        successor = records.get(nxt)
+        final = isinstance(successor, dict) and not successor.get("invalidated_by")
+        if not is_explicit_supersession(current, successor, now=now, live=final):
+            return None
+        if not successor.get("invalidated_by"):
+            return successor
+        current = successor
+        seen.add(nxt)
+    return None
+
+
+def _sqlite_records(db: Path, ids: set[str]) -> dict[str, dict]:
+    """Current records of ``ids`` and of their successor chains: one read-only snapshot (``mode=ro``)."""
+    import sqlite3
+
+    connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        query = ("SELECT v.record_json FROM items i JOIN item_versions v "
+                 "ON i.id=v.item_id AND i.current_revision=v.revision WHERE i.id=?")
+        out: dict[str, dict] = {}
+        todo = set(ids)
+        for _ in range(EXPLICIT_CHAIN_MAX + 1):
+            for item_id in todo:
+                try:
+                    row = connection.execute(query, (item_id,)).fetchone()
+                    record = json.loads(row[0]) if row else None
+                except (ValueError, TypeError):
+                    record = None
+                if isinstance(record, dict):
+                    out[item_id] = record
+            todo = {r.get("invalidated_by") for r in out.values()
+                    if isinstance(r.get("invalidated_by"), str)} - set(out)
+            if not todo:
+                break
+        return out
+    finally:
+        connection.close()
+
+
+def explicit_supersessions(store: Path, ids: list[str], *, now: float | None = None) -> tuple[set[str], set[str]]:
+    """(explicit, explicit created in the last 24 h) among ``ids``; never raises: unknown = review required."""
+    if not ids:
+        return set(), set()
+    now = time.time() if now is None else now
+    try:
+        if (store / "store.sqlite3").exists():
+            records = _sqlite_records(store / "store.sqlite3", set(ids))
+        else:
+            records = {}
+            for line in (store / "items.jsonl").read_bytes().splitlines():
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(d, dict) and isinstance(d.get("id"), str):
+                    records[d["id"]] = d
+    except Exception:
+        return set(), set()
+    explicit, recent = set(), set()
+    for i in ids:
+        try:
+            if explicit_chain_end(i, records, now=now) is None:
+                continue
+            explicit.add(i)
+            created = records[records[i]["invalidated_by"]].get("created_at")
+            if not isinstance(created, (int, float)) or created > now - 86400:
+                recent.add(i)  # unknown creation time counts as recent (conservative)
+        except Exception:
+            continue
+    return explicit, recent
 
 
 def scan_store(store: Path) -> dict:
@@ -122,8 +248,8 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
     if inert_cos_settings():
         info.append("Deprecated *_COS settings are inert; they do not establish confinement")
     try:
-        health_status, _ = http_get(settings.health_url, settings)
-        ready_status, ready_body = http_get(settings.ready_url, settings)
+        health_status, _ = http_get(settings.health_url, settings, timeout=PROBE_TIMEOUT_S)
+        ready_status, ready_body = http_get(settings.ready_url, settings, timeout=PROBE_TIMEOUT_S)
     except SecretFileError as exc:
         health_status = ready_status = -1
         ready_body = b""
@@ -152,6 +278,8 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
             reason = json.loads(ready_body or b"{}").get("reason", "")
         except ValueError:
             pass
+        if ready_status == -1 and not reason:
+            reason = f"(unreachable or no answer within {PROBE_TIMEOUT_S:.0f} s)"
         anomalies.append(f"server /ready status {ready_status} {reason}".strip())
     sup: list[str] = []
     try:
@@ -191,7 +319,22 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         known = set()
         anomalies.append(f"supersession baseline unreadable: {type(exc).__name__}")
     r["superseded_total"] = len(sup)
-    r["superseded_new"] = [i for i in sup if i not in known]
+    unknown = [i for i in sup if i not in known]
+    explicit, recent = explicit_supersessions(settings.store_dir, unknown)
+    r["superseded_explicit_24h"] = len(recent)
+    if len(recent) > EXPLICIT_DAILY_MAX:
+        anomalies.append(
+            f"{len(recent)} explicit corrections within 24 h (> {EXPLICIT_DAILY_MAX}): bulk pattern, "
+            "operator review required"
+        )
+        explicit -= recent
+    r["superseded_explicit_new"] = [i for i in unknown if i in explicit]
+    r["superseded_new"] = [i for i in unknown if i not in explicit]
+    if r["superseded_explicit_new"]:
+        info.append(
+            f"{len(r['superseded_explicit_new'])} explicit client correction(s) (replaces, same project, nothing "
+            f"deleted; {len(recent & explicit)} in the last 24 h): no review required"
+        )
     if r["superseded_new"]:
         anomalies.append(
             f"{len(r['superseded_new'])} unacknowledged supersession(s): operator review required; legitimacy not inferred"

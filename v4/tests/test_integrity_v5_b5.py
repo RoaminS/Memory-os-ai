@@ -118,7 +118,7 @@ def test_journal_stats_alert_and_health_render(memory,monkeypatch,tmp_path):
     assert stats['alert'] and stats['events']==1
     from memory_os_v4.ops.settings import OpsSettings
     s=OpsSettings(url='http://127.0.0.1:9/mcp/',store_dir=m.data_dir,ops_dir=tmp_path/'ops',backup_dir=tmp_path/'backup',token_file=tmp_path/'token',backup_key=tmp_path/'key',service_label=None)
-    monkeypatch.setattr(health,'http_get',lambda url,settings:(200,b'{}'))
+    monkeypatch.setattr(health,'http_get',lambda url,settings,**kw:(200,b'{}'))
     monkeypatch.setattr(health,'last_good_backup_age',lambda settings:0)
     monkeypatch.setattr(health,'last_drill',lambda settings:None)
     from memory_os_v4.ops import storage

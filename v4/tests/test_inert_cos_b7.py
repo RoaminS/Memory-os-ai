@@ -40,7 +40,7 @@ def test_health_first_observation_and_repeats_never_acknowledge_supersessions(tm
     (s.store_dir / "items.jsonl").write_text(json.dumps({"id": "old", "kind": "fact", "text": "old",
         "valid_until": 1, "invalidated_by": "new"}) + "\n")
     monkeypatch.setenv("MEMORY_V4_SUPERSEDE_COS", cos)
-    monkeypatch.setattr(health, "http_get", lambda url, settings: (200, json.dumps({"capabilities": {
+    monkeypatch.setattr(health, "http_get", lambda url, settings, **kw: (200, json.dumps({"capabilities": {
         "policies": {"mutations": mutation_policy()}}}).encode()))
     for _ in range(2):
         report = health.report(s)

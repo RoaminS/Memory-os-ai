@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.0.9.dev1 — autonomie du rapport de santé, 2026-11-20, locale, non publiée
+
+- `ops/health.py` : sonde `/health` et `/ready` à 15 s (l'audit d'intégrité de `/ready` prend ~4,4 s ; l'ancien
+  délai implicite de 3 s donnait « status -1 » sur un serveur sain). Jeton toujours obligatoire.
+- Les corrections client explicites (`replaces`, même projet, cible fermée et non supprimée, successeur non
+  expiré, au plus 3 cibles, audit `explicit_replaces` quand présent, chaînes suivies jusqu'au maillon vivant) sont
+  signalées en info, jamais écrites dans la base d'acquittement. Plus de 10 en 24 h → anomalie (motif de masse).
+- Lecture SQLite en un seul instantané `mode=ro` + `query_only` ; une fiche corrompue n'affecte qu'elle-même.
+- Revue adversariale (Claude, contexte neuf) : 1 bloquant + 3 à corriger, tous traités et couverts par des tests.
+
 ## 4.0.8 RC v3 — correctifs de qualification du2026-10-26, non publiée
 
 - Packaging : référence supprimée vers une note RC inexistante, note finale4.0.7
