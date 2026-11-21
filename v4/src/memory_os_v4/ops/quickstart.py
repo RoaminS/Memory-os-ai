@@ -117,41 +117,285 @@ def _port_state(port: int) -> str:
         return "listening" if s.connect_ex(("127.0.0.1", port)) == 0 else "free"
 
 
+# ---------- recognised form, destination identity, proof of ownership (SETUP_4_1_0.md §5.2) ----------
+
+RELAY_ARGS = ["-m", "memory_os_v4.ops.relay"]
+RELAY_ENV = frozenset({"MEMORY_V4_CLIENT_ID", "MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE", "MEMORY_V4_OPS_DIR"})
+INTERPRETER = re.compile(r"python(3(\.[0-9]+)?)?")
+# Transport keys a client adds around command/args/env, with the only value we write for each.
+TRANSPORT_KEYS = {"type": "stdio", "source": "custom", "enabled": True}
+
+
+def relay_form(entry) -> bool:
+    """Strict recognised form: an ABSOLUTE interpreter running exactly ``-m memory_os_v4.ops.relay``.
+
+    Anything else is a loose form, even when ``clients.classify`` calls it ``relay``: wrapper,
+    foreign program, extra or leading argument, relative interpreter, console script, legacy
+    script, an entry also carrying a URL, an extra variable. A form is not a proof of ownership.
+    """
+    if not isinstance(entry, dict) or set(entry) - {"command", "args", "env", *TRANSPORT_KEYS}:
+        return False
+    if any(key in entry and entry[key] != value for key, value in TRANSPORT_KEYS.items()):
+        return False
+    command = entry.get("command")
+    if not isinstance(command, str) or not os.path.isabs(command) or not INTERPRETER.fullmatch(os.path.basename(command)):
+        return False
+    if entry.get("args") != RELAY_ARGS:
+        return False
+    env = entry.get("env", {})
+    return isinstance(env, dict) and not set(env) - RELAY_ENV and all(isinstance(v, str) for v in env.values())
+
+
+def entry_identity(entry) -> str | None:
+    """Destination identity of an entry carrying both variables, else None. Not a proof of ownership."""
+    env = entry.get("env") if isinstance(entry, dict) else None
+    if not isinstance(env, dict):
+        return None
+    if not all(isinstance(env.get(key), str) for key in ("MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE")):
+        return None
+    return installation_identity(env)
+
+
+def _private(path: Path, mode: int, *, directory: bool = False) -> bool:
+    """Owned by this user, exact mode, not a link; a file must also have a single hard link."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    return (kind_ok and stat.S_IMODE(info.st_mode) == mode and info.st_uid == os.getuid()
+            and (directory or info.st_nlink == 1))
+
+
+def journal_trusted(directory: Path) -> bool:
+    """Trusted journal (§6): private directory, private single-link files, no symbolic link on the path."""
+    root = directory.parent
+    if root.is_symlink() or directory.is_symlink():
+        return False
+    try:
+        root_info = root.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.getuid() or root_info.st_mode & 0o022:
+        return False
+    if not _private(directory, 0o700, directory=True):
+        return False
+    names = [name for name in ("journal.json", "install.json") if (directory / name).exists() or (directory / name).is_symlink()]
+    return bool(names) and all(_private(directory / name, 0o600) for name in names)
+
+
+def _trusted_journals(journal_root: Path):
+    """(path of journal.json, document) for every trusted client journal, in path order."""
+    try:
+        directories = sorted(p for p in journal_root.iterdir())
+    except OSError:
+        return
+    if journal_root.is_symlink():
+        return
+    for directory in directories:
+        path = directory / "journal.json"
+        if not journal_trusted(directory) or not path.is_file():
+            continue
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(document, dict) and isinstance(document.get("records"), list):
+            yield path, document
+
+
+def _record_digest(record: dict) -> str | None:
+    """Digest of the entry a journal record applied; a 4.0.9 record holds the entry itself."""
+    if "applied_entry_sha256" in record:
+        value = record["applied_entry_sha256"]
+        return value if isinstance(value, str) else None
+    applied = record.get("applied_entry")
+    return _entry_hash(applied) if isinstance(applied, dict) else None
+
+
+def _record_proves(record: dict, client_key: str, digest: str, identity: str) -> bool:
+    if not isinstance(record, dict) or record.get("client") != client_key or record.get("status") != "applied":
+        return False
+    if record.get("revoked") or _record_digest(record) != digest:
+        return False
+    if "applied_entry_sha256" in record:
+        return record.get("installation_identity") == identity
+    return entry_identity(record.get("applied_entry")) == identity  # 4.0.9 journal: the exact entry is the binding
+
+
+def proof_of_ownership(journal_root: Path, client_key: str, entry, identity: str) -> list:
+    """Trusted journals proving that THIS installation wrote ``entry`` for THIS client (maybe none)."""
+    if not isinstance(entry, dict) or not relay_form(entry) or entry_identity(entry) != identity:
+        return []
+    digest = _entry_hash(entry)
+    return [path for path, document in _trusted_journals(journal_root)
+            if any(_record_proves(record, client_key, digest, identity) for record in document["records"])]
+
+
+def revoke_proofs(journal_root: Path, client_key: str, digest: str, by: str, *, progress: list | None = None) -> int:
+    """Durably revoke every record (same client, same digest) of every trusted journal; returns their count.
+
+    A proof is consumed by the removal it authorises. Journals are rewritten in path order through
+    ``_atomic_write`` (mode kept). A write failure propagates: revocations already written stay
+    (they are never undone) and are counted in ``progress``.
+    """
+    done = progress if progress is not None else []
+    for path, document in _trusted_journals(journal_root):
+        changed = False
+        for record in document["records"]:
+            if (isinstance(record, dict) and record.get("client") == client_key
+                    and _record_digest(record) == digest and not record.get("revoked")):
+                record.update(revoked=True, revoked_by=by)
+                changed = True
+        if changed:
+            _atomic_write(path, json.dumps(document, indent=1, ensure_ascii=False))
+            done.append(str(path))
+    return len(done)
+
+
+# ---------- client formats ----------
+
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _no_duplicates(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise _DuplicateKey("duplicate key")
+    return dict(pairs)
+
+
+def _json_has_duplicate_keys(text: str) -> bool:
+    try:
+        json.loads(text or "{}", object_pairs_hook=_no_duplicates)
+    except _DuplicateKey:
+        return True
+    except ValueError:
+        return False
+    return False
+
+
+def _dump_json(data, original: str | None) -> str:
+    """Serialise keeping the indentation unit, the final newline and non-ASCII text of ``original``."""
+    if original is None or not original.strip():
+        return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    unit = re.search(r"\n([ \t]+)\S", original)
+    text = json.dumps(data, indent=unit.group(1) if unit else None, ensure_ascii=False)
+    return text + ("\n" if original.endswith("\n") else "")
+
+
+def _toml_block(client: Client, entry: dict) -> str:
+    lines = [f"[mcp_servers.{SERVER}]", f"command = {json.dumps(entry['command'])}", f"args = {json.dumps(entry['args'])}"]
+    if client.fmt == "grok-toml":
+        lines.append("enabled = true")
+    lines.append(f"[mcp_servers.{SERVER}.env]")
+    lines += [f"{json.dumps(k)} = {json.dumps(v)}" for k, v in entry.get("env", {}).items()]
+    return "\n".join(lines) + "\n"
+
+
+def _toml_candidate(client: Client, prior: str, entry: dict) -> tuple[str, str] | None:
+    """(new text, appended text) when appending keeps the file valid, else None.
+
+    The candidate is parsed BEFORE any write and accepted only if its data equal the previous
+    data plus our entry; the previous bytes are a prefix of the new file.
+    """
+    import copy
+    import tomllib
+    appended = ("" if not prior or prior.endswith("\n") else "\n") + ("\n" if prior else "") + _toml_block(client, entry)
+    try:
+        before = tomllib.loads(prior)
+        after = tomllib.loads(prior + appended)
+    except (ValueError, TypeError):
+        return None
+    expected = copy.deepcopy(before)
+    servers = expected.setdefault("mcp_servers", {})
+    if not isinstance(servers, dict) or SERVER in servers:
+        return None
+    servers[SERVER] = entry
+    return (prior + appended, appended) if after == expected else None
+
+
+def _json_key(client: Client) -> str:
+    return {"vscode": "servers", "zed": "context_servers"}.get(client.fmt, "mcpServers")
+
+
+def _entry_in_text(client: Client, text: str) -> dict | None:
+    """Our server entry inside a copy of a JSON client file (used to read a private backup)."""
+    from .clients import _jsonc
+    data = _jsonc(text) if client.fmt == "zed" else json.loads(text or "{}")
+    servers = data.get(_json_key(client), {}) if isinstance(data, dict) else {}
+    entry = servers.get(SERVER) if isinstance(servers, dict) else None
+    return entry if isinstance(entry, dict) else None
+
+
 # ---------- preview (Q1: zero writes) ----------
 
 def preview(*, home: Path, python: str, env: dict[str, str], clients: tuple[str, ...] = DEFAULT_CLIENTS,
             port: int = 8765, token_file: Path | None = None, provision_plan: dict | None = None,
             replace_existing: tuple[str, ...] = (), journal_root: Path | None = None) -> dict:
-    """Read-only plan. ``provision_plan`` = result of provision.plan() (computed by the caller, without network)."""
+    """Read-only plan. ``provision_plan`` = result of provision.plan() (computed by the caller, without network).
+
+    An existing entry that is not exactly ours is never replaced silently (§5.2): only a strict
+    relay form pointing to this installation AND proven by a trusted journal is replaced without
+    asking; everything else needs the client named in ``replace_existing``. TOML is never rewritten.
+    """
     selected = [c for c in CLIENTS if c.key in clients]
     unknown = sorted(set(clients) - {c.key for c in selected})
+    stray = sorted(set(replace_existing) - set(clients))
+    if stray:
+        raise QuickstartError("Consent names a client that is not selected: " + ", ".join(stray),
+                              code="client_consent_unselected")
+    journal_root = journal_root or home / JOURNAL_SUBDIR
     token_file = token_file or home / ".config/memory-os/http.token"
     token_state = "absent"
     if token_file.exists():
         mode = token_file.stat().st_mode & 0o777
         token_state = "ok" if mode == 0o600 else f"bad-permissions:{oct(mode)}"
     disk_free = shutil.disk_usage(home).free
+    identity = installation_identity(env)
     plan_clients = []
     for c in selected:
         path = c.config_path(home)
         _safe_path(path, home)
         state, current = read_entry(c, home)
         want = desired_entry(c, python, env)
-        path = c.config_path(home)
-        action = "unchanged" if _same(current, want) else ("create" if current is None else "replace")
+        kind = classify(current)
+        current_identity = entry_identity(current)
+        proven = bool(current) and bool(proof_of_ownership(journal_root, c.key, current, identity))
+        raw = None
+        if path.exists() and state != "unreadable":
+            raw = path.read_text(encoding="utf-8")
         if state == "unreadable":
             action = "refuse-unreadable"
-        elif c.fmt == "zed" and path.exists() and action != "unchanged":
-            raw = path.read_text(encoding="utf-8")
-            try:
-                json.loads(raw or "{}")
-            except ValueError:
-                action = "refuse-jsonc-manual"  # comments: never rewrite the user's file
-        elif c.fmt.endswith("toml") and current is not None and action != "unchanged":
-            action = "refuse-toml-existing-manual"
+        elif _same(current, want):
+            action = "unchanged"
+        elif c.fmt == "zed" and raw is not None and _is_jsonc(raw):
+            action = "refuse-jsonc-manual"  # comments: never rewrite the user's file
+        elif c.fmt.endswith("toml"):
+            if current is not None:
+                action = "refuse-toml-existing-manual"  # never rewritten, no consent possible
+            elif _toml_candidate(c, raw or "", want) is None:
+                action = "refuse-toml-structure-manual"
+            else:
+                action = "create"
+        elif raw is not None and c.fmt != "zed" and _json_has_duplicate_keys(raw):
+            action = "refuse-json-duplicate-keys"
+        elif current is None:
+            action = "create"
+        elif c.key in replace_existing:
+            action = "replace"  # named consent for this client only
+        elif kind == "relay" and current_identity == identity:
+            action = "replace" if proven else "refuse-existing-relay-unproven"
+        elif kind == "relay":
+            action = "refuse-existing-relay-other-installation"
+        else:
+            action = "refuse-existing-" + kind
         plan_clients.append({"client": c.key, "name": c.name, "path": str(path), "file_sha256": _sha(path),
-                             "current_class": classify(current), "desired": _mask(want),
+                             "current_class": kind, "desired": _mask(want),
                              "desired_sha256": _entry_hash(want),
+                             "installation_identity": identity, "current_identity": current_identity,
+                             "ownership": "journal" if proven else "unproven",
                              "action": action, "note": c.note})
     return {"version": 1, "created_at": time.time(), "platform": sys.platform, "python": python,
             "unknown_clients": unknown, "disk_free_bytes": disk_free, "port": port, "port_state": _port_state(port),
@@ -159,6 +403,14 @@ def preview(*, home: Path, python: str, env: dict[str, str], clients: tuple[str,
             "provision": provision_plan, "clients": plan_clients,
             "downloads_required_bytes": (provision_plan or {}).get("download_bytes", 0),
             "writes": "none (preview)"}
+
+
+def _is_jsonc(raw: str) -> bool:
+    try:
+        json.loads(raw or "{}")
+    except ValueError:
+        return True
+    return False
 
 
 # ---------- client writes ----------
@@ -186,8 +438,13 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def _json_key(client: Client) -> str:
-    return {"vscode": "servers", "zed": "context_servers"}.get(client.fmt, "mcpServers")
+def _claude(argv: list[str], home: Path, *, run) -> int | None:
+    """Run the ``claude`` CLI against the selected HOME; only its return code is kept (None: timeout)."""
+    try:
+        return run(["claude", *argv], capture_output=True, text=True, timeout=30,
+                   env={**os.environ, "HOME": str(home)}).returncode
+    except subprocess.SubprocessError:
+        return None
 
 
 def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run) -> str:
@@ -198,43 +455,104 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
         flags = [x for k, v in entry.get("env", {}).items() for x in ("--env", f"{k}={v}")]
         _, existing = read_entry(client, home)
         if existing is not None:
-            removed = run(["claude", "mcp", "remove", "--scope", "user", SERVER],
-                          capture_output=True, text=True, timeout=30, env={**os.environ, "HOME": str(home)})
-            if removed.returncode:
+            if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
                 raise QuickstartError("claude mcp remove refused; previous entry retained")
-        res = run(["claude", "mcp", "add", "--scope", "user", "--transport", "stdio", *flags, SERVER, "--", command, *args],
-                  capture_output=True, text=True, timeout=30, env={**os.environ, "HOME": str(home)})
-        if res.returncode:
-            raise QuickstartError(f"claude mcp add failed ({res.returncode})")
+        code = _claude(["mcp", "add", "--scope", "user", "--transport", "stdio", *flags, SERVER, "--", command, *args],
+                       home, run=run)
+        if code != 0:
+            raise QuickstartError(f"claude mcp add failed ({code})")
         return "claude-cli"
     if client.fmt.endswith("toml"):
-        lines = [f"\n[mcp_servers.{SERVER}]", f"command = {json.dumps(entry['command'])}", f"args = {json.dumps(entry['args'])}"]
-        if client.fmt == "grok-toml":
-            lines.append("enabled = true")
-        lines.append(f"[mcp_servers.{SERVER}.env]")
-        lines += [f"{json.dumps(k)} = {json.dumps(v)}" for k, v in entry.get("env", {}).items()]
         prior = path.read_text(encoding="utf-8") if path.exists() else ""
-        _atomic_write(path, prior.rstrip("\n") + "\n" + "\n".join(lines) + "\n")
+        candidate = _toml_candidate(client, prior, entry)
+        if candidate is None:
+            raise QuickstartError("TOML structure cannot be extended safely; apply the snippet by hand")
+        _atomic_write(path, candidate[0])
         return "toml-append"
-    data = json.loads(path.read_text(encoding="utf-8") or "{}") if path.exists() else {}
+    raw = path.read_text(encoding="utf-8") if path.exists() else None
+    if raw is not None and _json_has_duplicate_keys(raw):
+        raise QuickstartError("JSON config with duplicate keys; edit it by hand")
+    data = json.loads(raw or "{}") if raw is not None else {}
     data.setdefault(_json_key(client), {})[SERVER] = entry
-    _atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    _atomic_write(path, _dump_json(data, raw))
     return "json-merge"
+
+
+def remove_client_entry(client: Client, home: Path, *, run=subprocess.run, previous: dict | None = None,
+                        toml_appended: str | None = None) -> None:
+    """Semantic removal of OUR entry (or return to ``previous``); everything else in the file is kept.
+
+    Never a restore of the backup: what was written to the file since is preserved. JSON keeps
+    its formatting; TOML loses exactly the text we appended when it is still there, else the
+    span of our two tables.
+    """
+    path = client.config_path(home)
+    _safe_path(path, home)
+    if client.fmt == "claude-user":
+        if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
+            raise QuickstartError("claude mcp remove failed; entry retained")
+        if previous:
+            _write_client(client, home, previous, run=run)
+        return
+    if client.fmt.endswith("toml"):
+        # Only absent entries can be appended; remove their exact text or table spans,
+        # leaving unrelated TOML/application edits intact.
+        if previous is not None:
+            raise QuickstartError("Existing TOML entry was not eligible for automatic apply")
+        text = path.read_text(encoding="utf-8")
+        if toml_appended and text.count(toml_appended) == 1:
+            _atomic_write(path, text.replace(toml_appended, "", 1))
+            return
+        retained, skipping = [], False
+        for line in text.splitlines(keepends=True):
+            if line.lstrip().startswith("["):
+                header = line.strip().split("#", 1)[0].strip()
+                skipping = header in {f"[mcp_servers.{SERVER}]", f"[mcp_servers.{SERVER}.env]"}
+            if not skipping:
+                retained.append(line)
+        _atomic_write(path, "".join(retained))
+        return
+    raw = path.read_text(encoding="utf-8")
+    data_cfg = json.loads(raw or "{}")
+    servers = data_cfg.setdefault(_json_key(client), {})
+    if previous is None:
+        servers.pop(SERVER, None)
+    else:
+        servers[SERVER] = previous
+    _atomic_write(path, _dump_json(data_cfg, raw))
+
+
+def backup_client_file(path: Path, backup: Path) -> str:
+    """Verbatim private copy (0600, fsync) taken before a write; returns its SHA-256.
+
+    The only place where a pre-existing secret of the file may survive: never shown, never
+    copied into a journal, quoted by path with ``backup_may_hold_secrets``.
+    """
+    shutil.copy2(path, backup)
+    os.chmod(backup, 0o600)
+    with backup.open('rb') as stream:
+        os.fsync(stream.fileno())
+    return _sha(backup)
 
 
 def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], journal_root: Path | None = None,
                   run=subprocess.run, journal_dir: Path | None = None) -> dict:
-    """Writes the client entries from the preview (Q3/Q5). Refuses any file modified since the preview."""
+    """Writes the client entries from the preview (Q3/Q5). Refuses any file modified since the preview.
+
+    The journal binds client, entry and installation (``applied_entry_sha256``,
+    ``installation_identity``) and never holds a previous entry in clear: only its class and digest.
+    """
     if plan.get("unknown_clients"):
         raise QuickstartError("Unknown clients; re-preview with explicit supported choices")
     for item in plan["clients"]:
         client = next(c for c in CLIENTS if c.key == item["client"])
         if _entry_hash(desired_entry(client, python, env)) != item['desired_sha256']:
             raise QuickstartError("Desired entry changed since preview")
-    jdir = journal_dir or new_journal(journal_root or home / ".local/state/memory-os/quickstart")
+    jdir = journal_dir or new_journal(journal_root or home / JOURNAL_SUBDIR)
     stamp = jdir.name
     journal = jdir / "journal.json"
     records = []
+    identity = installation_identity(env)
     def persist():
         _atomic_write(journal, json.dumps({"version": 1, "stamp": stamp, "records": records},
                                          indent=1, ensure_ascii=False))
@@ -258,14 +576,20 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
         _, before = read_entry(client, home)
         if path.exists():
             backup = jdir / f"{client.key}.bak"
-            shutil.copy2(path, backup)
-            os.chmod(backup, 0o600)
-            with backup.open('rb') as stream:
-                os.fsync(stream.fileno())
             rec["backup"] = str(backup)
+            rec["backup_sha256"] = backup_client_file(path, backup)
+            rec["backup_may_hold_secrets"] = True
         want = desired_entry(client, python, env)
-        rec["previous_entry"] = before
-        rec["applied_entry"] = want
+        if before is not None:
+            rec["previous_class"] = classify(before)
+            rec["previous_entry_sha256"] = _entry_hash(before)
+        rec["applied_entry"] = want  # our own entry: no secret, and the binding a 4.0.9 journal relied on
+        rec["applied_entry_sha256"] = _entry_hash(want)
+        rec["installation_identity"] = identity
+        if client.fmt.endswith("toml"):
+            candidate = _toml_candidate(client, path.read_text(encoding="utf-8") if path.exists() else "", want)
+            if candidate is not None:
+                rec["toml_appended"] = candidate[1]
         records.append(rec)
         rec["status"] = "pending"  # write-ahead evidence survives CLI/write failure
         persist()
@@ -280,11 +604,13 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
         except (OSError, ValueError, QuickstartError, subprocess.SubprocessError):
             rec["status"] = "failed-or-partial"
             persist()
-            raise QuickstartError(f"Client {client.key} failed; private journal retained: {stamp}") from None
+            raise QuickstartError(f"Client {client.key} failed; private journal retained: {stamp}",
+                                  code="client_write_failed") from None
         persist()
     persist()
+    hidden = ("applied_entry", "previous_entry", "toml_appended")
     return {"stamp": stamp, "journal": str(journal),
-            "records": [{k: v for k, v in r.items() if not k.endswith("_entry")} for r in records]}
+            "records": [{k: v for k, v in r.items() if k not in hidden} for r in records]}
 
 
 def new_journal(root: Path) -> Path:
@@ -297,62 +623,168 @@ def new_journal(root: Path) -> Path:
     return path
 
 
-def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subprocess.run) -> dict:
-    """Q3: restores the previous entry ONLY if our entry is still the one applied; otherwise refusal."""
+# ---------- stopping OUR service: confirmed stop first, plist moved last (SETUP_4_1_0.md §6) ----------
+
+STOP_CODES = {"stop-failed": "service_stop_failed", "stop-timeout": "service_stop_timeout",
+              "stop-unconfirmed": "service_stop_unconfirmed",
+              "refused-changed-since-install": "service_changed_since_install",
+              "refused-job-not-attested": "service_changed_since_install"}
+
+
+def _move_plist(plist: Path, journal_dir: Path) -> str:
+    """The definition is MOVED into the private journal, never deleted."""
+    target = journal_dir / plist.name
+    index = 1
+    while target.exists() or target.is_symlink():
+        target = journal_dir / f"{plist.name}.{index}"
+        index += 1
+    shutil.move(str(plist), str(target))
+    return str(target)
+
+
+def stop_owned_service(service: dict, plist_sha256: str | None, journal_dir: Path, *, run,
+                       stop_timeout: float = 10.0, sleep=time.sleep) -> dict:
+    """Stop the job this installation owns and move its plist into ``journal_dir``.
+
+    Sequence: the plist still has the journaled digest; the loaded job is re-attested (program,
+    arguments, token file, directory) right before the stop; ONE ``launchctl bootout``, no retry,
+    no forced kill; the job is observed absent within ``stop_timeout``; only then the plist moves.
+    Only an explicit "Could not find service" is absence: an error or a timeout of the
+    observation is indeterminate, never absent. Returns ``{"outcome": ..., ["code"], ...}``.
+    """
+    plist = Path(service["path"])
+
+    def refused(outcome, **facts):
+        return {"outcome": outcome, "code": STOP_CODES[outcome], **facts}
+    if plist.is_symlink() or not plist.is_file():
+        return {"outcome": "plist-already-absent"}
+    if plist_sha256 is None or _sha(plist) != plist_sha256:
+        return refused("refused-changed-since-install")
+    state = _job_state(service, run=run)
+    if state == "absent":  # never loaded (interrupted install): nothing to stop
+        return {"outcome": "plist-moved-job-was-absent", "plist_moved_to": _move_plist(plist, journal_dir)}
+    if state != "loaded":
+        return refused("refused-job-not-attested")
+    stop = _bootout(service, run=run)
+    if stop == "timeout":
+        return refused("stop-timeout")
+    if stop != "ok":
+        return refused("stop-failed")
+    waited = 0.0
+    while True:
+        state = _job_state(service, run=run)
+        if state == "absent" or waited >= stop_timeout:
+            break
+        pause = min(0.25, stop_timeout - waited)
+        sleep(pause)
+        waited += pause
+    if state != "absent":
+        return refused("stop-unconfirmed", observation="indeterminate" if state == "unknown" else "loaded")
+    if _sha(plist) != plist_sha256:
+        return refused("refused-changed-since-install")
+    return {"outcome": "stopped-and-plist-moved", "plist_moved_to": _move_plist(plist, journal_dir)}
+
+
+def retained_items(paths: dict) -> list:
+    """What is never removed, restored, replaced or even opened: ``{kind, path, exists}``."""
+    items = []
+    for kind in ("store", "backups", "backup-key", "token", "resources", "journals", "logs"):
+        value = paths.get(kind)
+        if not value:
+            continue
+        values = sorted(value.values()) if isinstance(value, dict) else [value]
+        if not values:
+            continue
+        item = {"kind": kind, "path": values[0], "exists": any(Path(v).exists() for v in values)}
+        if len(values) > 1:
+            item["paths"] = values
+        items.append(item)
+    return items
+
+
+def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subprocess.run,
+         with_service: bool = False, stop_timeout: float = 10.0, sleep=time.sleep) -> dict:
+    """Q3: restores the previous entry ONLY if our entry is still the one applied; otherwise refusal.
+
+    Clients: semantic removal of our entry (never the backup put back). The proof that
+    authorised the removal is revoked first, durably. Service: only with ``with_service`` and
+    only the one THIS install created, through ``stop_owned_service``. Data: never touched.
+    """
     if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]{32}", stamp):
         raise QuickstartError("Invalid journal stamp")
     journal_root = journal_root or home / JOURNAL_SUBDIR
-    journal = journal_root / stamp / "journal.json"
-    _safe_path(journal, journal_root)
-    if stat.S_IMODE(journal.stat().st_mode) != 0o600:
-        raise QuickstartError("Unsafe journal permissions")
-    data = json.loads(journal.read_text(encoding="utf-8"))
+    directory = journal_root / stamp
+    if not journal_trusted(directory):
+        raise QuickstartError("Journal is not private or its path is not safe; nothing done", code="journal_unsafe")
+    journal, install = directory / "journal.json", directory / "install.json"
+    try:
+        data = json.loads(journal.read_text(encoding="utf-8")) if journal.is_file() else {"records": []}
+        installed = json.loads(install.read_text(encoding="utf-8")) if install.is_file() else None
+    except (OSError, ValueError):
+        raise QuickstartError("Journal unreadable; nothing done", code="journal_unsafe") from None
     out = []
     for rec in data["records"]:
         if rec.get("status") not in {"applied", "pending", "failed-or-partial"}:
             out.append({"client": rec["client"], "undo": "nothing-to-undo"})
             continue
         client = next(c for c in CLIENTS if c.key == rec["client"])
+        digest = _record_digest(rec)
         state, current = read_entry(client, home)
-        if state != "ok" or not _same(current, rec["applied_entry"]):
+        if state != "ok" or not isinstance(current, dict) or digest is None or _entry_hash(current) != digest:
             out.append({"client": client.key, "undo": "refused-entry-changed-since-apply"})
             continue
-        previous = rec.get("previous_entry")
         path = client.config_path(home)
         if str(path) != rec["path"]:
             raise QuickstartError("Journal config path differs from registry")
         _safe_path(path, home)
-        if client.fmt == "claude-user":
-            removed = run(["claude", "mcp", "remove", "--scope", "user", SERVER], capture_output=True,
-                          text=True, timeout=30, env={**os.environ, "HOME": str(home)})
-            if removed.returncode:
-                raise QuickstartError("Claude undo failed; journal retained")
-            if previous:
-                _write_client(client, home, previous, run=run)
-        elif client.fmt.endswith("toml"):
-            # Only absent entries can be appended; remove their exact table spans,
-            # leaving unrelated TOML/application edits intact.
-            if previous is not None:
-                raise QuickstartError("Existing TOML entry was not eligible for automatic apply")
-            lines = path.read_text().splitlines(keepends=True)
-            retained, skipping = [], False
-            for line in lines:
-                if line.lstrip().startswith("["):
-                    header = line.strip().split("#", 1)[0].strip()
-                    skipping = header in {f"[mcp_servers.{SERVER}]", f"[mcp_servers.{SERVER}.env]"}
-                if not skipping:
-                    retained.append(line)
-            _atomic_write(path, "".join(retained))
-        else:
-            data_cfg = json.loads(path.read_text(encoding="utf-8") or "{}")
-            servers = data_cfg.setdefault(_json_key(client), {})
-            if previous is None:
-                servers.pop(SERVER, None)
-            else:
-                servers[SERVER] = previous
-            _atomic_write(path, json.dumps(data_cfg, indent=2, ensure_ascii=False) + "\n")
+        previous = rec.get("previous_entry")  # 4.0.9 journals only; newer ones never hold it in clear
+        if "previous_entry_sha256" in rec:
+            # The exact previous entry is read back from the private backup, after both digests are checked.
+            previous = None
+            try:
+                backup = Path(rec["backup"])
+                if _private(backup, 0o600) and _sha(backup) == rec.get("backup_sha256"):
+                    previous = _entry_in_text(client, backup.read_text(encoding="utf-8"))
+            except (OSError, ValueError, KeyError, TypeError):
+                previous = None
+            if previous is None or _entry_hash(previous) != rec["previous_entry_sha256"]:
+                out.append({"client": client.key, "undo": "refused-backup-changed"})
+                continue
+        try:
+            # Revocation first, removal second: a failed removal leaves the entry unproven, never removable by default.
+            revoke_proofs(journal_root, client.key, digest, stamp)
+        except (OSError, ValueError, QuickstartError):
+            out.append({"client": client.key, "undo": "revocation-failed-entry-untouched"})
+            continue
+        try:
+            remove_client_entry(client, home, run=run, previous=previous, toml_appended=rec.get("toml_appended"))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            out.append({"client": client.key, "undo": "failed-entry-kept-unproven"})
+            continue
         out.append({"client": client.key, "undo": "restored"})
-    return {"stamp": stamp, "results": out}
+    clients_done = all(item["undo"] in {"restored", "nothing-to-undo"} for item in out)
+    result = {"stamp": stamp, "ok": clients_done, "results": out, "data_restored_from_copy": False}
+    if not clients_done:
+        result["code"] = "undo_partial"
+    if not with_service:
+        result["service"] = {"undo": "not-requested"}
+    elif not isinstance(installed, dict) or installed.get("steps", {}).get("service", {}).get("created") is not True:
+        result["service"] = {"undo": "not-created-by-this-install"}
+    elif not clients_done:
+        # A client still configured must not be left pointing to a stopped service.
+        result["service"] = {"undo": "kept-clients-incomplete"}
+    else:
+        stopped = stop_owned_service(installed["service"], installed["steps"]["service"].get("plist_sha256"),
+                                     directory, run=run, stop_timeout=stop_timeout, sleep=sleep)
+        code = stopped.pop("code", None)
+        result["service"] = {"undo": stopped.pop("outcome"), **stopped}
+        if code:
+            result.update(ok=False, code=code)
+    if isinstance(installed, dict) and isinstance(installed.get("paths"), dict):
+        result["retained"] = retained_items({**installed["paths"], "journals": str(journal_root)})
+    else:
+        result["retained"] = []
+    return result
 
 
 def report(plan: dict) -> dict:

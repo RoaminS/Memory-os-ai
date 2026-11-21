@@ -62,7 +62,9 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
             return 0 if all(r['undo'] in {'restored', 'nothing-to-undo'} for r in result['results']) else 1
         chosen = tuple(args.clients.split(',')) if args.clients else quickstart.DEFAULT_CLIENTS
         s, backend = quickstart.settings_for_install(s, backend=args.backend)
-        plan = quickstart.prepare(s, clients=chosen, backend=backend, profile=getattr(args, 'profile', None))
+        consent = getattr(args, 'replace_existing', None)
+        plan = quickstart.prepare(s, clients=chosen, backend=backend, profile=getattr(args, 'profile', None),
+                                  replace_existing=tuple(consent.split(',')) if consent else ())
         if args.apply:
             result = quickstart.apply_install(plan, s, download_approved=args.download_approved, demo=args.demo)
             if args.report:
@@ -447,6 +449,9 @@ def main(argv: list[str] | None = None) -> int:
                     help='new installs: sqlite + tasks by default; existing backend is preserved; never migrates')
     qs.add_argument('--profile', choices=('lexical', 'semantic'), default=None,
                     help='required for a new install (no default); an existing install keeps its own profile')
+    qs.add_argument('--replace-existing', metavar='CLIENTS',
+                    help='comma-separated clients whose existing memory-os-ai entry may be replaced (named consent, '
+                         'per client; never Codex TOML)')
     mode = qs.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--undo', metavar='STAMP')
