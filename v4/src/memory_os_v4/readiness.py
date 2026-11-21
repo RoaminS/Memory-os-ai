@@ -65,7 +65,10 @@ def engine_readiness(engine) -> tuple[bool, str]:
         engine._ensure_open()
         if engine._writer_lock._file is None:
             return False, "writer_lease_missing"
-        if engine._retrieval_ready and engine.config.embed_model != "hash" and getattr(engine.embedder, "_model", None) is None:
+        # Lexical profile: no encoder by choice, never a missing model; retrieval is ready at open.
+        lexical = engine.config.retrieval_profile == "lexical"
+        if (not lexical and engine._retrieval_ready and engine.config.embed_model != "hash"
+                and getattr(engine.embedder, "_model", None) is None):
             return False, "model_not_loaded"
         if engine.config.store_backend == "sqlite_s1":
             # The engine lock serializes semantic writers. Never serve a cached
@@ -103,7 +106,9 @@ def engine_readiness(engine) -> tuple[bool, str]:
                 return True, 'ready_work_only'
             return False, 'model_not_loaded'
         live_ids = {item.id for item in engine.store.all(False)}
-        indexed = {engine.store.chunk_owner.get(key, key) for key in engine.vector_index.ids()}
+        # No vector coverage in the lexical profile; BM25/entity/facet coverage is checked alike.
+        indexed = live_ids if lexical else {
+            engine.store.chunk_owner.get(key, key) for key in engine.vector_index.ids()}
         if (indexed != live_ids or set(engine.bm25.doc_len) != live_ids
                 or set(engine.entities.doc_entities) != live_ids or engine.facet_index.ids() != live_ids):
             return False, "indexes_not_ready"

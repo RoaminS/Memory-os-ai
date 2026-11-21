@@ -238,9 +238,16 @@ def test_missing_package_is_explicit_and_unsafe_loose_metadata_rejected():
         raise runtime.metadata.PackageNotFoundError(name)
     proof = runtime.inspect_current(version_getter=missing)
     assert not proof['ok'] and all(v is None for v in proof['actual'].values())
+    # 4.1.0: a package that is not installed is "missing", never confused with a version drift.
+    assert proof['state'] == 'missing_dependency'
+    assert proof['mismatches'] and all(entry['state'] == 'missing' for entry in proof['mismatches'].values())
     requirements = [name + '==' + v for name, v in runtime.catalog()['versions'].items()]
     requirements = [r for r in requirements if not r.startswith('torch==')] + ['torch>=2.10,<2.11']
-    assert not runtime.check_requirements(requirements)['ok']
+    # 4.1.0: the exact-pin rule moved from the package metadata to the constraints file of the
+    # profile (contract LEXICAL_PROFILE_4_1_0 §8); a loose constraint is refused exactly as before.
+    exact = runtime.check_constraints(requirements)
+    assert not exact['ok'] and set(exact['mismatches']) == {'torch'}
+    assert runtime.check_constraints([name + '==' + v for name, v in runtime.catalog()['versions'].items()])['ok']
 
 
 def test_metadata_inspection_never_imports_encoder_or_torch():

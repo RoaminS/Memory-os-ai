@@ -8,26 +8,34 @@ from . import __version__
 def deployed(engine, build: dict) -> dict:
     from .brief_tokens import status
     from .ops.qualified_runtime import inspect_current
-    from .config import inert_cos_settings
+    from .config import LEXICAL_MARKER, LEXICAL_POLICY, PROFILE_LEXICAL, inert_cos_settings
     from .fact_updates import mutation_policy
 
     cfg = engine.config
+    lexical = cfg.retrieval_profile == PROFILE_LEXICAL
+    if lexical:
+        # Encoder absent by choice of profile: a normal state, distinct from a missing dependency
+        # or a drift, which only the runtime inspection below can report.
+        encoding = {"state": "absent_by_profile", "model": None, "profile": None, "loaded": False}
+    else:
+        encoding = {
+            "model": cfg.embed_model,
+            "requested_device": cfg.device,
+            "profile": engine._compute_profile(),
+            "loaded": engine._retrieval_ready,
+            "profile_source": "loaded_encoder" if engine._retrieval_ready else "historical_store_metadata",
+        }
     return {
         "schema_version": 1,
-        "runtime": inspect_current(extras=('ops', 'brief')),
+        "retrieval_profile": dict(LEXICAL_MARKER) if lexical else {"name": cfg.retrieval_profile, "policy": None},
+        "runtime": inspect_current(profile=cfg.retrieval_profile, extras=('ops', 'brief')),
         "engine": {"name": "memory-os-v4", "version": __version__, **build},
         "store": {
             "backend": cfg.store_backend,
             "instance_id": engine.store.meta.get("store_instance_id"),
             "atomic_mutations": cfg.store_backend == "sqlite_s1",
         },
-        "encoding": {
-            "model": cfg.embed_model,
-            "requested_device": cfg.device,
-            "profile": engine._compute_profile(),
-            "loaded": engine._retrieval_ready,
-            "profile_source": "loaded_encoder" if engine._retrieval_ready else "historical_store_metadata",
-        },
+        "encoding": encoding,
         "policies": {
             "maintenance": engine.maintenance_status(),
             "writes": engine.write_status(),
@@ -35,6 +43,7 @@ def deployed(engine, build: dict) -> dict:
             "bm25_profile": cfg.bm25_profile,
             "lexical_guard_k": cfg.lexical_guard_k,
             "fusion": cfg.fusion,
+            "ranking_policy": LEXICAL_POLICY if lexical else None,
             "request_receipts": "l3-v2",
             "automatic_mutation_replay": False,
             "mutations": mutation_policy(),
