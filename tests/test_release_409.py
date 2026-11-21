@@ -161,11 +161,13 @@ def base_init():
     )
 
 
-def fake_git(monkeypatch, names, new_init):
-    """Mocked git: diff -> names; show BASE -> real base file; show other -> new_init."""
+def fake_git(monkeypatch, names, new_init, health_blob=None):
+    """Mocked git: diff -> names; show BASE -> real base bytes; show other -> new_init bytes;
+    rev-parse <commit>:health.py -> health_blob (defaults to the pinned reviewed blob)."""
     old = base_init()
     calls = []
     real = subprocess.check_output
+    blob = gate.HEALTH_BLOB if health_blob is None else health_blob
 
     def query(argv, **kwargs):
         if argv[:1] != ["git"]:
@@ -173,8 +175,10 @@ def fake_git(monkeypatch, names, new_init):
         calls.append(list(argv))
         if argv[1] == "diff":
             return "".join(n + "\n" for n in names)
-        assert argv[1] == "show"
-        return old if argv[2].startswith(BASE + ":") else new_init
+        if argv[1] == "rev-parse":
+            return blob + "\n"
+        assert argv[1] == "show" and "text" not in kwargs  # bytes, never text-normalised
+        return (old if argv[2].startswith(BASE + ":") else new_init).encode()
 
     monkeypatch.setattr(subprocess, "check_output", query)
     return calls, old
@@ -190,7 +194,51 @@ def test_real_candidate_health_fix_and_version_line_is_accepted():
         "allowed_changed_paths": [INIT, HEALTH],
         "observed_changed_paths": [INIT, HEALTH],
         "version_file_change": ["4.0.8", "4.0.9"],
+        "health_blob": gate.HEALTH_BLOB,
     }
+
+
+def test_health_fix_other_than_reviewed_blob_is_refused(monkeypatch):
+    fake_git(monkeypatch, [INIT, HEALTH], base_init().replace('"4.0.8"', '"4.0.9"'), health_blob="0" * 40)
+    with pytest.raises(ValueError, match="reviewed 4.0.9 health fix"):
+        gate.verify_engine_version_only(ROOT, "c" * 40, "4.0.9")
+
+
+def _real_repo(tmp_path, new_bytes):
+    """Real git (no mock): base commit with the 4.0.8 __init__, candidate with new_bytes."""
+    def git(*a):
+        return subprocess.check_output(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.autocrlf=false",
+                                        *a], cwd=tmp_path, text=True).strip()
+    git("init", "-q")
+    init = tmp_path / INIT
+    init.parent.mkdir(parents=True)
+    init.write_bytes(subprocess.check_output(["git", "show", BASE + ":" + INIT], cwd=ROOT))
+    git("add", "-A"); git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    init.write_bytes(new_bytes)
+    git("add", "-A"); git("commit", "-q", "-m", "candidate")
+    return base, git("rev-parse", "HEAD")
+
+
+def test_real_git_crlf_version_file_is_refused_and_lf_bump_accepted(tmp_path, monkeypatch):
+    original = subprocess.check_output(["git", "show", BASE + ":" + INIT], cwd=ROOT)
+    bump = original.replace(b'__version__ = "4.0.8"', b'__version__ = "4.0.9"')
+    for name, data, accepted in (("lf", bump, True), ("crlf", bump.replace(b"\n", b"\r\n"), False)):
+        repo = tmp_path / name
+        repo.mkdir()
+        base, candidate = _real_repo(repo, data)
+        monkeypatch.setattr(gate, "FROZEN_BASE", base)
+        if accepted:
+            assert gate.verify_engine_version_only(repo, candidate, "4.0.9")["observed_changed_paths"] == [INIT]
+        else:
+            with pytest.raises(ValueError, match="__version__ line"):
+                gate.verify_engine_version_only(repo, candidate, "4.0.9")
+
+
+def test_installed_relay_case_runs_brief_and_outage_status_for_409():
+    import importlib
+    case = importlib.import_module("installed_relay_case")
+    assert {"4.0.8", "4.0.9"} <= case.COMPACT_BRIEF_AND_LOCAL_STATUS_VERSIONS
 
 
 def test_rule_lists_both_sides_of_renames_and_uses_frozen_base(monkeypatch):

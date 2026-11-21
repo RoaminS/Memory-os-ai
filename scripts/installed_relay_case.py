@@ -18,6 +18,10 @@ import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+# Versions whose relay exposes the compact brief and memory_request_status during an outage.
+# 4.0.8/4.0.9 keep both (4.0.9 adds no relay change); the 4.0.8 qualification ran from another checkout.
+COMPACT_BRIEF_AND_LOCAL_STATUS_VERSIONS = frozenset({'4.0.4', '4.0.5', '4.0.6', '4.0.7rc1', '4.0.7', '4.0.8', '4.0.9'})
+
 
 def main() -> int:
     if not __debug__:
@@ -127,7 +131,7 @@ def main() -> int:
                                                             {'project': 'package-probe', 'query': first_text, 'top_k': 5})
                             assert not found.isError and first_id in {h['id'] for h in json.loads(found.content[0].text)['hits']}
                             report['roundtrip'] = True
-                            if args.version in {'4.0.4', '4.0.5', '4.0.6', '4.0.7rc1', '4.0.7'}:
+                            if args.version in COMPACT_BRIEF_AND_LOCAL_STATUS_VERSIONS:
                                 brief = await session.call_tool('memory_session_brief', {'project': 'package-probe'})
                                 from memory_os_v4.brief_tokens import counter
                                 wire = json.dumps(brief.model_dump(mode='json', by_alias=True, exclude_none=True), ensure_ascii=False, separators=(',', ':'))
@@ -143,7 +147,7 @@ def main() -> int:
                             assert down.isError and any(word in down.content[0].text.lower()
                                                         for word in ('uncertain', 'unreachable', 'unavailable'))
                             report['failure_reported'] = True
-                            if args.version in {'4.0.4', '4.0.5', '4.0.6', '4.0.7rc1', '4.0.7'}:
+                            if args.version in COMPACT_BRIEF_AND_LOCAL_STATUS_VERSIONS:
                                 local = await session.call_tool('memory_request_status', {})
                                 assert not local.isError and 'connection' in json.loads(local.content[0].text)
                                 report['local_status_during_outage'] = True

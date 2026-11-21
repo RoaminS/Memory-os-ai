@@ -36,9 +36,13 @@ HEALTH_FILE = "v4/src/memory_os_v4/ops/health.py"
 # Exhaustive: any other changed path under v4/src (brief*.py, text.py, bm25.py,
 # store/sqlite files, ...) refuses. P-A transfers only on identical brief bytes.
 ENGINE_ALLOWED_CHANGES = (VERSION_FILE, HEALTH_FILE)
+# Reviewed health fix (a745b40, Codex review 2026-11-20): any other health.py bytes refuse.
+HEALTH_BLOB = "3aa1dfe5d023f6f7efa91cbe6c41e1abeb5ba8b9"
 PROOF_TRANSFER = {
-    "p_a": "transferred only because brief/engine bytes are identical to the "
-    "frozen base; no P-A rerun",
+    "p_a": "transferred: the P-A functional perimeter is unchanged (every v4/src file except "
+    "__init__.py and ops/health.py is byte-identical to the frozen base; ops/health.py is pinned to the "
+    "reviewed blob and imported only by ops/cli.py and ops/doctor.py); transferred proof = brief P-A "
+    "40/40 sealed gate acquired on ceedb5c (CHANGELOG 4.0.7rc1); no P-A rerun",
     "redo_on_final_commit": [
         "full_source",
         "artifacts",
@@ -78,8 +82,9 @@ def verify_engine_version_only(root, commit, version):
     require(VERSION_FILE in names, "Engine version not bumped to " + RELEASE_VERSION)
 
     def show(revision):
+        # Bytes, not text: text mode would normalise CRLF and hide line-ending changes.
         return subprocess.check_output(
-            ["git", "show", revision + ":" + VERSION_FILE], cwd=root, text=True
+            ["git", "show", revision + ":" + VERSION_FILE], cwd=root
         ).splitlines(keepends=True)
 
     old, new = show(FROZEN_BASE), show(commit)
@@ -87,12 +92,18 @@ def verify_engine_version_only(root, commit, version):
     require(
         len(old) == len(new)
         and len(changed) == 1
-        and old[changed[0]] == '__version__ = "%s"\n' % PREVIOUS_VERSION
-        and new[changed[0]] == '__version__ = "%s"\n' % RELEASE_VERSION,
+        and old[changed[0]] == ('__version__ = "%s"\n' % PREVIOUS_VERSION).encode()
+        and new[changed[0]] == ('__version__ = "%s"\n' % RELEASE_VERSION).encode(),
         "Version file changed beyond its __version__ line",
     )
+    if HEALTH_FILE in names:
+        blob = subprocess.check_output(
+            ["git", "rev-parse", commit + ":" + HEALTH_FILE], cwd=root, text=True
+        ).strip()
+        require(blob == HEALTH_BLOB, "ops/health.py differs from the reviewed 4.0.9 health fix")
     return {
         "base": FROZEN_BASE,
+        "health_blob": HEALTH_BLOB if HEALTH_FILE in names else None,
         "allowed_changed_paths": list(ENGINE_ALLOWED_CHANGES),
         "observed_changed_paths": sorted(names),
         "version_file_change": [PREVIOUS_VERSION, RELEASE_VERSION],

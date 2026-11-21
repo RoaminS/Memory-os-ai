@@ -16,11 +16,16 @@ conservés, jamais réutilisés). Aucun téléchargement.
   `v4/src/memory_os_v4/ops/health.py`} (`git diff --no-renames`) ;
 - `__init__.py` doit changer, et UNIQUEMENT par la ligne `__version__ = "4.0.8"` →
   `__version__ = "4.0.9"` ;
-- tout autre chemin (notamment `brief*.py`, `text.py`, `bm25.py`, store/sqlite) refuse.
+- tout autre chemin (notamment `brief*.py`, `text.py`, `bm25.py`, store/sqlite) refuse ;
+- `ops/health.py` doit être EXACTEMENT le correctif relu (blob git `3aa1dfe5d023f6f7efa91cbe6c41e1abeb5ba8b9`,
+  a745b40) : tout autre contenu refuse ;
+- comparaison en octets (une conversion CRLF ou une fin de ligne modifiée refuse).
 
 Le manifeste enregistre la base, la liste autorisée, les chemins observés et le
-transfert de preuves. **P-A n'est PAS relancée** : elle ne se transfère que parce
-que les octets brief/moteur sont identiques à la base. TOUT le reste est refait
+transfert de preuves. **P-A n'est PAS relancée** : le périmètre fonctionnel P-A est inchangé (tout
+fichier de `v4/src` autre que `__init__.py` et `ops/health.py` est identique octet pour octet à la base ;
+`ops/health.py`, épinglé, n'est importé que par `ops/cli.py` et `ops/doctor.py`). Preuve transférée :
+gate P-A 40/40 scellé acquis sur ceedb5c (CHANGELOG 4.0.7rc1). TOUT le reste est refait
 sur le commit final, sans transfert d'aucune preuve 4.0.8 : suite complète +
 source (32 identités TCP exactes, inchangées : le correctif santé n'ajoute aucun
 test TCP), artefacts, copie/S4, recollecte P-B liée au commit final, relais
@@ -28,7 +33,8 @@ installés. release_ready=false jusqu'à la dernière preuve. Aucune erreur/skip
 admise ; test lent désélectionné par le harnais standard puis test sémantique
 cached séparé obligatoire.
 
-**Ne pas utiliser `~/memory-os-local/ops/qualify_409_c1_chain.sh`** (orphelin du
+**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1_chain.sh`** (désactivé, non validé) **ni
+`~/memory-os-local/ops/qualify_409_c1_chain.sh`** (orphelin du
 31/10, visait un autre commit, 06199a2). Seules les commandes ci-dessous valent.
 
 ## Espace disque
@@ -56,7 +62,14 @@ copies si son budget calculé reste disponible.** Choix EXPLICITE et PRIVÉ, lim
 défaut ni de la production. S4 conserve réserve+6F+32MiB. L'override3Go du
 harnais ne réduit aucune de ces formules. Ni saut, ni réutilisation d'un S4
 antérieur ; une erreur laisse release_ready=false. Swap≤8,5Go mesurable ;
-nice15, concurrence1. Au plus un job de cette chaîne actif. Voir
+nice15, concurrence1. Au plus un job de cette chaîne actif.
+
+**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v2_chain.sh` :** pendant
+TOUTES les étapes, disque libre ≥ 5 Go et swap ≤ 8,5 Go (Go décimaux), mesurés toutes les 5 s ; sinon l'étape
+est arrêtée et marquée en échec (aucune relance automatique). La copie ne démarre qu'avec ≥ 9,2 Go libres
+(budget adaptive ≈4,1 Go + 5 Go). Les départs à 3,05–3,25 Go du tableau sont les gardes internes du harnais
+(MEMORY_V4_MIN_FREE_BYTES=3e9), un filet de sécurité, pas le seuil de la chaîne. Mesure de swap absente ou
+illisible : refus. Voir
 `BACKUP_CAPACITY_4_0_8.md` et `SQLITE_GROWTH_2026_10_26.md` (inchangés).
 
 ## 1. Arbre et source
@@ -203,7 +216,9 @@ nice -n 15 "$RC_PY" -B scripts/installed_relay_e2e.py \
 
 Seule la preuve finale peut lever release_ready. Inventaire/round-trip, panne,
 reconnexion sans rejeu, statut local pendant panne et handshake4.0.9 requis pour
-wheel ET sdist. release_ready=true n'autorise ni publication PyPI ni bascule de
+wheel ET sdist. `scripts/installed_relay_case.py` exécute le brief compact et
+`memory_request_status` pendant la panne pour 4.0.8 et 4.0.9 (ces versions manquaient de sa liste dans ce dépôt,
+ce qui aurait fait refuser `--record-relay-proof`). release_ready=true n'autorise ni publication PyPI ni bascule de
 production : chacune exige un GO distinct de Romain. La procédure de bascule
 (`SWITCH_4_0_8_SQLITE.md`) doit être adaptée/revue pour 4.0.9, jamais exécutée
 telle quelle.
