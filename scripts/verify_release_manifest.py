@@ -102,6 +102,9 @@ def validate_brief(proof, manifest):
 
 
 def validate_local(manifest, directory, *, require_source=True, require_copy=True, require_brief=True):
+    if manifest.get('version') == '4.0.9':
+        from release_409_checks import validate_local as validate_rc
+        return validate_rc(manifest, directory, require_copy=require_copy, require_source=require_source)
     if manifest.get('version') == '4.0.8':
         from release_408_checks import validate_local as validate_rc
         return validate_rc(manifest, directory, require_copy=require_copy, require_source=require_source)
@@ -190,6 +193,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(args.manifest.read_text())
+        if manifest.get('version') == '4.0.9':
+            from release_409_checks import main as verify_rc
+            return verify_rc(args)
         if manifest.get('version') == '4.0.8':
             from release_408_checks import main as verify_rc
             return verify_rc(args)
