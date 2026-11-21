@@ -28,6 +28,8 @@ from memory_os_v4 import Config, MemoryV4
 from memory_os_v4 import memory as memory_module
 from memory_os_v4.memory import StoreCloseError
 from memory_os_v4.sqlite_store import SQLiteStore
+from memory_os_v4 import sqlite_store as sqlite_store_module
+from memory_os_v4 import writer_lock as writer_lock_module
 from memory_os_v4.writer_lock import WriterConflictError, WriterLock
 
 SIDE_FILES = {"store.sqlite3-wal", "store.sqlite3-shm"}
@@ -233,6 +235,7 @@ def test_failing_store_close_keeps_the_lease_until_a_retry_closes_the_connection
     with pytest.raises(error, match=message):  # (b)
         engine.close() if path == "close" else engine._writer_finalizer()
     assert len(attempts) == 1 and not engine._release.released and lock._file is not None
+    assert lock._pinned_fd in writer_lock_module._pinned_fds  # held by the process, not by an object
     assert_exclusion_kept(tmp_path, connection, profile)  # (a)
     assert [event[0] for event in events] == []  # nothing closed, nothing released
     if path == "close":
@@ -249,6 +252,7 @@ def test_failing_store_close_keeps_the_lease_until_a_retry_closes_the_connection
     engine.close()  # (c) even though the weakref finalizer may already be consumed
     assert events == [("store_closed", True), ("lease_released", [True], [])]
     assert connection_closed(connection) and lock._file is None and engine._release.released
+    assert lock._pinned_fd is None and not writer_lock_module._pinned_fds  # the pin went with the lease
     assert not SIDE_FILES & names(tmp_path)
     assert not memory_module._UNRELEASED
     assert contender(tmp_path, profile) == FREE
@@ -320,8 +324,161 @@ def test_failed_open_with_a_failing_close_keeps_the_lease(tmp_path, monkeypatch)
     assert not memory_module._UNRELEASED
 
 
+@pytest.mark.parametrize("fallback", ["fails", "succeeds"])
+def test_store_constructor_failing_after_connect_is_covered_from_the_connection_on(
+        tmp_path, monkeypatch, fallback):
+    """SQLiteStore.__init__ fails AFTER sqlite3.connect, i.e. before the engine ever receives the
+    store. If its own fallback ``connection.close()`` fails too, the connection is open and the
+    engine must already know it: the lease is kept. (Before: unknown store, lease released.)"""
+    broken, connections, real_connect = {"close": fallback == "fails"}, [], sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def close(self):
+            if broken["close"]:
+                raise sqlite3.OperationalError("injected close failure")
+            super().close()
+
+    def connect(*args, **kwargs):
+        if "check_same_thread" not in kwargs:  # the read-only probes: untouched
+            return real_connect(*args, **kwargs)
+        connections.append(real_connect(*args, factory=Connection, **kwargs))
+        return connections[-1]
+
+    def crash(store):
+        raise OSError("injected initialization failure")
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", connect)
+    monkeypatch.setattr("memory_os_v4.changes.initialize", crash)  # inside SQLiteStore.__init__
+    if fallback == "succeeds":
+        with pytest.raises(OSError, match="injected initialization failure"):
+            MemoryV4(config=lexical_config(tmp_path))
+        assert len(connections) == 1 and connection_closed(connections[0])
+        assert not memory_module._UNRELEASED and not writer_lock_module._pinned_fds
+        assert contender(tmp_path)["lease"] == "free"
+        return
+
+    with pytest.raises(sqlite3.OperationalError, match="injected close failure") as raised:
+        MemoryV4(config=lexical_config(tmp_path))
+    chain, error = [], raised.value
+    while error is not None:
+        chain.append(str(error))
+        error = error.__context__
+    assert "injected initialization failure" in chain  # the cause of the failed open is not lost
+    assert len(connections) == 1 and not connection_closed(connections[0])
+    assert contender(tmp_path) == HELD  # another process: kernel lock refused, engine refused
+    pending = list(memory_module._UNRELEASED)
+    assert len(pending) == 1 and len(pending[0].stores) == 1 and not pending[0].released
+    assert pending[0].stores[0]._connection is connections[0]
+    assert pending[0].writer_lock._pinned_fd in writer_lock_module._pinned_fds
+    with pytest.raises(sqlite3.OperationalError, match="injected close failure"):
+        pending[0]()  # still failing: still held
+    assert contender(tmp_path) == HELD
+
+    broken["close"] = False  # the cause is removed: the same release closes, then frees the lease
+    pending[0]()
+    assert connection_closed(connections[0]) and pending[0].released
+    assert not memory_module._UNRELEASED and not writer_lock_module._pinned_fds
+    assert contender(tmp_path)["lease"] == "free"
+
+
+PERSISTENT = r"""
+import gc, json, os, sqlite3, sys, weakref
+from pathlib import Path
+from memory_os_v4 import Config, MemoryV4
+from memory_os_v4 import memory as memory_module
+from memory_os_v4.sqlite_store import SQLiteStore
+
+directory, mutation = Path(sys.argv[1]), sys.argv[2]
+SIDE = {"store.sqlite3-wal", "store.sqlite3-shm"}
+
+
+def step(**event):
+    event["side_files"] = sorted(SIDE & {entry.name for entry in directory.iterdir()})
+    os.write(1, (json.dumps(event, sort_keys=True) + "\n").encode())
+    os.read(0, 1)  # until the parent has looked at the lease from another process
+
+
+def broken(self):
+    raise sqlite3.OperationalError("injected close failure")
+
+
+if mutation == "unpinned":  # the previous behaviour: the lease only held by Python references
+    from memory_os_v4.writer_lock import WriterLock
+    WriterLock.pin = lambda self: None
+engine = MemoryV4(config=Config(data_dir=str(directory), retrieval_profile="lexical",
+                                store_backend="sqlite_s1", use_dense=False))
+engine.add_episodes_bulk([{"text": "Alice Martin adopted a grey cat named Pixel.", "item_id": "g1",
+                           "project": "alpha"}])
+connection, lock = engine.store._connection, weakref.ref(engine._writer_lock)
+SQLiteStore.close = broken  # persistent: never repaired
+try:
+    engine.close()
+except sqlite3.OperationalError:
+    pass
+step(event="close_failed", lock_alive=lock() is not None)
+# What interpreter shutdown does, in the worst order: every Python reference to the lease goes
+# first (module globals, the finalizer registry, the engine), the connection is destroyed later.
+engine._writer_finalizer.detach()
+memory_module._UNRELEASED.clear()
+del engine
+gc.collect()
+step(event="lock_destroyed", lock_alive=lock() is not None)
+del connection  # the late userland sqlite3_close: checkpoints and deletes -wal/-shm
+gc.collect()
+step(event="connection_destroyed", lock_alive=lock() is not None)
+# Normal interpreter exit (not os._exit): only the end of the process frees the lease.
+"""
+
+
+def persistent_failure(directory, mutation):
+    """Runs PERSISTENT; at each step, another process tries the lease. Returns (steps, exit code)."""
+    seen = []
+    child = subprocess.Popen([sys.executable, "-B", "-c", PERSISTENT, str(directory), mutation],
+                             env=child_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+    try:
+        for _ in range(3):
+            line = child.stdout.readline()
+            assert line, child.stderr.read().decode()[-2000:]
+            assert child.poll() is None  # the process is alive at each observation
+            seen.append({**json.loads(line), "contender": contender(directory)})
+            child.stdin.write(b"\n")
+            child.stdin.flush()
+        child.communicate(timeout=120)
+    finally:
+        child.kill()
+    return seen, child.returncode
+
+
+def test_persistent_close_failure_keeps_the_lease_until_the_process_is_gone(tmp_path):
+    """The lease must not depend on the order in which interpreter shutdown destroys the lock and
+    the connection. Here the lock object is destroyed FIRST and the connection closed late, while
+    the process is alive: another process is refused at every step, and gets the lease only once
+    the process has exited."""
+    seen, code = persistent_failure(tmp_path, "pinned")
+    assert code == 0
+    assert seen == [
+        {"event": "close_failed", "lock_alive": True, "side_files": sorted(SIDE_FILES), "contender": HELD},
+        # No Python object holds the lease any more, the connection is open: still excluded.
+        {"event": "lock_destroyed", "lock_alive": False, "side_files": sorted(SIDE_FILES), "contender": HELD},
+        # The late close deleted the side files UNDER the lease: nobody could observe the pair.
+        {"event": "connection_destroyed", "lock_alive": False, "side_files": [], "contender": HELD},
+    ]
+    assert contender(tmp_path) == FREE  # the process is gone: the kernel dropped the lease
+
+
+def test_without_the_pinned_descriptor_the_lease_is_lost_with_the_lock_object(tmp_path):
+    """Discrimination of the test above: with ``WriterLock.pin`` disabled (references only), the
+    destruction of the lock object frees the lease while the connection and its pair still exist,
+    and another process opens the store next to it."""
+    seen, _ = persistent_failure(tmp_path, "unpinned")
+    assert seen[0]["contender"] == HELD
+    assert seen[1] == {"event": "lock_destroyed", "lock_alive": False, "side_files": sorted(SIDE_FILES),
+                       "contender": FREE}
+
+
 def test_partial_failure_keeps_the_lease_and_never_closes_a_store_twice():
-    calls = []
+    calls, pins = [], []
 
     class Fake:
         def __init__(self, name, broken=False):
@@ -332,6 +489,9 @@ def test_partial_failure_keeps_the_lease_and_never_closes_a_store_twice():
             if self.broken:
                 raise OSError(f"{self.name} cannot close")
 
+        def pin(self):
+            pins.append(self.name)
+
     first, second, third, lease = Fake("first"), Fake("second", broken=True), Fake("third"), Fake("lease")
     stores = [first, second, third]
     release = memory_module._EngineRelease(os.getpid(), stores, lease)
@@ -339,6 +499,7 @@ def test_partial_failure_keeps_the_lease_and_never_closes_a_store_twice():
         release()
     assert calls == ["third", "second", "first"]  # every store is attempted, the lease is not released
     assert stores == [second] and not release.released and release in memory_module._UNRELEASED
+    assert pins == ["lease"]  # the kept lease is pinned to the process
     with pytest.raises(OSError, match="second cannot close"):
         release()
     assert calls == ["third", "second", "first", "second"]  # only the pending store is retried
@@ -354,6 +515,7 @@ def test_partial_failure_keeps_the_lease_and_never_closes_a_store_twice():
     forked = memory_module._EngineRelease(os.getpid() + 1, [Fake("store", broken=True)], Fake("lease"))
     forked()
     assert calls == ["lease"] and forked.released and forked not in memory_module._UNRELEASED
+    assert pins == ["lease", "lease"]  # the two failures above; a fork pins nothing
 
 
 def test_failed_open_closes_the_store_before_releasing_the_lease(tmp_path, monkeypatch):

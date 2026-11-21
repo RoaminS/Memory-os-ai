@@ -292,7 +292,11 @@ class SQLiteStore(Store):
     Embedding files are derived and explicitly outside these transactions.
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, *, owned: list | None = None) -> None:
+        """``owned``: the opener's list of stores to close before it releases its writer lease.
+        The store joins it as soon as its connection exists, BEFORE any further initialization: if
+        that initialization fails and the fallback close below fails too, the opener still knows
+        a connection may be open."""
         if sqlite3.sqlite_version_info < MIN_SQLITE:
             raise RuntimeError("SQLite S1 requires runtime >= 3.51.3 (WAL-reset fix)")
         data_dir = Path(data_dir).expanduser().resolve()
@@ -311,6 +315,8 @@ class SQLiteStore(Store):
         self.fault_hook = None  # Test-only callback; receives every mutation boundary.
         self._connection = sqlite3.connect(self.db_path, isolation_level=None, timeout=5,
                                            check_same_thread=False)
+        if owned is not None:
+            owned.append(self)
         try:
             if not fresh:
                 app_id = self._connection.execute("PRAGMA application_id").fetchone()[0]

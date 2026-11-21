@@ -12,6 +12,9 @@ from threading import Lock
 
 _registry_lock = Lock()
 _owned: set[Path] = set()
+# Raw duplicates of pinned lease descriptors (see ``WriterLock.pin``). Plain integers: no Python
+# object owns them, so interpreter shutdown cannot close them; only ``WriterLock.close`` does.
+_pinned_fds: set[int] = set()
 
 
 class WriterConflictError(RuntimeError):
@@ -22,6 +25,7 @@ class WriterLock:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir.resolve() / "writer.lock"
         self._file = None
+        self._pinned_fd = None
         self._pid = os.getpid()
         with _registry_lock:
             if self.path in _owned:
@@ -57,11 +61,29 @@ class WriterLock:
         if os.getpid() != self._pid:
             raise RuntimeError("An inherited memory engine cannot be used after fork; connect to the shared HTTP server")
 
+    def pin(self) -> None:
+        """Make the lease outlive this object: it then ends only with ``close()`` or the process.
+
+        The kernel lock belongs to the open file description, not to a descriptor: it lasts until
+        an explicit unlock or until EVERY descriptor on it is closed. Duplicating the descriptor
+        into a raw integer that no Python object owns means that destroying this lock or its file
+        object (garbage collection, interpreter shutdown, in any order) only closes the original
+        descriptor: the lease stays held until the operating system closes the duplicate, when the
+        process is gone and nothing in it can still close a SQLite connection. Only ``close()``
+        unlocks; nothing else in this module does. Idempotent.
+        """
+        with _registry_lock:
+            if self._file is None or self._pinned_fd is not None or os.getpid() != self._pid:
+                return
+            self._pinned_fd = os.dup(self._file.fileno())
+            _pinned_fds.add(self._pinned_fd)
+
     def close(self) -> None:
         with _registry_lock:
             if self._file is None:
                 return
             fh, self._file = self._file, None
+            pinned, self._pinned_fd = self._pinned_fd, None
             try:
                 if os.getpid() != self._pid:
                     # A fork inherits the open file description. Explicitly
@@ -75,5 +97,10 @@ class WriterLock:
                     import fcntl
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             finally:
-                fh.close()
-                _owned.discard(self.path)
+                try:
+                    fh.close()
+                finally:
+                    _owned.discard(self.path)
+                    if pinned is not None:  # after the explicit unlock above: the lease is released
+                        _pinned_fds.discard(pinned)
+                        os.close(pinned)

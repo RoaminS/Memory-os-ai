@@ -183,9 +183,9 @@ def _connection_closed(store) -> bool:
     return False
 
 
-# Releases that failed and are still holding their lease. A strong reference: once the
-# ``weakref.finalize`` of a collected engine is consumed nothing else would keep the stores and the
-# lock alive, and their destruction would give the lease up with the connection in an unknown state.
+# Releases that failed and are still holding their lease: a handle to retry them once the
+# ``weakref.finalize`` of a collected engine is consumed. The exclusion itself does not rely on this
+# reference (interpreter shutdown clears it) but on the pinned lease descriptor (``WriterLock.pin``).
 _UNRELEASED: set = set()
 
 
@@ -205,10 +205,14 @@ class _EngineRelease:
     again (``engine.close()`` does) retries only the pending stores and releases the lease once
     they are all closed. After a success every further call is a no-op.
 
-    A failed release pins itself in ``_UNRELEASED``. When nobody can retry any more (the engine
-    was collected, or the interpreter is exiting) the exclusion therefore lasts until the process
-    ends: the operating system then drops the flock and the connection together. Keeping the
-    lease too long is the accepted failure mode; giving it up over an open connection is not.
+    A failed release pins the lease (``WriterLock.pin``): the lock descriptor is duplicated into a
+    raw integer that no Python object owns, so the kernel lock no longer depends on the lifetime
+    of the lock object. When nobody can retry any more (the engine was collected, or the
+    interpreter is exiting) the exclusion lasts until the process itself is gone, whatever the
+    order in which interpreter shutdown destroys the lock and the connection: a connection closed
+    late by that shutdown is closed under the lease. The release also keeps itself in
+    ``_UNRELEASED`` (a retry handle; the guarantee does not rely on it). Keeping the lease too
+    long is the accepted failure mode; giving it up over an open connection is not.
 
     A forked child closes nothing: the inherited connection and lease belong to the parent
     (``WriterLock.close`` only drops the child's descriptor, it never unlocks from a fork).
@@ -240,6 +244,7 @@ class _EngineRelease:
                     else:
                         self.stores.remove(store)
                 if errors:
+                    self.writer_lock.pin()  # first: the lease no longer depends on any Python object
                     _UNRELEASED.add(self)
                     raise errors[0]
             self.writer_lock.close()
@@ -309,8 +314,9 @@ class MemoryV4:
                     raise ProfileError("store_profile_unverifiable",
                                        "The store changed while it was being opened; nothing was modified, retry")
                 probed = leased
-                self.store = SQLiteStore(self.data_dir)
-                self._owned_stores.append(self.store)
+                # The store registers itself in the owned list as soon as its connection exists:
+                # a constructor that fails with its connection still open keeps the lease too.
+                self.store = SQLiteStore(self.data_dir, owned=self._owned_stores)
                 self.requests = SQLiteRequests(self.store)
                 self.blocks = SQLiteBlocks(self.store, self.config.block_char_limit)
                 self.blocks.mutate = self._sql_mutation

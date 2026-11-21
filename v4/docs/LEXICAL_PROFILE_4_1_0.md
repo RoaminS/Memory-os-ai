@@ -916,13 +916,12 @@ mais tient toujours le bail : tout autre moteur, du même processus ou d'un autr
 quand toutes ont abouti, relâche le bail — que le `weakref.finalize` ait été consommé ou non.
 
 **Quand personne ne peut réessayer** (moteur collecté par le ramasse-miettes, constructeur en
-échec, sortie de l'interpréteur) : le relâchement en échec s'épingle dans `memory._UNRELEASED`
-(référence forte : sans elle, la destruction du verrou libérerait le bail connexion ouverte).
-Le bail reste donc tenu **jusqu'à la fin du processus**, où le noyau libère le `flock` et ferme
-la connexion ensemble (même cas que `SIGKILL`, §17). Garder le bail trop longtemps est le mode
-de défaillance accepté ; le relâcher sur une connexion ouverte ne l'est pas. Limite résiduelle :
-pendant la destruction finale de l'interpréteur, l'ordre dans lequel CPython détruit la
-connexion et le descripteur du verrou d'un relâchement resté en échec n'est pas maîtrisé.
+échec, sortie de l'interpréteur) : voir §19 — le bail est épinglé au **processus** et non à un
+objet Python. Le relâchement en échec reste aussi dans `memory._UNRELEASED`, simple poignée de
+reprise dont la garantie ne dépend pas. Garder le bail trop longtemps est le mode de
+défaillance accepté ; le relâcher sur une connexion ouverte ne l'est pas. ~~Limite résiduelle :
+ordre de destruction non maîtrisé pendant la destruction finale de l'interpréteur~~ — **levée
+par le §19**.
 
 **Tests** (`test_engine_finalizer_410.py`, 23). Le test « tentative → relâchement » est remplacé
 par la vérification de la propriété, dans les deux profils, pour un `close()` qui lève et pour
@@ -937,3 +936,51 @@ plusieurs stores (aucune double fermeture, seule la fermeture en attente est rej
 Enfin un vrai `fork` : l'enfant qui appelle `close()` sur le moteur hérité ne ferme pas la
 connexion et ne libère pas le bail du parent, qui ferme ensuite normalement.
 Avec un relâchement du bail malgré l'échec, douze de ces tests échouent.
+
+## 19. Amendement du verdict Codex n° 4 sur `acc637d` (21/11)
+
+| # | Défaut | Correction | Où |
+|---|---|---|---|
+| 1 | Après un échec persistant, le bail ne tenait qu'à des références Python (`_UNRELEASED`). Pendant la destruction finale de l'interpréteur, l'objet verrou pouvait être détruit (descripteur fermé, `flock` libéré) **avant** la fermeture tardive de la connexion SQLite | Le bail en échec est **épinglé au processus** : `WriterLock.pin()` duplique le descripteur du verrou (`os.dup`) dans un entier brut qu'aucun objet Python ne possède | `writer_lock.py` (`pin`, `_pinned_fds`, `close`), `memory.py` (`_EngineRelease`) |
+| 2 | `SQLiteStore` n'était inscrit dans la liste des stores du moteur qu'**après** son constructeur. Si celui-ci échouait après `sqlite3.connect` et que sa fermeture de secours échouait aussi, l'état de relâchement ne connaissait aucune connexion et libérait le bail | Le store s'inscrit lui-même dans la liste (`SQLiteStore(data_dir, owned=…)`) **dès que la connexion existe**, avant toute autre initialisation | `sqlite_store.py`, `memory.py` |
+
+**Épinglage (défaut 1).** Un verrou `flock` appartient à la *description de fichier ouverte*,
+pas à un descripteur : il dure jusqu'à un `LOCK_UN` explicite ou jusqu'à la fermeture de
+**tous** les descripteurs qui la désignent. Au premier échec de relâchement, avant de lever,
+`_EngineRelease` appelle `WriterLock.pin()` : le doublon est un entier, que ni le
+ramasse-miettes ni la destruction finale de l'interpréteur ne peuvent fermer. La destruction de
+l'objet verrou ou de son fichier, dans n'importe quel ordre, ne ferme que le descripteur
+d'origine : le bail reste tenu. Le seul `LOCK_UN` du code est dans `WriterLock.close()`, que
+seul un relâchement **réussi** appelle (il ferme alors aussi le doublon) ; `WriterLock` n'a pas
+de `__del__`. Sans reprise réussie, le doublon n'est fermé que par le noyau, à la disparition
+du processus : plus aucun code de ce processus ne peut alors fermer une connexion SQLite. Une
+connexion fermée tardivement par la destruction de l'interpréteur l'est donc **sous bail** ;
+une connexion jamais fermée laisse sa paire sur disque, stable (cas `SIGKILL`, §17). Un enfant
+de `fork` n'épingle rien. Portée : verrous `flock` (POSIX) ; sous Windows le doublon est créé de
+même, sans test.
+
+**Connexion couverte dès sa création (défaut 2).** `SQLiteStore.__init__` ajoute le store à la
+liste `owned` immédiatement après `sqlite3.connect`. Si la suite du constructeur échoue :
+fermeture de secours réussie → le relâchement referme sans effet, constate la connexion fermée,
+libère le bail ; fermeture de secours en échec → le store est en attente, connexion constatée
+ouverte, **bail conservé et épinglé**, relâchement rejouable. Les autres appelants de
+`SQLiteStore` (migration, restauration) ne passent pas `owned` : inchangés.
+
+**Tests** (`test_engine_finalizer_410.py`, 27).
+- Échec persistant, dans un processus qui sort normalement (pas `os._exit`) : après le `close()`
+  en échec, le processus fait ce que fait la destruction finale dans le pire ordre — toutes les
+  références Python au bail disparaissent d'abord (objet verrou constaté détruit), la connexion
+  est détruite ensuite. À chaque étape, processus vivant, **un autre processus** est refusé
+  (`flock` et ouverture du moteur) : verrou détruit et connexion ouverte avec sa paire ; puis
+  connexion détruite, paire supprimée sous bail. Le bail n'est obtenu qu'après la sortie du
+  processus. L'ordre est provoqué explicitement parce que celui de CPython n'est ni spécifié ni
+  reproductible ; la garantie, elle, ne dépend d'aucun ordre.
+- Test discriminant associé : même scénario avec `pin()` neutralisé (références seules) → à la
+  destruction de l'objet verrou, l'autre processus **obtient le bail et ouvre le store** alors
+  que la connexion et sa paire existent encore.
+- Constructeur de `SQLiteStore` en échec après `connect` (`changes.initialize`) avec fermeture
+  de secours en échec (`Connection.close` de la connexion du store) : connexion ouverte, autre
+  processus refusé, store en attente dans le relâchement, bail épinglé ; nouvel essai en échec →
+  toujours refusé ; cause levée → connexion fermée puis bail libre. Variante fermeture de
+  secours réussie : bail libre, rien d'épinglé. Sans l'inscription dès la connexion, le premier
+  cas échoue (bail libre, connexion ouverte).
