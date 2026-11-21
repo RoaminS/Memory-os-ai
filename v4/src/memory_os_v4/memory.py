@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sqlite3
 import time
 import uuid
 import weakref
@@ -161,27 +162,94 @@ def _atomic_mutation(method):
     return guarded
 
 
-def _release_engine(owner_pid: int, stores: list, writer_lock: WriterLock) -> None:
-    """Engine finalizer: close every SQLite connection of the engine, THEN release the lease.
+class StoreCloseError(RuntimeError):
+    """``store.close()`` returned but the SQLite connection is still open: the lease is kept."""
 
-    Never references the engine: it holds the stores and the lock themselves, so neither can be
-    collected before it runs. Releasing the lease first would let the next engine probe a
-    -wal/-shm pair that this connection deletes when it is destroyed afterwards. A failing close
-    does not keep the lease: it is released afterwards and the error propagates. A forked child
-    closes nothing: the inherited connection and lease belong to the parent.
+
+def _connection_closed(store) -> bool:
+    """Effective closure of a store: it has no SQLite connection, or that connection is closed.
+
+    ``total_changes`` is the probe: it raises ``ProgrammingError`` on a closed connection, never
+    touches the database and, unlike ``execute``, is not subject to the same-thread check (the
+    garbage collector may run the finalizer on any thread).
     """
+    connection = getattr(store, "_connection", None)
+    if connection is None:
+        return True
     try:
-        if os.getpid() == owner_pid:
-            errors = []
-            for store in reversed(stores):
-                try:
-                    store.close()
-                except BaseException as error:  # the lease must still be released below
-                    errors.append(error)
-            if errors:
-                raise errors[0]
-    finally:
-        writer_lock.close()
+        connection.total_changes
+    except sqlite3.ProgrammingError:
+        return True
+    return False
+
+
+# Releases that failed and are still holding their lease. A strong reference: once the
+# ``weakref.finalize`` of a collected engine is consumed nothing else would keep the stores and the
+# lock alive, and their destruction would give the lease up with the connection in an unknown state.
+_UNRELEASED: set = set()
+
+
+class _EngineRelease:
+    """Idempotent, retryable release of an engine: close every SQLite connection, THEN the lease.
+
+    Shared by ``MemoryV4.close()``, the failed-constructor path and the automatic finalizer
+    (garbage collection, interpreter exit). It never references the engine: it holds the stores
+    and the lock themselves, so neither can be collected before it has run.
+
+    The writer lease is released ONLY once every owned store is effectively closed, i.e. its
+    ``close()`` returned AND its SQLite connection is verified closed (``_connection_closed``).
+    Releasing earlier would let the next engine probe a -wal/-shm pair that this connection
+    deletes when it is closed or destroyed afterwards. If any close fails, or returns with the
+    connection still open, the lease is KEPT, the first error propagates, the stores that did
+    close are forgotten (never closed twice) and the others stay pending. Calling the object
+    again (``engine.close()`` does) retries only the pending stores and releases the lease once
+    they are all closed. After a success every further call is a no-op.
+
+    A failed release pins itself in ``_UNRELEASED``. When nobody can retry any more (the engine
+    was collected, or the interpreter is exiting) the exclusion therefore lasts until the process
+    ends: the operating system then drops the flock and the connection together. Keeping the
+    lease too long is the accepted failure mode; giving it up over an open connection is not.
+
+    A forked child closes nothing: the inherited connection and lease belong to the parent
+    (``WriterLock.close`` only drops the child's descriptor, it never unlocks from a fork).
+    """
+
+    __slots__ = ("owner_pid", "stores", "writer_lock", "released", "_guard")
+
+    def __init__(self, owner_pid: int, stores: list, writer_lock: WriterLock) -> None:
+        self.owner_pid = owner_pid
+        self.stores = stores  # the engine appends to this very list; closed stores are removed
+        self.writer_lock = writer_lock
+        self.released = False
+        self._guard = RLock()
+
+    def __call__(self) -> None:
+        with self._guard:
+            if self.released:
+                return
+            if os.getpid() == self.owner_pid:
+                errors = []
+                for store in reversed(list(self.stores)):
+                    try:
+                        store.close()
+                        if not _connection_closed(store):
+                            raise StoreCloseError(
+                                "SQLite connection still open after close(); writer lease kept")
+                    except BaseException as error:  # keep closing the others; the lease stays held
+                        errors.append(error)
+                    else:
+                        self.stores.remove(store)
+                if errors:
+                    _UNRELEASED.add(self)
+                    raise errors[0]
+            self.writer_lock.close()
+            self.released = True
+            _UNRELEASED.discard(self)
+
+
+def _release_engine(owner_pid: int, stores: list, writer_lock: WriterLock) -> None:
+    """One-shot form of ``_EngineRelease``: same guarantees (a failing close keeps the lease)."""
+    _EngineRelease(owner_pid, stores, writer_lock)()
 
 
 class MemoryV4:
@@ -224,8 +292,10 @@ class MemoryV4:
         # Every store the engine opens is appended here; the finalizer closes them BEFORE releasing
         # the lease, on every path (close(), garbage collection, interpreter exit).
         self._owned_stores: list = []
-        self._writer_finalizer = weakref.finalize(
-            self, _release_engine, os.getpid(), self._owned_stores, self._writer_lock)
+        # One release state shared by close(), a failed constructor and the automatic finalizer:
+        # a release that failed (lease kept) stays retryable after the finalizer is consumed.
+        self._release = _EngineRelease(os.getpid(), self._owned_stores, self._writer_lock)
+        self._writer_finalizer = weakref.finalize(self, self._release)
         try:
             if self.config.store_backend == "sqlite_s1":
                 from .sqlite_store import SQLiteStore
@@ -247,6 +317,7 @@ class MemoryV4:
                 self.blocks.cas_enabled = self.config.work_state
             else:
                 self.store = Store(self.data_dir)
+                self._owned_stores.append(self.store)
                 self.requests = RequestJournal(self.data_dir)
                 self.blocks = BlockStore(self.data_dir / "blocks.jsonl", self.config.block_char_limit)
                 owner = weakref.ref(self)
@@ -315,11 +386,10 @@ class MemoryV4:
             self.last_consolidated: float | None = self.store.meta.get("last_consolidated")
         except BaseException:
             self._closed = True
-            try:
-                if hasattr(self, "store"):
-                    self.store.close()
-            finally:
-                self._writer_finalizer()
+            # Connections first, then the lease. If a close fails here the lease stays held until
+            # the process ends (nobody holds this engine to retry) and that error propagates.
+            self._release()
+            self._writer_finalizer.detach()
             raise
 
     def _probe_store_profile(self, *, under_lease=False):
@@ -361,7 +431,7 @@ class MemoryV4:
 
     def _ensure_open(self) -> None:
         self._writer_lock.assert_owner()
-        if self._closed or not self._writer_finalizer.alive:
+        if self._closed or self._release.released:
             raise RuntimeError("Memory engine is closed; open a new engine or use the shared HTTP server")
         if getattr(self.store, "_poisoned", False):
             raise RuntimeError("SQLite commit outcome uncertain; inspect/reopen before further operations")
@@ -369,20 +439,24 @@ class MemoryV4:
             raise RuntimeError("Derived index rebuild failed; reopen before further operations")
 
     def close(self) -> None:
-        """Flush and release the lifetime writer lease, even when flushing fails."""
+        """Flush, close every SQLite connection, then release the lifetime writer lease.
+
+        The lease is released even when flushing fails, but ONLY once every connection is
+        effectively closed. If a close fails the error propagates, the engine is closed for
+        operations and still holds the lease: call ``close()`` again to retry the remaining
+        closes and release it. Idempotent once released.
+        """
         with self._lock:
-            if self._closed or not self._writer_finalizer.alive:
-                self._closed = True  # the finalizer already closed the store and released the lease
+            if self._release.released:
+                self._closed = True
                 return
             try:
-                if self._write_policy.mode == "read_write":
+                if not self._closed and self._write_policy.mode == "read_write":
                     self.flush()
             finally:
                 self._closed = True
-                try:
-                    self.store.close()
-                finally:
-                    self._writer_finalizer()
+                self._release()
+                self._writer_finalizer.detach()  # released: nothing left for the automatic path
 
     def __enter__(self) -> "MemoryV4":
         self._ensure_open()

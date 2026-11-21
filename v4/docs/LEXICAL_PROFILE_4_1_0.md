@@ -334,7 +334,8 @@ fermeture** (§17). Un moteur ne possède qu'une connexion SQLite, celle de `SQL
 travail la partagent). Elle est fermée **avant** le relâchement du bail par `close()`, par un
 échec du constructeur, et par la finalisation automatique (ramasse-miettes, sortie de
 l'interpréteur). Le moteur suivant ne peut donc pas observer une paire `-wal`/`-shm` qu'une
-connexion du moteur précédent supprimerait après coup.
+connexion du moteur précédent supprimerait après coup. Le bail n'est relâché **qu'une fois la
+fermeture effective constatée** : si elle échoue, l'exclusion est conservée (§18).
 
 **Conséquence pour un écrivain vivant.** Un moteur ouvert tient le bail et sa paire
 `-wal`/`-shm` existe : une seconde ouverture concurrente reçoit `deferred_to_lease` à la
@@ -859,12 +860,13 @@ Ces deux corrections portent `test_lexical_store_guard.py` de 48 à 59 tests (6 
 **Ordre exact du finaliseur**, identique sur les trois chemins (`close()`, échec du
 constructeur, finalisation automatique) : (1) `SQLiteStore.close()` — fermeture de la connexion,
 point de contrôle du WAL et suppression de `-wal`/`-shm` par SQLite si c'était la dernière
-connexion ; (2) `WriterLock.close()`. Une erreur à l'étape 1 n'empêche pas l'étape 2 : le bail
-est relâché **après** la tentative de fermeture, jamais avant, et l'erreur est propagée.
+connexion ; (2) `WriterLock.close()`. ~~Une erreur à l'étape 1 n'empêche pas l'étape 2~~ —
+**remplacé par le §18** : une erreur à l'étape 1 empêche l'étape 2, le bail est conservé.
 
 **Propriétés.** Le finaliseur ne référence pas le moteur : il reçoit la liste des stores et le
-verrou eux-mêmes (références fortes), qui ne peuvent donc pas être collectés avant lui. Il ne
-s'exécute qu'une fois (`weakref.finalize`) ; `close()` après lui ne fait rien, et inversement ;
+verrou eux-mêmes (références fortes), qui ne peuvent donc pas être collectés avant lui. Une fois
+le relâchement réussi, il ne se refait pas ; `close()` après lui ne fait rien, et inversement
+(après un échec, voir §18) ;
 un moteur finalisé refuse toute opération (« Memory engine is closed »). Dans un processus
 enfant issu d'un `fork`, il ne ferme rien : la connexion et le bail hérités appartiennent au
 parent (`WriterLock.close` ne déverrouille déjà pas depuis un enfant). Le store JSONL n'a pas
@@ -878,10 +880,60 @@ sur disque, stable, et relève de la sonde n° 2 (§5.1).
 
 **Tests** (`test_engine_finalizer_410.py`, 11) : ordre au moment du relâchement (connexion déjà
 fermée, annexes absentes) par le finaliseur seul, par le ramasse-miettes, par `close()` et par
-un constructeur en échec, dans les deux profils ; idempotence avec `close()` ; bail relâché
-après une fermeture en échec ; aucune fermeture depuis un `fork` ; et, entre deux processus,
+un constructeur en échec, dans les deux profils ; idempotence avec `close()` ; ~~bail relâché
+après une fermeture en échec~~ (remplacé, §18) ; aucune fermeture depuis un `fork` ; et, entre deux processus,
 un écrivain qui sort **sans** `close()` : à l'instant où son bail est libre (processus encore
 vivant, bloqué dans le relâchement), un second processus est refusé par la sonde n° 2 sans
 qu'aucun fichier soit créé, remplacé ou réécrit, puis ouvre le store sous bail ; le journal
 d'événements de l'écrivain est `store_closed` puis `lease_released`. Sur l'ancien ordre, huit
 de ces tests échouent (bail relâché connexion ouverte, paire présente).
+
+## 18. Amendement du verdict Codex n° 3 sur `1666d06` (21/11)
+
+| # | Défaut | Correction | Où |
+|---|---|---|---|
+| 1 | Le finaliseur relâchait **toujours** le bail (`finally`), même quand `store.close()` levait : bail libre, connexion SQLite peut-être encore ouverte, donc la course du §17 restait possible sur le chemin d'échec. Le `weakref.finalize` était de plus consommé par l'échec : `close()` ne pouvait plus réessayer | Le bail n'est relâché **qu'après la fermeture effective** de chaque connexion ; sinon il est **conservé**, l'erreur est propagée et le relâchement reste **rejouable** | `memory.py` (`_EngineRelease`, `_connection_closed`, `_UNRELEASED`, `MemoryV4.close`), §5.1, `test_engine_finalizer_410.py` |
+
+**Fermeture effective.** Un store est tenu pour fermé si `store.close()` est revenu sans
+erreur **et** si sa connexion `sqlite3` est constatée fermée (`_connection_closed` :
+`connection.total_changes` lève `ProgrammingError` sur une connexion fermée ; la sonde ne touche
+pas la base et n'est pas soumise au contrôle de fil d'exécution). Un `close()` qui revient en
+laissant la connexion ouverte est une erreur (`StoreCloseError`), traitée comme un `close()` qui
+lève. Un store sans connexion persistante (JSONL) est fermé par définition.
+
+**État de relâchement partagé.** `_EngineRelease(pid, stores, bail)` est l'unique objet appelé
+par `close()`, par l'échec du constructeur et par le `weakref.finalize` (ramasse-miettes,
+sortie de l'interpréteur). Il ne référence jamais le moteur. À chaque appel, sous son propre
+verrou : (1) déjà relâché → rien ; (2) processus enfant d'un `fork` → aucune fermeture,
+`WriterLock.close()` (qui ne déverrouille pas depuis un enfant) ; (3) sinon, tentative de
+fermeture de **chaque** store encore en attente ; un store effectivement fermé est retiré de la
+liste et n'est **jamais refermé** ; (4) s'il reste un échec : **bail conservé**, première erreur
+propagée ; (5) sinon `WriterLock.close()`, état « relâché ».
+
+**Reprise.** Après un échec, le moteur est fermé aux opérations (« Memory engine is closed »)
+mais tient toujours le bail : tout autre moteur, du même processus ou d'un autre, est refusé
+(`WriterConflictError`). Un nouvel `engine.close()` rejoue les seules fermetures en attente et,
+quand toutes ont abouti, relâche le bail — que le `weakref.finalize` ait été consommé ou non.
+
+**Quand personne ne peut réessayer** (moteur collecté par le ramasse-miettes, constructeur en
+échec, sortie de l'interpréteur) : le relâchement en échec s'épingle dans `memory._UNRELEASED`
+(référence forte : sans elle, la destruction du verrou libérerait le bail connexion ouverte).
+Le bail reste donc tenu **jusqu'à la fin du processus**, où le noyau libère le `flock` et ferme
+la connexion ensemble (même cas que `SIGKILL`, §17). Garder le bail trop longtemps est le mode
+de défaillance accepté ; le relâcher sur une connexion ouverte ne l'est pas. Limite résiduelle :
+pendant la destruction finale de l'interpréteur, l'ordre dans lequel CPython détruit la
+connexion et le descripteur du verrou d'un relâchement resté en échec n'est pas maîtrisé.
+
+**Tests** (`test_engine_finalizer_410.py`, 23). Le test « tentative → relâchement » est remplacé
+par la vérification de la propriété, dans les deux profils, pour un `close()` qui lève et pour
+un `close()` qui revient connexion ouverte, par `close()` et par le finaliseur : connexion
+encore ouverte et paire présente ; **un autre processus** est refusé pour le `flock` puis pour
+l'ouverture d'un moteur, sans rien créer ni réécrire ; l'erreur est propagée ; un nouvel essai
+échoue de même tant que la cause persiste ; cause levée, `close()` ferme la connexion **puis**
+relâche le bail, et l'autre processus prend le bail et ouvre le store. S'y ajoutent : moteur
+collecté avec fermeture en échec (bail tenu, relâchement épinglé), constructeur en échec avec
+fermeture en échec (bail tenu, erreur d'ouverture conservée en contexte), échec partiel sur
+plusieurs stores (aucune double fermeture, seule la fermeture en attente est rejouée, `fork`).
+Enfin un vrai `fork` : l'enfant qui appelle `close()` sur le moteur hérité ne ferme pas la
+connexion et ne libère pas le bail du parent, qui ferme ensuite normalement.
+Avec un relâchement du bail malgré l'échec, douze de ces tests échouent.
