@@ -139,6 +139,8 @@ class FakeSystem:
         self.bootstrap_fails = False
         self.bootout_mode = "ok"      # ok | fail | timeout | lingers (returns 0, job still loaded)
         self.job_replaced = False     # the loaded job is no longer the planned program
+        self.observe_after_stop = "normal"  # normal | error | timeout: what ``print`` does once a stop was sent
+        self.stop_sent = False
         self.crashing = None          # (runs, last exit code) reported by launchctl print
         self.noise = ""               # appended to the stdout/stderr of every command
         self.clock = None             # FakeClock advanced by commands that "take time"
@@ -154,6 +156,10 @@ class FakeSystem:
         if hook:
             hook()
         if argv[:2] == ["launchctl", "print"]:
+            if self.stop_sent and self.observe_after_stop == "timeout":
+                raise subprocess.TimeoutExpired(argv, 5, output=self.noise, stderr=self.noise)
+            if self.stop_sent and self.observe_after_stop == "error":
+                return self._done(1, stderr="Operation not permitted while System Integrity Protection is engaged")
             if not self.loaded or self.service is None:
                 return self._done(113, stderr="Could not find service")
             program = "/foreign/bin/other-server" if self.job_replaced else self.service["argv"][0]
@@ -168,6 +174,7 @@ class FakeSystem:
             self.loaded = True
             return self._done()
         if argv[:2] == ["launchctl", "bootout"]:
+            self.stop_sent = True
             if self.bootout_mode == "timeout":
                 raise subprocess.TimeoutExpired(argv, 15, output=self.noise, stderr=self.noise)
             if self.bootout_mode == "fail":
@@ -363,10 +370,20 @@ def data_inventory(c) -> dict:
     return out
 
 
-def all_text(root: Path, *, skip_suffixes=(".bak",)) -> str:
-    """Concatenated text of every journal/report file below ``root`` (verbatim backups excluded)."""
+def raw_logs(c) -> list[Path]:
+    """Raw source logs written by the SERVER, kept as they are: never a diagnostic we produce."""
+    return [c.settings.ops_dir / "logs/server.err"]
+
+
+def all_text(root: Path, *, skip_suffixes=(".bak",), exclude=()) -> str:
+    """Concatenated text of every file WE produce below ``root``.
+
+    Excluded, and checked separately by the tests: verbatim private backups (``*.bak``) and the
+    exact raw source logs named in ``exclude``.
+    """
+    excluded = {Path(path) for path in exclude}
     parts = []
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.suffix not in skip_suffixes:
+        if path.is_file() and path.suffix not in skip_suffixes and path not in excluded:
             parts.append(path.read_bytes().decode("utf-8", errors="replace"))
     return "\n".join(parts)

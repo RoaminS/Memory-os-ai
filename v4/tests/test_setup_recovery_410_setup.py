@@ -72,6 +72,31 @@ def test_rollback_confirms_the_stop_by_observing_the_job_absent(c):
     assert out["ok"] is True and out["service"]["undo"] == "stopped-and-plist-moved"
 
 
+@pytest.mark.parametrize("observation", ["error", "timeout"])
+def test_rollback_treats_an_unobservable_job_as_not_stopped(c, observation):
+    """``bootout`` returned 0 but the job can no longer be observed: indeterminate is never 'absent'."""
+    result = install(c, profile="lexical")
+    plist = (c.home / PLIST).read_bytes()
+    c.system.observe_after_stop = observation
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True, stop_timeout=0, sleep=no_sleep)
+    assert out["ok"] is False and out["code"] == "service_stop_unconfirmed"
+    assert out["service"]["undo"] == "stop-unconfirmed" and out["service"]["observation"] == "indeterminate"
+    assert (c.home / PLIST).read_bytes() == plist and "plist_moved_to" not in out["service"]
+    assert not list((c.home / STATE).rglob("*.plist"))
+
+
+@pytest.mark.parametrize("observation", ["error", "timeout"])
+def test_uninstall_treats_an_unobservable_job_as_not_stopped(c, observation):
+    install(c, profile="lexical")
+    plan = uninstall_plan(c)
+    plist = (c.home / PLIST).read_bytes()
+    c.system.observe_after_stop = observation
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system, stop_timeout=0, sleep=no_sleep)
+    assert result["ok"] is False and result["partial"] is True and result["code"] == "service_stop_unconfirmed"
+    assert result["service"]["outcome"] == "stop-unconfirmed" and result["service"]["observation"] == "indeterminate"
+    assert (c.home / PLIST).read_bytes() == plist and "plist_moved_to" not in result["service"]
+
+
 def test_rollback_never_stops_a_job_replaced_since_the_install(c):
     result = install(c, profile="lexical")
     c.system.job_replaced = True
@@ -80,11 +105,24 @@ def test_rollback_never_stops_a_job_replaced_since_the_install(c):
     assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
 
 
-@pytest.mark.parametrize("damage", ["install-mode", "journal-mode", "directory-mode", "symlink"])
-def test_rollback_trusts_only_a_private_journal_on_safe_paths(c, damage):
+@pytest.mark.parametrize("damage", ["install-mode", "journal-mode", "directory-mode", "symlink",
+                                    "hardlink-install", "hardlink-journal", "owner", "root-symlink"])
+def test_rollback_trusts_only_a_private_journal_on_safe_paths(c, damage, monkeypatch):
     result = install(c, profile="lexical")
     journal_dir = c.home / STATE / "quickstart" / result["stamp"]
-    if damage == "install-mode":
+    if damage == "hardlink-install":
+        os.link(journal_dir / "install.json", c.root / "second-name-of-install.json")
+    elif damage == "hardlink-journal":
+        os.link(journal_dir / "journal.json", journal_dir / "second-name.json")
+    elif damage == "owner":  # every file now belongs to "someone else"
+        uid = os.getuid()
+        monkeypatch.setattr(qs.os, "getuid", lambda: uid + 1)
+    elif damage == "root-symlink":
+        root = c.home / STATE / "quickstart"
+        real = root.with_name("quickstart.real")
+        root.rename(real)
+        root.symlink_to(real)
+    elif damage == "install-mode":
         (journal_dir / "install.json").chmod(0o644)
     elif damage == "journal-mode":
         (journal_dir / "journal.json").chmod(0o640)
@@ -238,8 +276,8 @@ def test_real_store_memories_survive_a_failed_stop(c, mode):
     assert all(read_memories(c, keys)["found"].values())
 
 
-def test_real_store_uncheckpointed_wal_is_left_alone_by_rollback_and_uninstall(c):
-    """A writer still holding the store (WAL not merged): the tools neither open nor copy it."""
+def test_real_store_uncheckpointed_wal_is_left_alone_by_rollback(c):
+    """A writer still holding the store (WAL not merged): the rollback neither opens nor copies it."""
     import sqlite3
     result = install(c, profile="lexical", clients=("cursor",))
     write_memories(c, 1)
@@ -259,6 +297,28 @@ def test_real_store_uncheckpointed_wal_is_left_alone_by_rollback_and_uninstall(c
         assert row == ("written after install, still in the WAL",)
     finally:
         holder.close()
+
+
+def test_real_store_uncheckpointed_wal_is_left_alone_by_uninstall(c):
+    """Same proof for the uninstall: a live writer's unmerged WAL is neither opened nor touched."""
+    import sqlite3
+    install(c, profile="lexical", clients=("cursor",))
+    keys = write_memories(c, 1)
+    database = c.settings.store_dir / "store.sqlite3"
+    holder = sqlite3.connect(database)
+    try:
+        holder.execute("PRAGMA wal_autocheckpoint=0")
+        holder.execute("CREATE TABLE IF NOT EXISTS setup_probe_410 (value TEXT)")
+        holder.execute("INSERT INTO setup_probe_410 VALUES ('unmerged at uninstall time')")
+        holder.commit()
+        assert Path(str(database) + "-wal").stat().st_size > 0
+        before = tree(c.settings.store_dir)  # bytes, modes AND mtimes: not even opened for writing
+        result = uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)
+        assert result["ok"] is True and tree(c.settings.store_dir) == before
+        assert holder.execute("SELECT value FROM setup_probe_410").fetchone() == ("unmerged at uninstall time",)
+    finally:
+        holder.close()
+    assert all(read_memories(c, keys)["found"].values())  # and the engine still recovers everything
 
 
 def test_real_lexical_store_helpers_work_today(c):

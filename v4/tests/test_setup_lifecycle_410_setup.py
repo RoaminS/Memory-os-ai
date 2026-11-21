@@ -287,6 +287,15 @@ def uninstall_plan(c, **kwargs):
     return uninstaller().plan(c.settings, home=c.home, python=c.python, run=c.system, **kwargs)
 
 
+def our_entry(c, key, python="/old/venv/bin/python"):
+    """What our tool writes for this installation — here planted by hand, so no journal proves it."""
+    from memory_os_v4.ops.clients import CLIENTS
+    client = next(item for item in CLIENTS if item.key == key)
+    return qs.desired_entry(client, python, {"MEMORY_V4_URL": c.settings.url,
+                                             "MEMORY_V4_TOKEN_FILE": str(c.settings.token_file),
+                                             "MEMORY_V4_OPS_DIR": str(c.settings.ops_dir)})
+
+
 def test_uninstall_preview_writes_nothing_and_lists_what_stays(c):
     installed(c)
     before = tree(c.root)
@@ -354,6 +363,90 @@ def test_uninstall_keeps_entries_that_are_not_this_installation(c):
     assert servers(c.home, "antigravity")["memory-os-ai"] == other_install
     statuses = {item["client"]: item["status"] for item in result["clients"]}
     assert statuses["cursor"] == statuses["antigravity"] == "kept-foreign"
+    assert result["service"]["outcome"] == "stopped-and-plist-moved"  # neither points to our service
+
+
+@pytest.mark.parametrize("case", ["hand-written-copy", "env-wrapper", "extra-argument"])
+def test_uninstall_removes_only_what_our_journal_proves(c, case):
+    """Same destination, relay-looking, but not written by us: kept, and the service stays for it."""
+    installed(c, clients=("vscode",))
+    entry = our_entry(c, "cursor")
+    if case == "env-wrapper":
+        entry = {**entry, "command": "/usr/bin/env", "args": ["python", "-m", "memory_os_v4.ops.relay"]}
+    elif case == "extra-argument":
+        entry = {**entry, "args": [*entry["args"], "--debug"]}
+    set_entry(c.home, "cursor", entry)
+    plan = uninstall_plan(c)
+    by = {item["client"]: item for item in plan["clients"]}
+    assert (by["vscode"]["action"], by["vscode"]["ownership"]) == ("remove", "journal")
+    assert (by["cursor"]["action"], by["cursor"]["ownership"]) == ("keep-unproven", "unproven")
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert servers(c.home, "cursor")["memory-os-ai"] == entry and "memory-os-ai" not in servers(c.home, "vscode")
+    assert result["service"]["outcome"] == "kept-clients-remaining"
+    assert result["service"]["remaining_clients"] == ["cursor"]
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
+
+
+def test_uninstall_removes_an_unproven_entry_only_with_named_consent(c):
+    installed(c, clients=("vscode",))
+    entry = our_entry(c, "cursor")
+    set_entry(c.home, "cursor", entry)
+    plan = uninstall_plan(c, remove_existing=("cursor",))
+    by = {item["client"]: item for item in plan["clients"]}
+    assert (by["cursor"]["action"], by["cursor"]["ownership"]) == ("remove", "consent")
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert "memory-os-ai" not in servers(c.home, "cursor")
+    assert result["service"]["outcome"] == "stopped-and-plist-moved"
+    with pytest.raises(uninstaller().UninstallError) as refusal:
+        uninstall_plan(c, clients=("vscode",), remove_existing=("cursor",))
+    assert refusal.value.code == "client_consent_unselected"
+
+
+# ---- selective uninstall: the shared service outlives a partial selection ----
+
+def test_selective_uninstall_keeps_the_service_while_other_clients_are_wired_to_it(c):
+    installed(c)
+    plan = uninstall_plan(c, clients=("cursor",))
+    assert [item["client"] for item in plan["clients"]] == ["cursor"]
+    assert plan["service"]["action"] == "keep-clients-remaining"
+    assert plan["service"]["remaining_clients"] == sorted(set(SIX) - {"cursor"})
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["ok"] is True and result["selective"] is True and result["partial"] is False
+    assert result["service"]["outcome"] == "kept-clients-remaining"
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+    assert "memory-os-ai" not in servers(c.home, "cursor")
+    for key in set(SIX) - {"cursor"}:
+        assert classify(servers(c.home, key)["memory-os-ai"]) == "relay"
+
+
+def test_service_stops_only_when_the_last_wired_client_is_removed(c):
+    installed(c, clients=("cursor", "vscode", "codex"))
+    for selection in (("cursor",), ("codex",)):
+        result = uninstaller().apply(uninstall_plan(c, clients=selection), c.settings, home=c.home, run=c.system)
+        assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
+    last = uninstaller().apply(uninstall_plan(c, clients=("vscode",)), c.settings, home=c.home, run=c.system)
+    assert last["service"]["outcome"] == "stopped-and-plist-moved" and last["service"]["remaining_clients"] == []
+    assert c.system.verbs().count("bootout") == 1 and not (c.home / PLIST).exists()
+
+
+def test_remaining_clients_are_looked_up_in_the_whole_registry_not_in_the_selection(c):
+    """A client the user did not name, and one our registry knows outside the six, both keep the service."""
+    from setup_fixture_410 import write
+    installed(c, clients=("cursor",))
+    write(c.home, ".codeium/windsurf/mcp_config.json", json.dumps({"mcpServers": {"memory-os-ai": our_entry(c, "windsurf")}}))
+    plan = uninstall_plan(c, clients=("cursor",))
+    assert plan["service"]["remaining_clients"] == ["windsurf"]
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
+
+
+def test_uninstall_has_no_option_to_force_the_stop_of_a_shared_service(c):
+    from memory_os_v4.ops import cli
+    for flag in ("--stop-service", "--force-stop", "--service-only"):
+        with pytest.raises(SystemExit) as stop:
+            cli.main(["uninstall", "--clients", "cursor", flag])
+        assert stop.value.code == 2
+    assert not {"stop_service", "force_stop"} & set(inspect.signature(uninstaller().apply).parameters)
 
 
 def test_uninstall_is_idempotent(c):
@@ -407,8 +500,10 @@ def test_uninstall_never_claims_to_be_complete_and_names_what_it_cannot_see(c):
     for document in (plan, result):
         manual = {item["kind"]: item for item in document["manual_removal_required"]}
         assert {"claude-desktop-extension", "claude-code-hooks", "auxiliary-launchd-jobs", "python-environment"} <= set(manual)
-        assert manual["claude-desktop-extension"]["inspected"] is False
-        assert "Extensions" in manual["claude-desktop-extension"]["procedure"]
+        extension = manual["claude-desktop-extension"]
+        assert extension["inspected"] is False and extension["present"] is None  # unknown, never asserted
+        assert extension["procedure"].startswith("If present:") and "Extensions" in extension["procedure"]
+        assert "check" in extension["procedure"].lower() and "is installed" not in extension["procedure"].lower()
         assert document["complete"] is False
     assert "complete" not in json.dumps(result["scope"]).lower()
 

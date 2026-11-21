@@ -13,7 +13,7 @@ import pytest
 from memory_os_v4.ops import quickstart as qs
 from memory_os_v4.ops.doctor import Check
 from setup_fixture_410 import (
-    BACKUP_KEY, LEAK_SECRET, PATHS, SECRETS, SIX, all_text, install, prepare, setup_context,
+    BACKUP_KEY, LEAK_SECRET, PATHS, SECRETS, SIX, all_text, install, prepare, raw_logs, setup_context,
 )
 
 PLIST = "Library/LaunchAgents/test.memory-os.plist"
@@ -34,10 +34,32 @@ def forbidden(c):
     return values
 
 
+def produced(c) -> str:
+    """Everything WE wrote under the state directory: journals and reports.
+
+    Not the verbatim ``*.bak`` backups, and not the raw server log: that file is a source the
+    server wrote, kept untouched; the rule is that nothing of it PROPAGATES into what we produce.
+    """
+    return all_text(c.home / STATE, exclude=raw_logs(c))
+
+
 def assert_clean(c, *documents):
-    shown = "".join(json.dumps(document, default=str) for document in documents) + all_text(c.home / STATE)
+    shown = "".join(json.dumps(document, default=str) for document in documents) + produced(c)
     leaked = [value[:12] for value in forbidden(c) if value in shown]
     assert not leaked, f"secret reached a journal, result or error: {leaked}"
+
+
+def test_the_propagation_check_excludes_exactly_the_raw_log_and_nothing_else(c):
+    """Green today: the harness itself — one named file is a source, every other file is searched."""
+    log, = raw_logs(c)
+    log.parent.mkdir(parents=True)
+    log.write_text("raw " + LEAK_SECRET)
+    assert log.is_relative_to(c.home / STATE) and LEAK_SECRET in all_text(c.home / STATE)
+    assert LEAK_SECRET not in all_text(c.home / STATE, exclude=[log])  # the named source, and only it
+    (log.parent / "other.log").write_text("x")
+    assert LEAK_SECRET in all_text(c.home / STATE, exclude=[log.parent / "other.log"])
+    (log.parent / "server.err.copy").write_text("copied " + LEAK_SECRET)  # a copy next to it IS a propagation
+    assert LEAK_SECRET in all_text(c.home / STATE, exclude=[log])
 
 
 def plant_key(c):
@@ -54,9 +76,11 @@ def crash(c, monkeypatch, clients=("cursor",)):
     monkeypatch.setattr(qs.time, "sleep", lambda *a: pytest.fail("a known startup failure must not wait"))
     log = c.settings.ops_dir / "logs/server.err"
 
+    planted = {}
+
     def write_log():
         token = c.settings.token_file.read_text().strip()
-        log.write_text("\n".join([
+        planted["text"] = "\n".join([
             "x" * 9000,
             "Authorization: Bearer " + token,
             "MEMORY_V4_BACKUP_KEY bytes " + BACKUP_KEY.decode() + " hex " + BACKUP_KEY.hex(),
@@ -65,35 +89,43 @@ def crash(c, monkeypatch, clients=("cursor",)):
             '  File "/srv/x.py", line 3, in start  # ' + LEAK_SECRET,
             "Leak5c6d7e8fSentinelError: " + LEAK_SECRET,
             "AttributeError: 'Server' object has no attribute '" + LEAK_SECRET + "'",
-        ]) + "\n")
+        ]) + "\n"
+        log.write_text(planted["text"])
+        log.chmod(0o600)
         c.system.crashing = (2, 1)
     c.system.hooks[("launchctl", "bootstrap")] = write_log
     result = install(c, profile="lexical", clients=clients)
-    return result, log
+    assert log == raw_logs(c)[0]
+    return result, log, planted
 
 
 def test_startup_failure_is_reported_as_structured_facts_never_as_a_log_tail(c, monkeypatch):
-    result, log = crash(c, monkeypatch)
+    result, log, _ = crash(c, monkeypatch)
     assert result["ok"] is False and result["code"] == "service_startup_failed"
     failure = result["startup_failure"]
     assert set(failure) <= STARTUP_FAILURE_KEYS and "stderr_tail" not in failure
     assert failure["runs"] == 2 and failure["last_exit_code"] == 1
-    assert failure["exception_types"] == ["AttributeError"]  # known class names only, never their message
+    # Names from the closed list only; the sentinel-shaped class becomes the constant, never its name.
+    assert failure["exception_types"] == ["AttributeError", "other"]
     assert failure["log_path"] == str(log) and failure["log_bytes"] == log.stat().st_size
     assert str(log) in result["error"] and "AttributeError" not in result["error"]
     assert_clean(c, result)
 
 
-def test_startup_failure_log_stays_private_and_untouched(c, monkeypatch):
-    result, log = crash(c, monkeypatch)
-    assert LEAK_SECRET in log.read_text()  # the evidence is kept where it was, for the operator
-    assert log.parent.stat().st_mode & 0o777 == 0o700
+def test_raw_server_log_is_kept_intact_private_and_is_the_only_place_holding_its_content(c, monkeypatch):
+    """The source log is evidence for the operator: same bytes, same mode, never copied or moved."""
+    result, log, planted = crash(c, monkeypatch)
+    assert log.read_text() == planted["text"] and LEAK_SECRET in planted["text"]  # integrity
+    assert log.stat().st_mode & 0o777 == 0o600 and log.parent.stat().st_mode & 0o777 == 0o700  # confidentiality
+    holders = [path for path in (c.home / STATE).rglob("*")
+               if path.is_file() and LEAK_SECRET in path.read_text(errors="replace")]
+    assert holders == [log]  # no copy, no excerpt, anywhere else under the state directory
     assert c.system.verbs().count("bootout") == 1 and result["startup_failure"]["stopped"] is True
 
 
 def test_startup_failure_through_the_cli_prints_no_secret(c, monkeypatch, capsys):
     from memory_os_v4.ops import cli
-    result, _ = crash(c, monkeypatch)
+    result, _, _ = crash(c, monkeypatch)
     monkeypatch.setattr(qs, "prepare", lambda settings, **kw: {"ok": True, "blockers": [], "clients": []})
     monkeypatch.setattr(qs, "apply_install", lambda plan, settings, **kw: result)
     monkeypatch.setattr(qs, "settings_for_install", lambda settings, **kw: (c.settings, "sqlite"))
@@ -139,7 +171,7 @@ def test_client_level_cli_failure_reports_the_return_code_only(c, tmp_path):
     with pytest.raises(qs.QuickstartError) as refusal:
         qs.apply_clients(plan, home=c.home, python=c.python, env=env, run=c.system,
                          journal_root=c.home / STATE / "quickstart")
-    assert LEAK_SECRET not in str(refusal.value) + all_text(c.home / STATE)
+    assert LEAK_SECRET not in str(refusal.value) + produced(c)
 
 
 # ---- doctor details ----
@@ -212,3 +244,80 @@ def test_refusal_with_every_client_holding_foreign_secrets_shows_none(c):
         qs.apply_install(plan, c.settings, home=c.home, run=c.system)
     assert LEAK_SECRET not in json.dumps(plan) + str(refusal.value)
     assert not [secret for secret in SECRETS if secret in json.dumps(plan)]
+
+
+# ---- exception names: one explicit closed list, everywhere ----
+
+EXCEPTION_TYPES = [
+    "AssertionError", "AttributeError", "ConnectionError", "FileNotFoundError", "ImportError", "IndexError",
+    "KeyError", "KeyboardInterrupt", "MemoryError", "ModuleNotFoundError", "NotImplementedError", "OSError",
+    "PermissionError", "ProfileError", "ProvisionError", "QuickstartError", "RuntimeError", "SecretFileError",
+    "SyntaxError", "SystemExit", "TimeoutError", "TypeError", "UninstallError", "ValueError",
+    "sqlite3.DatabaseError", "sqlite3.OperationalError",
+]
+
+
+class Leak5c6d7e8fSentinelError(Exception):
+    """A foreign class whose very name must not be echoed."""
+
+
+def diagnostics():
+    from memory_os_v4.ops import diagnostics
+    return diagnostics
+
+
+def test_exception_names_come_from_an_explicit_closed_list():
+    module = diagnostics()
+    assert sorted(module.EXCEPTION_TYPES) == EXCEPTION_TYPES and isinstance(module.EXCEPTION_TYPES, frozenset)
+    assert module.OTHER == "other"
+    import sqlite3
+    assert module.exception_label(ValueError("x " + LEAK_SECRET)) == "ValueError"
+    assert module.exception_label(sqlite3.OperationalError("x")) == "sqlite3.OperationalError"
+    assert module.exception_label(Leak5c6d7e8fSentinelError(LEAK_SECRET)) == "other"
+    assert module.exception_label(type("ValueError", (Exception,), {"__module__": "evil"})()) == "other"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("AttributeError: x\nValueError: y\nAttributeError: z\n", ["AttributeError", "ValueError"]),
+    ("Leak5c6d7e8fSentinelError: boom\n", ["other"]),
+    ("pkg.mod.CustomFailure: boom\nsqlite3.OperationalError: locked\n", ["sqlite3.OperationalError", "other"]),
+    ("no traceback here, AttributeError mentioned mid-line\n", []),
+    ("", []),
+])
+def test_log_classification_never_echoes_an_unknown_class_name(text, expected):
+    assert diagnostics().exception_types(text) == expected
+
+
+def test_install_journal_reduces_an_unknown_foreign_exception_to_the_constant(c):
+    async def probe(python, env, **kwargs):
+        raise Leak5c6d7e8fSentinelError("body " + LEAK_SECRET)
+    result = install(c, profile="lexical", probe=probe)
+    assert result["ok"] is False and result["error"] == "other" and result["code"] == "relay_probe_failed"
+    assert "Leak5c6d7e8f" not in json.dumps(result) + produced(c)
+
+
+def test_cli_reduces_an_unknown_foreign_exception_to_the_constant(c, monkeypatch, capsys):
+    from memory_os_v4.ops import cli
+
+    def boom(*args, **kwargs):
+        raise Leak5c6d7e8fSentinelError("secret " + LEAK_SECRET)
+    monkeypatch.setattr(qs, "settings_for_install", boom)
+    assert cli.main(["quickstart", "--clients", "cursor"]) == 1
+    out = capsys.readouterr()
+    assert json.loads(out.out)["error"] == "other" and "Leak5c6d7e8f" not in out.out + out.err
+
+
+def test_doctor_reduces_an_unknown_foreign_exception_to_the_constant(c, monkeypatch):
+    from dataclasses import replace
+    from memory_os_v4 import sqlite_stats
+    from memory_os_v4.ops import doctor
+    settings = replace(c.settings, service_label=None)
+    settings.store_dir.mkdir(parents=True)
+    (settings.store_dir / "store.sqlite3").write_bytes(b"not a database")
+
+    def boom(path):
+        raise Leak5c6d7e8fSentinelError("row " + LEAK_SECRET)
+    monkeypatch.setattr(sqlite_stats, "scan_sqlite", boom)
+    check = doctor._store(settings)
+    assert check.status == "FAIL" and check.detail.endswith(": other")
+    assert "Leak5c6d7e8f" not in check.detail + check.hint

