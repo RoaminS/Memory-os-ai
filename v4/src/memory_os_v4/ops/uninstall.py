@@ -181,11 +181,11 @@ def remaining_dependencies(home: Path, port: int, *, removed=()) -> dict:
     """{client: dependency} for every ``memory-os-ai`` entry of the WHOLE registry that keeps the service."""
     found = {}
     for client in CLIENTS:
-        state, entry = read_entry(client, home)
+        state, entry = _inspect(client, home)
         entries = [] if client.key in removed or entry is None else [entry]
-        if client.fmt == "claude-user":
+        if client.fmt == "claude-user" and state == "ok":
             entries += _claude_project_entries(client.config_path(home))  # never "removed" by us: always counted
-        if state == "unreadable" or client.config_path(home).is_symlink():
+        if state in {"unreadable", "unsafe-path", "ambiguous"}:
             found[client.key] = "indeterminate"  # an entry may be there: nothing proves the contrary
             continue
         verdicts = {_dependency(item, port, client.key) for item in entries}
@@ -194,6 +194,32 @@ def remaining_dependencies(home: Path, port: int, *, removed=()) -> dict:
         elif "indeterminate" in verdicts:
             found[client.key] = "indeterminate"
     return found
+
+
+def _inspect(client, home: Path):
+    """(state, entry) with ONE path and ambiguity rule for the plan and for the dependency scan.
+
+    ``unsafe-path``: a symbolic link anywhere on the path (dangling parent included) or a special
+    file. ``ambiguous``: a TOML file holding BOTH server tables (``mcp_servers`` and
+    ``mcp.servers``) with our name in one of them: which table the client reads is not ours to guess.
+    """
+    path = client.config_path(home)
+    try:
+        qs._safe_path(path, home)
+    except qs.QuickstartError:
+        return "unsafe-path", None
+    state, entry = read_entry(client, home)
+    if state == "ok" and client.fmt.endswith("toml"):
+        try:
+            import tomllib
+            data = tomllib.loads(path.read_bytes().decode("utf-8"))
+            first, nested = data.get("mcp_servers"), data.get("mcp")
+            second = nested.get("servers") if isinstance(nested, dict) else None
+            if isinstance(first, dict) and isinstance(second, dict) and (SERVER in first or SERVER in second):
+                return "ambiguous", None
+        except (OSError, ValueError):
+            return "unreadable", None
+    return state, entry
 
 
 def _claude_project_entries(path: Path) -> list:
@@ -295,16 +321,14 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
         blockers.append(message)
     for client in selected:
         path = client.config_path(home)
-        try:
-            qs._safe_path(path, home)
-            state, entry = read_entry(client, home)
-        except qs.QuickstartError:
-            state, entry = "unsafe-path", None  # symbolic link or special file: never written through
+        state, entry = _inspect(client, home)  # unsafe path or ambiguous file: never written through
         item = {"client": client.key, "name": client.name, "path": str(path),
                 "file_sha256": qs._sha(path) if state != "unsafe-path" else None,
                 "current_class": classify(entry), "ownership": None, "dependency": None}
         if state == "unsafe-path":
             item.update(action="keep-unsafe-path", dependency="indeterminate")
+        elif state == "ambiguous":
+            item.update(action="keep-ambiguous", dependency="indeterminate")
         elif state == "missing-config":
             item["action"] = "missing-config"
         elif state == "unreadable":
@@ -399,7 +423,10 @@ def _changed(plan_document: dict, current: dict) -> bool:
 
     def service_view(document):
         service = document["service"]
-        return service["state"], service["sha256"], service["loaded_state"], service.get("argv"), service["path"]
+        # The announced fate of the service is part of the plan: a service shown as kept is never
+        # stopped because a client outside the selection vanished after the preview.
+        return (service["state"], service["sha256"], service["loaded_state"], service.get("argv"), service["path"],
+                service["action"], service["remaining_clients"], service["remaining_dependencies"])
     return (not current["ok"] or client_view(plan_document) != client_view(current)
             or service_view(plan_document) != service_view(current))
 
@@ -470,7 +497,11 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
             continue
         try:
             # Validated before anything is revoked or written: an unsafe removal leaves entry AND proof intact.
-            qs.removal_text(client, home, toml_appended=appended)
+            qs.removal_text(client, home, toml_appended=appended, expected_sha256=digest)
+        except qs.EntryChanged:
+            done["status"] = "conflict-file-changed-since-preview"
+            record()
+            continue
         except (OSError, ValueError, qs.QuickstartError, RecursionError):
             done["status"] = "refused-removal-manual"
             record()
@@ -487,10 +518,13 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
         done["status"] = "failed-entry-kept-unproven"  # write-ahead: true until the removal is verified
         record()
         try:
-            qs.remove_client_entry(client, home, run=run, toml_appended=appended)
+            qs.remove_client_entry(client, home, run=run, toml_appended=appended, expected_sha256=digest)
             state, entry = read_entry(client, home)
             if state == "ok" and entry is None:
                 done["status"] = "removed"
+        except qs.EntryChanged:
+            # Changed DURING the revocation: no longer the entry the plan showed; it is left alone.
+            done["status"] = "conflict-file-changed-since-preview"
         except (OSError, ValueError, KeyError, qs.QuickstartError, subprocess.SubprocessError):
             pass
         record()
@@ -510,6 +544,11 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
     elif remaining:
         outcome["outcome"] = "kept-clients-remaining"
         result["next_steps"] += _next_steps(remaining)
+    elif service["action"] != "stop":
+        # The plan announced a kept service; whatever happened since, this run does not stop it.
+        outcome["outcome"] = "kept-as-planned"
+        result["next_steps"].append("the dependencies seen at the preview are gone; preview again (uninstall) "
+                                    "to plan the stop of the service")
     else:
         stopped = qs.stop_owned_service(service, service["sha256"], journal_dir, run=run,
                                         stop_timeout=stop_timeout, sleep=sleep)
@@ -526,7 +565,7 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
 
 def _kept_status(action: str) -> str:
     return {"keep-unproven": "kept-unproven", "keep-foreign": "kept-foreign", "keep-unreadable": "kept-unreadable",
-            "keep-unsafe-path": "kept-unsafe-path", "remove": "planned"}.get(action, action)
+            "keep-unsafe-path": "kept-unsafe-path", "keep-ambiguous": "kept-ambiguous", "remove": "planned"}.get(action, action)
 
 
 def settings_from_service(settings, home: Path):

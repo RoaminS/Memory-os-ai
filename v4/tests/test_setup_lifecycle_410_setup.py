@@ -1019,6 +1019,159 @@ def test_an_unreadable_client_file_is_a_refusal_not_a_crash(c):
         path.chmod(0o600)
 
 
+# ---- Codex implementation review n° 1 ----
+
+FOREIGN_NOW = {"command": "/someone/else/bin/tool", "args": ["serve"], "env": {"WRITTEN": "during-the-revocation"}}
+
+
+def rewrite_during_revocation(c, monkeypatch, key="cursor"):
+    """The client entry is replaced by someone else right after OUR revocation of its proof is written."""
+    real = qs._atomic_write
+    seen = []
+
+    def hooked(path, text):
+        real(path, text)
+        if Path(path).name == "journal.json" and '"revoked": true' in text and not seen:
+            seen.append(str(path))
+            set_entry(c.home, key, FOREIGN_NOW)
+    monkeypatch.setattr(qs, "_atomic_write", hooked)
+    return seen
+
+
+def test_uninstall_never_removes_an_entry_that_changed_during_its_own_revocation(c, monkeypatch):
+    """Compare-then-write at removal time: the digest is re-checked on the bytes the write is built from."""
+    installed(c, clients=("cursor",))
+    plan = uninstall_plan(c)
+    seen = rewrite_during_revocation(c, monkeypatch)
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert seen, "the modification must happen during the revocation of this very client"
+    assert servers(c.home, "cursor")["memory-os-ai"] == FOREIGN_NOW  # neither removed nor overwritten
+    item, = [entry for entry in result["clients"] if entry["client"] == "cursor"]
+    assert item["status"] == "conflict-file-changed-since-preview" and item["revoked_journals"] == 1
+    assert result["ok"] is False and result["partial"] is True and result["code"] == "uninstall_partial"
+    assert result["service"]["outcome"] == "kept-clients-incomplete"
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+
+
+def test_undo_never_removes_an_entry_that_changed_during_its_own_revocation(c, monkeypatch):
+    result = installed(c, clients=("cursor",))
+    seen = rewrite_during_revocation(c, monkeypatch)
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert seen and servers(c.home, "cursor")["memory-os-ai"] == FOREIGN_NOW
+    assert out["results"] == [{"client": "cursor", "undo": "refused-entry-changed-since-apply"}]
+    assert out["ok"] is False and out["service"] == {"undo": "kept-clients-incomplete"}
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
+
+
+def test_claude_code_entry_changed_during_its_revocation_is_not_removed_through_the_cli(c, monkeypatch):
+    installed(c, clients=("claude-code",))
+    plan = uninstall_plan(c)
+    seen = rewrite_during_revocation(c, monkeypatch, key="claude-code")
+    calls = len(c.system.calls)
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert seen and servers(c.home, "claude-code")["memory-os-ai"] == FOREIGN_NOW
+    assert not [argv for argv in c.system.calls[calls:] if argv[0] == "claude"]
+    assert result["partial"] is True and result["service"]["outcome"] == "kept-clients-incomplete"
+
+
+def test_a_service_announced_as_kept_is_not_stopped_when_the_other_client_vanishes_after_the_preview(c):
+    """The fate of the service and the dependencies outside the selection are part of the revalidated plan."""
+    installed(c, clients=("cursor", "vscode"))
+    plan = uninstall_plan(c, clients=("cursor",))
+    assert plan["service"]["action"] == "keep-clients-remaining" and plan["service"]["remaining_clients"] == ["vscode"]
+    path = c.home / PATHS["vscode"]
+    data = json.loads(path.read_text())
+    del data["servers"]["memory-os-ai"]  # VS Code is not in the selection: its file is not compared by digest
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    before = tree(c.root)
+    with pytest.raises(uninstaller().UninstallError) as refusal:
+        uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert refusal.value.code == "uninstall_changed_since_preview"
+    assert tree(c.root) == before and "bootout" not in c.system.verbs() and c.system.loaded is True
+
+
+def test_a_kept_service_stays_kept_even_if_its_last_dependency_vanishes_during_the_apply(c, monkeypatch):
+    installed(c, clients=("cursor", "vscode"))
+    plan = uninstall_plan(c, clients=("cursor",))
+    real = qs._atomic_write
+
+    def hooked(path, text):
+        real(path, text)
+        if str(path).endswith(PATHS["cursor"]):  # while the apply runs, after its revalidation
+            vscode = c.home / PATHS["vscode"]
+            data = json.loads(vscode.read_text())
+            data["servers"].pop("memory-os-ai", None)
+            vscode.write_text(json.dumps(data, indent=2) + "\n")
+    monkeypatch.setattr(qs, "_atomic_write", hooked)
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["ok"] is True and result["service"]["outcome"] == "kept-as-planned"
+    assert result["service"]["remaining_clients"] == [] and any("preview again" in step for step in result["next_steps"])
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_a_config_behind_a_symbolic_link_in_a_parent_directory_keeps_the_service(c, dangling):
+    """Same path rule for the plan and for the dependency scan: a linked ancestor is never vouched for."""
+    installed(c, clients=("cursor",))
+    directory = c.home / ".gemini"  # Antigravity and Gemini CLI both live below it
+    real = directory.with_name(".gemini.real")
+    directory.rename(real)
+    directory.symlink_to(c.home / "nowhere" if dangling else real)
+    plan = uninstall_plan(c)
+    by = {item["client"]: item for item in plan["clients"]}
+    assert by["antigravity"]["action"] == "keep-unsafe-path" and by["gemini-cli"]["action"] == "keep-unsafe-path"
+    assert plan["service"]["remaining_dependencies"] == {"antigravity": "indeterminate", "gemini-cli": "indeterminate"}
+    assert uninstaller().remaining_dependencies(c.home, c.settings.port, removed={"cursor"}) == plan["service"]["remaining_dependencies"]
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
+
+
+def test_a_replace_consumes_the_proof_of_the_entry_it_replaces(c):
+    """Install E1, replace it by E2, uninstall E2, re-create E1 by hand: no journal may still vouch for E1."""
+    installed(c, clients=("cursor", "vscode"))
+    first = servers(c.home, "cursor")["memory-os-ai"]  # E1
+    other = c.home / "runtime2/bin/python"
+    other.parent.mkdir(parents=True)
+    other.write_text("# synthetic executable, never executed")
+    other.chmod(0o700)
+    plan = qs.preview(home=c.home, python=str(other), clients=("cursor",),
+                      env={"MEMORY_V4_URL": c.settings.url, "MEMORY_V4_TOKEN_FILE": str(c.settings.token_file),
+                           "MEMORY_V4_OPS_DIR": str(c.settings.ops_dir)})
+    assert (plan["clients"][0]["action"], plan["clients"][0]["ownership"]) == ("replace", "journal")
+    replaced = qs.apply_clients(plan, home=c.home, python=str(other), env={
+        "MEMORY_V4_URL": c.settings.url, "MEMORY_V4_TOKEN_FILE": str(c.settings.token_file),
+        "MEMORY_V4_OPS_DIR": str(c.settings.ops_dir)}, run=c.system)
+    assert replaced["records"][0]["status"] == "applied" and replaced["records"][0]["revoked_journals"] == 1
+    second = servers(c.home, "cursor")["memory-os-ai"]  # E2
+    assert second != first and uninstall_plan(c, clients=("cursor",))["clients"][0]["ownership"] == "journal"
+    done = uninstaller().apply(uninstall_plan(c, clients=("cursor",)), c.settings, home=c.home, run=c.system)
+    assert done["clients"][0]["status"] == "removed"
+    set_entry(c.home, "cursor", first)  # E1 again, by hand
+    item, = uninstall_plan(c, clients=("cursor",))["clients"]
+    assert (item["action"], item["ownership"]) == ("keep-unproven", "unproven")
+    again = qs.preview(home=c.home, python=str(other), clients=("cursor",),
+                       env={"MEMORY_V4_URL": c.settings.url, "MEMORY_V4_TOKEN_FILE": str(c.settings.token_file),
+                            "MEMORY_V4_OPS_DIR": str(c.settings.ops_dir)})
+    assert again["clients"][0]["action"] == "refuse-existing-relay-unproven"
+    assert all(record.get("revoked") is True for record in journal_records(c, "cursor"))
+
+
+def test_a_toml_file_with_both_server_tables_is_ambiguous_never_a_proof_of_no_dependency(c):
+    """``[mcp.servers.memory-os-ai]`` next to ``[mcp_servers.*]``: which table Codex reads is not ours to guess."""
+    from setup_fixture_410 import write
+    installed(c, clients=("cursor",))
+    write(c.home, PATHS["codex"], '[mcp_servers.other]\ncommand = "x"\n\n[mcp.servers.memory-os-ai]\n'
+          'command = "memory-os-relay"\n[mcp.servers.memory-os-ai.env]\n'
+          f'MEMORY_V4_URL = "{c.settings.url}"\n')
+    plan = uninstall_plan(c)
+    by = {item["client"]: item for item in plan["clients"]}
+    assert (by["codex"]["action"], by["codex"]["dependency"]) == ("keep-ambiguous", "indeterminate")
+    assert plan["service"]["remaining_dependencies"] == {"codex": "indeterminate"}
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
+    assert any("codex" in step for step in result["next_steps"])
+
+
 def test_uninstall_is_idempotent(c):
     installed(c)
     uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)

@@ -497,9 +497,31 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
     return "json-merge"
 
 
+class EntryChanged(QuickstartError):
+    """The entry in place is no longer the one the caller was authorised to remove."""
+
+    def __init__(self, message: str = "The memory-os-ai entry changed; it is not removed"):
+        super().__init__(message, code="client_entry_changed")
+
+
+def _expect(entry, expected_sha256: str | None) -> None:
+    if expected_sha256 is not None and (not isinstance(entry, dict) or _entry_hash(entry) != expected_sha256):
+        raise EntryChanged()
+
+
 def removal_text(client: Client, home: Path, *, previous: dict | None = None,
-                 toml_appended: str | None = None) -> str | None:
-    """The file as it would be after OUR entry is removed (or ``previous`` put back); None for Claude Code.
+                 toml_appended: str | None = None, expected_sha256: str | None = None) -> str | None:
+    return _removal(client, home, previous=previous, toml_appended=toml_appended,
+                    expected_sha256=expected_sha256)[1]
+
+
+def _removal(client: Client, home: Path, *, previous: dict | None = None, toml_appended: str | None = None,
+             expected_sha256: str | None = None) -> tuple[str | None, str | None]:
+    """(text read, text to write): the file after OUR entry is removed (or ``previous`` put back).
+
+    ``expected_sha256``: digest of the entry the caller may remove. It is compared with the entry
+    found IN THE TEXT READ HERE, the very text the candidate is built from: an entry that changed
+    since the authorisation raises ``EntryChanged`` and nothing is written. Both are None for Claude Code.
 
     Computed and VALIDATED before anything is written or revoked; raises ``QuickstartError`` when
     the removal cannot be done without touching foreign content: JSON with duplicate keys, a TOML
@@ -512,7 +534,8 @@ def removal_text(client: Client, home: Path, *, previous: dict | None = None,
         if previous is not None and not relay_form(previous):
             raise QuickstartError("The previous Claude Code entry cannot be restored through the claude CLI; "
                                   "it is kept in the private backup of the journal: restore it by hand")
-        return None
+        _expect(read_entry(client, home)[1], expected_sha256)
+        return None, None
     text = _read(path)
     if client.fmt.endswith("toml"):
         # Only absent entries can be appended; remove their exact text or table spans,
@@ -537,42 +560,54 @@ def removal_text(client: Client, home: Path, *, previous: dict | None = None,
             servers = expected.get("mcp_servers")
             if not isinstance(servers, dict) or SERVER not in servers:
                 raise ValueError("entry not in the expected table")
+            _expect(servers[SERVER], expected_sha256)
             del servers[SERVER]
             after = tomllib.loads(candidate)
             if not servers and "mcp_servers" not in after:
                 del expected["mcp_servers"]
             if after != expected:
                 raise ValueError("removal would change foreign content")
+        except EntryChanged:
+            raise
         except (ValueError, TypeError):
             raise QuickstartError("TOML entry cannot be removed safely; edit the file by hand") from None
-        return candidate
+        return text, candidate
     if _json_has_duplicate_keys(text):
         raise QuickstartError("JSON config with duplicate keys; edit it by hand")
     data_cfg = json.loads(text or "{}")
     servers = data_cfg.setdefault(_json_key(client), {})
+    if not isinstance(servers, dict):
+        raise QuickstartError("Unexpected server table; edit the file by hand")
+    _expect(servers.get(SERVER), expected_sha256)
     if previous is None:
         servers.pop(SERVER, None)
     else:
         servers[SERVER] = previous
-    return _dump_json(data_cfg, text)
+    return text, _dump_json(data_cfg, text)
 
 
 def remove_client_entry(client: Client, home: Path, *, run=subprocess.run, previous: dict | None = None,
-                        toml_appended: str | None = None) -> None:
+                        toml_appended: str | None = None, expected_sha256: str | None = None) -> None:
     """Semantic removal of OUR entry (or return to ``previous``); everything else in the file is kept.
 
     Never a restore of the backup: what was written to the file since is preserved. JSON keeps
     its formatting; TOML loses exactly the text we appended when it is still there, else the
-    span of our two tables. The candidate is validated by ``removal_text`` before the write.
+    span of our two tables. The candidate is validated before the write, and the entry is
+    re-checked against ``expected_sha256`` on the bytes the write is built from (compare, then
+    write): an entry changed meanwhile, even during the revocation, raises ``EntryChanged``.
     """
-    candidate = removal_text(client, home, previous=previous, toml_appended=toml_appended)
+    original, candidate = _removal(client, home, previous=previous, toml_appended=toml_appended,
+                                   expected_sha256=expected_sha256)
     if client.fmt == "claude-user":
         if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
             raise QuickstartError("claude mcp remove failed; entry retained")
         if previous:
             _write_client(client, home, previous, run=run)
         return
-    _atomic_write(client.config_path(home), candidate)
+    path = client.config_path(home)
+    if _read(path) != original:  # last look before the replace: the file moved under us
+        raise EntryChanged("The client file changed while the removal was prepared; nothing written")
+    _atomic_write(path, candidate)
 
 
 def backup_client_file(path: Path, backup: Path) -> str:
@@ -650,6 +685,15 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
             rec["status"] = "conflict-file-changed-since-preview"
             persist()
             continue
+        if before is not None:
+            # A replace REMOVES the entry in place: the proof of that entry is consumed here, like by an
+            # undo or an uninstall, so the old entry re-created later by hand is never ours again.
+            try:
+                rec["revoked_journals"] = revoke_proofs(jdir.parent, client.key, _entry_hash(before), stamp)
+            except (OSError, ValueError, QuickstartError):
+                rec["status"] = "revocation-failed-entry-untouched"
+                persist()
+                continue
         try:
             rec["method"] = _write_client(client, home, want, run=run)
             state, after = read_entry(client, home)
@@ -840,7 +884,11 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
                 continue
         try:
             # Validated before anything is revoked or written: an unsafe removal leaves entry AND proof intact.
-            removal_text(client, home, previous=previous, toml_appended=rec.get("toml_appended"))
+            removal_text(client, home, previous=previous, toml_appended=rec.get("toml_appended"),
+                         expected_sha256=digest)
+        except EntryChanged:
+            out.append({"client": client.key, "undo": "refused-entry-changed-since-apply"})
+            continue
         except (OSError, ValueError, QuickstartError, RecursionError):
             out.append({"client": client.key, "undo": "refused-removal-manual"})
             continue
@@ -851,7 +899,12 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
             out.append({"client": client.key, "undo": "revocation-failed-entry-untouched"})
             continue
         try:
-            remove_client_entry(client, home, run=run, previous=previous, toml_appended=rec.get("toml_appended"))
+            remove_client_entry(client, home, run=run, previous=previous, toml_appended=rec.get("toml_appended"),
+                                expected_sha256=digest)
+        except EntryChanged:
+            # Changed DURING the revocation: it is someone else's entry now, and it is left alone.
+            out.append({"client": client.key, "undo": "refused-entry-changed-since-apply"})
+            continue
         except (OSError, ValueError, KeyError, QuickstartError, subprocess.SubprocessError):
             out.append({"client": client.key, "undo": "failed-entry-kept-unproven"})
             continue
