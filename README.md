@@ -97,7 +97,7 @@ Handoff check: in Claude, *"project acme-api: we decided to use Postgres 17 for 
 - Synthetic safety gates for the 4.0.7 engine: brief P-A 40/40 and integrity P-B 40/40 on frozen candidates;
   not user studies. P-B uses a hash encoder and simulated relay; cursor MACs are excluded, replay defaults use the
   candidate as oracle, query-forget ranking is not independently scored, and authenticity is conditional on the local
-  attested sources/runtime. RC evidence transfer and installed/copy qualification remain pending.
+  attested sources/runtime. At the 4.0.7 release, RC evidence transfer and installed/copy qualification of these gates were still pending.
 - No productivity gain is claimed: cross-assistant handoff has not been measured on users yet.
 - Local storage does not stop a cloud assistant from receiving the snippets it reads.
 - 4.0.4 / 4.0.5 fresh installs can resolve an incompatible MCP 2.x: use ≥ 4.0.6 (fully pinned dependencies).
@@ -109,7 +109,7 @@ policy, dated append-only history, compare-and-set on tasks and core blocks.
 
 ## Release notes
 
-**4.0.9**: the operator health report probes `/health` and `/ready` with a 15 s timeout (the `/ready` integrity audit takes several seconds on a large store) and reports explicit client corrections as information instead of pending reviews; more than 10 in 24 h raises an anomaly. Documentation states the published versions. No engine, brief, schema or encoder change. No measured user-productivity gain.
+**4.0.9**: the operator health report probes `/health` and `/ready` with a 15 s timeout (the `/ready` integrity audit takes several seconds on a large store) and reports explicit client corrections as information instead of pending reviews; more than 10 replaced targets in 24 h raise an anomaly. Documentation states the published versions. No engine, brief, schema or encoder change. No measured user-productivity gain.
 
 **4.0.8** (published on PyPI on 31 October 2026): declarative mutation authors, PEP 440 doctor support and bounded readiness audits. No schema or encoder change. No measured user-productivity gain.
 

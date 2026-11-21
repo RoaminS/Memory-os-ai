@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.0.9 — candidate à chaîne finale (2026-11-21), non publiée / non déployée
+## 4.0.9 — candidate à chaîne finale (2026-11-21) ; état à la préparation : non publiée / non déployée
 
 - Contenu fonctionnel = 4.0.9.dev1 (a745b40, rapport de santé) ; aucun changement moteur, brief, schéma ni encodeur.
   Le correctif brief 4.0.9.dev2 (branche fix/4.0.9-brief-focus) est EXCLU : il amende l'ordre scellé P-A et
@@ -10,6 +10,9 @@
   publiée sur PyPI le 31/10/2026 (fait vérifié sur PyPI le 21/11 ; la publication n'avait pas été consignée ici).
 - Le numéro 4.0.9 avait été préparé le 31/10 sur une autre arborescence (commit 06199a2, sources absentes de
   ce dépôt, suite complète en échec, ops/qualify_409_c1_chain.sh orphelin) : cette candidate-ci le remplace.
+- Précision sur l'entrée 4.0.9.dev1 ci-dessous : l'instantané unique et l'isolation d'une fiche corrompue concernent
+  la lecture des chaînes de corrections, pas le scan SQLite général du rapport ; le seuil de 10 compte des cibles
+  remplacées non acquittées (relecture Codex du 21/11).
 - Qualification installée, publication PyPI et bascule : à faire, sur décision de Romain.
 
 ## 4.0.9.dev1 — autonomie du rapport de santé, 2026-11-20, locale, non publiée
