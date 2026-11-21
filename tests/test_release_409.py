@@ -213,10 +213,12 @@ def _real_repo(tmp_path, new_bytes):
     init = tmp_path / INIT
     init.parent.mkdir(parents=True)
     init.write_bytes(subprocess.check_output(["git", "show", BASE + ":" + INIT], cwd=ROOT))
-    git("add", "-A"); git("commit", "-q", "-m", "base")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
     base = git("rev-parse", "HEAD")
     init.write_bytes(new_bytes)
-    git("add", "-A"); git("commit", "-q", "-m", "candidate")
+    git("add", "-A")
+    git("commit", "-q", "-m", "candidate")
     return base, git("rev-parse", "HEAD")
 
 
