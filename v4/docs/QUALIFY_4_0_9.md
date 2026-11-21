@@ -33,7 +33,7 @@ installés. release_ready=false jusqu'à la dernière preuve. Aucune erreur/skip
 admise ; test lent désélectionné par le harnais standard puis test sémantique
 cached séparé obligatoire.
 
-**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1/v2/v3_chain.sh`** (désactivés, non
+**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1/v2/v3/v4_chain.sh`** (désactivés, non
 validés) **ni
 `~/memory-os-local/ops/qualify_409_c1_chain.sh`** (orphelin du
 31/10, visait un autre commit, 06199a2). Seules les commandes ci-dessous valent.
@@ -65,11 +65,16 @@ harnais ne réduit aucune de ces formules. Ni saut, ni réutilisation d'un S4
 antérieur ; une erreur laisse release_ready=false. Swap≤8,5Go mesurable ;
 nice15, concurrence1. Au plus un job de cette chaîne actif.
 
-**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v4_chain.sh` :** pendant
-TOUTES les étapes, disque libre ≥ 5 Go et swap ≤ 8,5 Go (Go décimaux), mesurés toutes les 2 s ; sinon tout l'arbre de processus de l'étape
-(descendants suivis par point fixe, plus balayage des processus démarrés après la chaîne sous la branche ou sous
-`qual-envs/409-installed-claude-*`) est gelé puis arrêté, l'étape marquée en échec, sans relance automatique.
-Verrou commun `ops/logs/qualify_409.lock`, conservé tant qu'un processus survit. La copie ne démarre qu'avec ≥ 9,2 Go libres
+**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v5_chain.sh` :** pendant
+TOUTES les étapes, disque libre ≥ 5 Go et swap ≤ 8,5 Go (Go décimaux), mesurés toutes les 2 s ; sinon les processus dont la filiation avec l'étape
+est PROUVÉE (descendants suivis par point fixe, identité pid + heure de démarrage) sont gelés puis arrêtés, l'étape
+est marquée en échec, sans relance automatique. Un balayage de DÉTECTION (jamais de signal) repère les processus
+démarrés après la chaîne sous la branche ou sous `qual-envs/409-installed-claude-*` ; s'il en reste, le verrou
+commun `ops/logs/qualify_409.lock` est conservé et la liste affichée pour inspection humaine.
+**Garantie réduite, à accepter explicitement par Romain avant tout lancement :** sur macOS sans privilèges
+(environnement des processus illisible), un orphelin créé puis abandonné entre deux relevés n'est pas arrêté
+automatiquement ; il n'est que détecté s'il travaille sous ces chemins. Alternative à garantie complète : exécuter
+la chaîne sous un compte macOS dédié (tous ses processus lui appartiennent), à créer par Romain. La copie ne démarre qu'avec ≥ 9,2 Go libres
 (budget adaptive ≈4,1 Go + 5 Go). Les départs à 3,05–3,25 Go du tableau sont les gardes internes du harnais
 (MEMORY_V4_MIN_FREE_BYTES=3e9), un filet de sécurité, pas le seuil de la chaîne. Mesure de swap absente ou
 illisible : refus. Voir
@@ -225,7 +230,7 @@ ce qui aurait fait refuser `--record-relay-proof`). Ce script fait partie de l'i
 manifeste 4.0.8 se vérifie avec son outillage historique, jamais en réécrivant ses empreintes.
 
 **Attention : `--record-relay-proof` positionne déjà `release_ready=true`.** Seul compte le résultat de la
-vérification finale : la chaîne v4 écrit `CHAIN_RESULT=PASS` dans son dossier de logs uniquement après elle ; un
+vérification finale : la chaîne v5 écrit `CHAIN_RESULT=PASS` dans son dossier de logs uniquement après elle ; un
 arrêt ou un refus de cette dernière commande interdit toute publication même si `release_ready` vaut true. release_ready=true n'autorise ni publication PyPI ni bascule de
 production : chacune exige un GO distinct de Romain. La procédure de bascule
 (`SWITCH_4_0_8_SQLITE.md`) doit être adaptée/revue pour 4.0.9, jamais exécutée
