@@ -441,11 +441,45 @@ def test_real_store_uncheckpointed_wal_is_left_alone_by_uninstall(c):
 
 
 def test_real_lexical_store_helpers_work_today(c):
-    """Green today: the proof harness itself (real engine, no ML) writes, reopens and finds."""
-    import sys
+    """Green today: the proof harness itself (real engine) writes, reopens and finds."""
     keys = write_memories(c, 2)
     after = read_memories(c, keys)
     assert all(after["found"].values()) and after["instance_id"]
     assert (c.settings.store_dir / "store.sqlite3").is_file()
     assert os.environ["HOME"] != "/Users/romain"
-    assert not [name for name in ("torch", "faiss", "sentence_transformers") if name in sys.modules]
+
+
+NO_ML_CHILD = """
+import sys
+BLOCKED = ("torch", "faiss", "sentence_transformers", "transformers")
+class Block:
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in BLOCKED:
+            raise ImportError("blocked by the test: " + name)
+sys.meta_path.insert(0, Block())
+from memory_os_v4 import Config, MemoryV4
+store = sys.argv[1]
+with MemoryV4(config=Config.lexical(data_dir=store)) as engine:
+    assert engine.add_facts([{"text": "The kept decision is zebra4471."}], project="kept")["added"]
+with MemoryV4(config=Config.lexical(data_dir=store)) as engine:
+    found = [hit.item.text for hit in engine.search("zebra4471", top_k=5, project="kept")]
+    assert found == ["The kept decision is zebra4471."], found
+    assert engine.store.meta.get("store_instance_id")
+assert not [name for name in BLOCKED if name in sys.modules]
+print("ok")
+"""
+
+
+def test_real_lexical_store_harness_needs_no_ml_module(tmp_path):
+    """The same write / reopen / search as the helpers, in a FRESH interpreter where the ML modules
+    cannot be imported: independent of what earlier tests loaded into this process."""
+    import subprocess
+    import sys
+    source = Path(__file__).resolve().parents[1] / "src"
+    env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1",
+           "HOME": str(tmp_path / "home"), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+    (tmp_path / "home").mkdir()
+    done = subprocess.run([sys.executable, "-B", "-c", NO_ML_CHILD, str(tmp_path / "store")],
+                          capture_output=True, text=True, timeout=120, env=env)
+    assert done.returncode == 0 and done.stdout.strip() == "ok", done.stderr[-2000:]
+    assert (tmp_path / "store" / "store.sqlite3").is_file()

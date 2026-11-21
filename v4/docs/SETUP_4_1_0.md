@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (580 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (581 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 580 tests verts** (clients 183, cycle de vie 205, profil 62, reprise 45, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 51 d'écarts et de décisions ultérieures (§23). Le reste de
+**État après implémentation : 581 tests verts** (clients 183, cycle de vie 205, profil 62, reprise 46, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 52 d'écarts et de décisions ultérieures (§23). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1081,6 +1081,11 @@ Règles du contrat corrigées ou précisées pendant l'implémentation, avec leu
   `~/.local/state/memory-os/uninstall/<stamp>/`.
 - **Robustesse des aperçus** : fichier client de mode 000, entrée TOML portant une date, JSON trop
   profond, journal non fiable ou mal formé : refus ou ignoré, jamais une exception.
+
+- **Preuve « sans ML » du banc sur vrai store** : l'assertion sur `sys.modules` dans le processus de test dépendait
+  de l'ordre des tests (un test antérieur peut avoir chargé `torch`) ; elle est remplacée par
+  `test_real_lexical_store_harness_needs_no_ml_module`, qui rejoue écriture, réouverture et recherche dans un
+  interpréteur neuf où les modules ML sont bloqués.
 
 ### 23.3 Limites résiduelles
 
