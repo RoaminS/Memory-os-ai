@@ -246,7 +246,17 @@ include = ["memory_os_ai*", "memory_os_v4*"]
         from memory_os_v4.ops.qualified_runtime import check_requirements
         with zipfile.ZipFile(next(folder.glob('*.whl'))) as archive:
             metadata = BytesParser().parsebytes(archive.read(next(n for n in archive.namelist() if n.endswith('.dist-info/METADATA'))))
-            assert check_requirements(metadata.get_all('Requires-Dist'))['ok']
+            requires = metadata.get_all('Requires-Dist')
+            # 4.1.0: wheel METADATA carry bounds containing the qualified versions, per profile;
+            # no ML package is active without the [semantic] extra (exact locks: constraints files).
+            for profile in ('lexical', 'semantic'):
+                assert check_requirements(requires, profile=profile) == {'ok': True, 'mismatches': {}}, profile
+                assert check_requirements(requires, profile=profile, extras=('ops', 'brief'))['ok'], profile
+            assert 'semantic' in metadata.get_all('Provides-Extra')
+            from packaging.requirements import Requirement
+            unconditional = {Requirement(text).name for text in requires if Requirement(text).marker is None}
+            assert not {'torch', 'sentence-transformers', 'transformers', 'faiss-cpu'} & unconditional
+            assert 'numpy' in unconditional
 
 
 def test_no_extra_name_can_parse_as_pep440_version():
@@ -326,7 +336,17 @@ def test_doctor_explains_embedded_identity(monkeypatch, tmp_path):
 def test_extras_and_v3_failure_are_explicit(monkeypatch, capsys):
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert not any(name.startswith(("pymupdf", "pytesseract", "python-pptx", "python-docx", "Pillow", "requests")) for name in meta["dependencies"])
-    assert "sentence-transformers==5.2.3" in meta["dependencies"]
+    # 4.1.0: the ML closure left the core for the [semantic] extra, with a bound containing the
+    # qualified version; the exact lock ==5.2.3 is asserted on the semantic constraints file.
+    from packaging.requirements import Requirement
+    from memory_os_v4.ops import qualified_runtime
+    assert not any(Requirement(text).name == "sentence-transformers" for text in meta["dependencies"])
+    bounds = [Requirement(text) for text in meta["optional-dependencies"]["semantic"]
+              if Requirement(text).name == "sentence-transformers"]
+    assert len(bounds) == 1 and bounds[0].specifier.contains("5.2.3") and "==" not in str(bounds[0].specifier)
+    constraints = (qualified_runtime.PROFILE.parent / "qualified_runtime_constraints_v1.txt").read_text().splitlines()
+    assert "sentence-transformers==5.2.3" in constraints
+    assert qualified_runtime.check_constraints(constraints, profile="semantic", extras=("ops", "brief"))["ok"]
     assert "pymupdf>=1.24" in meta["optional-dependencies"]["documents"]
     monkeypatch.setattr(legacy_cli.importlib.util, "find_spec", lambda *a: None)
     assert legacy_cli.main() == 2

@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.1.0 — en développement (branche feature/4.1.0-lexical, 2026-11-21) ; non publiée / non déployée / non qualifiée
+
+- Profil de récupération explicite : `semantic` (défaut, moteur inchangé) ou `lexical` (politique `lex-4.1.0-v1`,
+  SQLite, aucun encodeur ni vecteur, aucun import ML). Sélection par `Config.lexical()` ou
+  `MEMORY_V4_RETRIEVAL_PROFILE=lexical`, jamais déduite des dépendances installées.
+- Marqueur `retrieval_profile` dans les métadonnées d'un store lexical ; sonde en lecture seule avant toute
+  ouverture mutante, refaite sous bail d'écriture. Refus : `store_profile_unverifiable`, `store_profile_mismatch`,
+  `store_profile_contaminated`. Aucune conversion implicite. Un store lexical n'a pas de retour arrière 4.0.x.
+- Un store existant dont le profil ne peut pas être lu (fichier illisible, métadonnées invalides, paire
+  `-wal`/`-shm` incomplète, fichier annexe orphelin) est désormais refusé aussi par le profil sémantique.
+- Empaquetage : fermeture ML dans l'extra `[semantic]` ; métadonnées à bornes compatibles ; verrous exacts dans
+  les contraintes par profil (`qualified_runtime_constraints_v1.txt`, `qualified_runtime_constraints_lexical_v1.txt`).
+  Ouvrir le profil sémantique sans la fermeture ML lève `semantic_dependency_missing`.
+- Runtime qualifié par profil ; états `qualified` / `missing_dependency` / `drift` ; capacités : encodeur
+  `absent_by_profile` en lexical.
+- `bench/evaluation_manifest.py` : mode `retrospective_no_selection` pour une mesure sur corpus déjà observé.
+- Inchangés : schéma SQLite 8, `embed.py`, cache d'embeddings, comportement du profil sémantique.
+- Non fait : preuve du wheel lexical installé, copie de store qualifiée, mesure H2, adaptation de `quickstart`,
+  `provision` et `doctor` au profil lexical. Contrat : `v4/docs/LEXICAL_PROFILE_4_1_0.md`.
+
 ## 4.0.9 — candidate à chaîne finale (2026-11-21) ; état à la préparation : non publiée / non déployée
 
 - Contenu fonctionnel = 4.0.9.dev1 (a745b40, rapport de santé) ; aucun changement moteur, brief, schéma ni encodeur.

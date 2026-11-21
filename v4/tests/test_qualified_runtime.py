@@ -199,12 +199,36 @@ def test_network_guard_refuses_invalid_override_before_resolution(tmp_path, monk
 
 
 def test_project_pins_match_shipped_qualified_profile():
+    """4.1.0 (contract LEXICAL_PROFILE_4_1_0 §8, §11.1): the exact == locks are checked on the
+    shipped constraints file; pyproject.toml carries bounds that must contain the qualified
+    versions, with the ML closure under the [semantic] extra."""
     project = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']
-    assert runtime.check_requirements(project['dependencies'])['ok']
+    optional = project['optional-dependencies']
+    extras = ('ops', 'brief')
+    # Exact == for every package of the qualified profile, and nothing outside it: unchanged rule.
+    constraints = [line for line in (runtime.PROFILE.parent / 'qualified_runtime_constraints_v1.txt')
+                   .read_text().splitlines() if line and not line.startswith('#')]
+    assert runtime.check_constraints(constraints, profile='semantic', extras=extras) == {
+        'ok': True, 'mismatches': {}}
+    assert sorted(constraints) == sorted(
+        name + '==' + version for name, version in runtime.expected_versions(extras=extras).items())
     assert runtime.catalog()['versions']['torch'] == '2.10.0'
     assert runtime.catalog()['versions']['sentence-transformers'] == '5.2.3'
-    assert runtime.check_requirements(project['dependencies'] + project['optional-dependencies']['ops'] +
-                                      project['optional-dependencies']['brief'], extras=('ops', 'brief'))['ok']
+    # Package metadata: bounds containing the qualified version, for the core alone and with extras.
+    semantic = project['dependencies'] + optional['semantic']
+    assert runtime.check_requirements(semantic)['ok']
+    assert runtime.check_requirements(semantic + optional['ops'] + optional['brief'], extras=extras)['ok']
+    # Without the [semantic] extra the semantic closure is incomplete, and says which packages.
+    bare = runtime.check_requirements(project['dependencies'] + optional['ops'] + optional['brief'],
+                                      extras=extras)
+    assert not bare['ok'] and {'torch', 'sentence-transformers', 'transformers', 'faiss-cpu'} <= set(
+        bare['mismatches'])
+    # A bound that excludes the qualified version is refused, package by package.
+    for name, version in runtime.expected_versions(extras=extras).items():
+        excluded = [text for text in semantic + optional['ops'] + optional['brief']
+                    if not text.startswith(name + '>=')] + [name + '>' + version]
+        proof = runtime.check_requirements(excluded, extras=extras)
+        assert not proof['ok'] and set(proof['mismatches']) == {name}, name
 
 
 def test_shipped_closure_and_constraints_match_ledger():

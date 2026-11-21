@@ -201,3 +201,28 @@ Le statut local reste annoncé même si le préchargement échoue ; un catalogue
 caché n'est pas une preuve de santé/authentification du serveur. Redémarrer la
 session cliente pour adopter de nouvelles définitions d'outils. Les écritures
 restent soumises aux contrôles habituels, sans rejeu automatique.
+
+## 4.1.0 (en développement) — profil lexical : avertissements d'exploitation
+
+Contrat : `LEXICAL_PROFILE_4_1_0.md`. Non publié, non qualifié ; `quickstart`, `provision` et `doctor` ne sont
+pas déclarés compatibles avec le profil lexical.
+
+- **Un store lexical n'a pas de retour arrière 4.0.x.** Une 4.0.x ouvre un store lexical sans avertir, encode
+  tout le corpus et écrit `embed_model`, `dim`, `embed_compute_profile` et sa version. La 4.1.0 refuse ensuite ce
+  store (`store_profile_contaminated`) dans les deux profils, sans le modifier ni le réparer : restaurer la
+  dernière sauvegarde 4.1.0. Revenir à une 4.0.x suppose de reprendre le store sémantique ou la sauvegarde
+  d'avant 4.1.0.
+- **Sauvegarde obligatoire** avant de créer un store lexical à côté d'un store existant.
+- **Aucune conversion** entre profils, dans aucun sens, et aucun outil de conversion : changer de profil = créer
+  un store neuf et y réécrire les sources par les API publiques.
+- Refus à l'ouverture (`ValueError` avec attribut `code`), toujours avant toute écriture :
+  `store_profile_mismatch` (store de l'autre profil ou marqueur invalide), `store_profile_contaminated`,
+  `store_profile_unverifiable` (profil illisible : fichier qui n'est pas une base, métadonnées invalides, paire
+  `-wal`/`-shm` incomplète, fichier annexe sans base ; ou store modifié pendant l'ouverture). Ce dernier refus
+  s'applique **aussi au profil sémantique**.
+- Création interrompue avant le marquage d'un store lexical : le fichier vide est sans marqueur, donc refusé par
+  le profil lexical. Vérifier qu'il est vide, supprimer ce dossier, recréer.
+- Installation : le cœur du paquet ne contient plus la fermeture ML. Profil sémantique :
+  `pip install -c qualified_runtime_constraints_v1.txt "memory-os-ai[semantic,ops,brief]"`. Sans l'extra
+  `[semantic]`, l'ouverture sémantique échoue avec `semantic_dependency_missing` ; il n'y a aucun repli
+  automatique vers le profil lexical.
