@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.0.9 — candidate à chaîne finale (2026-11-21), non publiée / non déployée
+
+- Contenu fonctionnel = 4.0.9.dev1 (a745b40, rapport de santé) ; aucun changement moteur, brief, schéma ni encodeur.
+  Le correctif brief 4.0.9.dev2 (branche fix/4.0.9-brief-focus) est EXCLU : il amende l'ordre scellé P-A et
+  reste expérimental.
+- Documentation : README (statut, commandes d'installation, boutons Cursor/VS Code, notes de version) et
+  docs/CLIENTS.md, server.json (registre MCP) et la note docs/releases/v4.0.9.md (embarquée) ne disent plus « candidate, not published » pour une version publiée ; 4.0.8 est notée
+  publiée sur PyPI le 31/10/2026 (fait vérifié sur PyPI le 21/11 ; la publication n'avait pas été consignée ici).
+- Le numéro 4.0.9 avait été préparé le 31/10 sur une autre arborescence (commit 06199a2, sources absentes de
+  ce dépôt, suite complète en échec, ops/qualify_409_c1_chain.sh orphelin) : cette candidate-ci le remplace.
+- Qualification installée, publication PyPI et bascule : à faire, sur décision de Romain.
+
 ## 4.0.9.dev1 — autonomie du rapport de santé, 2026-11-20, locale, non publiée
 
 - `ops/health.py` : sonde `/health` et `/ready` à 15 s (l'audit d'intégrité de `/ready` prend ~4,4 s ; l'ancien

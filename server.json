@@ -8,19 +8,19 @@
     "url": "https://github.com/romainsantoli-web/Memory-os-ai",
     "source": "github"
   },
-  "version": "4.0.8",
+  "version": "4.0.9",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "memory-os-ai",
-      "version": "4.0.8",
+      "version": "4.0.9",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "named",
           "name": "--from",
-          "value": "memory-os-ai[ops,brief]==4.0.8"
+          "value": "memory-os-ai[ops,brief]==4.0.9"
         },
         {
           "type": "positional",
@@ -56,7 +56,7 @@
         "command": "memory-os-relay",
         "requires_existing_shared_service": true,
         "consumer_argument_convention": "runtimeArguments before the consumer-appended package identifier; trailing identifier ignored by relay.main",
-        "manual_pinned_command": "uvx --from memory-os-ai[ops,brief]==4.0.8 memory-os-relay"
+        "manual_pinned_command": "uvx --from memory-os-ai[ops,brief]==4.0.9 memory-os-relay"
       },
       "public_source_status": "historical-repository-GitHub-frozen"
     }
