@@ -54,8 +54,11 @@ def snapshot(directory):
     return result
 
 
-def assert_unchanged(directory, before, *, volatile=()):
+def assert_unchanged(directory, before, *, volatile=(), leased=False):
+    """``leased``: the refusal came from probe 2, so the (empty) writer.lock may be the single new file."""
     after = snapshot(directory)
+    if leased and "writer.lock" not in before:
+        assert after.pop("writer.lock")[0] == b""
     assert sorted(after) == sorted(before)
     for name, (data, digest, mtime) in before.items():
         if name in volatile:
@@ -153,7 +156,8 @@ def test_semantic_store_with_a_live_wal_is_refused_without_touching_database_or_
         shutil.copytree(tmp_path / "live", hot)
     before = snapshot(hot)
     assert {"store.sqlite3", "store.sqlite3-wal", "store.sqlite3-shm"} <= set(before)
-    # A complete -wal/-shm pair is probed with mode=ro (no immutable): the verdict is exact.
+    # A complete -wal/-shm pair is never opened by probe 1; probe 2 reads it under the lease with
+    # mode=ro (no immutable): the verdict is exact.
     assert refused(lexical_config(hot)) == "store_profile_mismatch"
     # -shm is transient reader bookkeeping; the durable files may not change by one byte.
     assert_unchanged(hot, before, volatile=("store.sqlite3-shm",))
@@ -323,7 +327,9 @@ def test_marker_present_only_in_the_wal_is_seen_by_the_probe(tmp_path):
     assert refused(semantic_config(hot)) == "store_profile_mismatch"
     assert refused(Config(data_dir=str(hot), store_backend="sqlite_s1"), defer_retrieval=True) == (
         "store_profile_mismatch")
-    assert_unchanged(hot, before, volatile=("store.sqlite3-shm",))  # transient -shm excluded from the guarantee
+    # A -wal/-shm pair defers the decision to probe 2: writer.lock is the only file that may appear;
+    # the transient -shm bookkeeping of the reader is excluded from the guarantee.
+    assert_unchanged(hot, before, volatile=("store.sqlite3-shm",), leased=True)
     with MemoryV4(config=lexical_config(hot)) as engine:  # the right profile recovers the WAL and opens it
         assert engine.store.meta["retrieval_profile"] == MARKER
         assert engine.store.meta["store_instance_id"] == "f" * 32
@@ -562,3 +568,142 @@ def test_creation_interrupted_before_marking_leaves_an_unmarked_store_that_lexic
     assert refused(lexical_config(tmp_path)) == "store_profile_mismatch"
     assert_unchanged(tmp_path, before)
     WriterLock(tmp_path).close()  # the failed creation released its lease
+
+
+# ------------------------------- probe 1 never opens where a side file could be created
+def inventory(directory):
+    """name -> (inode, mtime_ns, size) of every entry: detects a created, replaced or rewritten file."""
+    return {entry.name: (entry.stat().st_ino, entry.stat().st_mtime_ns, entry.stat().st_size)
+            for entry in sorted(Path(directory).iterdir())}
+
+
+def record_connects(monkeypatch):
+    """Record the target of every sqlite3.connect while delegating to the real one."""
+    real, seen = sqlite3.connect, []
+
+    def recording(database, *args, **kwargs):
+        seen.append(str(database))
+        return real(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", recording)
+    return seen
+
+
+@pytest.mark.parametrize("stored", ["semantic", "lexical"])
+@pytest.mark.parametrize("requested", ["semantic", "lexical"])
+def test_last_writer_closing_inside_probe_one_creates_no_side_file(tmp_path, monkeypatch, stored, requested):
+    """The last writer closes (deleting -wal/-shm) exactly between probe 1's observation of the pair
+    and any open. A ``mode=ro`` open at that point would RECREATE the side files before refusing:
+    probe 1 must open nothing, and the decision must be the one of probe 2, under the lease."""
+    from memory_os_v4 import sqlite_store
+
+    configs = {"semantic": semantic_config, "lexical": lexical_config}
+    writer = MemoryV4(config=configs[stored](tmp_path))
+    writer.add_episodes_bulk([dict(spec) for spec in CORPUS])
+    side_files = {"store.sqlite3-wal", "store.sqlite3-shm"}
+    assert side_files <= set(inventory(tmp_path))  # live writer: the pair exists
+    state = {"probes": [], "in_probe_one": False}
+    real_lexists, real_probe = sqlite_store.os.path.lexists, sqlite_store.probe_retrieval_profile
+
+    def lexists(path):
+        found = real_lexists(path)
+        if state["in_probe_one"] and str(path).endswith("store.sqlite3-shm") and "closed" not in state:
+            assert found  # the probe has now observed the complete pair...
+            writer.close()  # ...and the last writer closes normally: -wal/-shm are deleted
+            state["closed"] = inventory(tmp_path)
+            assert not side_files & set(state["closed"])
+            state["connects_before"] = len(connects)
+        return found
+
+    def probe(*args, **kwargs):
+        first = not state["probes"]
+        state["in_probe_one"] = first
+        try:
+            finding = real_probe(*args, **kwargs)
+        finally:
+            state["in_probe_one"] = False
+        if first:
+            state["after_probe_one"] = inventory(tmp_path)
+            state["probe_one_connects"] = connects[state["connects_before"]:]
+        state["probes"].append(finding)
+        return finding
+
+    connects = record_connects(monkeypatch)
+    monkeypatch.setattr(sqlite_store.os.path, "lexists", lexists)
+    monkeypatch.setattr(sqlite_store, "probe_retrieval_profile", probe)
+    try:
+        engine = MemoryV4(config=configs[requested](tmp_path))
+    except ValueError as refusal:
+        outcome = getattr(refusal, "code", None)
+        assert inventory(tmp_path) == state["closed"]  # refused: nothing created, replaced or rewritten
+    else:
+        outcome = None
+        engine.close()
+    # No file was created, replaced or rewritten by probe 1 (directory listing, inode, mtime, size).
+    assert state["after_probe_one"] == state["closed"]
+    assert not side_files & set(state["after_probe_one"])
+    assert state["probe_one_connects"] == []  # the stale observation of a pair opens nothing
+    assert len(state["probes"]) == 2 and state["probes"][0].state == "deferred_to_lease"
+    # The final decision is exactly the one of probe 2, taken under the lease.
+    decision = sqlite_store.profile_refusal(state["probes"][1], requested)
+    assert state["probes"][1].state == "existing" and state["probes"][1].profile == stored
+    assert outcome == (decision[0] if decision else None) == (None if stored == requested else "store_profile_mismatch")
+
+
+def test_probe_one_never_connects_without_immutable(tmp_path, monkeypatch):
+    """Whatever the state of the directory, a probe without the lease opens SQLite with immutable=1 or not at all."""
+    from memory_os_v4.sqlite_store import probe_retrieval_profile
+
+    with MemoryV4(config=semantic_config(tmp_path / "live")) as engine:
+        engine.add_episodes_bulk([dict(spec) for spec in CORPUS])
+        shutil.copytree(tmp_path / "live", tmp_path / "pair")  # complete -wal/-shm pair
+    for kept in ("-wal", "-shm"):
+        shutil.copytree(tmp_path / "pair", tmp_path / f"only{kept}")
+        (tmp_path / f"only{kept}" / f"store.sqlite3{'-shm' if kept == '-wal' else '-wal'}").unlink()
+    (tmp_path / "orphan").mkdir()
+    (tmp_path / "orphan" / "store.sqlite3-wal").write_bytes(b"leftover" * 64)
+    lexical_store(tmp_path / "lexical")
+    expected = {"live": "existing", "lexical": "existing", "pair": "deferred_to_lease", "only-wal": "unverifiable",
+                "only-shm": "unverifiable", "orphan": "unverifiable", "absent": "new"}
+    connects = record_connects(monkeypatch)
+    for name, state in expected.items():
+        before = inventory(tmp_path / name) if (tmp_path / name).exists() else None
+        del connects[:]
+        assert probe_retrieval_profile(tmp_path / name).state == state, name
+        assert len(connects) == (1 if state == "existing" else 0), name
+        assert all("mode=ro&immutable=1" in uri for uri in connects), (name, connects)
+        assert (inventory(tmp_path / name) if (tmp_path / name).exists() else None) == before, name
+    # Through the engine: every connect made before the writer lease is immutable; the pair is read after it.
+    marks = {}
+    original = WriterLock.__init__
+
+    def leasing(self, data_dir):
+        marks.setdefault("before_lease", list(connects))
+        original(self, data_dir)
+
+    monkeypatch.setattr(WriterLock, "__init__", leasing)
+    for name in ("pair", "live"):
+        del connects[:]
+        marks.clear()
+        assert refused(lexical_config(tmp_path / name)) == "store_profile_mismatch"
+        assert all("mode=ro&immutable=1" in uri for uri in marks.get("before_lease", connects)), name
+        assert len(marks.get("before_lease", connects)) == (0 if name == "pair" else 1)
+    del connects[:]
+    assert refused(lexical_config(tmp_path / "pair")) == "store_profile_mismatch"
+    assert len(connects) == 1 and "mode=ro" in connects[0] and "immutable" not in connects[0]  # probe 2, leased
+
+
+def test_store_vanishing_after_a_deferred_probe_one_is_refused(tmp_path, monkeypatch):
+    """Probe 1 deferred (an existing store with its pair); under the lease there is no store any more."""
+    with MemoryV4(config=lexical_config(tmp_path / "live")) as engine:
+        engine.add_episodes_bulk([dict(spec) for spec in CORPUS])
+        hot = tmp_path / "hot"
+        shutil.copytree(tmp_path / "live", hot)
+
+    def vanish():
+        for name in ("store.sqlite3", "store.sqlite3-wal", "store.sqlite3-shm"):
+            (hot / name).unlink()
+
+    code, after_race = raced_open(monkeypatch, lexical_config(hot), vanish)
+    assert code == "store_profile_unverifiable"
+    assert_only_the_lease_file_may_be_new(hot, after_race)

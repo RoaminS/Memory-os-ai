@@ -189,14 +189,16 @@ La validation **ne précède pas tout accès disque** : l'ordre réel, conservé
 | 4 | politiques de maintenance et d'écriture | aucun |
 | 5 | profil sémantique : présence de la fermeture ML (§8) | `importlib.util.find_spec` : lecture des répertoires d'import, aucun import, aucune écriture. **Jamais exécutée en profil lexical** |
 | 6 | contrôle du backend, `validate_sqlite_target` | `resolve` et `stat` du dossier cible, de `items.jsonl`, `blocks.jsonl`, `requests.jsonl`, `meta.json`, `store.sqlite3` et de ses `-wal`/`-shm` |
-| 7 | **sonde n° 1** (§5.1) | lecture seule de `store.sqlite3` (et du WAL s'il existe) |
+| 7 | **sonde n° 1** (§5.1) | `stat` de `store.sqlite3` et de ses `-wal`/`-shm` ; lecture seule `immutable=1` de `store.sqlite3` **uniquement** si aucun des deux n'existe ; paire présente → aucune ouverture, décision reportée à l'étape 9 |
 | 8 | `data_dir.mkdir`, `WriterLock` | création éventuelle du dossier et de `writer.lock` |
-| 9 | **sonde n° 2 sous bail** (§5.1) | lecture seule |
+| 9 | **sonde n° 2 sous bail** (§5.1), qui fait autorité | lecture seule (`immutable=1` sans annexe, `mode=ro` avec la paire : WAL lu) |
 | 10 | `SQLiteStore(...)` puis premier `save_meta` | première étape mutante |
 
 Avant la sonde n° 1, rien n'est donc créé ni écrit ; le dossier du store n'est lu que par des
 `stat`. Les refus des étapes 3, 5, 7 et 9 sont des `ValueError` portant un attribut `code`
-stable ; un refus aux étapes 3 à 7 ne crée ni dossier ni fichier.
+stable ; un refus aux étapes 3 à 7 ne crée ni dossier ni fichier. Pour un store dont la paire
+`-wal`/`-shm` est présente à l'étape 7, le refus de profil est prononcé à l'étape 9 : le seul
+effet possible sur le système de fichiers avant ce refus est celui de `WriterLock` (§5.1).
 
 | `code` | Cas |
 |---|---|
@@ -252,12 +254,18 @@ Mécanique :
 - `store.sqlite3` absent et aucun fichier `-wal`/`-shm` → store neuf (aucune ouverture SQLite).
 - `store.sqlite3` absent mais `-wal` ou `-shm` présent → **indéterminable**.
 - ni `-wal` ni `-shm` → `sqlite3.connect("file:…?mode=ro&immutable=1", uri=True)` : aucune
-  écriture possible, aucun fichier créé. `immutable` est réservé à cet état stable sans WAL.
-- `-wal` **et** `-shm` présents (écrivain vivant, copie à chaud ou arrêt brutal) → `mode=ro`
-  sans `immutable`, même règle que `ops/sqlite_backup.readonly` : le contenu du WAL est lu (un
-  marqueur présent seulement dans le WAL est vu). Le fichier principal et le WAL ne changent
-  pas d'un octet ; **la modification transitoire de `-shm` par le lecteur est explicitement
-  exclue de la garantie d'immutabilité**.
+  écriture possible, aucun fichier créé (en mode `immutable`, SQLite ne crée aucune annexe et
+  ne pose aucun verrou). `immutable` est réservé à cet état sans WAL, dans les deux sondes.
+- `-wal` **et** `-shm` présents (écrivain vivant, copie à chaud ou arrêt brutal) : le contenu
+  du WAL doit être lu, donc par `mode=ro` sans `immutable` (même règle que
+  `ops/sqlite_backup.readonly` ; un marqueur présent seulement dans le WAL est vu). Or une
+  ouverture `mode=ro` d'une base WAL dont les annexes viennent d'être supprimées par la
+  fermeture normale du dernier écrivain les **recrée** si le dossier est inscriptible. Cette
+  ouverture n'est donc faite **que sous bail d'écriture** (sonde n° 2), où aucun moteur
+  écrivain ne peut fermer concurremment : la paire est stable. Sans bail (sonde n° 1) :
+  **aucune ouverture**, constat `deferred_to_lease` (ni refus ni accord). Sous bail, le fichier
+  principal et le WAL ne changent pas d'un octet ; **la modification transitoire de `-shm` par
+  le lecteur est explicitement exclue de la garantie d'immutabilité**.
 - un seul des deux présent → **indéterminable** (aucune ouverture, aucun fichier touché).
 - erreur SQLite à l'ouverture ou à la lecture (pas une base, E/S, verrou), ou ligne `metadata`
   présente dont la valeur n'est pas un objet JSON → **indéterminable**.
@@ -271,8 +279,27 @@ profil : il pourrait ouvrir en écriture un store lexical non identifié. Pour u
 profil est déterminé comme sémantique, le chemin historique et ses propres refus (schéma
 inconnu, sommes de migration) restent inchangés.
 
-**Sonde n° 1**, avant `data_dir.mkdir` et `WriterLock` (étape 7 du §4.1). Un refus ne crée ni
-dossier, ni `writer.lock`, ni `-wal`/`-shm`, et ne prend aucun bail.
+**Sonde n° 1**, avant `data_dir.mkdir` et `WriterLock` (étape 7 du §4.1). Elle n'appelle
+jamais `sqlite3.connect` sans `immutable=1` : elle ne peut donc **créer aucune annexe**, quelle
+que soit la concurrence. Trois issues :
+
+- aucune annexe → ouverture `immutable=1`, constat complet ; un refus ne crée ni dossier, ni
+  `writer.lock`, ni `-wal`/`-shm`, et ne prend aucun bail ;
+- paire incomplète ou annexe orpheline → `store_profile_unverifiable` sur la seule foi des
+  `stat`, sans aucune ouverture, mêmes garanties ;
+- paire complète → **`deferred_to_lease`** : rien n'est ouvert, rien n'est refusé ; la décision
+  est prise par la sonde n° 2.
+
+Les `stat` et l'ouverture ne sont pas atomiques ; les deux courses possibles sont sans effet
+sur le disque :
+
+- le dernier écrivain ferme (annexes supprimées) juste après l'observation de la paire : la
+  sonde n° 1 n'ouvre rien (constat périmé `deferred_to_lease`), la sonde n° 2 voit l'état réel ;
+- un écrivain apparaît entre les `stat` et l'ouverture `immutable=1` : la sonde n° 1 peut
+  seulement lire un fichier principal périmé (ou obtenir une erreur de lecture →
+  `store_profile_unverifiable`, sans effet) ; elle ne crée ni ne modifie rien. Un constat
+  périmé accepté à tort est rattrapé par la sonde n° 2, qui fait autorité ; un refus prononcé
+  sur un constat périmé est sûr (rien n'a été touché, réessayer).
 
 **Sonde n° 2, complète, sous bail d'écriture et AVANT la construction de `SQLiteStore`**
 (étape 9). Le constructeur n'est pas un point de contrôle acceptable : il active le WAL, migre
@@ -281,20 +308,44 @@ qu'on puisse relire quoi que ce soit. La sonde n° 2 refait toutes les lectures,
 
 1. si son constat appelle à lui seul un refus (indéterminable, marqueur invalide, contaminé,
    autre profil), ce refus est levé avec son code ;
-2. sinon il est comparé à celui de la sonde n° 1 sur l'état (neuf/existant), le marqueur, le
-   verdict de contamination — une contamination conserve le marqueur, le marqueur seul ne
-   suffit donc pas —, `store_instance_id`, `application_id` et `user_version` ; tout écart →
-   `store_profile_unverifiable` (le store a changé pendant l'ouverture ; réessayer).
+2. sinon, si la sonde n° 1 avait rendu un constat complet, il lui est comparé sur l'état
+   (neuf/existant), le marqueur, le verdict de contamination — une contamination conserve le
+   marqueur, le marqueur seul ne suffit donc pas —, `store_instance_id`, `application_id` et
+   `user_version` ; tout écart → `store_profile_unverifiable` (le store a changé pendant
+   l'ouverture ; réessayer) ;
+3. si la sonde n° 1 était `deferred_to_lease`, il n'y a rien à comparer : **le constat de la
+   sonde n° 2 décide seul**. Seule exigence héritée de la sonde n° 1 : elle avait vu un
+   `store.sqlite3` existant ; un constat « neuf » sous bail (le fichier a disparu) →
+   `store_profile_unverifiable`, rien n'est créé à sa place.
+
+Sous bail, la sonde n° 2 applique la même mécanique de `stat` : sans annexe `immutable=1`,
+paire complète `mode=ro`, paire incomplète ou orpheline → indéterminable sans ouverture.
 
 Le bail exclut tout autre moteur écrivain ; la sonde n° 2 fait donc autorité contre une course
-entre deux processus `MemoryV4`. Les outils qui écrivent sans bail (restauration, copie
-manuelle) restent hors de cette garantie, comme aujourd'hui.
+entre deux processus `MemoryV4`, y compris la fermeture du dernier écrivain. **Hors contrat** :
+tout écrivain qui ne prend pas le bail (`sqlite3` en ligne de commande, restauration, copie
+manuelle). S'il ferme la base entre les `stat` et l'ouverture `mode=ro` de la sonde n° 2, des
+annexes peuvent être recréées ; le bail est la seule protection et il a été violé.
 
-**Garantie distincte pour `writer.lock` lors d'une course.** Refus à la sonde n° 1 : rien n'est
-créé, pas même `writer.lock`. Refus à la sonde n° 2 : le dossier (s'il n'existait pas) et
-`writer.lock` peuvent avoir été créés par la prise de bail — ce sont les **seuls** éléments
-nouveaux ; le bail est relâché avant de lever ; `store.sqlite3` et ses `-wal`/`-shm` ne sont ni
-créés ni modifiés (à l'exception `-shm` ci-dessus quand la paire existait).
+**Conséquence pour un écrivain vivant.** Un moteur ouvert tient le bail et sa paire
+`-wal`/`-shm` existe : une seconde ouverture concurrente reçoit `deferred_to_lease` à la
+sonde n° 1, puis le refus habituel de `WriterLock` (`WriterConflictError`, « already has an
+active writer ») — et non plus un code de profil —, sans avoir ouvert SQLite.
+
+**Ce que fait `WriterLock`** (`writer_lock.py`, inchangé) : `open("a+b")` de
+`<dossier>/writer.lock` — le fichier est créé vide (0 octet) s'il n'existait pas ; s'il existe
+il n'est ni écrit, ni tronqué, ni daté (POSIX) — puis `flock(LOCK_EX | LOCK_NB)`. Le fichier
+n'est jamais supprimé, y compris au relâchement. `data_dir.mkdir` ne crée le dossier que s'il
+n'existait pas (impossible après un `deferred_to_lease`, qui suppose `store.sqlite3` présent).
+
+**Garantie, énoncée précisément.** Refus à la sonde n° 1 (store sans annexe, ou paire
+incomplète/orpheline) : rien n'est créé, pas même `writer.lock`. Refus à la sonde n° 2 — c'est
+**toujours** le cas d'un store dont la paire `-wal`/`-shm` était présente à la sonde n° 1, et
+celui d'une course entre les sondes — : le seul effet possible sur le système de fichiers
+avant le refus est celui de `WriterLock` ci-dessus (création d'un `writer.lock` vide s'il
+manquait, et du dossier s'il n'existait pas) ; le bail est relâché avant de lever ;
+`store.sqlite3` et ses `-wal`/`-shm` ne sont ni créés ni modifiés (à l'exception `-shm`
+ci-dessus quand la paire existait sous bail). Aucune des deux sondes ne crée d'annexe.
 
 **Création interrompue avant marquage.** Entre la création du fichier par `SQLiteStore` et le
 premier `save_meta`, un arrêt laisse un fichier au schéma 8, sans ligne `metadata` et sans
@@ -317,6 +368,7 @@ et une migration JSONL produit un store sans marqueur, donc sémantique.
 | Marqueur exact + traces sémantiques | `store_profile_contaminated` | `store_profile_contaminated` |
 | Profil indéterminable (fichier illisible, métadonnées non objet, paire `-wal`/`-shm` incomplète, fichier annexe orphelin) | `store_profile_unverifiable` | `store_profile_unverifiable` |
 | Store changé entre les deux sondes | code du nouveau constat, sinon `store_profile_unverifiable` | idem |
+| Paire `-wal`/`-shm` complète à la sonde n° 1 | décision de la sonde n° 2 seule, après le bail (lignes ci-dessus) | idem |
 
 ### 5.3 Aucune conversion implicite
 
@@ -778,3 +830,10 @@ Lectures confirmées par ce verdict, appliquées telles quelles : la priorité d
 motifs de refus du **store** (les validations de configuration et de dépendances restent
 antérieures) ; à la seconde sonde, le code de son propre refus prévaut, sinon un constat
 différent produit `store_profile_unverifiable`.
+
+## 16. Amendement du verdict Codex sur l'implémentation v1 (21/11)
+
+| # | Défaut | Correction | Où |
+|---|---|---|---|
+| 1 | Course dans la sonde : `stat` des annexes puis ouverture `mode=ro` ; si le dernier écrivain fermait entre les deux, la sonde n° 1 pouvait recréer `-wal`/`-shm` avant de refuser | La sonde n° 1 n'ouvre jamais sans `immutable=1` ; paire présente → `deferred_to_lease`, décision par la sonde n° 2 sous bail ; garantie reformulée (seul effet avant refus : `WriterLock`) ; écrivains sans bail hors contrat | §4.1, §5.1, §5.2, `test_lexical_store_guard.py` (fermeture du dernier écrivain entre observation et ouverture ; aucune connexion sans `immutable=1` hors bail) |
+

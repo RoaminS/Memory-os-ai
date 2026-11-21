@@ -173,7 +173,8 @@ class MemoryV4:
         elif (self.data_dir / "store.sqlite3").exists():
             raise ValueError("SQLite store present: explicit backend selection required; "
                              "no implicit downgrade")
-        # Probe 1: read-only, before the directory, the writer lease or any mutating open.
+        # Probe 1: read-only, before the directory, the writer lease or any mutating open. It never
+        # opens SQLite where a side file could be created (a -wal/-shm pair defers to probe 2).
         probed = self._probe_store_profile() if self.config.store_backend == "sqlite_s1" else None
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,9 +189,13 @@ class MemoryV4:
                 from .sqlite_engine import SQLiteBlocks, SQLiteRequests
                 # Probe 2, complete, under the writer lease and BEFORE the constructor (which
                 # already enables WAL, migrates and initializes the change journal).
-                if self._probe_store_profile() != probed:
+                # Authoritative: its own refusal prevails. A probe 1 deferred to the lease (-wal/-shm
+                # pair present, nothing opened) saw an existing store and nothing else.
+                leased = self._probe_store_profile(under_lease=True)
+                if (leased.state != "existing") if probed.state == "deferred_to_lease" else (leased != probed):
                     raise ProfileError("store_profile_unverifiable",
                                        "The store changed while it was being opened; nothing was modified, retry")
+                probed = leased
                 self.store = SQLiteStore(self.data_dir)
                 self.requests = SQLiteRequests(self.store)
                 self.blocks = SQLiteBlocks(self.store, self.config.block_char_limit)
@@ -273,11 +278,11 @@ class MemoryV4:
                 self._writer_finalizer()
             raise
 
-    def _probe_store_profile(self):
+    def _probe_store_profile(self, *, under_lease=False):
         """Read-only profile probe; raises the store refusal of the requested profile, if any."""
         from .sqlite_store import probe_retrieval_profile, profile_refusal
 
-        finding = probe_retrieval_profile(self.data_dir)
+        finding = probe_retrieval_profile(self.data_dir, under_lease=under_lease)
         refusal = profile_refusal(finding, self.config.retrieval_profile)
         if refusal is not None:
             raise ProfileError(*refusal)

@@ -168,7 +168,7 @@ def lexical_version_ok(version) -> bool:
 @dataclass(frozen=True)
 class ProfileFinding:
     """What one read-only probe saw. Two probes of an unchanged store compare equal."""
-    state: str  # "new" | "existing" | "unverifiable"
+    state: str  # "new" | "existing" | "unverifiable" | "deferred_to_lease" (probe 1 only)
     reason: str | None = None  # why the profile cannot be determined
     has_marker: bool = False
     marker: object = None
@@ -193,12 +193,16 @@ class ProfileFinding:
         return PROFILE_LEXICAL if self.has_marker else PROFILE_SEMANTIC
 
 
-def probe_retrieval_profile(data_dir) -> ProfileFinding:
+def probe_retrieval_profile(data_dir, *, under_lease: bool = False) -> ProfileFinding:
     """Read the retrieval profile of ``data_dir`` without creating or modifying any file.
 
-    No -wal/-shm: ``mode=ro&immutable=1``. Complete -wal/-shm pair: ``mode=ro`` so that the WAL
-    content is read (only the transient -shm bookkeeping of a reader may change). Anything
-    else that prevents a certain answer is reported as ``unverifiable`` and never opened.
+    No -wal/-shm: ``mode=ro&immutable=1`` (SQLite creates no side file in immutable mode).
+    Incomplete pair or orphaned side file: ``unverifiable`` from ``stat`` alone, never opened.
+    Complete -wal/-shm pair: the WAL must be read with ``mode=ro``, and a ``mode=ro`` open of a
+    WAL database whose side files have just been deleted by the last writer closing RECREATES
+    them. That open is therefore only made ``under_lease`` (probe 2: no engine writer can close
+    concurrently, the pair is stable; only the transient -shm bookkeeping of a reader may
+    change). Without the lease (probe 1) nothing is opened: ``deferred_to_lease``.
     """
     database = Path(data_dir).expanduser().resolve() / "store.sqlite3"
     has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
@@ -210,6 +214,8 @@ def probe_retrieval_profile(data_dir) -> ProfileFinding:
         return ProfileFinding("unverifiable", "incomplete -wal/-shm pair")
     if database.is_symlink() or not database.is_file():
         return ProfileFinding("unverifiable", "store.sqlite3 is not a regular file")
+    if has_wal and not under_lease:
+        return ProfileFinding("deferred_to_lease")
     uri = "file:" + quote(str(database)) + ("?mode=ro" if has_wal else "?mode=ro&immutable=1")
     try:
         connection = sqlite3.connect(uri, uri=True, timeout=5)
@@ -261,8 +267,8 @@ def profile_refusal(finding: ProfileFinding, requested: str) -> tuple[str, str] 
         return ("store_profile_unverifiable",
                 f"The retrieval profile of this existing store cannot be determined ({finding.reason}); "
                 "it is not opened in any profile")
-    if finding.state == "new":
-        return None
+    if finding.state in ("new", "deferred_to_lease"):
+        return None  # deferred: probe 1 opened nothing, probe 2 under the lease decides alone
     if finding.has_marker and not finding.marker_valid:
         return ("store_profile_mismatch",
                 "The store carries an unknown or invalid retrieval_profile marker; it is never interpreted")
