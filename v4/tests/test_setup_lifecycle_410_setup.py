@@ -513,6 +513,74 @@ def test_the_proof_is_revoked_before_the_entry_is_removed(c, monkeypatch):
     assert uninstall_plan(c, clients=("cursor",))["clients"][0]["action"] == "keep-unproven"
 
 
+def test_every_matching_journal_is_revoked_and_nothing_else_is_touched(c):
+    """Three journals prove the same Cursor entry (ours, a copy of ours, a 4.0.9 one); a fourth does not."""
+    import shutil
+    result = installed(c, clients=("cursor", "vscode"))
+    root = c.home / STATE / "quickstart"
+    entry = servers(c.home, "cursor")["memory-os-ai"]
+    ours = root / result["stamp"]
+    twin = root / ("20261101-101010-" + "b" * 32)
+    shutil.copytree(ours, twin)
+    for path in twin.iterdir():
+        path.chmod(0o600)
+    twin.chmod(0o700)
+
+    def legacy(stamp, applied):
+        directory = root / stamp
+        directory.mkdir(mode=0o700)
+        journal = directory / "journal.json"
+        journal.write_text(json.dumps({"version": 1, "stamp": stamp, "records": [{
+            "client": "cursor", "path": str(c.home / PATHS["cursor"]), "action": "create", "status": "applied",
+            "previous_entry": None, "applied_entry": applied, "method": "json-merge"}]}))
+        journal.chmod(0o600)
+        return journal
+    old_format = legacy("20261001-120000-" + "a" * 32, entry)
+    unrelated = legacy("20260901-120000-" + "c" * 32, {**entry, "command": "/some/other/venv/bin/python"})
+    unrelated_bytes = unrelated.read_bytes()
+    vscode_before = [record for record in json.loads((ours / "journal.json").read_text())["records"]
+                     if record["client"] == "vscode"]
+
+    done = uninstaller().apply(uninstall_plan(c, clients=("cursor",)), c.settings, home=c.home, run=c.system)
+    for journal in (ours / "journal.json", twin / "journal.json", old_format):
+        records = [r for r in json.loads(journal.read_text())["records"] if r["client"] == "cursor"]
+        assert records and all(r["revoked"] is True and r["revoked_by"] == done["stamp"] for r in records)
+        assert journal.stat().st_mode & 0o777 == 0o600 and journal.parent.stat().st_mode & 0o777 == 0o700
+        assert journal.stat().st_nlink == 1
+    assert unrelated.read_bytes() == unrelated_bytes  # another digest: not a proof of this entry, not rewritten
+    assert [record for record in json.loads((ours / "journal.json").read_text())["records"]
+            if record["client"] == "vscode"] == vscode_before
+    assert done["clients"][0]["revoked_journals"] == 3
+    set_entry(c.home, "cursor", entry)
+    assert uninstall_plan(c, clients=("cursor",))["clients"][0]["action"] == "keep-unproven"
+
+
+def test_a_failed_revocation_leaves_the_client_untouched_and_the_result_partial(c, monkeypatch):
+    installed(c, clients=("cursor", "vscode"))
+    plan = uninstall_plan(c, clients=("cursor", "vscode"))
+    config = (c.home / PATHS["cursor"]).read_bytes()
+    journals = {path: path.read_bytes() for path in (c.home / STATE / "quickstart").glob("*/journal.json")}
+    real = qs._atomic_write
+
+    def failing(path, text):
+        if Path(path).name == "journal.json" and any(
+                record["client"] == "cursor" and record.get("revoked") for record in json.loads(text)["records"]):
+            raise OSError("read-only file system")
+        return real(path, text)
+    monkeypatch.setattr(qs, "_atomic_write", failing)
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    statuses = {item["client"]: item["status"] for item in result["clients"]}
+    assert statuses == {"cursor": "revocation-failed-entry-untouched", "vscode": "removed"}
+    assert (c.home / PATHS["cursor"]).read_bytes() == config  # no write to the client file
+    assert result["ok"] is False and result["partial"] is True and result["code"] == "uninstall_partial"
+    assert result["service"]["outcome"] == "kept-clients-incomplete" and "bootout" not in c.system.verbs()
+    monkeypatch.setattr(qs, "_atomic_write", real)
+    cursor_records = [r for path in journals for r in json.loads(path.read_text())["records"] if r["client"] == "cursor"]
+    assert cursor_records and not any(r.get("revoked") for r in cursor_records)  # the proof is intact
+    again = uninstall_plan(c, clients=("cursor",))
+    assert (again["clients"][0]["action"], again["clients"][0]["ownership"]) == ("remove", "journal")
+
+
 def test_undo_revokes_the_proof_too(c):
     result = installed(c, clients=("cursor", "vscode"))
     entry = servers(c.home, "cursor")["memory-os-ai"]
@@ -527,21 +595,49 @@ def test_undo_revokes_the_proof_too(c):
 DEFAULT_URL = "http://127.0.0.1:8765/mcp/"  # the relay's default; the fake machine never opens it
 README_UVX = {"command": "uvx", "args": ["--python", "3.11", "--no-python-downloads", "--from",
                                          "memory-os-ai[ops,brief]==4.1.0", "memory-os-relay"]}
-DEPENDENTS = {  # entry, dependency on the service of a default-URL installation
-    "readme-uvx-no-environment": (README_UVX, "wired"),
-    "console-script-no-environment": ({"command": "memory-os-relay"}, "wired"),
-    "module-relay-no-environment": ({"command": "/x/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"]}, "wired"),
-    "console-script-explicit-same-url": ({"command": "memory-os-relay", "env": {"MEMORY_V4_URL": DEFAULT_URL}}, "wired"),
+MODULE_RELAY = {"command": "/x/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"]}
+
+
+def with_url(entry, url):
+    return {**entry, "env": {"MEMORY_V4_URL": url}}
+
+
+# entry -> dependency on a service listening on DEFAULT_URL.
+# ``none`` only where the entry ITSELF positively establishes another destination.
+DEPENDENTS = {
+    # wired: the entry names our service explicitly
+    "console-script-explicit-same-url": (with_url({"command": "memory-os-relay"}, DEFAULT_URL), "wired"),
+    "module-relay-explicit-same-url": (with_url(MODULE_RELAY, DEFAULT_URL), "wired"),
+    "uvx-explicit-same-url": (with_url(README_UVX, DEFAULT_URL), "wired"),
     "direct-http-same-url": ({"type": "http", "url": DEFAULT_URL}, "wired"),
     "direct-http-no-trailing-slash": ({"serverUrl": "http://127.0.0.1:8765/mcp"}, "wired"),
     "direct-http-localhost-name": ({"httpUrl": "http://localhost:8765/mcp/"}, "wired"),
+    # indeterminate: the effective environment of the client process is not established by its config
+    "readme-uvx-no-environment": (README_UVX, "indeterminate"),
+    "console-script-no-environment": ({"command": "memory-os-relay"}, "indeterminate"),
+    "module-relay-no-environment": (MODULE_RELAY, "indeterminate"),
+    "module-relay-token-file-only": ({**MODULE_RELAY, "env": {"MEMORY_V4_TOKEN_FILE": "/t"}}, "indeterminate"),
+    "variable-in-url": (with_url({"command": "memory-os-relay"}, "${MEMORY_URL}"), "indeterminate"),
+    "url-not-a-string": ({**MODULE_RELAY, "env": {"MEMORY_V4_URL": 8765}}, "indeterminate"),
+    # indeterminate: the command decides by itself where it connects
     "shell-wrapper": ({"command": "/bin/sh", "args": ["-c", "exec python -m memory_os_v4.ops.relay"]}, "indeterminate"),
+    "shell-wrapper-with-explicit-other-url": (with_url({"command": "/bin/sh", "args": [
+        "-c", "MEMORY_V4_URL=http://127.0.0.1:8765/mcp/ exec python -m memory_os_v4.ops.relay"]},
+        "http://127.0.0.1:9999/mcp/"), "indeterminate"),
     "foreign-program": ({"command": "/opt/proxy", "args": ["--upstream", "memory_os_v4.ops.relay"]}, "indeterminate"),
-    "variable-in-url": ({"command": "memory-os-relay", "env": {"MEMORY_V4_URL": "${MEMORY_URL}"}}, "indeterminate"),
-    "console-script-other-port": ({"command": "memory-os-relay", "env": {"MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/"}}, "none"),
+    "opaque-command": ({"command": "/opt/bin/mon-relais"}, "indeterminate"),
+    "opaque-command-with-other-url": (with_url({"command": "/opt/bin/mon-relais"}, "http://127.0.0.1:9999/mcp/"),
+                                      "indeterminate"),
+    "class-other": (EXISTING["other"], "indeterminate"),
+    "legacy-v3-inside-a-wrapper": ({"command": "/bin/sh", "args": ["-c", "python -m memory_os_ai.server"]}, "indeterminate"),
+    "http-and-command-mixed": ({"command": "/opt/x", "url": "http://127.0.0.1:9999/mcp/"}, "indeterminate"),
+    # none: another destination is positively established by the entry itself
+    "console-script-explicit-other-port": (with_url({"command": "memory-os-relay"}, "http://127.0.0.1:9999/mcp/"), "none"),
+    "module-relay-explicit-other-port": (with_url(MODULE_RELAY, "http://127.0.0.1:9999/mcp/"), "none"),
+    "module-relay-explicit-other-host": (with_url(MODULE_RELAY, "http://10.0.0.5:8765/mcp/"), "none"),
     "direct-http-other-port": ({"type": "http", "url": "http://127.0.0.1:9999/mcp/"}, "none"),
     "direct-http-other-host": ({"type": "http", "url": "https://example.com:8765/mcp/"}, "none"),
-    "legacy-v3": (EXISTING["legacy-v3"], "none"),
+    "legacy-v3-exact-module": (EXISTING["legacy-v3"], "none"),
 }
 
 
@@ -553,7 +649,7 @@ def default_url_install(c, clients=("cursor",)):
 
 
 @pytest.mark.parametrize("case", sorted(DEPENDENTS))
-def test_service_dependency_of_an_entry_is_resolved_with_the_relay_defaults(c, case):
+def test_service_dependency_is_none_only_when_another_destination_is_established(c, case):
     from dataclasses import replace
     entry, expected = DEPENDENTS[case]
     settings = replace(c.settings, url=DEFAULT_URL)
@@ -581,14 +677,44 @@ def test_uninstall_keeps_the_service_for_an_entry_that_depends_or_may_depend_on_
         assert any("antigravity" in step for step in result["next_steps"])
 
 
-def test_implicit_defaults_do_not_wire_an_entry_to_a_service_on_another_port(c):
-    """Our service is on port 43219 here: the default-URL relay entries point elsewhere, the resolution is real."""
+@pytest.mark.parametrize("entry", [README_UVX, {"command": "memory-os-relay"}, MODULE_RELAY])
+@pytest.mark.parametrize("tool_env", ["unset", "our-url", "another-url"])
+def test_inherited_environment_is_never_assumed_for_a_relay_without_an_explicit_url(c, monkeypatch, entry, tool_env):
+    """Service on port 43219, relay default 8765: the client may have been launched with
+    ``MEMORY_V4_URL`` pointing here and pass it on without repeating it in its config. Neither the
+    default nor the environment of the uninstall command establishes what that process sees."""
+    if tool_env == "unset":
+        monkeypatch.delenv("MEMORY_V4_URL", raising=False)
+    else:
+        monkeypatch.setenv("MEMORY_V4_URL", c.settings.url if tool_env == "our-url" else "http://127.0.0.1:9999/mcp/")
+    assert c.settings.url != DEFAULT_URL
+    assert uninstaller().service_dependency(entry, c.settings, home=c.home) == "indeterminate"
+
+
+def test_uninstall_keeps_the_service_for_a_relay_that_may_inherit_its_destination(c, monkeypatch):
+    monkeypatch.setenv("MEMORY_V4_URL", "http://127.0.0.1:9999/mcp/")  # the tool's own environment proves nothing
     installed(c, clients=("cursor",))
     set_entry(c.home, "antigravity", README_UVX)
-    assert uninstaller().service_dependency(README_UVX, c.settings, home=c.home) == "none"
     result = uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)
-    assert result["service"]["outcome"] == "stopped-and-plist-moved"
-    assert servers(c.home, "antigravity")["memory-os-ai"] == README_UVX
+    assert result["service"]["outcome"] == "kept-clients-remaining"
+    assert result["service"]["remaining_dependencies"] == {"antigravity": "indeterminate"}
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+    assert servers(c.home, "antigravity")["memory-os-ai"] == README_UVX and "memory-os-ai" not in servers(c.home, "cursor")
+
+
+def test_uninstall_keeps_the_service_for_an_opaque_command(c):
+    """``/opt/bin/mon-relais`` shows no marker; nothing proves it does not call our relay."""
+    installed(c, clients=("cursor",))
+    opaque = {"command": "/opt/bin/mon-relais"}
+    set_entry(c.home, "antigravity", opaque)
+    plan = uninstall_plan(c)
+    by = {item["client"]: item for item in plan["clients"]}
+    assert (by["antigravity"]["action"], by["antigravity"]["dependency"]) == ("keep-foreign", "indeterminate")
+    assert plan["service"]["action"] == "keep-clients-remaining"
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
+    assert any("antigravity" in step for step in result["next_steps"])
+    assert servers(c.home, "antigravity")["memory-os-ai"] == opaque
 
 
 def test_strict_ownership_still_excludes_the_console_script_that_counts_as_a_dependency(c):
@@ -597,7 +723,11 @@ def test_strict_ownership_still_excludes_the_console_script_that_counts_as_a_dep
     by = {item["client"]: item for item in uninstall_plan(c)["clients"]}
     assert qs.relay_form(README_UVX) is False
     assert (by["antigravity"]["action"], by["antigravity"]["ownership"]) == ("keep-unproven", "unproven")
-    assert by["antigravity"]["dependency"] == "wired"
+    assert by["antigravity"]["dependency"] == "indeterminate"
+    explicit = with_url(README_UVX, DEFAULT_URL)
+    set_entry(c.home, "antigravity", explicit)
+    by = {item["client"]: item for item in uninstall_plan(c)["clients"]}
+    assert qs.relay_form(explicit) is False and by["antigravity"]["dependency"] == "wired"
 
 
 def test_an_entry_exactly_equal_to_ours_is_unchanged_whatever_its_history(c):
