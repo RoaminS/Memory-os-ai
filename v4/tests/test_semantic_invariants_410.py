@@ -1,4 +1,4 @@
-"""4.1.0 non-regression guards for the semantic profile (contract §5, G1a).
+"""4.1.0 non-regression guards for the semantic profile (contract §6, G1a).
 
 These tests pass on base 83ddead and must keep passing unchanged while the
 lexical profile is implemented: embed.py stays byte-identical, schema 8 and
@@ -247,3 +247,61 @@ def test_explicit_request_replay_is_idempotent_and_conflicts_are_refused(tmp_pat
         with pytest.raises(RequestConflictError):
             engine.execute_request("memory_add_facts", "p", {"facts": 2}, "request-1", action)
         assert len(calls) == 1 and len(engine.store.items) == items
+
+
+# ---- Complements requested by the contract review (scope of the guards above is limited:
+# the adoption cases only exercise `_legacy_profile`, re-encoding uses the hash encoder, and
+# test_sqlite_cache_release.py remains the reference for adoption/atomicity). Green on 83ddead.
+def _nan_row(connection, key):
+    blob = np.full(16, np.nan, dtype="<f4").tobytes()
+    connection.execute("UPDATE embedding_cache SET vector=?, vector_sha256=? WHERE cache_key=?",
+                       (blob, hashlib.sha256(blob).hexdigest(), key))
+
+
+@pytest.mark.parametrize("corrupt", [
+    lambda connection, key: connection.execute(
+        "UPDATE embedding_cache SET vector_sha256=? WHERE cache_key=?", ("0" * 64, key)),
+    _nan_row,
+    lambda connection, key: connection.execute("UPDATE embedding_cache SET dim=8 WHERE cache_key=?", (key,)),
+], ids=["checksum_mismatch", "non_finite_values", "wrong_dimension"])
+def test_each_cache_corruption_kind_reencodes_only_the_faulty_row(tmp_path, monkeypatch, corrupt):
+    config = _semantic_config(tmp_path)
+    with MemoryV4(config=config) as engine:
+        engine.add_episodes_bulk([dict(spec) for spec in CORPUS])
+        rows = _cache_rows(engine)
+        exported = _vectors(engine)
+        corrupt(engine.store._connection, rows[1][0])
+    encoded = []
+    original = HashEmbedder.encode
+
+    def counted(self, texts):
+        encoded.append(len(texts))
+        return original(self, texts)
+
+    monkeypatch.setattr(HashEmbedder, "encode", counted)
+    with MemoryV4(config=config) as engine:
+        assert encoded == [1]
+        assert _cache_rows(engine) == rows and _vectors(engine) == exported
+
+
+def test_request_replay_is_idempotent_across_a_reopen(tmp_path):
+    config = _semantic_config(tmp_path)
+    calls = []
+
+    def run(engine):
+        def action():
+            calls.append(1)
+            return engine.add_facts([{"text": "Bruno Keller prefers green tea."}], project="p")
+        return engine.execute_request("memory_add_facts", "p", {"facts": 1}, "request-1", action)
+
+    with MemoryV4(config=config) as engine:
+        first = run(engine)
+        items, cache = len(engine.store.items), _cache_rows(engine)
+    with MemoryV4(config=config) as engine:  # another engine instance, same durable receipt
+        count = "SELECT count(*) FROM request_receipts"
+        receipts = engine.store._connection.execute(count).fetchone()[0]
+        assert run(engine) == first and len(calls) == 1
+        assert len(engine.store.items) == items and _cache_rows(engine) == cache
+        assert engine.store._connection.execute(count).fetchone()[0] == receipts  # the replay wrote nothing
+        with pytest.raises(RequestConflictError):
+            engine.execute_request("memory_add_facts", "p", {"facts": 2}, "request-1", lambda: {})

@@ -1,10 +1,13 @@
 # Profil lexical 4.1.0 — contrat (phase 1a-cœur, étapes 1 à 3)
 
-Statut : **contrat écrit avant tout code moteur**, à relire par Codex. Base `83ddead`
+Statut : **contrat v2, écrit avant tout code moteur**. La v1 (`7bb9a89`) a reçu le verdict Codex
+« VALIDÉ AVEC AMENDEMENTS » du 21/11 (`codex_verdict_contract_410_v1.md`) ; cette v2 intègre
+chaque amendement et consigne les dix arbitrages (§14). Base `83ddead`
 (`release/4.0.9-hygiene`, non qualifiée), branche `feature/4.1.0-lexical`. Plan de référence :
-`PLAN_STRATEGIQUE_OEM_v3_1.md` §4 ; verdict Codex v2 du 21/11. Ce document ne modifie aucun
-fichier sous `v4/src/` ni `src/`. Aucun banc n'a été exécuté pour l'écrire. Plateforme visée :
-macOS ARM64, CPython 3.11. Chemins moteur relatifs à `v4/src/memory_os_v4/`.
+`PLAN_STRATEGIQUE_OEM_v3_1.md` §4. Ce document ne modifie aucun fichier sous `v4/src/` ni
+`src/`. Aucun banc n'a été exécuté pour l'écrire ; les sorties de référence du §3 ont été
+produites en exécutant le moteur **non modifié** de `83ddead` sur un corpus de test. Plateforme
+visée : macOS ARM64, CPython 3.11. Chemins moteur relatifs à `v4/src/memory_os_v4/`.
 
 ## 1. Faits de code constatés sur `83ddead`
 
@@ -39,6 +42,26 @@ macOS ARM64, CPython 3.11. Chemins moteur relatifs à `v4/src/memory_os_v4/`.
   `resources/qualified_runtime_v1.json`, exactement `==version` dans les exigences du paquet.
   `pyproject.toml` épingle aujourd'hui toute la fermeture (ML comprise) en `==` dans
   `dependencies`.
+- `MemoryV4.__init__` appelle `ProjectRegistry.load(config.project_registry)` (`memory.py:126`)
+  **avant** `validate_lexical_policy()` : si un registre est configuré, son fichier est ouvert en
+  lecture (`O_RDONLY|O_NOFOLLOW|O_NONBLOCK`), `fstat`, lecture d'au plus 1 Mio + 1 octet.
+- `SQLiteStore.save_meta` (`sqlite_store.py:330`) réécrit **tout** le document JSON à chaque
+  appel ; `_flush_sql_sources` l'appelle à chaque mutation avec `version` = version du paquet.
+- Garde C4 (`retrieval.py:829-836`) : les ancres sont triées **après** la pénalité ×0,5 des items
+  invalidés. Plancher adaptatif de demi-vie (`retrieval.py:761`, `_corpus_span_days`) : étendue
+  temporelle de **tous** les items non supprimés du store, tous projets confondus.
+- Canal `entity` (`retrieval.py:695,701`, `entities.py:137`) : `EntityIndex.search` calcule
+  `df/n`, le seuil de 10 % et son top-N sur **tout** le store ; le filtre projet/type/validité
+  n'est appliqué qu'ensuite.
+- `consolidate.py` : `dedup_sweep` (égalité de texte normalisé, `:24`) et `supersede_sweep`
+  (`replacement_sweep`, `:52`) sont **déterministes et non vectoriels** ; ils reçoivent
+  `vector_index` sans l'utiliser. Seul `summary_proposals` (regroupement par cosinus) lit les
+  vecteurs.
+- `get_context` (`memory.py:1046`) passe à `mmr` les vecteurs des items trouvés : en profil
+  sémantique, même avec `use_dense=False`, le contexte est diversifié par les vecteurs.
+- `text.py::lexical_tokens` (`:72`) : sous `scoped_literal`, `use_stemming` n'est pas lu.
+- `bench/evaluation_manifest.py` (`:33,169,181`) exige des partitions `dev` et `test` non vides
+  et `selection_rule == "dev_only_then_freeze"`.
 - `readiness.py::engine_readiness` compare `vector_index.ids()` aux items vivants et renvoie
   `model_not_loaded` sans encodeur ; `capabilities.py::deployed` publie un bloc `encoding` ;
   `ops/quickstart.py::_ready()` exige le runtime d'encodage qualifié et la révision Granite du
@@ -56,20 +79,32 @@ macOS ARM64, CPython 3.11. Chemins moteur relatifs à `v4/src/memory_os_v4/`.
 
 Règles :
 
-1. Le marqueur est écrit **une seule fois**, à la création d'un store lexical neuf (fichier
-   `store.sqlite3` absent), dans la même écriture que `store_instance_id`. Il n'est jamais
-   réécrit, retiré ni modifié ensuite.
+1. **Valeur immuable, pas écriture unique.** La valeur du champ est fixée à la création d'un
+   store lexical neuf (fichier `store.sqlite3` absent) : le premier `SQLiteStore.save_meta` écrit
+   ensemble, dans un seul document, exactement `retrieval_profile`, `store_instance_id` et
+   `version` (= version du paquet). Ensuite chaque `save_meta` réécrit physiquement tout le
+   document JSON (c'est son fonctionnement) : la garantie porte sur la **valeur**, qu'aucun
+   chemin 4.1.0 ne modifie, ne retire ni ne remplace, et non sur le nombre d'écritures.
 2. **Absence du champ = store sémantique.** Un store sémantique, neuf ou historique, ne reçoit
-   jamais de marqueur : le chemin sémantique reste identique à l'octet près dans ses métadonnées.
+   jamais de marqueur : le chemin sémantique reste identique à l'octet près dans ses métadonnées
+   (y compris l'absence de `version` avant la première mutation).
 3. Champ présent mais différent de la valeur exacte (autre politique, forme invalide, `null`) :
    refusé par les deux profils, jamais interprété.
 4. Le profil lexical exige `store_backend="sqlite_s1"`. JSONL + lexical est refusé à la
    validation de configuration.
+5. Un store lexical propre porte toujours une `version` de la forme `X.Y.Z` ≥ `4.1.0` (§5.4).
+   Toute version de paquet qui écrit un store lexical est donc une version finale `X.Y.Z`, sans
+   suffixe.
 
 ## 3. Politique de classement `lex-4.1.0-v1`
 
 Définition normative : **le classement 4.0.9 du chemin `use_dense=False` aux valeurs par défaut,
-sans aucun travail vectoriel.** Le test de parité compare les deux sur un même corpus.
+sans aucun travail vectoriel.** La référence n'est pas un second chemin du futur code : ce sont
+les **sorties du moteur `83ddead` non modifié**, figées en données littérales
+(`v4/tests/lexical_frozen_83ddead.py`, identiques sous `PYTHONHASHSEED` 0, 1 et 4242, horloge
+de recherche fixée). `test_lexical_reference_410.py` prouve que le moteur de base les reproduit ;
+`test_lexical_profile.py` exige que le profil lexical les reproduise. Régénérer ces données
+depuis un commit ultérieur est interdit : un écart est un changement de politique.
 
 - **Canaux** : `bm25` profil `scoped_literal` (mots Unicode littéraux de `item.text`,
   statistiques et top-N restreints au périmètre projet/type/validité *avant* sélection) et
@@ -80,12 +115,25 @@ sans aucun travail vectoriel.** Le test de parité compare les deux sur un même
   repli sur le rang pour un signal à scores tous égaux ; `candidates=100`,
   `n = max(candidates, top_k)`.
 - **Récence et importance** : `final = fusion × (0.7 + 0.3 × récence) × (0.8 + 0.4 × importance)`,
-  pénalité ×0,5 pour un item invalidé hors `at_time` valide. La formule est figée ; ses
-  paramètres (`use_recency`, `recency_only_with_at_time`, demi-vies) restent des réglages
-  d'opérateur, comme aujourd'hui.
-- **Garde C4** : `lexical_guard_k=3`. Les 3 meilleures correspondances BM25 strictement positives
-  (ordre `(-bm25, id)`) sont replacées en tête après toute autre étape ; le score public vaut
-  `1/rang`.
+  puis ×0,5 pour un item invalidé (`invalidated_by` renseigné), sauf si `at_time` est fourni et
+  que l'item était valide à cette date. La formule est figée ; ses paramètres restent des
+  réglages d'opérateur, avec trois régimes exacts :
+  1. `use_recency=False` : récence = 1 ;
+  2. défaut (`use_recency=True`, `recency_only_with_at_time=False`) : demi-vie du type d'item,
+     âge mesuré à `at_time` s'il est fourni, sinon à l'horloge ;
+  3. `recency_only_with_at_time=True` : sans `at_time`, récence = 1 ; avec `at_time`,
+     demi-vie = `max(demi-vie du type, 0,25 × étendue)` où l'étendue est
+     `max(event_time) − min(event_time)` sur **tous les items non supprimés du store, tous
+     projets et tous types confondus** (valeur mise en cache tant que le nombre d'items ne
+     change pas). Un item d'un autre projet peut donc modifier la récence — jamais le contenu —
+     des résultats d'un projet (`test_adaptive_half_life_floor_uses_the_global_time_span`).
+- **Garde C4** : `lexical_guard_k=3`. Les scores BM25 bruts du périmètre sont d'abord multipliés
+  par 0,5 pour les items invalidés (même exception `at_time` que ci-dessus) ; les ancres sont les
+  `min(3, top_k)` items de score **pénalisé** strictement positif, triés `(-score pénalisé, id)`.
+  Elles sont replacées en tête après toute autre étape, le reste suit dans l'ordre de fusion ;
+  le score public vaut `1/rang` et `signals["bm25"]` conserve le rang et le score **non
+  pénalisés**. Un item invalidé peut ainsi être le premier rang BM25 et la troisième ancre
+  (`test_c4_anchors_are_sorted_after_the_invalidated_penalty`).
 - **Égalités** : ordre total `(-score, item.id)` partout (candidats, ancres, RRF). Aucune
   dépendance à `PYTHONHASHSEED` ni à l'ordre d'insertion.
 - **Expansions** : aucune (`neighbor_expansion`, `entity_expansion`, `full_candidate_scoring`,
@@ -93,35 +141,73 @@ sans aucun travail vectoriel.** Le test de parité compare les deux sur un même
 - **Multi-requêtes** : `search_multi` inchangé — une recherche par chaîne avec `top_k × 4`,
   RRF pondéré `k = multi_query_rrf_k = 20`, poids requête 1,0 / `queries` 1,0 / `hypotheses` 0,7,
   ordre `(-score_rrf, id)`.
-- **Contexte et brief** : `get_context` appelle `mmr` avec un dictionnaire de vecteurs vide ; la
-  diversité vaut 0 et l'ordre est celui de la pertinence (comportement actuel de `mmr`).
-  `session_brief` n'utilise aucun vecteur.
-- **Déterminisme** : pour un même contenu de store, une même requête et un même `at_time`, la
-  liste `(id, score)` est identique d'un appel, d'une réouverture et d'un processus à l'autre.
-  Sans `at_time`, la récence dépend de l'horloge ; le score public (`1/rang`) n'en dépend pas
-  tant que l'ordre ne change pas.
-- **Traçabilité** : chaque résultat porte `signals["ranking_policy"] = "lex-4.1.0-v1"`.
-- **Limite connue, conservée** : les statistiques du canal `entity` (`df/n`, seuil 10 %) sont
-  calculées sur tout le store, pas par projet ; seuls les candidats sont filtrés. Aucun contenu
-  ne traverse les projets, mais un poids d'entité peut dépendre d'un autre projet.
+- **Contexte et brief** : `get_context` appelle `mmr` avec un dictionnaire de vecteurs **vide** ;
+  la diversité vaut 0 et l'ordre est celui de la pertinence. Ce contexte **n'est pas** celui du
+  profil sémantique, qui diversifie avec les vecteurs stockés : la parité est testée contre MMR
+  à vecteurs vides (données figées `context_empty_mmr`), et le contexte sémantique fait l'objet
+  d'une assertion distincte (`context_semantic`). `session_brief` n'utilise aucun vecteur.
+- **Déterminisme** : pour un même contenu de store, une même configuration effective, une même
+  requête et une même horloge (ou un même `at_time`), la liste `(id, score)` et les signaux sont
+  identiques d'un appel, d'une réouverture et d'un processus à l'autre, quel que soit
+  `PYTHONHASHSEED` (`test_ranking_is_identical_across_processes_and_hash_seeds`). Sans `at_time`
+  en régime 2, la récence dépend de l'horloge ; le score public (`1/rang`) n'en dépend pas tant
+  que l'ordre ne change pas.
+- **Traçabilité** : chaque résultat porte `signals["ranking_policy"] = "lex-4.1.0-v1"`. Toute
+  comparaison ou mesure enregistre la **configuration effective** (récence, demi-vies,
+  `recency_only_with_at_time`, `index_keywords`) à côté de la politique.
+- **Limites connues, conservées en v1** (canal `entity`, global au store) :
+  1. *statistiques* : `df/n` et le seuil de 10 % sont calculés sur tout le store ; un document
+     d'un autre projet peut activer ou éteindre le poids d'une entité
+     (`test_entity_threshold_depends_on_other_projects`) ;
+  2. *compétition top-N avant filtrage* : `EntityIndex.search` retient les 100 meilleurs
+     candidats du store entier, puis seulement le filtre de projet s'applique ; à scores égaux
+     (ordre par id), 100 items d'autres projets peuvent évincer du canal `entity` un item du
+     projet interrogé, qui reste trouvé par BM25
+     (`test_entity_top_100_is_saturated_by_other_projects_before_filtering`).
+  Aucun contenu ne traverse les projets ; seuls des poids, donc l'ordre de la queue, peuvent
+  dépendre d'un autre projet. Ce que le périmètre garantit, et ce que les tests affirment, se
+  limite aux rangs et scores BM25 bruts et aux ancres C4. L'isolation des statistiques et des
+  candidats d'entités relève d'une politique `v2`.
 
 Tout changement de cette section crée une nouvelle version de politique (`lex-…-v2`) et un
 nouveau contrat ; un store marqué `v1` n'est pas rouvert sous `v2` sans procédure explicite.
 
 ## 4. Sélection, validation et options incompatibles
 
-`validate_lexical_policy()` est déjà appelée en tête de `MemoryV4.__init__`, avant tout accès
-disque : la validation de profil s'y ajoute. Les refus sont des `ValueError` portant un
-attribut `code` stable.
+### 4.1 Ordre exact dans `MemoryV4.__init__`, et ce qui est touché avant la sonde
+
+La validation **ne précède pas tout accès disque** : l'ordre réel, conservé, est le suivant.
+
+| # | Étape | Accès disque |
+|---|---|---|
+| 1 | `Config.from_env()` si aucune configuration n'est passée | aucun (environnement) |
+| 2 | `ProjectRegistry.load` | si un registre est configuré : ouverture en lecture seule, `fstat`, lecture ≤ 1 Mio + 1 octet de **ce fichier** ; rien n'est créé ni écrit ; une erreur de registre est levée avant la validation de profil (ordre inchangé) |
+| 3 | `validate_lexical_policy()` + validation de profil | aucun |
+| 4 | politiques de maintenance et d'écriture | aucun |
+| 5 | profil sémantique : présence de la fermeture ML (§8) | `importlib.util.find_spec` : lecture des répertoires d'import, aucun import, aucune écriture. **Jamais exécutée en profil lexical** |
+| 6 | contrôle du backend, `validate_sqlite_target` | `resolve` et `stat` du dossier cible, de `items.jsonl`, `blocks.jsonl`, `requests.jsonl`, `meta.json`, `store.sqlite3` et de ses `-wal`/`-shm` |
+| 7 | **sonde n° 1** (§5.1) | lecture seule de `store.sqlite3` (et du WAL s'il existe) |
+| 8 | `data_dir.mkdir`, `WriterLock` | création éventuelle du dossier et de `writer.lock` |
+| 9 | **sonde n° 2 sous bail** (§5.1) | lecture seule |
+| 10 | `SQLiteStore(...)` puis premier `save_meta` | première étape mutante |
+
+Avant la sonde n° 1, rien n'est donc créé ni écrit ; le dossier du store n'est lu que par des
+`stat`. Les refus des étapes 3, 5, 7 et 9 sont des `ValueError` portant un attribut `code`
+stable ; un refus aux étapes 3 à 7 ne crée ni dossier ni fichier.
 
 | `code` | Cas |
 |---|---|
 | `profile_unknown` | `retrieval_profile` hors `{"semantic", "lexical"}` |
 | `profile_option_conflict` | option incompatible avec `lex-4.1.0-v1` (ci-dessous) |
-| `store_profile_mismatch` | store de l'autre profil, sans marqueur, ou marqueur invalide |
-| `store_profile_contaminated` | marqueur lexical valide mais traces sémantiques (§5.4) |
-| `store_profile_unverifiable` | sonde impossible sans écrire (un seul de `-wal`/`-shm`, fichier illisible) |
 | `semantic_dependency_missing` | profil sémantique demandé, fermeture ML non installée (§8) |
+| `store_profile_unverifiable` | fichier existant dont le profil est indéterminable, ou store changé entre les deux sondes (§5.1) — **dans les deux profils** |
+| `store_profile_mismatch` | marqueur invalide, ou store de l'autre profil |
+| `store_profile_contaminated` | marqueur lexical valide mais traces sémantiques (§5.4) |
+
+Priorité quand plusieurs cas s'appliquent : `store_profile_unverifiable`, puis marqueur
+invalide (`store_profile_mismatch`), puis contamination, puis comparaison au profil demandé.
+
+### 4.2 Options
 
 En profil lexical, doivent valoir exactement :
 
@@ -135,43 +221,83 @@ En profil lexical, doivent valoir exactement :
   `full_candidate_scoring`, `dense_norm`, `neighbor_expansion`, `entity_expansion`,
   `temporal_query_mode`, `facet_channel`, `w_dense`.
 
+`use_stemming` est **inerte** sous `scoped_literal` (`text.py:72`) : son gel à `True` est une
+convention d'identité de configuration, pas un réglage de classement.
+
 Restent libres : `data_dir`, `project_registry`, `maintenance_mode`, `write_mode`, `work_state`,
-`block_char_limit`, `episode_ttl_days`, récence et demi-vies.
+`block_char_limit`, `episode_ttl_days`, `use_recency`, `recency_only_with_at_time` et les
+demi-vies. Ces options libres changent des scores : elles font partie de la configuration
+effective à enregistrer (§3).
 
 `Config.from_env()` : avec `MEMORY_V4_RETRIEVAL_PROFILE=lexical`, le défaut de `use_dense`
 devient `False` si `MEMORY_V4_USE_DENSE` est absent (même mécanisme que `guard_default`
 aujourd'hui) ; une variable explicite contradictoire (`MEMORY_V4_USE_DENSE=1`,
 `MEMORY_V4_EMBED_MODEL`, `MEMORY_V4_RERANK_MODEL`, …) est refusée à la validation.
-`Config(use_dense=False)` seul reste le profil sémantique actuel.
+`Config(use_dense=False)` seul reste le profil sémantique actuel. Le profil n'est **jamais**
+déduit des dépendances installées (§8).
 
 ## 5. Refus avant toute ouverture mutante
 
-### 5.1 Emplacement de la sonde
+### 5.1 La sonde, exécutée deux fois
 
-Fonction en lecture seule dans `sqlite_store.py` (nom proposé `probe_retrieval_profile`),
-appelée par `MemoryV4.__init__` **après** la validation de configuration et
-`validate_sqlite_target()` (qui ne fait que des `stat`), **avant** `data_dir.mkdir`,
-`WriterLock` et `SQLiteStore(...)`. Un refus ne crée donc ni dossier, ni `writer.lock`, ni
-`-wal`/`-shm`, et ne prend aucun bail d'écriture.
+Fonction en lecture seule dans `sqlite_store.py` (nom proposé `probe_retrieval_profile`). Elle
+renvoie un constat : `état` (neuf / existant), marqueur lu, verdict de contamination,
+`store_instance_id`, `application_id`, `user_version`.
 
 Mécanique :
 
-- `store.sqlite3` absent → store neuf (aucune ouverture SQLite).
+- `store.sqlite3` absent et aucun fichier `-wal`/`-shm` → store neuf (aucune ouverture SQLite).
+- `store.sqlite3` absent mais `-wal` ou `-shm` présent → **indéterminable**.
 - ni `-wal` ni `-shm` → `sqlite3.connect("file:…?mode=ro&immutable=1", uri=True)` : aucune
-  écriture possible, aucun fichier créé.
-- `-wal` et `-shm` présents (écrivain vivant ou arrêt brutal) → `mode=ro` sans `immutable`, même
-  règle que `ops/sqlite_backup.readonly` : le fichier principal et le WAL ne changent pas ; seul
-  `-shm` (mémoire partagée transitoire) peut être touché par le lecteur.
-- un seul des deux présent, ou erreur SQLite → `store_profile_unverifiable` en lexical.
+  écriture possible, aucun fichier créé. `immutable` est réservé à cet état stable sans WAL.
+- `-wal` **et** `-shm` présents (écrivain vivant, copie à chaud ou arrêt brutal) → `mode=ro`
+  sans `immutable`, même règle que `ops/sqlite_backup.readonly` : le contenu du WAL est lu (un
+  marqueur présent seulement dans le WAL est vu). Le fichier principal et le WAL ne changent
+  pas d'un octet ; **la modification transitoire de `-shm` par le lecteur est explicitement
+  exclue de la garantie d'immutabilité**.
+- un seul des deux présent → **indéterminable** (aucune ouverture, aucun fichier touché).
+- erreur SQLite à l'ouverture ou à la lecture (pas une base, E/S, verrou), ou ligne `metadata`
+  présente dont la valeur n'est pas un objet JSON → **indéterminable**.
 - Lectures : `PRAGMA application_id`, `PRAGMA user_version`, le document `metadata`,
-  l'existence d'au moins une ligne `embedding_cache`.
+  l'existence d'au moins une ligne `embedding_cache`. Table `store_metadata` ou ligne `metadata`
+  absente (schéma ancien, fichier créé mais jamais marqué) = pas de marqueur = sémantique.
 
-En profil **sémantique**, la sonde ne sert qu'à refuser un store marqué ; si elle ne peut pas
-conclure, la main passe au chemin historique, qui applique ses propres refus, inchangés.
+**Indéterminable → `store_profile_unverifiable` dans les DEUX profils.** Le chemin sémantique
+historique n'est plus autorisé à ouvrir un fichier existant dont la sonde n'a pas pu lire le
+profil : il pourrait ouvrir en écriture un store lexical non identifié. Pour un store dont le
+profil est déterminé comme sémantique, le chemin historique et ses propres refus (schéma
+inconnu, sommes de migration) restent inchangés.
 
-Seconde vérification, sous bail d'écriture : après `SQLiteStore(...)` et avant le premier
-`save_meta`, le marqueur de `store.meta` est comparé à celui de la sonde ; un écart (course
-entre deux processus) ferme le store et lève `store_profile_mismatch` sans écrire de ligne.
+**Sonde n° 1**, avant `data_dir.mkdir` et `WriterLock` (étape 7 du §4.1). Un refus ne crée ni
+dossier, ni `writer.lock`, ni `-wal`/`-shm`, et ne prend aucun bail.
+
+**Sonde n° 2, complète, sous bail d'écriture et AVANT la construction de `SQLiteStore`**
+(étape 9). Le constructeur n'est pas un point de contrôle acceptable : il active le WAL, migre
+et initialise le journal des changements (`sqlite_store.py:187,197,220`, `changes.py:22`) avant
+qu'on puisse relire quoi que ce soit. La sonde n° 2 refait toutes les lectures, puis :
+
+1. si son constat appelle à lui seul un refus (indéterminable, marqueur invalide, contaminé,
+   autre profil), ce refus est levé avec son code ;
+2. sinon il est comparé à celui de la sonde n° 1 sur l'état (neuf/existant), le marqueur, le
+   verdict de contamination — une contamination conserve le marqueur, le marqueur seul ne
+   suffit donc pas —, `store_instance_id`, `application_id` et `user_version` ; tout écart →
+   `store_profile_unverifiable` (le store a changé pendant l'ouverture ; réessayer).
+
+Le bail exclut tout autre moteur écrivain ; la sonde n° 2 fait donc autorité contre une course
+entre deux processus `MemoryV4`. Les outils qui écrivent sans bail (restauration, copie
+manuelle) restent hors de cette garantie, comme aujourd'hui.
+
+**Garantie distincte pour `writer.lock` lors d'une course.** Refus à la sonde n° 1 : rien n'est
+créé, pas même `writer.lock`. Refus à la sonde n° 2 : le dossier (s'il n'existait pas) et
+`writer.lock` peuvent avoir été créés par la prise de bail — ce sont les **seuls** éléments
+nouveaux ; le bail est relâché avant de lever ; `store.sqlite3` et ses `-wal`/`-shm` ne sont ni
+créés ni modifiés (à l'exception `-shm` ci-dessus quand la paire existait).
+
+**Création interrompue avant marquage.** Entre la création du fichier par `SQLiteStore` et le
+premier `save_meta`, un arrêt laisse un fichier au schéma 8, sans ligne `metadata` et sans
+item : par la règle 2 du §2 c'est un store **sémantique**. Le profil lexical le refuse
+(`store_profile_mismatch`) sans le toucher ; il n'est jamais adopté ni marqué après coup.
+Remède documenté : vérifier qu'il est vide, supprimer ce dossier, recréer.
 
 Les outils `ops` qui ouvrent le fichier sans `MemoryV4` (sauvegarde, restauration,
 `storecheck`, migration JSONL→SQLite) sont indépendants du profil : ils copient ou vérifient,
@@ -182,10 +308,12 @@ et une migration JSONL produit un store sans marqueur, donc sémantique.
 | Store | Profil lexical | Profil sémantique |
 |---|---|---|
 | Neuf | créé, marqueur écrit | créé, sans marqueur (inchangé) |
-| Sans marqueur (historique ou sémantique 4.1.0) | `store_profile_mismatch` | ouvert (inchangé) |
+| Sans marqueur (historique, sémantique 4.1.0, création interrompue) | `store_profile_mismatch` | ouvert (inchangé) |
 | Marqueur exact `lex-4.1.0-v1`, sans trace sémantique | ouvert | `store_profile_mismatch` |
 | Marqueur d'une autre politique ou invalide | `store_profile_mismatch` | `store_profile_mismatch` |
 | Marqueur exact + traces sémantiques | `store_profile_contaminated` | `store_profile_contaminated` |
+| Profil indéterminable (fichier illisible, métadonnées non objet, paire `-wal`/`-shm` incomplète, fichier annexe orphelin) | `store_profile_unverifiable` | `store_profile_unverifiable` |
+| Store changé entre les deux sondes | code du nouveau constat, sinon `store_profile_unverifiable` | idem |
 
 ### 5.3 Aucune conversion implicite
 
@@ -194,7 +322,7 @@ une simple ouverture), ni lexical → sémantique (aucun encodage de rattrapage)
 fournit **aucun outil de conversion** ; changer de profil = créer un store neuf et y réécrire
 les sources par les API publiques.
 
-### 5.4 Retour arrière vers une 4.0.x
+### 5.4 Retour arrière vers une 4.0.x : détection et avertissement
 
 Ce que fait une 4.0.x sur un store lexical (lecture du code `83ddead`) : le schéma 8 et ses
 sommes sont acceptés ; le champ inconnu est conservé ; `_rebuild_sql_indexes` → `_reembed_all`
@@ -203,16 +331,31 @@ encode **tous** les items avec l'encodeur configuré (Granite par défaut) et re
 `version = 4.0.x`. Avec `work_state`/`defer_retrieval`, cela se produit à la première
 recherche. La 4.0.x ne refuse rien et n'avertit pas : c'est une conversion silencieuse.
 
-Ce que la 4.1.0 fait et documente :
+Ce que la 4.1.0 fait et documente — **détection et avertissement, rien d'autre** :
 
-- **Détection** : marqueur lexical valide et au moins une trace parmi `embed_model`, `dim`,
-  `embed_compute_profile`, une ligne dans `embedding_cache`, ou `version` antérieure à 4.1.0
-  → `store_profile_contaminated`, dans les deux profils, sans mutation.
+- **Détection** : marqueur lexical valide et **au moins une** des traces suivantes, chacune
+  suffisante à elle seule → `store_profile_contaminated`, dans les deux profils, sans mutation :
+  1. clé `embed_model` présente dans les métadonnées ;
+  2. clé `dim` présente ;
+  3. clé `embed_compute_profile` présente ;
+  4. au moins une ligne dans `embedding_cache` (seule lecture de cette table par le profil
+     lexical, faite par la sonde) ;
+  5. `version` ne prouvant pas une écriture 4.1.0 ou ultérieure.
+- **Règle de version (refus conservateur).** `version` est valide si et seulement si c'est une
+  chaîne de la forme exacte `^\d+\.\d+\.\d+$` ; la comparaison se fait sur le triplet
+  d'**entiers** `(X, Y, Z) ≥ (4, 1, 0)`, jamais sur le texte (`4.10.0` > `4.1.0`). Une version
+  **absente**, non textuelle ou **malformée** (`"4.1"`, `"4.1.0.dev1"`, `"banana"`, `410`) est
+  refusée comme une version antérieure : un store lexical propre porte une version dès sa
+  création (§2). Une version seule inférieure à 4.1.0 signale le passage d'un runtime
+  incompatible ; elle ne prouve pas qu'un encodage a eu lieu, d'où le terme *conservateur*.
 - **Réparation** : aucune réparation automatique. Restaurer la dernière sauvegarde 4.1.0.
 - **Avertissement documenté** (README, `OPERATIONS.md`, message du refus, `doctor`) : « un store
   lexical n'a pas de retour arrière 4.0.x ; revenir à une 4.0.x suppose de reprendre le store
   sémantique ou la sauvegarde d'avant 4.1.0 ». Sauvegarde obligatoire avant toute création de
   store lexical à côté d'un store existant.
+- **Écarté** : rendre le store illisible par une 4.0.x en cassant `check_integrity()`. Ce
+  sabotage d'un invariant d'intégrité casserait les outils de sauvegarde 4.0.x et ne produirait
+  qu'un refus tardif, après des opérations mutantes.
 
 ## 6. Invariants du cache sémantique
 
@@ -233,21 +376,31 @@ Ce que la 4.1.0 fait et documente :
 6. Règles d'adoption historiques inchangées (`4.0.5`/`4.0.6`, `cache_schema == 2`, attestation,
    révision connue). **Aucune adoption d'une révision de modèle inconnue** : sans révision, le
    nonce `unattested_revision_nonce` interdit toute réutilisation entre processus.
-7. Démarrage à chaud : zéro ré-encodage du corpus, `hits == nombre d'items`, `misses == 0`.
-8. Le profil lexical ne lit ni n'écrit jamais `embedding_cache`.
+7. Démarrage à chaud : zéro ré-encodage du corpus, `hits == nombre d'items`, `misses == 0` —
+   **à quatre conditions** : même corpus (mêmes textes d'index), même profil de cache (modèle,
+   dimension, `max_seq_length`, `batch_size`, périphérique, `cache_schema`, `namespace`,
+   attestation complète dont `encoder_source_sha256` et les versions du runtime), **révision du
+   modèle connue**, lignes de cache valides (dimension, longueur, SHA-256, finitude). Une
+   révision inconnue impose le nonce `unattested_revision_nonce` : chaque processus ré-encode
+   alors tout le corpus, par conception ; ce n'est pas une régression de cette promesse.
+8. Le profil lexical n'écrit jamais `embedding_cache` et ne la lit jamais, **à la seule
+   exception de la sonde de contamination du §5.1** (`existe-t-il au moins une ligne ?`, sur sa
+   propre connexion en lecture seule). La connexion du moteur lexical n'émet aucune instruction
+   SQL nommant `embedding_cache`.
 
 ## 7. Découplage : ce que fait chaque opération en profil lexical
 
 | Opération | Comportement lexical |
 |---|---|
-| Import, ouverture | aucun `torch`, `sentence_transformers`, `faiss`, `transformers` ; `embedder = None` ; pas de `VectorIndex` FAISS |
+| Import, ouverture | aucun `torch`, `sentence_transformers`, `faiss`, `transformers`, pas même une tentative d'import ni un `find_spec` ; `embedder = None` ; aucune instance de `VectorIndex`, `Embedder` ou `HashEmbedder` n'est construite |
 | Écriture (`add_episode`, `add_episodes_bulk`, `add_facts`, `add_document`) | BM25, entités, facettes, sources ; aucun encodage, aucun `chunk_map` vectoriel |
 | `forget`, corrections | retrait des index lexicaux ; aucune opération vectorielle |
-| Reconstruction, rollback SQL | `_rebuild_bm25_entities()` seul |
+| Reconstruction, rollback SQL | `_rebuild_bm25_entities()` seul : après une faute SQL, sources, BM25, entités et facettes reviennent à l'état d'avant, sans ré-encodage ni accès vectoriel |
+| Corrections, reçus, CAS de blocs | inchangés (remplacement explicite, rejeu idempotent, conflit d'ETag) ; aucun point de faute `embedding_cache`, aucun accès vectoriel |
 | `status` | `retrieval_profile` = marqueur, `vector_count = 0`, `embed_model`/`dim`/`encoding_profile` = `None`, `retrieval_ready = True` |
 | `flush`, fermeture | sources SQL seulement ; `embed_model`/`dim` jamais écrits |
 | `get_context`, `session_brief` | §3 (MMR sans vecteurs) |
-| `consolidate` | balayages par cosinus et propositions de résumés par regroupement indisponibles : listes vides et `"similarity": "unavailable_in_lexical_profile"` ; `decay` inchangé. Jamais d'erreur d'import. |
+| `consolidate` | **résultat partiel explicite.** `dedup_sweep` (égalité de texte normalisé), `supersede_sweep` (remplacements explicites) et `decay` sont déterministes, non vectoriels et **conservés à l'identique** (mêmes clés, mêmes valeurs qu'en sémantique). Seules les propositions de regroupement exigent des vecteurs : `summary_proposals == []` et clé supplémentaire `summary_proposals_status == "unavailable_in_lexical_profile"`. Le résultat sémantique est inchangé (pas de nouvelle clé). Jamais d'erreur d'import, jamais de refus. |
 | `ensure_retrieval` | sans effet (la récupération lexicale est prête dès l'ouverture) |
 
 ## 8. Empaquetage
@@ -273,33 +426,60 @@ Ce que la 4.1.0 fait et documente :
   est scindé :
   - `check_requirements(requirements, *, profile, extras)` valide les **métadonnées** : chaque
     paquet du catalogue du profil a une exigence active dont l'ensemble de versions **contient**
-    la version qualifiée ; aucun paquet de la fermeture ML n'est exigé sans marqueur d'extra ;
-    tous le sont sous `extra == "semantic"` ;
-  - `check_constraints(lines, *, profile, extras)` garde la règle actuelle : exactement
-    `==version` pour chaque paquet du catalogue, appliquée au fichier de contraintes.
+    la version qualifiée ; en profil lexical, aucun paquet de la fermeture ML n'est une exigence
+    active ; en profil sémantique, tous le sont. `extras` sélectionne, comme aujourd'hui, les
+    `extra_versions` du catalogue (`ops`, `brief`) ; le catalogue sémantique, inchangé, garde
+    les paquets ML dans ses `versions`, et l'extra `semantic` est implicitement actif pour
+    l'évaluation des marqueurs `Requires-Dist` de ce profil ;
+  - `check_constraints(lines, *, profile, extras)` garde la règle exacte actuelle, appliquée au
+    fichier de contraintes : exactement `==version` pour chaque paquet du catalogue du profil,
+    et **aucune ligne hors de ce catalogue** (le fichier est le verrou : les contraintes
+    sémantiques ne valident pas le profil lexical, ni l'inverse). Résultat
+    `{"ok": …, "mismatches": {paquet: …}}`.
   `inspect_current` continue de comparer les versions **installées** aux versions exactes.
-- Installation nue sans extra et profil sémantique demandé : refus
-  `semantic_dependency_missing` nommant l'extra, avant toute ouverture de store. Le profil par
-  défaut reste `semantic` tant que H2 n'a pas tranché.
+- **Installation nue** (`pip install memory-os-ai`, sans extra) : le profil par défaut **reste
+  `semantic`**. Ouvrir un moteur sémantique sans la fermeture ML lève
+  `semantic_dependency_missing` (`ValueError`), dont le message nomme
+  `memory-os-ai[semantic]`, à l'étape 5 du §4.1 : avant la sonde, avant toute création de
+  dossier ou de fichier, quel que soit le backend. Détection par
+  `importlib.util.find_spec` sur les modules requis, sans import : `faiss` toujours (même avec
+  l'encodeur `hash`, même avec `use_dense=False`, même avec `work_state`) ; `torch`,
+  `sentence_transformers` et `transformers` sauf si `embed_model == "hash"`.
+  **Aucun repli automatique** : le profil n'est jamais choisi d'après les dépendances
+  installées ; le lexical se sélectionne explicitement (§2). Le profil lexical n'appelle jamais
+  `find_spec` sur ces modules.
 
 ## 9. Capacités et attestations
 
 Trois états distincts, jamais confondus :
 
-| État | Sens | Verdict |
-|---|---|---|
-| `absent_by_profile` | profil lexical : encodeur absent par choix | normal |
-| `missing_dependency` | profil sémantique, paquet ML non installé | échec, correctif : installer `[semantic]` |
-| `drift` | paquet installé, version différente du verrou du profil | échec, correctif : runtime qualifié |
+| État | Où il apparaît | Sens | Verdict |
+|---|---|---|---|
+| `absent_by_profile` | `capabilities.deployed()["encoding"]["state"]` | profil lexical : encodeur absent par choix | normal |
+| `missing` | écart de `qualified_runtime.compare`, état global `missing_dependency` | paquet du catalogue du profil non installé | échec, correctif : installer `[semantic]` (ou le paquet manquant) |
+| `drift` | écart de `qualified_runtime.compare`, état global `drift` | paquet installé, version différente du verrou du profil | échec, correctif : runtime qualifié |
 
-- `qualified_runtime.compare` ajoute, par paquet en écart, `state: "missing" | "drift"`
-  (`actual is None` → `missing`).
+- `qualified_runtime.compare` : chaque écart devient
+  `{"expected": …, "actual": …, "state": "missing" | "drift"}` (`actual is None` → `missing`) ;
+  le résultat porte `state` = `"qualified"` sans écart, `"missing_dependency"` dès qu'un paquet
+  manque (les dérives restent listées), sinon `"drift"`. Avec le catalogue lexical, l'absence
+  comme la présence d'un paquet ML n'est ni exigée ni inspectée.
 - `capabilities.py::deployed` : ajoute `retrieval_profile` (nom, politique) ; `runtime` inspecté
   avec le catalogue du profil ; en lexical, `encoding = {"state": "absent_by_profile",
-  "model": None, "profile": None, "loaded": False}` ; `policies.ranking_policy`.
-- `readiness.py::engine_readiness` : en lexical, pas de contrôle `model_not_loaded` ni de
-  couverture vectorielle ; couverture BM25/entités/facettes contre les items vivants
-  inchangée ; raison `ready`.
+  "model": None, "profile": None, "loaded": False}` ; `policies.ranking_policy`. Un moteur
+  sémantique sans ML ne s'ouvre pas (§8) : l'état `missing` n'est donc visible que par
+  l'inspection du runtime et par `doctor`, jamais par un moteur ouvert.
+- `readiness.py::engine_readiness` : en lexical, pas de contrôle `model_not_loaded`, pas de
+  couverture vectorielle, jamais `ready_work_only` (la récupération est prête dès l'ouverture) ;
+  couverture BM25/entités/facettes contre les items vivants inchangée : un index lexical
+  incomplet donne `indexes_not_ready`.
+- **Tokenizer du brief** : « sans modèle » ne dispense pas de `tiktoken` ni de la table
+  `cl100k_base` attestée (`brief_tokens.status()`, `TABLE_SHA256`). L'extra `[brief]` et la
+  table restent requis et vérifiés dans les deux profils.
+
+**Périmètre (confirmé).** Phase 1a-cœur, étapes 4 à 7 : `capabilities.py`, `readiness.py`,
+`ops/qualified_runtime.py` et les ressources du runtime. Phase 1a-setup (GO séparé) :
+
 - `ops/quickstart.py::_ready()` : en lexical, exige marqueur de profil, `bm25_profile`,
   `lexical_guard_k`, `encoding.state == "absent_by_profile"` et le tokenizer prêt ; n'exige ni
   runtime d'encodage ni révision Granite. Chemin sémantique inchangé.
@@ -307,24 +487,20 @@ Trois états distincts, jamais confondus :
 - `doctor` : contrôle `encoder-runtime` à trois issues (PASS « absent par choix », FAIL
   « dépendance manquante », FAIL « dérive ») ; nouveau contrôle `store-profile` (marqueur,
   contamination).
-- **Tokenizer du brief** : « sans modèle » ne dispense pas de `tiktoken` ni de la table
-  `cl100k_base` attestée (`brief_tokens.status()`, `TABLE_SHA256`). L'extra `[brief]` et la
-  table restent requis et vérifiés dans les deux profils.
 
-Le code de `_ready()`, `provision` et `doctor` relève de la phase 1a-setup (GO séparé) ; les
-étapes 4 à 7 livrent `capabilities.py`, `readiness.py` et `qualified_runtime.py`, dont ils
-dépendent.
+**Aucun parcours setup (`quickstart`, `provision`, `doctor`) n'est déclaré compatible avec le
+profil lexical avant cette adaptation.**
 
 ## 10. Mesure H2 (parité lexical / sémantique) — gelée ici, non exécutée
 
 | Élément | Valeur gelée |
 |---|---|
 | Protocole | `v4/bench/protocols/v1.md`, famille « récupération de preuves » uniquement |
-| Corpus | BEAM (`Mohammadta/BEAM`), révision `3205395e897e7318c7b094ef4e6047b9b82dbb03`, CC-BY-SA-4.0 |
-| Split | **100K**, entier : aucune partition dev/test, aucun réglage autorisé |
+| Corpus | BEAM (`Mohammadta/BEAM`), révision `3205395e897e7318c7b094ef4e6047b9b82dbb03`, CC-BY-SA-4.0 — **accepté pour cette décision limitée** ; LongMemEval-S n'est pas requis ici |
+| Jeu évalué | **100K**, entier, en une seule partition `evaluation` : aucune partition dev/test, aucun réglage autorisé |
 | Fichier | `beam_100k.jsonl`, SHA-256 `613b85b9e5eca98b88de25bedb7490f1dbf61ae4c361d544452feea19bfa18a3` (parquet `c0519be2…a78ace`), cf. `BEAM_PROTOCOL_v1.md` |
 | Effectif | 20 conversations, 5 732 messages, 400 questions exécutées, **355 questions scorées** (preuve annotée non vide) |
-| Bras | lexical : profil `lexical`, `lex-4.1.0-v1` ; sémantique : profil par défaut du même commit (Granite, C4) ; mêmes réglages hors canal dense, récence désactivée dans les deux bras comme dans `beam-c4-retrieval-v2` ; stores SQLite neufs et isolés |
+| Bras | lexical : profil `lexical`, `lex-4.1.0-v1` ; sémantique : profil par défaut du même commit (Granite, C4) ; **stores SQLite (`sqlite_s1`) neufs et isolés dans les deux bras** ; mêmes réglages hors canal dense, récence désactivée dans les deux bras comme dans `beam-c4-retrieval-v2` ; configuration effective complète de chaque bras enregistrée dans le manifeste |
 | Métrique | Recall@10 des tours annotés, sous le même budget que `BEAM_PROTOCOL_v1.md` |
 | Statistique | delta apparié lexical − sémantique ; bootstrap par **conversation** entière, 2 000 réplicats, seed `20261010`, IC percentile 95 % |
 | Seuil | Recall@10 lexical ≥ Recall@10 sémantique − 0,02 **et** borne basse de l'IC95 apparié ≥ −0,03 |
@@ -332,11 +508,32 @@ dépendent.
 Règle de décision : seuil atteint (400/400 exécutées, 0 échec) → le lexical peut devenir le
 profil par défaut recommandé ; sinon le sémantique reste recommandé, le lexical est proposé
 comme profil « léger » et l'écart est publié. Dans tous les cas, aucune revendication de
-rappel supérieur. Le seuil a été fixé en connaissant déjà BEAM (C4 0,462 contre BM25 0,445,
-`BEAM_RESULT_V2.md`) : il ne vaut que sur ce corpus gelé, n'est pas un test indépendant et ne
-dit rien des réponses générées ni des tâches d'agent. Un manifeste `h2-lexical-parity-v1` est
-gelé par `evaluation_manifest.py` avant l'exécution ; toute modification du corpus, des bras ou
-du seuil après observation invalide la mesure.
+rappel supérieur.
+
+**Mesure rétrospective, sans indépendance statistique.** Le seuil a été fixé en connaissant
+déjà BEAM (C4 0,462 contre BM25 0,445, `BEAM_RESULT_V2.md`) et les bras passent de JSONL
+(campagne v2) à SQLite : la mesure ne vaut que sur ce corpus gelé, n'est **pas** un test
+indépendant, ne revendique aucune indépendance statistique et ne dit rien des réponses générées
+ni des tâches d'agent.
+
+**Gel par `bench/evaluation_manifest.py` en mode rétrospectif.** L'outil actuel exige des
+partitions `dev` et `test` non vides et `selection_rule == "dev_only_then_freeze"` : H2 ne peut
+pas le satisfaire honnêtement, et un faux découpage dev/test est interdit. Avant H2, l'outil
+reçoit un mode explicite, tests d'abord (`test_evaluation_manifest_retrospective_410.py`) :
+
+- `selection_rule == "retrospective_no_selection"` ;
+- bloc `retrospective` obligatoire : `independence_claim: false`, `tuning_allowed: false`,
+  `prior_exposure` = liste non vide de phrases décrivant ce qui a déjà été observé ;
+- fichier de partitions : **une seule** clé `evaluation`, non vide, identifiants uniques ; les
+  clés `dev` et `test` y sont refusées, même vides ; `evaluation_count` remplace `test_count`
+  (dont la présence est refusée) ;
+- tout le reste du manifeste (source, verrou d'environnement, matériel, budgets, systèmes à
+  configuration résolue, données hachées) est validé comme aujourd'hui ;
+- le mode `dev_only_then_freeze` garde exactement son sens : il refuse un bloc `retrospective`
+  et une partition `evaluation`.
+
+Le manifeste `h2-lexical-parity-v1` est gelé dans ce mode avant l'exécution ; toute
+modification du corpus, des bras ou du seuil après observation invalide la mesure.
 
 ## 11. Critères de sortie G1a, vérifiables
 
@@ -348,58 +545,139 @@ Relevé de référence dans `.local-baseline/` (session parente, `83ddead`) :
 
 | Critère | Vérification |
 |---|---|
-| Non-régression | mêmes commandes que le relevé ; l'ensemble trié des identifiants `FAILED`/`ERROR` est **identique** aux deux listes ; 0 test ignoré. Les tests existants qui affirment les `==` de `pyproject.toml` (`test_qualified_runtime.py`, `test_distribution_d1a.py`) sont adaptés à l'étape 6–7 ; chaque adaptation est listée dans la revue. |
-| Nouveaux tests | les trois fichiers du §12 verts (62 tests) |
+| Non-régression | mêmes commandes que le relevé ; l'ensemble trié des identifiants `FAILED`/`ERROR` est **identique** aux deux listes, **et la cause de chaque échec est vérifiée inchangée** ; 0 test ignoré. Les tests existants à adapter (§11.1) ne figurent pas parmi les échecs de référence : l'identité des listes reste atteignable. |
+| Nouveaux tests | les sept fichiers du §12 verts (142 tests) |
 | Aucun ML en lexical | `test_import_write_search_reopen_never_import_ml_modules` : interpréteur neuf, import bloqué ; aucune **tentative** d'import ni module `torch`, `sentence_transformers`, `faiss`, `transformers` dans `sys.modules` après import, écriture, recherche, réouverture |
 | SHA d'`embed.py` | `shasum -a 256 v4/src/memory_os_v4/embed.py` = valeur du §6 ; `git diff 83ddead -- v4/src/memory_os_v4/embed.py` vide |
 | Migrations | `schema_checksums()` égal aux 8 sommes épinglées ; `SCHEMA_VERSION == 8` |
-| Cache sémantique chaud | `test_warm_semantic_cache_is_reused_without_reencoding_the_corpus` vert, inchangé depuis `83ddead` |
-| Wheel lexical | étape 7 : wheel installé dans un environnement vierge avec les contraintes lexicales, sans paquet ML ; les tests lexicaux y passent |
-| Copie de store qualifiée | ci-dessous |
+| Cache sémantique chaud | `test_warm_semantic_cache_is_reused_without_reencoding_the_corpus` vert, inchangé depuis `83ddead` (conditions du §6.7 réunies par la fixture) |
+| Wheel lexical | §11.2 |
+| Copie de store qualifiée | §11.3 |
 | Revue | verdict Codex « VALIDÉ » |
 
-**Copie de store qualifiée** : copie privée d'un store sémantique réel produite par l'outil de
-sauvegarde (`ops/sqlite_backup`) puis restaurée dans un dossier hors production, jamais le
-dossier vivant, jamais un store de qualification scellé. Opération manuelle sous GO de Romain,
-hors suites de tests. Preuve attendue : (1) inventaire et SHA-256 de chaque fichier avant ;
-(2) ouverture en profil lexical → `store_profile_mismatch` ; (3) inventaire et SHA-256 après :
-identiques, aucun fichier créé ; (4) dans un autre dossier, store lexical neuf : écriture,
-recherche, fermeture, réouverture, mêmes résultats.
+### 11.1 Tests existants à adapter (étapes 4, 6 et 7), et comment
+
+Règle : **conserver les contrôles exacts sur les contraintes, mettre les identités de version en
+cohérence, ne rien affaiblir.** Chaque adaptation est listée dans la revue avec sa cause.
+
+| Test | Aujourd'hui | Adaptation |
+|---|---|---|
+| `test_qualified_runtime.py:201` `test_project_pins_match_shipped_qualified_profile` | exige `==` exact dans `pyproject.toml` | le contrôle `==` exact passe sur le **fichier de contraintes** via `check_constraints` (profil sémantique, extras `ops`/`brief`) ; `pyproject.toml` est vérifié par `check_requirements` (bornes contenant la version qualifiée, ML sous `[semantic]`) ; les deux assertions sur le catalogue (`torch == 2.10.0`, `sentence-transformers == 5.2.3`) restent |
+| `test_qualified_runtime.py:236` `test_missing_package_is_explicit_and_unsafe_loose_metadata_rejected` | `torch>=2.10,<2.11` refusé par `check_requirements` | le même jeu de lignes est refusé par `check_constraints` (une contrainte lâche reste interdite) ; la partie « paquet manquant » vérifie en plus `state == "missing"` |
+| `test_distribution_d1a.py:249` (METADATA du wheel) | `check_requirements(Requires-Dist)` avec `==` | `check_requirements(Requires-Dist, profile="lexical")` et `check_requirements(Requires-Dist, profile="semantic")` : bornes contenant la version qualifiée, aucun paquet ML actif sans l'extra |
+| `test_distribution_d1a.py:329` `test_extras_and_v3_failure_are_explicit` | `"sentence-transformers==5.2.3" in dependencies` | `sentence-transformers` absent de `dependencies`, présent dans `optional-dependencies["semantic"]` avec une borne contenant 5.2.3 ; le verrou `==5.2.3` est affirmé sur le fichier de contraintes sémantique |
+| `test_distribution_d1a.py:39` `test_release_versions_and_packaged_notes_are_consistent` | toutes les identités de version égales | **inchangé, non affaibli** : `pyproject.toml`, `v4/pyproject.toml`, `server.json`, `memory_os_ai.__version__` et la note de version passent ensemble à `4.1.0` |
+| tests épinglant `4.0.9` (`tests/test_release_409.py`, `test_schema7_genuine_upgrade.py`, `tests/test_z_coverage_boost.py`) | à examiner au passage de version | un test qui prouve une règle sur les octets de la 4.0.9 reste tel quel ; une identité de version courante est mise en cohérence ; aucune assertion retirée |
+
+### 11.2 Sous-ensemble exécutable sans ML, et preuve du wheel
+
+Tous les tests 4.1.0 ne tournent pas sans ML : construire un moteur sémantique, même avec
+l'encodeur `hash`, exige FAISS.
+
+| Fichier | Sans ML | Remarque |
+|---|---|---|
+| `test_lexical_profile.py` | **oui** | référence = données littérales figées ; aucun moteur sémantique |
+| `test_lexical_capabilities_410.py` | **oui** | versions installées injectées |
+| `lexical_fixture_410.py`, `lexical_frozen_83ddead.py` | **oui** | modules d'appui, requis par les deux fichiers ci-dessus |
+| `test_lexical_packaging_410.py` | sans ML, mais **checkout source** | lit `pyproject.toml` |
+| `test_evaluation_manifest_retrospective_410.py` | sans ML, mais **checkout source** | importe `bench/` |
+| `test_lexical_reference_410.py` | non | moteur sémantique `hash` → FAISS |
+| `test_lexical_store_guard.py` | non | construit des stores sémantiques `hash` |
+| `test_semantic_invariants_410.py` | non | profil sémantique |
+
+**Preuve du wheel lexical (étape 7).** Environnement vierge ; `pip install -c
+qualified_runtime_constraints_lexical_v1.txt <wheel>[ops,brief]` plus `pytest` ; aucun paquet
+ML installé. Les deux fichiers « oui » et leurs deux modules d'appui sont copiés dans un
+dossier **hors du dépôt** et exécutés depuis ce dossier, **sans `PYTHONPATH` ni `-c`/`rootdir`
+pointant vers les sources**. La preuve consigne `memory_os_v4.__file__` (sous `site-packages`
+de l'environnement), l'absence de `torch`, `sentence_transformers`, `transformers` et `faiss`
+(`importlib.util.find_spec(...) is None`) et le résultat des tests. Un passage obtenu en
+important `v4/src` ne compte pas : c'est le **paquet installé** qui est prouvé. Les
+sous-processus de ces tests réutilisent le répertoire du paquet importé par le test, donc le
+même paquet installé.
+
+### 11.3 Copie de store qualifiée
+
+Copie privée d'un store sémantique réel produite par l'outil de sauvegarde
+(`ops/sqlite_backup`) puis restaurée dans un dossier hors production, jamais le dossier vivant,
+jamais un store de qualification scellé. Opération manuelle sous GO de Romain, hors suites de
+tests. Preuve attendue : (1) inventaire et SHA-256 de chaque fichier avant ; (2) ouverture en
+profil lexical → `store_profile_mismatch` ; (3) inventaire et SHA-256 après : identiques, aucun
+fichier créé ; (4) dans un autre dossier, store lexical neuf : écriture, recherche, fermeture,
+réouverture, mêmes résultats.
 
 ## 12. Tests
 
-Verts dès maintenant et à maintenir verts (16) — `v4/tests/test_semantic_invariants_410.py` :
-SHA d'`embed.py`, contenu d'`encoding_profile()` sur un modèle factice, schéma 8 et sommes de
-migration, clés de métadonnées d'un store sémantique et absence de marqueur, formule de clé et
-codec float32, cache chaud, corruption d'une ligne et conservation des anciennes lignes, règles
-d'adoption (8 cas), rejeu idempotent d'une requête explicite.
+142 tests dans sept fichiers ; **32 verts dès maintenant** (comportement actuel, à maintenir),
+**110 rouges par construction** jusqu'aux étapes 4 à 7 (ou jusqu'au mode rétrospectif pour le
+dernier fichier), sans `skip` ni `xfail`. Modules d'appui : `lexical_fixture_410.py` (corpus,
+scénarios partagés entre le bras de référence et le bras lexical, rejeu interprocessus,
+détecteur d'accès vectoriel) et `lexical_frozen_83ddead.py` (sorties figées de `83ddead`).
 
-**Rouges jusqu'aux étapes 4 à 7** (46, sans `skip` ni `xfail`) :
+| Fichier | Verts | Rouges | Objet |
+|---|---|---|---|
+| `test_semantic_invariants_410.py` | 20 | 0 | invariants sémantiques |
+| `test_lexical_reference_410.py` | 9 | 0 | le moteur de base reproduit les données figées |
+| `test_lexical_profile.py` | 0 | 44 | profil lexical, sans ML |
+| `test_lexical_store_guard.py` | 0 | 42 | sonde, refus, courses |
+| `test_lexical_capabilities_410.py` | 0 | 5 | capacités, readiness, états du runtime |
+| `test_lexical_packaging_410.py` | 1 | 4 | métadonnées et contraintes par profil |
+| `test_evaluation_manifest_retrospective_410.py` | 2 | 15 | mode rétrospectif H2 |
 
-- `v4/tests/test_lexical_profile.py` (33) :
-  `test_import_write_search_reopen_never_import_ml_modules`,
-  `test_default_profile_is_semantic_and_lexical_selection_is_explicit`,
-  `test_options_incompatible_with_the_frozen_policy_are_refused_before_any_write` (25 cas),
-  `test_unknown_profile_and_contradictory_environment_are_refused`,
-  `test_fresh_lexical_store_carries_the_marker_and_no_semantic_state`,
-  `test_reopen_preserves_identity_marker_items_and_ranking`,
-  `test_ranking_is_deterministic_and_ties_break_on_item_id`,
-  `test_policy_equals_the_frozen_reference_without_the_dense_channel`,
-  `test_projects_are_isolated_in_results_and_in_corpus_statistics`.
-- `v4/tests/test_lexical_store_guard.py` (13) :
-  `test_semantic_store_is_refused_in_lexical_before_any_mutation`,
-  `test_semantic_store_without_writer_lock_file_gets_no_new_file`,
-  `test_historical_stores_without_marker_are_semantic_and_refused`,
-  `test_semantic_store_with_a_live_wal_is_refused_without_touching_database_or_wal`,
-  `test_lexical_store_is_refused_in_semantic_before_any_mutation`,
-  `test_lexical_marker_with_another_policy_is_refused_unchanged`,
-  `test_malformed_marker_is_never_interpreted` (5 cas),
-  `test_lexical_store_contaminated_by_a_4_0_x_runtime_is_refused_by_both_profiles`,
-  `test_refused_configuration_never_creates_a_directory_or_a_store`.
+**Verts.**
 
-Aujourd'hui ils échouent tous sur `Config(retrieval_profile=…)` ou `Config.lexical`
-(`TypeError`/`AttributeError`). Tant qu'ils sont rouges, la suite `v4/tests` compte 46 échecs
-de plus que le relevé ; G1a se mesure une fois qu'ils sont verts.
+- `test_semantic_invariants_410.py` (20) : SHA d'`embed.py`, contenu d'`encoding_profile()` sur
+  un modèle factice, schéma 8 et sommes de migration, clés de métadonnées d'un store sémantique
+  et absence de marqueur, formule de clé et codec float32, cache chaud, corruption d'une ligne
+  et conservation des anciennes lignes, règles d'adoption (8 cas), rejeu idempotent ; plus, en
+  v2, trois corruptions distinctes (somme, valeurs non finies, dimension) et le rejeu après
+  réouverture. **Portée limitée, assumée** : les huit cas d'adoption n'exercent que
+  `_legacy_profile`, le ré-encodage utilise l'encodeur `hash`. Ces gardes **ne remplacent pas**
+  `test_sqlite_cache_release.py` (adoption, atomicité, corruption) ni les gardes CAS et
+  corrections existantes (`test_work_state.py`, `test_scope_and_fact_updates.py`), qui restent
+  dans le critère de non-régression.
+- `test_lexical_reference_410.py` (9) : reproduction des données figées dans le processus et
+  dans des processus neufs sous trois `PYTHONHASHSEED` ; contexte sémantique distinct du contexte
+  à vecteurs vides ; pénalité C4 ; plancher de demi-vie global ; seuil d'entités global ;
+  saturation du top-100 interprojets.
+- `test_lexical_packaging_410.py` (1) : ressources sémantiques identiques à l'octet près.
+- `test_evaluation_manifest_retrospective_410.py` (2) : le mode de sélection exige toujours
+  `dev` et `test` ; une règle inconnue est refusée.
+
+**Rouges.**
+
+- `test_lexical_profile.py` (44) : aucun import ML (interpréteur neuf) ; sélection par défaut et
+  explicite ; 25 options incompatibles ; profil inconnu et environnement contradictoire ; store
+  neuf marqué ; réouverture ; déterminisme et égalités ; **reproduction des sorties figées de
+  `83ddead`** (rangs, signaux, fusion, récence, ancres, multi-requêtes, `at_time`, contexte
+  comparé à MMR à vecteurs vides) ; rejeu interprocessus sous trois `PYTHONHASHSEED`, horloge
+  et configuration fixes ; pénalité C4 ; plancher de demi-vie ; seuil d'entités et saturation
+  du top-100 ; isolation des projets limitée à ce que BM25 garantit (rangs et scores BM25
+  bruts, ancres — pas l'ordre final) ; rollback après faute SQL à quatre points ; corrections,
+  reçus et CAS de blocs ; consolidation partielle ; ces trois derniers avec détecteur d'accès
+  vectoriel et trace SQL ; refus sémantique sans ML avant toute création de fichier, sans repli.
+- `test_lexical_store_guard.py` (42) : store sémantique refusé en lexical sans mutation ; copie
+  sans `writer.lock` ; stores historiques ; WAL vivant ; store lexical refusé en sémantique ;
+  autre politique ; marqueur malformé (5) ; contamination groupée ; configuration refusée ;
+  **profil indéterminable dans les deux profils** (4) ; **WAL ou SHM isolé** (2) ; fichier
+  annexe orphelin (2) ; **marqueur présent seulement dans le WAL** ; **contamination par chaque
+  trace séparée** (10, dont version absente et malformée) ; comparaison de version par triplet
+  d'entiers (4) ; store neuf estampillé ; **courses** entre les deux sondes — contamination à
+  marqueur inchangé, identité remplacée, changement de profil, store apparu ; **création
+  interrompue avant marquage**.
+- `test_lexical_capabilities_410.py` (5) : catalogues par profil ; dépendance manquante contre
+  dérive ; absence de ML normale en lexical ; encodeur absent par choix ; readiness sans vecteur
+  et index lexical incomplet.
+- `test_lexical_packaging_410.py` (4) : verrous exacts dans les contraintes de chaque profil ;
+  métadonnées à bornes compatibles et ML sous `[semantic]` ; identité de version `4.1.0` (2).
+- `test_evaluation_manifest_retrospective_410.py` (15) : manifeste rétrospectif accepté ; ses
+  huit défauts de franchise refusés ; cinq découpages factices ou vides refusés ; le mode de
+  sélection refuse les champs rétrospectifs.
+
+Aujourd'hui les rouges échouent sur `Config(retrieval_profile=…)`/`Config.lexical`
+(`TypeError`/`AttributeError`), sur les API de runtime par profil, sur les ressources lexicales
+absentes ou sur le mode de manifeste absent. Tant qu'ils sont rouges, la suite `v4/tests`
+compte 110 échecs de plus que le relevé ; G1a se mesure une fois qu'ils sont verts.
 
 ## 13. Ordre d'implémentation, fichier par fichier (étapes 4 à 7, aucun code maintenant)
 
@@ -408,11 +686,12 @@ de plus que le relevé ; G1a se mesure une fois qu'ils sont verts.
 1. `config.py` : `retrieval_profile`, constantes de profil et de politique, `Config.lexical`,
    erreur à `code`, validation de profil dans `validate_lexical_policy()`, `from_env`.
    `__init__.py` : version `4.1.0` dès cette étape (la règle de contamination du §5.4 compare
-   `version` à 4.1.0) ; les tests existants qui épinglent `4.0.9` sont adaptés et listés.
+   `version` à 4.1.0) ; identités de version mises en cohérence (§11.1).
 2. `sqlite_store.py` : sonde en lecture seule (aucun changement de `SCHEMA`, `MIGRATIONS`,
    `SQLiteStore.__init__`).
-3. `memory.py` (constructeur seulement) : appel de la sonde avant `mkdir`/`WriterLock`/
-   `SQLiteStore`, matrice du §5.2, écriture du marqueur sur store neuf, seconde vérification.
+3. `memory.py` (constructeur seulement) : contrôle de dépendance sémantique, sonde n° 1 avant
+   `mkdir`/`WriterLock`, **sonde n° 2 sous bail avant `SQLiteStore(...)`**, matrice du §5.2,
+   écriture conjointe marqueur + `store_instance_id` + `version` sur store lexical neuf.
    → `test_lexical_store_guard.py` et les tests de validation deviennent verts.
 
 Étape 5 — découplage vectoriel :
@@ -423,7 +702,8 @@ de plus que le relevé ; G1a se mesure une fois qu'ils sont verts.
 6. `memory.py` : `_index_items`, `_add_chunk_vectors`, `forget`, `_reconcile_indexes`,
    `_rebuild_sql_indexes`, `_reembed_all`, `_flush_sql_sources`, `status`, `flush`,
    `get_context`, `ensure_retrieval`, `_compute_profile`, `_consolidate`.
-7. `consolidate.py` : chemins sans index vectoriel (§7).
+7. `consolidate.py` : `summary_proposals` seul devient indisponible ; les deux balayages et
+   `decay` ne changent pas (§7).
 8. `server.py` : `memory_status` (bloc `embedding_cache`) et démarrage `--warm` en lexical.
 9. `__init__.py` : les variables d'environnement BLAS restent (sans effet sans ML).
 10. `embed.py` : **aucune modification**.
@@ -435,36 +715,34 @@ de plus que le relevé ; G1a se mesure une fois qu'ils sont verts.
     `resources/qualified_runtime_constraints_lexical_v1.txt` (nouveaux) ; ressources
     sémantiques intactes.
 12. `ops/qualified_runtime.py` : paramètre `profile`, `check_requirements`/`check_constraints`,
-    état `missing`/`drift` ; tests `test_qualified_runtime.py` adaptés d'abord.
+    états `missing`/`drift` ; tests `test_qualified_runtime.py` adaptés d'abord (§11.1).
 13. `capabilities.py`, puis `readiness.py`.
+    → `test_lexical_capabilities_410.py` devient vert.
 
 Étape 7 — empaquetage :
 
-14. `pyproject.toml` : extra `[semantic]`, bornes compatibles ; `test_distribution_*` adaptés.
-15. Construction du wheel, installation lexicale en environnement vierge, exécution des tests
-    lexicaux ; vérification que l'installation sémantique contrainte reproduit le catalogue
-    `granite-macos-arm64-py311-v1`.
+14. `pyproject.toml` : extra `[semantic]`, bornes compatibles ; `test_distribution_*` adaptés
+    (§11.1). → `test_lexical_packaging_410.py` devient vert.
+15. Construction du wheel, preuve du §11.2 sur le paquet **installé** ; vérification que
+    l'installation sémantique contrainte reproduit le catalogue `granite-macos-arm64-py311-v1`.
 
-Puis étape 8 : revue adverse Codex, mesure de G1a.
+Puis étape 8 : revue adverse Codex, mesure de G1a. Avant H2 seulement, hors G1a :
+`bench/evaluation_manifest.py` reçoit le mode rétrospectif du §10
+(→ `test_evaluation_manifest_retrospective_410.py` vert).
 
-## 14. Questions ouvertes pour la revue Codex
+## 14. Décisions arbitrées par Codex (verdict du 21/11 sur le contrat v1)
 
-1. **Retour arrière** : le contrat retient « détection + avertissement documenté ». Variante
-   possible sans toucher au schéma : rendre le store lexical illisible par une 4.0.x en
-   exploitant `check_integrity()` (une ligne `store_metadata` dont la valeur n'est pas un
-   objet). Elle donnerait un vrai refus 4.0.x, mais casse volontairement un invariant
-   d'intégrité et les outils de sauvegarde 4.0.x. Écartée par défaut ; à trancher.
-2. **Sévérité des options** : `w_bm25`, `w_entity`, `candidates`, `use_stemming` figés ;
-   récence et demi-vies libres (BEAM impose la récence désactivée). Trop strict, pas assez ?
-3. **WAL vivant** : la sonde `mode=ro` peut modifier `-shm`. Alternative : refuser toute sonde
-   quand `-wal` existe (`store_profile_unverifiable`), au prix d'un store lexical non rouvrable
-   après arrêt brutal sans procédure.
-4. **Contamination par `version`** : faut-il traiter `version < 4.1.0` seule (sans vecteurs)
-   comme contamination, ou seulement les traces d'encodage ?
-5. **H2** : BEAM 100K entier sans partition, déjà observé pour C4/BM25 ; les bras passent de
-   JSONL (campagne v2) à SQLite. Acceptable comme corpus gelé, ou faut-il LongMemEval-S ?
-6. **`consolidate` en lexical** : listes vides + indicateur, ou refus explicite ?
-7. **Périmètre 1a-cœur / 1a-setup** : `_ready()`, `provision`, `doctor` spécifiés ici mais
-   codés en 1a-setup ; confirmer.
-8. **Statistiques d'entités globales** (§3) : conservées telles quelles pour la parité avec la
-   référence ; à cadrer par projet dans une politique `v2` ?
+| # | Question | Décision | Où |
+|---|---|---|---|
+| 1 | Retour arrière 4.0.x | **Détection + avertissement.** Le sabotage d'intégrité est rejeté : il casserait les outils 4.0.x et ne donnerait qu'un refus tardif, après des opérations mutantes. | §5.4 |
+| 2 | Sévérité des options | **Gel accepté.** Récence et demi-vies restent configurables, la configuration effective étant enregistrée pour toute comparaison ; `use_stemming` est inerte sous `scoped_literal`, son gel est une convention. | §3, §4.2 |
+| 3 | Sonde et WAL | **`mode=ro` accepté avec `-wal` et `-shm` existants**, la modification transitoire de `-shm` étant exclue de la garantie ; **paire incomplète → refus dans les deux profils** ; `immutable` réservé à un état stable sans WAL. | §5.1 |
+| 4 | Contamination par `version` seule | **Refus conservateur accepté.** Elle signale un passage incompatible sans prouver un encodage ; versions absentes ou malformées refusées ; comparaison par triplet d'entiers. | §5.4 |
+| 5 | Corpus H2 | **BEAM accepté pour cette décision limitée**, manifeste adapté (mode rétrospectif), SQLite identique dans les deux bras ; LongMemEval-S non requis ; aucune indépendance statistique revendiquée. | §10 |
+| 6 | `consolidate` en lexical | **Résultat partiel explicite** : déduplication, remplacement et décroissance conservés ; propositions vectorielles vides avec indicateur d'indisponibilité. | §7 |
+| 7 | Périmètre cœur / setup | **Séparation confirmée** : capacités, readiness et runtime dans le cœur ; `_ready`, `provision` et `doctor` dans setup ; aucun parcours setup déclaré compatible avant adaptation. | §9 |
+| 8 | Tests existants | **Adaptations nécessaires et listées** ; contrôles exacts sur les contraintes préservés ; identités de version mises en cohérence, `test_distribution_d1a.py:39` non affaibli ; identité des listes d'échecs maintenue, causes vérifiées. | §11.1 |
+| 9 | Entités globales | **Conservées en v1**, en documentant les statistiques **et** la compétition top-N avant filtrage ; isolation des statistiques et des candidats en `v2`. | §3 |
+| 10 | Installation nue | **Défaut sémantique maintenu**, erreur explicite demandant `[semantic]` ; lexical sélectionné explicitement ; aucun repli automatique selon les dépendances installées. | §8 |
+
+Aucune question ouverte ne subsiste dans ce contrat.
