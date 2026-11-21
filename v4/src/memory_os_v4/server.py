@@ -191,7 +191,8 @@ def _hit_dict(hit, store=None) -> dict:
 # -------------------------------------------------------------------- handlers
 def _h_status(engine: MemoryV4, args: models.StatusIn) -> dict:
     s = dict(engine.status(project=_project_of(args.project)))
-    if engine.config.store_backend == 'sqlite_s1':
+    if engine.config.store_backend == 'sqlite_s1' and engine._embedding_cache is not None:
+        # Absent in the lexical profile: no encoder, no corpus-vector cache.
         s['embedding_cache'] = {'hits': engine._embedding_cache.hits,
                                 'misses': engine._embedding_cache.misses,
                                 'namespace': engine.config.sqlite_embedding_namespace}

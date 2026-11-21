@@ -428,24 +428,29 @@ class MemoryV4:
     def _flush_sql_sources(self):
         meta = dict(self.store.meta)
         meta['version'] = _package_version()
-        if self._retrieval_ready:
+        if self._retrieval_ready and not self._lexical:
             meta.update(embed_model=self.config.embed_model, dim=self.embedder.dim)
         # Cold task/CAS mutations preserve prior vectors/profile/model metadata.
         if self.last_consolidated is not None:
             meta["last_consolidated"] = self.last_consolidated
         self.store.save_meta(meta)
         self.store.flush_access()
-        self.store.save_chunk_map()
+        if not self._lexical:  # no vector, hence no chunk map row, in the lexical profile
+            self.store.save_chunk_map()
 
     def _rebuild_sql_indexes(self):
         """Rebuild indexes, reusing fingerprint-checked corpus embeddings."""
         self.facet_index = FacetIndex()
-        if not self._retrieval_ready and not self._retrieval_initializing:
+        if self._lexical:
+            # Sources, BM25, entities and facets only: nothing is re-encoded, no vector is touched.
+            self._rebuild_bm25_entities()
+        elif not self._retrieval_ready and not self._retrieval_initializing:
             self._rebuild_bm25_entities()
             return
-        self._reembed_all()
-        self._rebuild_bm25_entities()
-        self.store.meta["embed_compute_profile"] = self._compute_profile()
+        else:
+            self._reembed_all()
+            self._rebuild_bm25_entities()
+            self.store.meta["embed_compute_profile"] = self._compute_profile()
         if getattr(self, "retriever", None) is not None:
             self.retriever.vector_index = self.vector_index
             self.retriever.bm25 = self.bm25
@@ -472,6 +477,8 @@ class MemoryV4:
         return self._embedding_cache.encode(texts, self.embedder.encode, self.embedder.dim, profile)
 
     def _compute_profile(self):
+        if self._lexical:
+            return None  # encoder absent by profile
         if not self._retrieval_ready and not self._retrieval_initializing:
             old = self.store.meta.get('embed_compute_profile')
             return dict(old) if isinstance(old, dict) else None
@@ -570,7 +577,7 @@ class MemoryV4:
         chunk_owner = self.store.chunk_owner
 
         # ---- vector index: drop stale entries, embed+add missing ones ----
-        indexed_ids = set(self.vector_index.ids())
+        indexed_ids = set() if self._lexical else set(self.vector_index.ids())
         stale_vec_ids = [sid for sid in indexed_ids if chunk_owner.get(sid, sid) not in live_ids]
         if stale_vec_ids:
             self.vector_index.remove(stale_vec_ids)
@@ -578,7 +585,7 @@ class MemoryV4:
             for sid in stale_vec_ids:
                 self.store.chunk_owner.pop(sid, None)
         represented = {chunk_owner.get(sid, sid) for sid in indexed_ids}
-        missing_ids = [iid for iid in live_ids if iid not in represented]
+        missing_ids = [] if self._lexical else [iid for iid in live_ids if iid not in represented]
         if missing_ids:
             missing_items = [live_items[iid] for iid in missing_ids]
             texts = [index_text(it, self.config) for it in missing_items]
@@ -730,12 +737,13 @@ class MemoryV4:
         """
         if not items:
             return
-        if vecs is None:
-            texts = [index_text(it, self.config) for it in items]
-            vecs = self._encode_index_texts(texts)
-        ids = [it.id for it in items]
-        self.vector_index.add(ids, vecs)
-        self._add_chunk_vectors(items)
+        if not self._lexical:  # the lexical profile indexes BM25, entities and facets only
+            if vecs is None:
+                texts = [index_text(it, self.config) for it in items]
+                vecs = self._encode_index_texts(texts)
+            ids = [it.id for it in items]
+            self.vector_index.add(ids, vecs)
+            self._add_chunk_vectors(items)
         for it in items:
             self.bm25.add(
                 it.id, lexical_index_tokens(it, self.config)
@@ -943,10 +951,12 @@ class MemoryV4:
 
                     # Embeddings serve retrieval, never duplicate decisions. Reuse
                     # this vector for indexing rather than computing it twice.
-                    probe_text = index_text(item, self.config)
-                    vec = self._encode_index_texts([probe_text])[0]
-
-                    self._index_items([item], vecs=np.asarray([vec]))
+                    if self._lexical:
+                        self._index_items([item])
+                    else:
+                        probe_text = index_text(item, self.config)
+                        vec = self._encode_index_texts([probe_text])[0]
+                        self._index_items([item], vecs=np.asarray([vec]))
                     added.append(item.id)
                     if kind == "fact" and (item.replaces or
                                            (item.identity and item.identity["cardinality"] == "single")):
@@ -997,10 +1007,11 @@ class MemoryV4:
                 return False
             item.deleted = True
             self.store.append(item)
-            chunk_ids = [cid for cid, owner in self.store.chunk_owner.items() if owner == item_id]
-            self.vector_index.remove([item_id, *chunk_ids])
-            for cid in chunk_ids:
-                self.store.chunk_owner.pop(cid, None)
+            if not self._lexical:
+                chunk_ids = [cid for cid, owner in self.store.chunk_owner.items() if owner == item_id]
+                self.vector_index.remove([item_id, *chunk_ids])
+                for cid in chunk_ids:
+                    self.store.chunk_owner.pop(cid, None)
             self.bm25.remove(item_id)
             self.entities.remove(item_id)
             self.facet_index.remove(item_id)
@@ -1105,7 +1116,9 @@ class MemoryV4:
                 hits = self.retriever.search(
                     query, top_k=self.config.candidates, at_time=at_time, project=project
                 )
-            vectors = {h.item.id: v for h in hits if (v := self.vector_index.get_one(h.item.id)) is not None}
+            # Policy lex-4.1.0-v1: MMR over an EMPTY vector map (diversity 0, relevance order).
+            vectors = {} if self._lexical else {
+                h.item.id: v for h in hits if (v := self.vector_index.get_one(h.item.id)) is not None}
             diversified = mmr(hits, vectors, lambda_=0.7, k=len(hits))
             return self._render_hits(diversified, max_tokens, with_revisions=with_revisions)
 
@@ -1250,7 +1263,9 @@ class MemoryV4:
             superseded = consolidate_mod.supersede_sweep(
                 self.store, self.vector_index, self.config, dry_run, project=project)
             decayed = consolidate_mod.decay(self.store, self.config, time.time(), dry_run, project=project)
-            proposals = consolidate_mod.summary_proposals(self.store, self.vector_index, project=project)
+            # Only cluster proposals read vectors: explicit partial result in the lexical profile.
+            proposals = [] if self._lexical else consolidate_mod.summary_proposals(
+                self.store, self.vector_index, project=project)
 
             if not dry_run and (deduped or superseded):
                 self._reconcile_indexes()
@@ -1261,7 +1276,7 @@ class MemoryV4:
                 self.store.meta.setdefault("last_consolidated_by_project", {})[project or "*"] = (
                     self.last_consolidated)
 
-            return {
+            result = {
                 "deduped": len(deduped),
                 "deduped_pairs": deduped,
                 "superseded": len(superseded),
@@ -1269,6 +1284,9 @@ class MemoryV4:
                 "decayed": decayed,
                 "summary_proposals": proposals,
             }
+            if self._lexical:
+                result["summary_proposals_status"] = "unavailable_in_lexical_profile"
+            return result
 
     @_requires_open
     def status(self, project: str | None = None) -> dict:
@@ -1277,13 +1295,15 @@ class MemoryV4:
         counts: dict[str, int] = {}
         for it in items:
             counts[it.kind] = counts.get(it.kind, 0) + 1
-        vector_count = sum(self.store.chunk_owner.get(vid, vid) in ids for vid in self.vector_index.ids())
+        vector_count = 0 if self._lexical else sum(
+            self.store.chunk_owner.get(vid, vid) in ids for vid in self.vector_index.ids())
         entity_terms = len({entity for it in items for entity in self.entities.doc_entities.get(it.id, [])})
         result = {
             "counts": counts,
             "total": sum(counts.values()),
-            "embed_model": getattr(self.embedder, "model_name", self.config.embed_model),
-            "dim": self.embedder.dim if self._retrieval_ready else self.store.meta.get("dim"),
+            "embed_model": None if self._lexical else getattr(self.embedder, "model_name", self.config.embed_model),
+            "dim": None if self._lexical else (
+                self.embedder.dim if self._retrieval_ready else self.store.meta.get("dim")),
             "retrieval_ready": self._retrieval_ready,
             "encoding_profile": self._compute_profile(),
             "data_dir": str(self.data_dir),
@@ -1293,6 +1313,8 @@ class MemoryV4:
             "last_consolidated": (self.last_consolidated if project is None else
                                   self.store.meta.get("last_consolidated_by_project", {}).get(project)),
         }
+        if self._lexical:
+            result["retrieval_profile"] = dict(LEXICAL_MARKER)
         if self.config.store_backend == "sqlite_s1":
             from .sqlite_stats import receipt_statistics
             result["receipts"] = receipt_statistics(self.store._connection, self.store.db_path)

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .bm25 import BM25Index
-from .config import Config
+from .config import Config, LEXICAL_POLICY, PROFILE_LEXICAL
 from .embed import Embedder, HashEmbedder
 from .entities import JUNK_ENTITY_WORDS, EntityIndex, extract_entities
 from .facets import FacetIndex, normalize_facet, rank_facet_pool
@@ -783,6 +783,8 @@ class HybridRetriever:
             signals["recency"] = recency
             signals["query_dates"] = query_dates
             signals["temporal_boost"] = temporal_boost
+            if cfg.retrieval_profile == PROFILE_LEXICAL:
+                signals["ranking_policy"] = LEXICAL_POLICY  # traceability; semantic signals unchanged
             scored.append(SearchHit(item=item, score=final, signals=signals))
 
         # Deterministic total order: `candidate_ids` is a set (assembled from
