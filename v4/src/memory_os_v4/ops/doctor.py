@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .auth import SecretFileError, http_get, read_token
 from .clients import CLIENTS, classify, read_entry
+from .diagnostics import exception_label
 from .settings import OpsSettings
 
 PROFILES = ("lexical", "semantic")
@@ -214,7 +215,7 @@ def _store(settings: OpsSettings) -> Check:
             return Check(
                 "store",
                 "FAIL",
-                f"SQLite read-only check failed: {type(exc).__name__}",
+                f"SQLite read-only check failed: {exception_label(exc)}",
                 "see ADR-001; doctor never repairs or upgrades SQLite",
             )
     if not (store / "items.jsonl").is_file():
@@ -237,7 +238,7 @@ def _backup(settings: OpsSettings) -> Check:
     try:
         age = last_good_backup_age(settings)
     except Exception as exc:
-        return Check("backup", "WARN", f"backup log unreadable: {type(exc).__name__}")
+        return Check("backup", "WARN", f"backup log unreadable: {exception_label(exc)}")
     if age is None:
         return Check("backup", "WARN", "no verified qualified backup yet", "memory-os-admin backup")
     status = "PASS" if age <= BACKUP_MAX_AGE_H else "WARN"
@@ -257,7 +258,7 @@ def _storage(settings: OpsSettings) -> Check:
             "free operator-owned space or choose qualified storage; never bypass the backup guard",
         )
     except (OSError, ValueError) as exc:
-        return Check("storage", "WARN", f"storage margin unknown: {type(exc).__name__}")
+        return Check("storage", "WARN", f"storage margin unknown: {exception_label(exc)}")
 
 
 def _backup_capacity(settings):
@@ -273,7 +274,7 @@ def _backup_capacity(settings):
             "Explicit MEMORY_V4_SQLITE_BACKUP_MAX_BYTES; never purge history to bypass a cap",
         )
     except (OSError, ValueError) as exc:
-        return Check("backup_capacity", "FAIL", str(exc))
+        return Check("backup_capacity", "FAIL", f"backup capacity unavailable: {exception_label(exc)}")
 
 
 def _sqlite_runtime() -> Check:
