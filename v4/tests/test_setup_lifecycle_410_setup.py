@@ -354,15 +354,15 @@ def test_uninstall_keeps_entries_that_are_not_this_installation(c):
     set_entry(c.home, "cursor", EXISTING["legacy-v3"])
     other_install = {"command": "/other/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"],
                      "env": {"MEMORY_V4_TOKEN_FILE": "/other/http.token", "MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/"}}
-    set_entry(c.home, "antigravity", other_install)
+    set_entry(c.home, "vscode", other_install)
     plan = uninstall_plan(c)
     actions = {item["client"]: item["action"] for item in plan["clients"]}
-    assert actions["cursor"] == "keep-foreign" and actions["antigravity"] == "keep-foreign"
+    assert actions["cursor"] == "keep-foreign" and actions["vscode"] == "keep-foreign"
     result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
     assert servers(c.home, "cursor")["memory-os-ai"] == EXISTING["legacy-v3"]
-    assert servers(c.home, "antigravity")["memory-os-ai"] == other_install
+    assert servers(c.home, "vscode")["memory-os-ai"] == other_install
     statuses = {item["client"]: item["status"] for item in result["clients"]}
-    assert statuses["cursor"] == statuses["antigravity"] == "kept-foreign"
+    assert statuses["cursor"] == statuses["vscode"] == "kept-foreign"
     assert result["service"]["outcome"] == "stopped-and-plist-moved"  # neither points to our service
 
 
@@ -723,9 +723,10 @@ DEPENDENTS = {
                                            "httpUrl": "http://127.0.0.1:9999/mcp"}, "none"),
 }
 # The entry's own ``env`` is known to override the inherited environment only in these clients
-# (sources read by the reviewer: VS Code, Codex, Gemini CLI; Antigravity by family).
-ENV_PRECEDENCE_ESTABLISHED = ("vscode", "codex", "gemini-cli", "antigravity")
-ENV_PRECEDENCE_NOT_ESTABLISHED = ("claude-code", "claude-desktop", "cursor", None)
+# (sources read by the reviewer: VS Code, Codex, Gemini CLI). Antigravity is not established: its
+# sources were not read, so an explicit foreign URL there stays ``indeterminate``.
+ENV_PRECEDENCE_ESTABLISHED = ("vscode", "codex", "gemini-cli")
+ENV_PRECEDENCE_NOT_ESTABLISHED = ("claude-code", "claude-desktop", "cursor", "antigravity", None)
 OTHER_URL = "http://127.0.0.1:9999/mcp/"
 EXPLICIT_FOREIGN_RELAYS = {
     "module-relay": with_url(MODULE_RELAY, OTHER_URL),
@@ -746,8 +747,8 @@ def test_service_dependency_is_none_only_when_another_destination_is_established
     from dataclasses import replace
     entry, expected = DEPENDENTS[case]
     settings = replace(c.settings, url=DEFAULT_URL)
-    # ``antigravity``: the client the uninstall test below plants the entry in (env precedence established).
-    assert uninstaller().service_dependency(entry, settings, home=c.home, client="antigravity") == expected
+    # ``vscode``: the client the uninstall test below plants the entry in (env precedence established).
+    assert uninstaller().service_dependency(entry, settings, home=c.home, client="vscode") == expected
 
 
 def test_the_clients_where_the_entry_environment_is_known_to_win_are_an_explicit_list():
@@ -781,7 +782,7 @@ def test_explicit_url_against_a_contradictory_inherited_environment(c, monkeypat
                                             client=client) == "wired"
 
 
-@pytest.mark.parametrize("key", ["claude-desktop", "claude-code", "antigravity"])
+@pytest.mark.parametrize("key", ["claude-desktop", "claude-code", "antigravity", "vscode"])
 def test_uninstall_keeps_the_service_for_an_explicit_foreign_url_in_a_client_not_established(c, key):
     """Same entry, three clients: the service stops only where the entry env is known to win."""
     installed(c, clients=("cursor",))
@@ -805,21 +806,21 @@ def test_uninstall_keeps_the_service_for_an_explicit_foreign_url_in_a_client_not
 def test_uninstall_keeps_the_service_for_an_entry_that_depends_or_may_depend_on_it(c, case):
     entry, dependency = DEPENDENTS[case]
     default_url_install(c)
-    set_entry(c.home, "antigravity", entry)
+    set_entry(c.home, "vscode", entry)
     plan = uninstall_plan(c)
     by = {item["client"]: item for item in plan["clients"]}
-    assert by["cursor"]["action"] == "remove" and by["antigravity"]["action"].startswith("keep-")
+    assert by["cursor"]["action"] == "remove" and by["vscode"]["action"].startswith("keep-")
     result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
-    assert servers(c.home, "antigravity")["memory-os-ai"] == entry and "memory-os-ai" not in servers(c.home, "cursor")
+    assert servers(c.home, "vscode")["memory-os-ai"] == entry and "memory-os-ai" not in servers(c.home, "cursor")
     if dependency == "none":
         assert result["service"]["outcome"] == "stopped-and-plist-moved" and result["service"]["remaining_clients"] == []
         assert c.system.verbs().count("bootout") == 1
     else:
         assert result["service"]["outcome"] == "kept-clients-remaining"
-        assert result["service"]["remaining_clients"] == ["antigravity"]
-        assert result["service"]["remaining_dependencies"] == {"antigravity": dependency}
+        assert result["service"]["remaining_clients"] == ["vscode"]
+        assert result["service"]["remaining_dependencies"] == {"vscode": dependency}
         assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
-        assert any("antigravity" in step for step in result["next_steps"])
+        assert any("vscode" in step for step in result["next_steps"])
 
 
 @pytest.mark.parametrize("entry", [README_UVX, {"command": "memory-os-relay"}, MODULE_RELAY])

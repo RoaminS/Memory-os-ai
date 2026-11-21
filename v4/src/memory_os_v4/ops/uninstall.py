@@ -28,9 +28,10 @@ from .clients import CLIENTS, SERVER, classify, read_entry
 JOURNAL_SUBDIR = ".local/state/memory-os/uninstall"  # below the selected HOME
 URL_FIELDS = ("url", "serverUrl", "httpUrl")
 # Clients where the ``env`` of an entry is known to override the environment the client inherited
-# (sources read by the contract reviewer: VS Code, Codex, Gemini CLI; Antigravity by family).
+# (sources read by the contract reviewer: VS Code, Codex, Gemini CLI). Antigravity is NOT in the list:
+# its sources were not read, and sharing the ``.gemini`` directory proves nothing about its launcher.
 # Elsewhere an explicit foreign URL does not establish independence from our service.
-ENV_PRECEDENCE_ESTABLISHED = frozenset({"vscode", "codex", "gemini-cli", "antigravity"})
+ENV_PRECEDENCE_ESTABLISHED = frozenset({"vscode", "codex", "gemini-cli"})
 V3_ARGS = ["-m", "memory_os_ai.server"]
 CONSOLE_SCRIPT = "memory-os-relay"
 PACKAGE = re.compile(r"memory-os-ai(\[[a-z]+(,[a-z]+)*\])?(==[0-9][0-9A-Za-z.]*)?")  # index name only: no URL, no path

@@ -471,10 +471,11 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
   **Priorité de l'`env` d'une entrée sur l'environnement hérité : bornée aux clients où elle
   est établie** (amendement du verdict n° 5). Elle est établie, d'après les sources lues par
   le relecteur, pour **VS Code** (`extHostMcpNode.ts`), **Codex** (`rmcp-client/src/utils.rs`)
-  et **Gemini CLI** (`mcp-client.ts`) ; Antigravity est rattaché à la famille Gemini (même
-  arborescence `.gemini/`, indication du coordinateur — à confirmer en revue). Constante :
-  `uninstall.ENV_PRECEDENCE_ESTABLISHED = {"vscode", "codex", "gemini-cli", "antigravity"}`.
-  Pour **Claude Code, Claude Desktop, Cursor** et tout autre client du registre, elle n'est
+  et **Gemini CLI** (`mcp-client.ts`), et pour eux seuls. Constante :
+  `uninstall.ENV_PRECEDENCE_ESTABLISHED = {"vscode", "codex", "gemini-cli"}`. **Antigravity n'en fait pas
+  partie** : ses sources n'ont pas été lues, et partager l'arborescence `.gemini/` ne dit rien de la façon dont
+  il lance un serveur ; la règle « non établi → `indeterminate` » s'applique (décision du coordinateur).
+  Pour **Claude Code, Claude Desktop, Cursor, Antigravity** et tout autre client du registre, elle n'est
   **pas établie ici** : aucun code de ce dépôt ne la démontre (le dépôt ne contient que le
   relais, qui lit l'environnement de son processus, `ops/settings.py:73` ; la façon dont le
   client compose cet environnement est hors du dépôt) et aucun accès réseau n'est permis pour
@@ -704,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (579 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (580 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -716,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 579 tests verts** (clients 183, cycle de vie 204, profil 62, reprise 45, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 50 d'écarts (§23). Le reste de
+**État après implémentation : 580 tests verts** (clients 183, cycle de vie 205, profil 62, reprise 45, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 51 d'écarts et de décisions ultérieures (§23). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1023,7 +1024,7 @@ et aux tests avant le code des outils.
 
 | Point du verdict | Changement | Section · tests |
 |---|---|---|
-| **Amendement 1** — la priorité de l'`env` explicite sur l'hérité n'est établie que pour VS Code, Codex, Gemini CLI | affirmation bornée : `none` pour un relais à URL explicite étrangère seulement dans un client établi (`ENV_PRECEDENCE_ESTABLISHED`) ; Claude Code, Claude Desktop, Cursor, client non précisé : `indeterminate` ; `service_dependency(..., client=None)` | §7 · `test_explicit_foreign_url_frees_the_service_only_where_env_precedence_is_established` (24), `test_uninstall_keeps_the_service_for_an_explicit_foreign_url_in_a_client_not_established` (3) |
+| **Amendement 1** — la priorité de l'`env` explicite sur l'hérité n'est établie que pour VS Code, Codex, Gemini CLI | affirmation bornée : `none` pour un relais à URL explicite étrangère seulement dans un client établi (`ENV_PRECEDENCE_ESTABLISHED` = VS Code, Codex, Gemini CLI) ; Claude Code, Claude Desktop, Cursor, Antigravity, client non précisé : `indeterminate` ; `service_dependency(..., client=None)` | §7 · `test_explicit_foreign_url_frees_the_service_only_where_env_precedence_is_established` (24), `test_uninstall_keeps_the_service_for_an_explicit_foreign_url_in_a_client_not_established` (4, dont Antigravity non établi et VS Code établi) |
 | Cas : URL explicite contre environnement hérité contradictoire | l'environnement de l'outil n'établit rien ; seul le client décide | §7 · `test_explicit_url_against_a_contradictory_inherited_environment` (4) |
 | Cas : `uvx` avec URL explicite étrangère | forme `uvx` reconnue définie strictement ; autre paquet ou `--env-file` : `indeterminate` | §7 · cas `uvx-explicit-other-port`, `uvx-foreign-package-explicit-other-url`, `uvx-env-file-explicit-other-url` |
 | HTTP directe : plusieurs champs URL contradictoires | `indeterminate` ; champs concordants acceptés | §7 · cas `direct-http-contradictory-urls`, `direct-http-two-foreign-urls-that-differ`, `direct-http-agreeing-urls`, `direct-http-agreeing-foreign-urls` |
@@ -1034,7 +1035,7 @@ Effet sur les comptes : 47 tests ajoutés au fichier du cycle de vie (7 cas de d
 liste des clients établis, 24 + 4 + 3 cas d'amendement 1, 1 scénario d'amendement 2) ; avant le
 code des outils : **529 tests, 82 verts, 447 rouges**. Le test
 `test_service_dependency_is_none_only_when_another_destination_is_established` précise désormais
-le client (`antigravity`, celui du test de désinstallation réelle) : sans client, les trois cas
+le client (`vscode`, celui du test de désinstallation réelle, client établi) : sans client, les trois cas
 « relais à URL explicite étrangère » sont `indeterminate`.
 
 ## 23. Écarts d'implémentation
@@ -1097,4 +1098,5 @@ Règles du contrat corrigées ou précisées pendant l'implémentation, avec leu
 - Preuve du localisateur : wheel construit hors ligne depuis le commit scellé et inspecté (module, deux
   fichiers de contraintes, point d'entrée) ; l'installation `pip --no-deps` dans un venv vierge (§12) reste
   à faire sous GO.
-- Antigravity dans `ENV_PRECEDENCE_ESTABLISHED` : par rattachement à Gemini CLI, non lu dans ses sources.
+- Antigravity n'est **pas** dans `ENV_PRECEDENCE_ESTABLISHED` (retiré : rattachement à Gemini CLI non vérifié) ;
+  un relais Antigravity à URL explicite étrangère retient donc le service jusqu'à preuve ou retrait de l'entrée.
