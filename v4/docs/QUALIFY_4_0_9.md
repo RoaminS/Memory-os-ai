@@ -33,7 +33,7 @@ installés. release_ready=false jusqu'à la dernière preuve. Aucune erreur/skip
 admise ; test lent désélectionné par le harnais standard puis test sémantique
 cached séparé obligatoire.
 
-**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1…v7_chain.sh`** (désactivés, non
+**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1…v8_chain.sh`** (désactivés, non
 validés) **ni
 `~/memory-os-local/ops/qualify_409_c1_chain.sh`** (orphelin du
 31/10, visait un autre commit, 06199a2). Seules les commandes ci-dessous valent.
@@ -65,25 +65,18 @@ harnais ne réduit aucune de ces formules. Ni saut, ni réutilisation d'un S4
 antérieur ; une erreur laisse release_ready=false. Swap≤8,5Go mesurable ;
 nice15, concurrence1. Au plus un job de cette chaîne actif.
 
-**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v8_chain.sh` :** pendant
-TOUTES les étapes, disque libre ≥ 5 Go et swap ≤ 8,5 Go (Go décimaux), mesurés toutes les 2 s ; sinon les processus dont la filiation avec l'étape
-est PROUVÉE (descendants suivis par point fixe, identité pid + heure de démarrage) sont gelés puis arrêtés, l'étape
-est marquée en échec, sans relance automatique. Un balayage de DÉTECTION (jamais de signal) repère les processus
-démarrés après la chaîne sous la branche ou sous `qual-envs/409-installed-claude-*` ; s'il en reste, le verrou
-commun `ops/logs/qualify_409.lock` est conservé et la liste affichée pour inspection humaine. Une détection impossible
-(ps/lsof en échec) vaut refus : verrou conservé. Un parent n'est exploré que si son identité (pid + heure de
-démarrage) est vérifiée, ce qui exclut les pid réattribués. Aucun TERM/KILL n'est envoyé sans gel vérifié
-(SIGSTOP puis identité relue ; en cas d'écart, SIGCONT immédiat) : un processus gelé ne peut pas se terminer, donc son
-pid ne peut pas être réattribué. Risque résiduel borné : si un pid est réattribué dans la fenêtre microscopique entre
-la vérification et le SIGSTOP, un processus étranger est suspendu un instant puis relancé, jamais terminé. Un refus
-à la sortie renomme `CHAIN_RESULT` en `CHAIN_RESULT.invalid` et donne le code 5.
-**Garantie réduite, à accepter explicitement par Romain avant tout lancement :** sur macOS sans privilèges
-(environnement des processus illisible), un orphelin créé puis abandonné entre deux relevés n'est pas arrêté
-automatiquement ; il n'est que détecté s'il travaille sous ces chemins. Alternative à garantie complète : exécuter
-la chaîne sous un compte macOS dédié (tous ses processus lui appartiennent), à créer par Romain. La copie ne démarre qu'avec ≥ 9,2 Go libres
-(budget adaptive ≈4,1 Go + 5 Go). Les départs à 3,05–3,25 Go du tableau sont les gardes internes du harnais
-(MEMORY_V4_MIN_FREE_BYTES=3e9), un filet de sécurité, pas le seuil de la chaîne. Mesure de swap absente ou
-illisible : refus. Voir
+**Règle de Romain (disque libre ≥ 5 Go, swap ≤ 8,5 Go, Go décimaux), chaîne `~/memory-os-local/ops/qualify_409_v9_chain.sh` :**
+chaque étape tourne au premier plan sous `ops/qualify_409_step_supervisor.py`, qui mesure toutes les 2 s, en octets.
+- Seul l'enfant direct est signalé (TERM, puis KILL après 30 s), via `Popen.send_signal` : tant qu'il n'est pas récolté,
+  son pid est réservé, donc sans course de réattribution.
+- Les descendants ne sont JAMAIS signalés : ils sont relevés (pid + heure de démarrage) et, s'il en reste, verrou commun
+  `ops/logs/qualify_409.lock` conservé, intervention humaine. Un balayage de détection (chemins de la branche et de
+  `qual-envs/409-installed-claude-*`) complète ce relevé ; une détection impossible vaut refus.
+- Les harnais gardent leur garde interne qualifiée (MEMORY_V4_MIN_FREE_BYTES=3e9) sur leurs propres enfants : entre 5 et
+  3 Go, un descendant d'un harnais arrêté peut terminer son travail en cours (puis il est détecté).
+- La copie ne démarre qu'avec ≥ 9,2 Go libres. Mesure illisible : refus. Arrêt manuel : Ctrl-C ou TERM au groupe.
+- **Garantie à accepter par Romain** : aucun signal à un processus non prouvé ; arrêt automatique limité à l'enfant direct.
+  Alternative à arrêt complet garanti : compte macOS dédié. Voir
 `BACKUP_CAPACITY_4_0_8.md` et `SQLITE_GROWTH_2026_10_26.md` (inchangés).
 
 ## 1. Arbre et source
@@ -236,7 +229,7 @@ ce qui aurait fait refuser `--record-relay-proof`). Ce script fait partie de l'i
 manifeste 4.0.8 se vérifie avec son outillage historique, jamais en réécrivant ses empreintes.
 
 **Attention : `--record-relay-proof` positionne déjà `release_ready=true`.** Seul compte le résultat de la
-vérification finale : la chaîne v8 écrit `CHAIN_RESULT=PASS` dans son dossier de logs uniquement après elle ; un
+vérification finale : la chaîne v9 écrit `CHAIN_RESULT=PASS` dans son dossier de logs uniquement après elle ; un
 arrêt ou un refus de cette dernière commande interdit toute publication même si `release_ready` vaut true. release_ready=true n'autorise ni publication PyPI ni bascule de
 production : chacune exige un GO distinct de Romain. La procédure de bascule
 (`SWITCH_4_0_8_SQLITE.md`) doit être adaptée/revue pour 4.0.9, jamais exécutée
