@@ -1,6 +1,7 @@
 # Installation multi-clients 4.1.0 — contrat (phase 1a-setup, étape 1)
 
-Statut : **contrat v5, écrit avant tout code d'outil**. Le verdict n° 4 sur la v4 (`ad9d8bb`,
+Statut : **contrat v5 amendé (verdict n° 5 « VALIDÉ AVEC AMENDEMENTS », traité en §22 bis), en cours
+d'implémentation** ; écarts constatés à l'implémentation : §23. Le verdict n° 4 sur la v4 (`ad9d8bb`,
 `codex_verdict_setup_contract_v4.md` : deux faux négatifs de dépendance) est traité en §22 ; le
 verdict n° 3 sur la v3 (`7e76eba`) en §21. Historique : La v1 (`779c3a7`) a reçu le verdict Codex
 « NON VALIDÉ » du 21/11 (`codex_verdict_setup_contract_v1.md`), traité point par point en §19 ;
@@ -290,9 +291,20 @@ Trois notions distinctes ; aucune ne remplace les autres.
    entrée recréée à la main ensuite est `unproven`. **Ordre : révocation d'abord, retrait
    ensuite.** Si le retrait échoue après la révocation, l'entrée reste en place et non prouvée
    (`failed-entry-kept-unproven`, résultat partiel) : l'erreur va dans le sens sûr, un
-   consentement nommé sera demandé. Si la révocation est impossible, ce client n'est pas
-   touché (`revocation-failed-entry-untouched`, aucune écriture dans son fichier, preuve
-   intacte, résultat partiel, service conservé). Tous les journaux concordants sont révoqués,
+   consentement nommé sera demandé. Si la révocation échoue (écriture d'un journal impossible),
+   ce client n'est pas touché : `revocation-failed-entry-untouched`, **aucune écriture dans son
+   fichier**, résultat partiel, service conservé. Ce qui est garanti alors, et seulement cela
+   (amendement du verdict n° 5) : **client intact ; révocations déjà acquises conservées**
+   (jamais défaites : un journal déjà réécrit reste révoqué) ; **résultat partiel**
+   (`uninstall_partial`) ; **service conservé**. La preuve n'est donc « intacte » que si l'échec
+   survient à la **première** écriture ; après un échec sur le deuxième journal, le premier est
+   déjà révoqué et l'entrée n'est plus prouvée que par les journaux concordants restants.
+   `revoked_journals` donne le nombre de révocations acquises. **Reprise** : une nouvelle
+   exécution relit les journaux ; s'il reste au moins un enregistrement concordant non révoqué,
+   l'entrée est encore prouvée (`remove`, `ownership: "journal"`), les journaux restants sont
+   révoqués puis l'entrée est retirée ; s'il n'en reste aucun, elle est `keep-unproven` et
+   demande un consentement nommé. Les journaux sont traités dans l'ordre de leur chemin.
+   Tous les journaux concordants sont révoqués,
    pas seulement le plus récent ; un journal portant une autre empreinte n'est pas réécrit ;
    mode 0600, dossier 0700 et lien unique sont conservés par la réécriture. Le résultat donne
    `revoked_journals` par client. Les preuves des autres clients ne sont pas modifiées.
@@ -441,8 +453,11 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
 
   | Entrée restante | Ce qui est établi | Dépendance |
   |---|---|---|
-  | relais de forme stricte, ou script console `memory-os-relay` (nu, ou `uvx … memory-os-relay`), **avec un `MEMORY_V4_URL` littéral dans son `env`** | la destination : l'`env` de l'entrée est imposé au processus lancé et prime sur tout environnement hérité | `wired` si hôte de bouclage et port sont les nôtres ; `none` sinon (autre port, ou hôte hors bouclage) |
-  | HTTP directe (`url`, `serverUrl`, `httpUrl` littérale), sans `command` | la destination : c'est l'URL elle-même | `wired` si hôte de bouclage (`127.0.0.1`, `localhost`, `::1`) et port sont les nôtres, avec ou sans barre finale ; `none` sinon |
+  | relais de forme stricte, ou script console `memory-os-relay` (nu, ou forme `uvx` reconnue, ci-dessous), **avec un `MEMORY_V4_URL` littéral dans son `env`**, visant **notre** service (hôte de bouclage et port) | l'entrée nomme notre service | `wired`, quel que soit le client (sens sûr : le service est conservé) |
+  | même forme, `MEMORY_V4_URL` littéral visant une **autre** destination (autre port, ou hôte hors bouclage), dans un client où la priorité de l'`env` de l'entrée sur l'environnement hérité est **établie** (liste ci-dessous) | la destination : l'`env` de l'entrée est imposé au processus lancé et prime sur l'environnement hérité | `none` |
+  | même forme, autre destination, dans un client où cette priorité **n'est pas établie**, ou client non précisé | rien : un `MEMORY_V4_URL` hérité visant notre port pourrait l'emporter | `indeterminate` |
+  | HTTP directe (`url`, `serverUrl`, `httpUrl` littérale), sans `command`, **une seule destination** (un seul champ, ou plusieurs champs désignant le même hôte et le même port) | la destination : c'est l'URL elle-même | `wired` si hôte de bouclage (`127.0.0.1`, `localhost`, `::1`) et port sont les nôtres, avec ou sans barre finale ; `none` sinon |
+  | HTTP directe portant **plusieurs champs URL contradictoires** (destinations différentes), ou un champ URL non littéral | rien : on ne sait pas lequel le client utilise | `indeterminate` |
   | serveur v3 de forme exacte : interpréteur, `args == ["-m", "memory_os_ai.server"]` | un serveur stdio autonome, avec son propre magasin, qui n'ouvre aucune connexion vers le service v4 | `none` |
   | relais de forme stricte ou script console **sans `MEMORY_V4_URL` dans son `env`** (forme du README et de `server.json`) | rien : le relais lit l'environnement de **son** processus (`ops/settings.py:73`) ; le client a pu être lancé avec `MEMORY_V4_URL` visant notre port et le transmettre sans l'écrire dans sa configuration ; la valeur par défaut `8765` ne s'applique que si rien n'est hérité, ce que la configuration ne dit pas | `indeterminate`, quel que soit notre port |
   | `MEMORY_V4_URL` non littéral (`${VAR}`, valeur non textuelle) | rien | `indeterminate` |
@@ -452,6 +467,34 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
 
   La comparaison porte sur le **service** (hôte de bouclage et port), pas sur le fichier de
   jeton : une entrée qui vise notre port dépend de notre service même avec un autre jeton.
+
+  **Priorité de l'`env` d'une entrée sur l'environnement hérité : bornée aux clients où elle
+  est établie** (amendement du verdict n° 5). Elle est établie, d'après les sources lues par
+  le relecteur, pour **VS Code** (`extHostMcpNode.ts`), **Codex** (`rmcp-client/src/utils.rs`)
+  et **Gemini CLI** (`mcp-client.ts`) ; Antigravity est rattaché à la famille Gemini (même
+  arborescence `.gemini/`, indication du coordinateur — à confirmer en revue). Constante :
+  `uninstall.ENV_PRECEDENCE_ESTABLISHED = {"vscode", "codex", "gemini-cli", "antigravity"}`.
+  Pour **Claude Code, Claude Desktop, Cursor** et tout autre client du registre, elle n'est
+  **pas établie ici** : aucun code de ce dépôt ne la démontre (le dépôt ne contient que le
+  relais, qui lit l'environnement de son processus, `ops/settings.py:73` ; la façon dont le
+  client compose cet environnement est hors du dépôt) et aucun accès réseau n'est permis pour
+  la vérifier. Pour eux, un relais avec URL explicite étrangère est `indeterminate` et conserve
+  le service. Les vingt-six scénarios synthétiques ne constituent pas cette preuve.
+  `service_dependency(entry, settings, *, home, client=None)` : `client` est la clé du client
+  qui porte l'entrée ; absent, il vaut « non établi ».
+
+  **Forme `uvx` reconnue** : `command` de nom `uvx`, arguments composés **uniquement** de
+  `--python <v>`, `--no-python-downloads`, `--from <exigence>` où l'exigence nomme le paquet
+  `memory-os-ai` (extras et version libres), terminés par `memory-os-relay`. Tout autre
+  argument (`--with`, `--env-file`, autre paquet, `--from` absent) en fait une commande
+  opaque : `indeterminate`, même avec une URL explicite étrangère.
+
+  Cas ajoutés par l'amendement, tous testés : URL explicite étrangère contre environnement
+  hérité contradictoire (l'environnement de l'outil visant notre service : `none` dans un
+  client établi, `indeterminate` ailleurs) ; URL explicite vers notre service contre
+  environnement hérité étranger (`wired`) ; client non établi ou non précisé ; `uvx` avec URL
+  explicite étrangère (forme reconnue : `none` dans un client établi ; autre paquet ou
+  `--env-file` : `indeterminate`) ; champs URL contradictoires (`indeterminate`).
 
   Conséquences assumées : l'entrée du README (`uvx … memory-os-relay` sans environnement) et
   toute entrée `memory-os-ai` opaque retiennent le service jusqu'à ce que l'utilisateur les
@@ -968,3 +1011,31 @@ mise à niveau d'une installation 4.0.x.
 
 Le §21 décrit la v4 ; sa ligne N2 (« résolue avec les valeurs par défaut du relais ») est
 remplacée par la règle ci-dessus.
+
+## 22 bis. Verdict Codex n° 5 sur la v5 (« VALIDÉ AVEC AMENDEMENTS ») : point par point
+
+`codex_verdict_setup_contract_v5.md`. Les deux amendements obligatoires sont intégrés au texte
+et aux tests avant le code des outils.
+
+| Point du verdict | Changement | Section · tests |
+|---|---|---|
+| **Amendement 1** — la priorité de l'`env` explicite sur l'hérité n'est établie que pour VS Code, Codex, Gemini CLI | affirmation bornée : `none` pour un relais à URL explicite étrangère seulement dans un client établi (`ENV_PRECEDENCE_ESTABLISHED`) ; Claude Code, Claude Desktop, Cursor, client non précisé : `indeterminate` ; `service_dependency(..., client=None)` | §7 · `test_explicit_foreign_url_frees_the_service_only_where_env_precedence_is_established` (24), `test_uninstall_keeps_the_service_for_an_explicit_foreign_url_in_a_client_not_established` (3) |
+| Cas : URL explicite contre environnement hérité contradictoire | l'environnement de l'outil n'établit rien ; seul le client décide | §7 · `test_explicit_url_against_a_contradictory_inherited_environment` (4) |
+| Cas : `uvx` avec URL explicite étrangère | forme `uvx` reconnue définie strictement ; autre paquet ou `--env-file` : `indeterminate` | §7 · cas `uvx-explicit-other-port`, `uvx-foreign-package-explicit-other-url`, `uvx-env-file-explicit-other-url` |
+| HTTP directe : plusieurs champs URL contradictoires | `indeterminate` ; champs concordants acceptés | §7 · cas `direct-http-contradictory-urls`, `direct-http-two-foreign-urls-that-differ`, `direct-http-agreeing-urls`, `direct-http-agreeing-foreign-urls` |
+| v3 exact : une mention dans une enveloppe ne suffit pas | déjà couvert (`legacy-v3-inside-a-wrapper`) ; l'interpréteur doit être un chemin d'interpréteur, les arguments exactement `-m memory_os_ai.server` | §7 |
+| **Amendement 2** — « preuve intacte » fausse après un échec sur le deuxième journal | garanties réécrites : client intact, révocations acquises conservées, résultat partiel, service conservé ; reprise décrite | §5.2 · `test_a_revocation_failing_on_the_second_journal_keeps_the_first_and_resumes` |
+
+Effet sur les comptes : 47 tests ajoutés au fichier du cycle de vie (7 cas de dépendance × 2,
+liste des clients établis, 24 + 4 + 3 cas d'amendement 1, 1 scénario d'amendement 2) ; avant le
+code des outils : **529 tests, 82 verts, 447 rouges**. Le test
+`test_service_dependency_is_none_only_when_another_destination_is_established` précise désormais
+le client (`antigravity`, celui du test de désinstallation réelle) : sans client, les trois cas
+« relais à URL explicite étrangère » sont `indeterminate`.
+
+## 23. Écarts d'implémentation
+
+Règles du contrat corrigées ou précisées pendant l'implémentation, avec leur raison. Chaque
+écart est reflété par les tests.
+
+(à compléter au fil des étapes)

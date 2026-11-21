@@ -581,6 +581,55 @@ def test_a_failed_revocation_leaves_the_client_untouched_and_the_result_partial(
     assert (again["clients"][0]["action"], again["clients"][0]["ownership"]) == ("remove", "journal")
 
 
+def test_a_revocation_failing_on_the_second_journal_keeps_the_first_and_resumes(c, monkeypatch):
+    """Verdict n° 5, amendment 2: two journals prove the entry; the write of the SECOND one fails.
+
+    The first revocation is already durable: the proof is not 'intact'. What is guaranteed is the
+    client file untouched, acquired revocations kept, a partial result, the service kept — and a
+    later run that finishes the work from the journal that still proves the entry.
+    """
+    import shutil
+    result = installed(c, clients=("cursor",))
+    root = c.home / STATE / "quickstart"
+    twin = root / ("20261101-101010-" + "b" * 32)
+    shutil.copytree(root / result["stamp"], twin)
+    for path in twin.iterdir():
+        path.chmod(0o600)
+    twin.chmod(0o700)
+    plan = uninstall_plan(c, clients=("cursor",))
+    assert (plan["clients"][0]["action"], plan["clients"][0]["ownership"]) == ("remove", "journal")
+    config = (c.home / PATHS["cursor"]).read_bytes()
+    real = qs._atomic_write
+    revocations = []
+
+    def failing(path, text):
+        if Path(path).name == "journal.json" and '"revoked": true' in text:
+            revocations.append(str(path))
+            if len(revocations) == 2:
+                raise OSError("read-only file system")
+        return real(path, text)
+    monkeypatch.setattr(qs, "_atomic_write", failing)
+    partial = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    item, = partial["clients"]
+    assert item["status"] == "revocation-failed-entry-untouched" and item["revoked_journals"] == 1
+    assert (c.home / PATHS["cursor"]).read_bytes() == config  # client untouched
+    assert partial["ok"] is False and partial["partial"] is True and partial["code"] == "uninstall_partial"
+    assert partial["service"]["outcome"] == "kept-clients-incomplete"
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+    states = [bool(record.get("revoked")) for record in journal_records(c, "cursor")]
+    assert sorted(states) == [False, True]  # the acquired revocation is kept, the other journal still proves
+    assert len(revocations) == 2 and revocations[0] != revocations[1]
+
+    monkeypatch.setattr(qs, "_atomic_write", real)  # resumption, once the journal can be written again
+    again = uninstall_plan(c, clients=("cursor",))
+    assert (again["clients"][0]["action"], again["clients"][0]["ownership"]) == ("remove", "journal")
+    done = uninstaller().apply(again, c.settings, home=c.home, run=c.system)
+    assert done["ok"] is True and done["clients"][0]["status"] == "removed" and done["clients"][0]["revoked_journals"] == 1
+    assert all(record["revoked"] is True for record in journal_records(c, "cursor"))
+    assert "memory-os-ai" not in servers(c.home, "cursor")
+    assert done["service"]["outcome"] == "stopped-and-plist-moved" and c.system.verbs().count("bootout") == 1
+
+
 def test_undo_revokes_the_proof_too(c):
     result = installed(c, clients=("cursor", "vscode"))
     entry = servers(c.home, "cursor")["memory-os-ai"]
@@ -638,6 +687,29 @@ DEPENDENTS = {
     "direct-http-other-port": ({"type": "http", "url": "http://127.0.0.1:9999/mcp/"}, "none"),
     "direct-http-other-host": ({"type": "http", "url": "https://example.com:8765/mcp/"}, "none"),
     "legacy-v3-exact-module": (EXISTING["legacy-v3"], "none"),
+    # verdict n° 5, amendment 1: uvx with an explicit foreign URL, and contradictory URL fields
+    "uvx-explicit-other-port": (with_url(README_UVX, "http://127.0.0.1:9999/mcp/"), "none"),
+    "uvx-foreign-package-explicit-other-url": (with_url({"command": "uvx", "args": [
+        "--from", "some-other-package", "memory-os-relay"]}, "http://127.0.0.1:9999/mcp/"), "indeterminate"),
+    "uvx-env-file-explicit-other-url": (with_url({"command": "uvx", "args": [
+        "--env-file", "/x/.env", "--from", "memory-os-ai[ops,brief]==4.1.0", "memory-os-relay"]},
+        "http://127.0.0.1:9999/mcp/"), "indeterminate"),
+    "direct-http-contradictory-urls": ({"url": "http://127.0.0.1:9999/mcp/", "serverUrl": DEFAULT_URL}, "indeterminate"),
+    "direct-http-two-foreign-urls-that-differ": ({"url": "http://127.0.0.1:9999/mcp/",
+                                                  "httpUrl": "https://example.com/mcp"}, "indeterminate"),
+    "direct-http-agreeing-urls": ({"url": DEFAULT_URL, "serverUrl": "http://localhost:8765/mcp"}, "wired"),
+    "direct-http-agreeing-foreign-urls": ({"url": "http://127.0.0.1:9999/mcp/",
+                                           "httpUrl": "http://127.0.0.1:9999/mcp"}, "none"),
+}
+# The entry's own ``env`` is known to override the inherited environment only in these clients
+# (sources read by the reviewer: VS Code, Codex, Gemini CLI; Antigravity by family).
+ENV_PRECEDENCE_ESTABLISHED = ("vscode", "codex", "gemini-cli", "antigravity")
+ENV_PRECEDENCE_NOT_ESTABLISHED = ("claude-code", "claude-desktop", "cursor", None)
+OTHER_URL = "http://127.0.0.1:9999/mcp/"
+EXPLICIT_FOREIGN_RELAYS = {
+    "module-relay": with_url(MODULE_RELAY, OTHER_URL),
+    "console-script": with_url({"command": "memory-os-relay"}, OTHER_URL),
+    "uvx": with_url(README_UVX, OTHER_URL),
 }
 
 
@@ -653,7 +725,59 @@ def test_service_dependency_is_none_only_when_another_destination_is_established
     from dataclasses import replace
     entry, expected = DEPENDENTS[case]
     settings = replace(c.settings, url=DEFAULT_URL)
-    assert uninstaller().service_dependency(entry, settings, home=c.home) == expected
+    # ``antigravity``: the client the uninstall test below plants the entry in (env precedence established).
+    assert uninstaller().service_dependency(entry, settings, home=c.home, client="antigravity") == expected
+
+
+def test_the_clients_where_the_entry_environment_is_known_to_win_are_an_explicit_list():
+    assert uninstaller().ENV_PRECEDENCE_ESTABLISHED == frozenset(ENV_PRECEDENCE_ESTABLISHED)
+
+
+@pytest.mark.parametrize("client", [*ENV_PRECEDENCE_ESTABLISHED, *ENV_PRECEDENCE_NOT_ESTABLISHED])
+@pytest.mark.parametrize("form", sorted(EXPLICIT_FOREIGN_RELAYS))
+def test_explicit_foreign_url_frees_the_service_only_where_env_precedence_is_established(c, client, form):
+    """Verdict n° 5: 'the entry env overrides the inherited one' is proven for some clients only."""
+    from dataclasses import replace
+    settings = replace(c.settings, url=DEFAULT_URL)
+    entry = EXPLICIT_FOREIGN_RELAYS[form]
+    options = {} if client is None else {"client": client}
+    expected = "none" if client in ENV_PRECEDENCE_ESTABLISHED else "indeterminate"
+    assert uninstaller().service_dependency(entry, settings, home=c.home, **options) == expected
+    # Naming OUR service explicitly is ``wired`` everywhere: the safe direction needs no proof.
+    ours = with_url({k: v for k, v in entry.items() if k != "env"}, DEFAULT_URL)
+    assert uninstaller().service_dependency(ours, settings, home=c.home, **options) == "wired"
+
+
+@pytest.mark.parametrize("client,expected", [("vscode", "none"), ("codex", "none"),
+                                             ("cursor", "indeterminate"), ("claude-desktop", "indeterminate")])
+def test_explicit_url_against_a_contradictory_inherited_environment(c, monkeypatch, client, expected):
+    """The tool's own environment names our service while the entry names another one, and conversely."""
+    monkeypatch.setenv("MEMORY_V4_URL", c.settings.url)
+    assert uninstaller().service_dependency(with_url(MODULE_RELAY, OTHER_URL), c.settings, home=c.home,
+                                            client=client) == expected
+    monkeypatch.setenv("MEMORY_V4_URL", OTHER_URL)
+    assert uninstaller().service_dependency(with_url(MODULE_RELAY, c.settings.url), c.settings, home=c.home,
+                                            client=client) == "wired"
+
+
+@pytest.mark.parametrize("key", ["claude-desktop", "claude-code", "antigravity"])
+def test_uninstall_keeps_the_service_for_an_explicit_foreign_url_in_a_client_not_established(c, key):
+    """Same entry, three clients: the service stops only where the entry env is known to win."""
+    installed(c, clients=("cursor",))
+    entry = with_url(MODULE_RELAY, OTHER_URL)
+    set_entry(c.home, key, entry)
+    plan = uninstall_plan(c)
+    by = {item["client"]: item for item in plan["clients"]}
+    established = key in ENV_PRECEDENCE_ESTABLISHED
+    assert by[key]["action"] == "keep-foreign" and by[key]["dependency"] == ("none" if established else "indeterminate")
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert servers(c.home, key)["memory-os-ai"] == entry
+    if established:
+        assert result["service"]["outcome"] == "stopped-and-plist-moved" and result["service"]["remaining_clients"] == []
+    else:
+        assert result["service"]["outcome"] == "kept-clients-remaining"
+        assert result["service"]["remaining_dependencies"] == {key: "indeterminate"}
+        assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
 
 
 @pytest.mark.parametrize("case", sorted(DEPENDENTS))
