@@ -110,12 +110,6 @@ def test_every_preflight_refusal_has_a_stable_code_and_writes_nothing(c, monkeyp
     assert tree(c.root) == before
 
 
-def test_running_claude_desktop_points_to_the_mcpb_route(c):
-    c.system.desktop_running = True
-    plan = prepare(c, profile="lexical", clients=("claude-desktop",))
-    assert any(".mcpb" in blocker for blocker in plan["blockers"])
-
-
 # ---- apply: the six clients, each backed up ----
 
 def test_install_configures_the_six_clients_and_backs_up_each_original(c):
@@ -158,7 +152,22 @@ def test_no_secret_reaches_any_journal_report_or_plist(c):
     assert not any(secret in shown for secret in secrets)
     assert str(c.settings.token_file) in plist  # the path, never the value
     for backup in (c.home / STATE).rglob("*.bak"):
-        assert token not in backup.read_text(errors="replace")  # verbatim copies predate the token
+        assert backup.stat().st_mode & 0o777 == 0o600 and backup.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_a_pre_existing_secret_survives_only_in_the_private_backup(c):
+    """An old direct-HTTP entry carried this very token: the verbatim 0600 backup keeps it, nothing else does."""
+    token = "T" * 43
+    c.settings.token_file.parent.mkdir(parents=True, exist_ok=True)
+    c.settings.token_file.write_text(token + "\n")
+    c.settings.token_file.chmod(0o600)
+    set_entry(c.home, "cursor", {"type": "http", "url": c.settings.url, "headers": {"Authorization": "Bearer " + token}})
+    result = install(c, profile="lexical", clients=("cursor",), replace_existing=("cursor",))
+    assert result["ok"] is True
+    backup = Path(result["clients"]["records"][0]["backup"])
+    assert token in backup.read_text() and backup.stat().st_mode & 0o777 == 0o600
+    assert token not in json.dumps(result) + all_text(c.home / STATE) + (c.home / PLIST).read_text()
+    assert result["clients"]["records"][0]["backup_may_hold_secrets"] is True
 
 
 def test_cli_output_of_a_full_install_holds_no_secret(c, monkeypatch, capsys):
@@ -377,16 +386,41 @@ def test_uninstall_refuses_while_claude_desktop_runs(c):
     assert plan["ok"] is False and "client_app_running" in plan["blocker_codes"]
 
 
-def test_uninstall_skips_a_config_changed_since_its_preview(c):
+def test_uninstall_refuses_globally_when_anything_changed_since_its_preview(c):
+    """Conflict seen before any mutation: nothing is removed, the service keeps running."""
     installed(c)
     plan = uninstall_plan(c)
     path = c.home / PATHS["cursor"]
     path.write_text(path.read_text() + "\n")
-    changed = path.read_bytes()
+    before = tree(c.root)
+    with pytest.raises(uninstaller().UninstallError) as refusal:
+        uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert refusal.value.code == "uninstall_changed_since_preview"
+    assert tree(c.root) == before
+    assert "bootout" not in c.system.verbs() and c.system.verbs("claude").count("mcp") == 1  # the install only
+
+
+def test_uninstall_never_claims_to_be_complete_and_names_what_it_cannot_see(c):
+    installed(c)
+    plan = uninstall_plan(c)
     result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
-    statuses = {item["client"]: item["status"] for item in result["clients"]}
-    assert statuses["cursor"] == "conflict-file-changed-since-preview" and path.read_bytes() == changed
-    assert statuses["vscode"] == "removed" and result["ok"] is False
+    for document in (plan, result):
+        manual = {item["kind"]: item for item in document["manual_removal_required"]}
+        assert {"claude-desktop-extension", "claude-code-hooks", "auxiliary-launchd-jobs", "python-environment"} <= set(manual)
+        assert manual["claude-desktop-extension"]["inspected"] is False
+        assert "Extensions" in manual["claude-desktop-extension"]["procedure"]
+        assert document["complete"] is False
+    assert "complete" not in json.dumps(result["scope"]).lower()
+
+
+def test_no_bundle_is_shipped_by_this_phase():
+    """Green today: no ``mcpb`` command and no bundle builder until the architecture is decided (R7)."""
+    import importlib.util
+    from memory_os_v4.ops import cli
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["mcpb", "--output", "x.mcpb"])
+    assert stop.value.code == 2
+    assert importlib.util.find_spec("memory_os_v4.ops.mcpb") is None
 
 
 def test_uninstall_has_no_way_to_delete_data(c):
@@ -418,19 +452,17 @@ def test_uninstall_cli_previews_by_default_and_applies_only_on_request(c, monkey
 
 # ---- after an uninstall: the kept store is never adopted silently ----
 
-def test_reinstall_on_a_kept_store_is_refused_without_the_explicit_flag(c):
+def test_reinstall_on_a_kept_store_is_refused_and_no_reattach_option_exists(c):
+    """Reattaching a kept store is the upgrade runbook's job, out of this phase (R4)."""
+    from memory_os_v4.ops import cli
     installed(c, clients=("cursor",))
     uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)
     data = data_inventory(c)
     plan = prepare(c, profile="lexical")
     assert plan["ok"] is False and "store_not_empty" in plan["blocker_codes"]
-    assert any("--reuse-store" in blocker for blocker in plan["blockers"])
+    assert any("runbook" in blocker for blocker in plan["blockers"])
     assert data_inventory(c) == data
-
-
-def test_reuse_of_a_store_no_uninstall_journal_attests_is_refused(c):
-    plant_data(c)
-    data = data_inventory(c)
-    plan = prepare(c, profile="lexical", reuse_store=True)
-    assert plan["ok"] is False and "store_reuse_unattested" in plan["blocker_codes"]
-    assert data_inventory(c) == data
+    assert "reuse_store" not in inspect.signature(qs.prepare).parameters
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["quickstart", "--profile", "lexical", "--reuse-store"])
+    assert stop.value.code == 2

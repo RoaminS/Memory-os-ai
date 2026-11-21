@@ -1,0 +1,272 @@
+"""SETUP_4_1_0.md §6 and §7: stopping the service can fail, and memories must stay recoverable.
+
+A failed, timed-out or unconfirmed stop never moves the plist; a job replaced after the preview
+is never stopped; an interrupted install can be rolled back. The data proofs use a REAL
+temporary SQLite store opened by the engine (lexical profile, no ML): transactions committed
+after the install are searched back after the rollback or the uninstall.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from memory_os_v4.ops import quickstart as qs
+from setup_fixture_410 import (
+    PATHS, SIX, contents, install, prepare, read_memories, servers, setup_context, tree, write_memories,
+)
+
+PLIST = "Library/LaunchAgents/test.memory-os.plist"
+STATE = ".local/state/memory-os"
+STOP_FAILURES = {"fail": "service_stop_failed", "timeout": "service_stop_timeout", "lingers": "service_stop_unconfirmed"}
+
+
+@pytest.fixture
+def c(tmp_path, monkeypatch):
+    return setup_context(tmp_path, monkeypatch)
+
+
+def uninstaller():
+    from memory_os_v4.ops import uninstall
+    return uninstall
+
+
+def claude_on_path(name):
+    return "/usr/local/bin/" + name
+
+
+def uninstall_plan(c):
+    return uninstaller().plan(c.settings, home=c.home, python=c.python, run=c.system)
+
+
+def no_sleep(seconds):
+    return None
+
+
+# ---- rollback: the stop must be confirmed before the plist moves ----
+
+@pytest.mark.parametrize("mode", sorted(STOP_FAILURES))
+def test_rollback_keeps_the_plist_when_the_stop_is_not_confirmed(c, mode):
+    result = install(c, profile="lexical")
+    plist = (c.home / PLIST).read_bytes()
+    c.system.bootout_mode = mode
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True, stop_timeout=0, sleep=no_sleep)
+    assert out["ok"] is False and out["code"] == STOP_FAILURES[mode]
+    assert out["service"]["undo"] == STOP_FAILURES[mode].replace("service_", "").replace("_", "-")
+    assert "plist_moved_to" not in out["service"]
+    assert (c.home / PLIST).read_bytes() == plist  # never moved after a stop that is not proven
+    assert not list((c.home / STATE).rglob("*.plist"))
+    assert c.system.verbs().count("bootout") == 1  # no retry loop, no forced kill
+
+
+def test_rollback_confirms_the_stop_by_observing_the_job_absent(c):
+    result = install(c, profile="lexical")
+    before = len(c.system.calls)
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    after = [argv[:2] for argv in c.system.calls[before:]]
+    stop = after.index(["launchctl", "bootout"])
+    assert ["launchctl", "print"] in after[:stop], "the job identity is re-checked before the stop"
+    assert ["launchctl", "print"] in after[stop + 1:], "the job is observed absent after the stop"
+    assert out["ok"] is True and out["service"]["undo"] == "stopped-and-plist-moved"
+
+
+def test_rollback_never_stops_a_job_replaced_since_the_install(c):
+    result = install(c, profile="lexical")
+    c.system.job_replaced = True
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert out["service"]["undo"] == "refused-job-not-attested" and out["code"] == "service_changed_since_install"
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
+
+
+@pytest.mark.parametrize("damage", ["install-mode", "journal-mode", "directory-mode", "symlink"])
+def test_rollback_trusts_only_a_private_journal_on_safe_paths(c, damage):
+    result = install(c, profile="lexical")
+    journal_dir = c.home / STATE / "quickstart" / result["stamp"]
+    if damage == "install-mode":
+        (journal_dir / "install.json").chmod(0o644)
+    elif damage == "journal-mode":
+        (journal_dir / "journal.json").chmod(0o640)
+    elif damage == "directory-mode":
+        journal_dir.chmod(0o755)
+    else:
+        real = journal_dir.with_name(journal_dir.name + ".real")
+        journal_dir.rename(real)
+        journal_dir.symlink_to(real)
+    before = (c.home / PATHS["cursor"]).read_bytes()
+    with pytest.raises(qs.QuickstartError) as refusal:
+        qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert refusal.value.code == "journal_unsafe"
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
+    assert (c.home / PATHS["cursor"]).read_bytes() == before
+
+
+# ---- interrupted install ----
+
+def interrupted(c, clients=("cursor",)):
+    c.system.bootstrap_fails = True
+    result = install(c, profile="lexical", clients=clients)
+    assert result["ok"] is False and result["stage"] == "service" and result["code"] == "service_bootstrap_failed"
+    assert result["steps"]["service"]["created"] is True and "clients" not in result
+    return result
+
+
+def test_interrupted_install_leaves_evidence_and_no_client_change(c):
+    originals = {key: (c.home / PATHS[key]).read_bytes() for key in SIX}
+    result = interrupted(c)
+    assert (c.home / PLIST).exists() and c.settings.token_file.exists() and c.system.loaded is False
+    assert {key: (c.home / PATHS[key]).read_bytes() for key in SIX} == originals
+    journal = json.loads((c.home / STATE / "quickstart" / result["stamp"] / "install.json").read_text())
+    assert journal["ok"] is False and journal["stage"] == "service"
+
+
+def test_interrupted_install_is_rolled_back_without_a_stop_when_the_job_never_loaded(c):
+    result = interrupted(c)
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert out["ok"] is True and out["service"]["undo"] == "plist-moved-job-was-absent"
+    assert "bootout" not in c.system.verbs() and not (c.home / PLIST).exists()
+    assert Path(out["service"]["plist_moved_to"]).is_file()
+    assert c.settings.token_file.exists()  # the token is data of the user: kept
+
+
+def test_second_install_after_an_interrupted_one_is_refused_until_it_is_rolled_back(c):
+    interrupted(c)
+    c.system.bootstrap_fails = False
+    plan = prepare(c, profile="lexical")
+    assert plan["ok"] is False and "service_not_loaded" in plan["blocker_codes"]
+    assert any("--undo" in blocker and "--with-service" in blocker for blocker in plan["blockers"])
+
+
+# ---- uninstall: order, stop failures, late conflict ----
+
+def installed(c, clients=SIX):
+    return install(c, profile="lexical", clients=clients, which=claude_on_path)
+
+
+def test_uninstall_removes_the_clients_before_it_stops_the_service(c):
+    installed(c)
+    before = len(c.system.calls)
+    uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)
+    after = [argv[:3] for argv in c.system.calls[before:]]
+    assert after.index(["claude", "mcp", "remove"]) < [argv[:2] for argv in after].index(["launchctl", "bootout"])
+
+
+@pytest.mark.parametrize("mode", sorted(STOP_FAILURES))
+def test_uninstall_reports_a_partial_result_when_the_stop_is_not_confirmed(c, mode):
+    installed(c)
+    plist = (c.home / PLIST).read_bytes()
+    plan = uninstall_plan(c)
+    c.system.bootout_mode = mode
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system, stop_timeout=0, sleep=no_sleep)
+    assert result["ok"] is False and result["partial"] is True and result["code"] == STOP_FAILURES[mode]
+    assert result["service"]["outcome"] == STOP_FAILURES[mode].replace("service_", "").replace("_", "-")
+    assert (c.home / PLIST).read_bytes() == plist and "plist_moved_to" not in result["service"]
+    assert {item["client"]: item["status"] for item in result["clients"] if item["client"] in SIX} == dict.fromkeys(SIX, "removed")
+    assert any("launchctl bootout" in step for step in result["next_steps"])
+    # A later run finishes the job once the stop works: nothing is lost, nothing is done twice.
+    c.system.bootout_mode = "ok"
+    again = uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)
+    assert again["ok"] is True and again["service"]["outcome"] == "stopped-and-plist-moved"
+    assert not (c.home / PLIST).exists()
+
+
+def test_uninstall_refuses_a_job_replaced_after_its_preview(c):
+    installed(c)
+    plan = uninstall_plan(c)
+    c.system.job_replaced = True
+    before = tree(c.root)
+    with pytest.raises(uninstaller().UninstallError) as refusal:
+        uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert refusal.value.code == "uninstall_changed_since_preview"
+    assert tree(c.root) == before and "bootout" not in c.system.verbs()
+
+
+def test_uninstall_late_conflict_gives_a_partial_result_and_keeps_the_service(c):
+    """A file rewritten while the uninstall runs: that client is skipped, the service stays up."""
+    installed(c)
+    plan = uninstall_plan(c)
+    cursor = c.home / PATHS["cursor"]
+
+    def rewrite_cursor():  # happens during the first mutation (Claude Code goes first)
+        cursor.write_text(cursor.read_text() + "\n")
+    c.system.hooks[("claude", "mcp", "remove")] = rewrite_cursor
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    statuses = {item["client"]: item["status"] for item in result["clients"]}
+    assert statuses["claude-code"] == "removed" and statuses["cursor"] == "conflict-file-changed-since-preview"
+    assert result["ok"] is False and result["partial"] is True and result["code"] == "uninstall_partial"
+    assert result["service"]["outcome"] == "kept-clients-incomplete"
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+    assert "memory-os-ai" in servers(c.home, "cursor")
+
+
+# ---- data: recoverable memories, not only preserved bytes ----
+
+def test_real_store_memories_written_after_the_install_survive_a_rollback_with_service(c):
+    result = install(c, profile="lexical", clients=("cursor", "codex"))
+    keys = write_memories(c, 3)
+    identity = read_memories(c, keys)["instance_id"]
+    more = write_memories(c, 2, tag="second-session")
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert out["ok"] is True and out["service"]["undo"] == "stopped-and-plist-moved"
+    after = read_memories(c, {**keys, **more})
+    assert all(after["found"].values()) and len(after["found"]) == 5
+    assert after["instance_id"] == identity  # the same store, not a copy put back in service
+
+
+def test_real_store_memories_survive_an_uninstall_and_stay_searchable(c):
+    installed(c, clients=("cursor", "vscode"))
+    keys = write_memories(c, 4)
+    identity = read_memories(c, keys)["instance_id"]
+    files = contents(c.settings.store_dir)
+    result = uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)
+    assert result["ok"] is True and result["data_deleted"] is False
+    assert contents(c.settings.store_dir) == files  # the uninstall itself never opens the store for writing
+    after = read_memories(c, keys)
+    assert all(after["found"].values()) and after["instance_id"] == identity
+    again = write_memories(c, 1, tag="after-uninstall")  # still a working store
+    assert all(read_memories(c, again)["found"].values())
+
+
+@pytest.mark.parametrize("mode", sorted(STOP_FAILURES))
+def test_real_store_memories_survive_a_failed_stop(c, mode):
+    installed(c, clients=("cursor",))
+    keys = write_memories(c, 2)
+    plan = uninstall_plan(c)
+    c.system.bootout_mode = mode
+    uninstaller().apply(plan, c.settings, home=c.home, run=c.system, stop_timeout=0, sleep=no_sleep)
+    assert all(read_memories(c, keys)["found"].values())
+
+
+def test_real_store_uncheckpointed_wal_is_left_alone_by_rollback_and_uninstall(c):
+    """A writer still holding the store (WAL not merged): the tools neither open nor copy it."""
+    import sqlite3
+    result = install(c, profile="lexical", clients=("cursor",))
+    write_memories(c, 1)
+    database = c.settings.store_dir / "store.sqlite3"
+    holder = sqlite3.connect(database)
+    try:
+        holder.execute("PRAGMA wal_autocheckpoint=0")
+        holder.execute("CREATE TABLE IF NOT EXISTS setup_probe_410 (value TEXT)")
+        holder.execute("INSERT INTO setup_probe_410 VALUES ('written after install, still in the WAL')")
+        holder.commit()
+        wal = Path(str(database) + "-wal")
+        assert wal.stat().st_size > 0
+        before = contents(c.settings.store_dir)
+        qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+        assert contents(c.settings.store_dir) == before
+        row = holder.execute("SELECT value FROM setup_probe_410").fetchone()
+        assert row == ("written after install, still in the WAL",)
+    finally:
+        holder.close()
+
+
+def test_real_lexical_store_helpers_work_today(c):
+    """Green today: the proof harness itself (real engine, no ML) writes, reopens and finds."""
+    import sys
+    keys = write_memories(c, 2)
+    after = read_memories(c, keys)
+    assert all(after["found"].values()) and after["instance_id"]
+    assert (c.settings.store_dir / "store.sqlite3").is_file()
+    assert os.environ["HOME"] != "/Users/romain"
+    assert not [name for name in ("torch", "faiss", "sentence_transformers") if name in sys.modules]

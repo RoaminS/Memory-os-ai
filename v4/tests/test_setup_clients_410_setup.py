@@ -336,13 +336,88 @@ def test_consent_naming_an_unselected_client_is_refused(home):
     assert refusal.value.code == "client_consent_unselected"
 
 
-def test_stale_relay_entry_of_ours_is_updated_without_extra_consent(home, tmp_path):
-    """Green today: a relay entry pointing to another interpreter is shown as ``replace`` and applied."""
-    set_entry(home, "cursor", {"command": "/old/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"]})
+# ---- an existing relay entry: ours only when it designates this installation ----
+
+def relay_entry(**env):
+    return {"command": "/old/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"], "env": env}
+
+
+OUR_SERVICE = {"MEMORY_V4_URL": ENV["MEMORY_V4_URL"], "MEMORY_V4_TOKEN_FILE": ENV["MEMORY_V4_TOKEN_FILE"]}
+FOREIGN_RELAYS = {
+    "no-environment": {"command": "/old/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"]},
+    "other-token-file": relay_entry(**{**OUR_SERVICE, "MEMORY_V4_TOKEN_FILE": "/other/http.token"}),
+    "other-url": relay_entry(**{**OUR_SERVICE, "MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/"}),
+    "token-file-only": relay_entry(MEMORY_V4_TOKEN_FILE=ENV["MEMORY_V4_TOKEN_FILE"]),
+    "relay-script": {"command": "memory-os-relay"},
+}
+
+
+def test_installation_identity_is_the_service_a_relay_entry_designates():
+    ours = qs.installation_identity(ENV)
+    assert len(ours) == 64 and ours == qs.installation_identity(dict(reversed(list(ENV.items()))))
+    assert qs.installation_identity({**OUR_SERVICE, "MEMORY_V4_OPS_DIR": "/elsewhere", "MEMORY_V4_CLIENT_ID": "x"}) == ours
+    assert qs.entry_identity(relay_entry(**OUR_SERVICE)) == ours
+    for entry in FOREIGN_RELAYS.values():
+        assert qs.entry_identity(entry) != ours
+    assert qs.entry_identity(FOREIGN_RELAYS["no-environment"]) is None
+    assert qs.entry_identity(FOREIGN_RELAYS["token-file-only"]) is None
+
+
+def test_relay_entry_of_this_installation_is_updated_without_extra_consent(home, tmp_path):
+    """Same service (URL and token file), another interpreter: shown as ``replace``, applied, backed up."""
+    set_entry(home, "cursor", relay_entry(**OUR_SERVICE, MEMORY_V4_CLIENT_ID="cursor"))
     plan, result = apply(home, tmp_path, ("cursor",))
     assert plan["clients"][0]["current_class"] == "relay" and plan["clients"][0]["action"] == "replace"
     assert status(result) == {"cursor": "applied"}
     assert servers(home, "cursor")["memory-os-ai"]["command"] == PY
+
+
+def test_plan_names_the_identity_it_compared(home):
+    set_entry(home, "cursor", relay_entry(**OUR_SERVICE))
+    item, = qs.preview(home=home, python=PY, env=ENV, clients=("cursor",))["clients"]
+    assert item["current_identity"] == item["installation_identity"] == qs.installation_identity(ENV)
+
+
+@pytest.mark.parametrize("key", ["cursor", "claude-desktop", "claude-code"])
+@pytest.mark.parametrize("case", sorted(FOREIGN_RELAYS))
+def test_relay_entry_of_unknown_or_other_identity_is_not_replaced_without_consent(home, tmp_path, key, case):
+    set_entry(home, key, FOREIGN_RELAYS[case])
+    system = FakeSystem(home)
+    before = tree(home)
+    plan, result = apply(home, tmp_path, (key,), run=system)
+    item, = plan["clients"]
+    assert item["current_class"] == "relay" and item["action"] == "refuse-existing-relay-other-installation"
+    assert item["current_identity"] != item["installation_identity"]
+    assert status(result) == {key: "refuse-existing-relay-other-installation"}
+    assert tree(home) == before and system.calls == []
+
+
+@pytest.mark.parametrize("case", sorted(FOREIGN_RELAYS))
+def test_relay_entry_of_another_installation_is_replaced_only_with_named_consent(home, tmp_path, case):
+    set_entry(home, "cursor", FOREIGN_RELAYS[case])
+    original = (home / PATHS["cursor"]).read_bytes()
+    plan, result = apply(home, tmp_path, ("cursor",), replace_existing=("cursor",))
+    assert plan["clients"][0]["action"] == "replace" and status(result) == {"cursor": "applied"}
+    assert qs.entry_identity(servers(home, "cursor")["memory-os-ai"]) == qs.installation_identity(ENV)
+    assert Path(result["records"][0]["backup"]).read_bytes() == original
+
+
+def test_codex_relay_entry_strictly_identical_to_ours_is_unchanged(home, tmp_path):
+    """Green today: the only existing TOML entry that is not a refusal is the exact one we would write."""
+    apply(home, tmp_path, ("codex",))
+    before = tree(home)
+    plan, result = apply(home, tmp_path, ("codex",))
+    assert plan["clients"][0]["action"] == "unchanged" and tree(home) == before
+
+
+def test_codex_relay_entry_of_this_installation_but_different_is_still_manual(home, tmp_path):
+    """Green today: no TOML rewrite, even for our own stale entry; the snippet is applied by hand."""
+    write(home, PATHS["codex"], CODEX_TOML + '\n[mcp_servers.memory-os-ai]\ncommand = "/old/venv/bin/python"\n'
+          'args = ["-m", "memory_os_v4.ops.relay"]\n[mcp_servers.memory-os-ai.env]\n'
+          f'MEMORY_V4_URL = "{ENV["MEMORY_V4_URL"]}"\nMEMORY_V4_TOKEN_FILE = "{ENV["MEMORY_V4_TOKEN_FILE"]}"\n')
+    before = tree(home)
+    plan, result = apply(home, tmp_path, ("codex",))
+    assert plan["clients"][0]["action"] == "refuse-toml-existing-manual" and tree(home) == before
 
 
 def test_journal_never_holds_the_previous_entry_in_clear(home, tmp_path):

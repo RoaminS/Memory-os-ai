@@ -134,6 +134,24 @@ def test_constraints_locator_needs_no_third_party_package():
     assert done.stdout.split() == [str(CONSTRAINTS["lexical"]), str(CONSTRAINTS["semantic"])]
 
 
+def test_constraints_locator_works_from_a_bare_package_tree_without_any_dependency(tmp_path):
+    """Stand-in for ``pip install --no-deps``: only our two top-level items, no site-packages."""
+    import shutil
+    site = tmp_path / "site"
+    site.mkdir()
+    source = ROOT / "v4/src"
+    shutil.copy2(source / "memory_os_constraints.py", site / "memory_os_constraints.py")
+    shutil.copytree(source / "memory_os_v4", site / "memory_os_v4", ignore=shutil.ignore_patterns("__pycache__"))
+    done = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import memory_os_constraints as m; "
+         "print(m.path('lexical')); assert 'memory_os_v4' not in sys.modules", str(site)],
+        capture_output=True, text=True, timeout=60, env={"PATH": "/usr/bin:/bin"})
+    assert done.returncode == 0, done.stderr[-2000:]
+    expected = site / "memory_os_v4/resources/qualified_runtime_constraints_lexical_v1.txt"
+    assert done.stdout.strip() == str(expected) and expected.is_file()
+
+
 @pytest.mark.parametrize("argv,code", [([], 2), (["hybrid"], 2), (["lexical", "extra"], 2)])
 def test_constraints_locator_requires_exactly_one_known_profile(argv, code):
     done = isolated(f"import memory_os_constraints as locator\nraise SystemExit(locator.main({argv!r}))", ())
@@ -165,6 +183,81 @@ def test_resolution_gate_has_no_default_profile(monkeypatch, tmp_path):
         gate.resolution_command("/py", tmp_path / "w.whl", tmp_path / "out")
     with pytest.raises(ValueError):
         gate.resolution_command("/py", tmp_path / "w.whl", tmp_path / "out", profile="hybrid")
+
+
+def run_gate(monkeypatch, tmp_path, profile, argv_profile=True):
+    """The gate's ``main()`` with a simulated runner: no pip, no network, private output."""
+    import hashlib
+    import zipfile
+    gate = script("qualify_runtime_resolution", monkeypatch)
+    monkeypatch.delenv("MEMORY_V4_MIN_FREE_BYTES", raising=False)
+    versions = {**expected_versions(profile=profile, extras=("ops", "brief")), "memory-os-ai": __version__}
+    wheel = tmp_path / "fixture.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(f"memory_os_ai-{__version__}.dist-info/METADATA",
+                         f"Name: memory-os-ai\nVersion: {__version__}\n")
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion = "{__version__}"\n')
+    output = tmp_path / ".local-qualification/resolution"
+    report = report_for(versions)
+    report["install"][-1]["download_info"] = {"archive_info": {"hashes": {
+        "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest()}}}
+    seen = {"commands": [], "checks": []}
+
+    def command(argv, cwd, env, log, monitor):
+        seen["commands"].append([str(a) for a in argv])
+        (output / "pip-report.json").write_text(json.dumps(report))
+        return {"simulated": True}
+
+    def check(document, version, **kwargs):
+        seen["checks"].append(kwargs)
+        return {"ok": True, "simulated_check": True}
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "guard", lambda path: None)
+    monkeypatch.setattr(gate.os, "setpriority", lambda *a: None)
+    monkeypatch.setattr(gate, "command", command)
+    monkeypatch.setattr(gate, "check", check)
+    argv = ["tool", "--wheel", str(wheel), "--output", str(output)] + (["--profile", profile] if argv_profile else [])
+    monkeypatch.setattr(sys, "argv", argv)
+    return gate, seen, wheel, output
+
+
+@pytest.mark.parametrize("profile,requirement", [("lexical", "[ops,brief]"), ("semantic", "[ops,brief,semantic]")])
+def test_resolution_gate_main_resolves_under_constraints_and_checks_the_same_profile(
+        monkeypatch, tmp_path, profile, requirement):
+    gate, seen, wheel, output = run_gate(monkeypatch, tmp_path, profile)
+    assert gate.main() == 0
+    argv, = seen["commands"]
+    assert argv[-1] == str(wheel) + requirement and "--dry-run" in argv
+    assert argv.count("-c") == 1 and argv[argv.index("-c") + 1] == str(CONSTRAINTS[profile])
+    assert argv == [str(a) for a in gate.resolution_command(sys.executable, wheel, output, profile=profile)]
+    assert [call["profile"] for call in seen["checks"]] == [profile]
+    proof = json.loads((output / "report.json").read_text())
+    assert proof["profile"] == profile and proof["constraints_sha256"] == __import__("hashlib").sha256(
+        CONSTRAINTS[profile].read_bytes()).hexdigest()
+    assert proof["installed"] is False
+
+
+def test_resolution_gate_main_refuses_to_run_without_a_profile(monkeypatch, tmp_path):
+    gate, seen, _, output = run_gate(monkeypatch, tmp_path, "lexical", argv_profile=False)
+    with pytest.raises(SystemExit) as stop:
+        gate.main()
+    assert stop.value.code == 2 and seen["commands"] == [] and not output.exists()
+
+
+def test_resolution_gate_main_fails_when_the_real_check_sees_an_ml_package(monkeypatch, tmp_path):
+    """The real ``check`` behind ``main()``: a lexical resolution that pulled torch is not a pass."""
+    gate, seen, wheel, output = run_gate(monkeypatch, tmp_path, "lexical")
+    monkeypatch.setattr(gate, "check", script("check_runtime_resolution", monkeypatch).check)
+    semantic = expected_versions(profile="semantic", extras=("ops", "brief"))
+    lexical = {**expected_versions(profile="lexical", extras=("ops", "brief")), "memory-os-ai": __version__}
+
+    def command(argv, cwd, env, log, monitor):
+        (output / "pip-report.json").write_text(json.dumps(report_for({**lexical, "torch": semantic["torch"]})))
+        return {"simulated": True}
+    monkeypatch.setattr(gate, "command", command)
+    assert gate.main() == 1
+    proof = json.loads((output / "report.json").read_text())
+    assert proof["ok"] is False and proof["ml_packages"] == ["torch"]
 
 
 def report_for(versions):

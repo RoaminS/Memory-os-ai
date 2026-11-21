@@ -139,14 +139,83 @@ def test_lexical_service_environment_opens_a_valid_lexical_config(c, monkeypatch
     assert config.retrieval_profile == "lexical" and config.use_dense is False
 
 
-def test_semantic_service_definition_is_unchanged_from_4_0_9(c):
-    """Green today, and must stay: an existing owned semantic plist keeps comparing equal."""
-    service = qs._service_plan(c.settings, c.home, c.python, {
-        "HF_HUB_CACHE": "/c", "MEMORY_V4_CL100K_PATH": "/t", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
-    assert set(service["env"]) == SEMANTIC_ENV_KEYS
-    assert "MEMORY_V4_RETRIEVAL_PROFILE" not in service["env"]
-    assert service["argv"][1:] == ["-m", "memory_os_v4.server", "--transport", "http", "--host", "127.0.0.1",
-                                   "--port", "43219", "--warm"]
+# Frozen from cd83511 (ops/quickstart.py identical to the 4.0.9 base 83ddead): literal values,
+# not the output of the function under test.
+FROZEN_HOME = "/nonexistent-home-410"
+FROZEN_PYTHON = "/opt/memory-os/venv/bin/python"
+FROZEN_RESOURCE_ENV = {"HF_HUB_CACHE": "/c/hub", "MEMORY_V4_CL100K_PATH": "/c/cl100k_base.tiktoken",
+                       "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+FROZEN_SEMANTIC_PLIST_SHA256 = "bea151cf0886a3feef30aef3934c386ab663e2ab2fa348e33f43e7356afb2066"
+FROZEN_SEMANTIC_PLIST = {
+    "Label": "test.memory-os",
+    "ProgramArguments": [FROZEN_PYTHON, "-m", "memory_os_v4.server", "--transport", "http", "--host", "127.0.0.1",
+                         "--port", "43219", "--warm"],
+    "EnvironmentVariables": {
+        "MEMORY_V4_DIR": FROZEN_HOME + "/.local/share/memory-os/store",
+        "MEMORY_V4_TOKEN_FILE": FROZEN_HOME + "/.config/memory-os/http.token",
+        "MEMORY_V4_URL": "http://127.0.0.1:43219/mcp/",
+        "MEMORY_V4_SERVICE_LABEL": "test.memory-os",
+        "MEMORY_V4_STORE_BACKEND": "sqlite_s1",
+        "MEMORY_V4_WORK_STATE": "true",
+        "MEMORY_V4_EMBED_MODEL": "ibm-granite/granite-embedding-97m-multilingual-r2",
+        "MEMORY_V4_EMBED_MAX_SEQ_LENGTH": "512",
+        "MEMORY_V4_MAINTENANCE_MODE": "disabled",
+        "MEMORY_V4_DEVICE": "auto",
+        "MEMORY_V4_EMBED_DTYPE": "native",
+        "MEMORY_V4_EMBED_BATCH_SIZE": "32",
+        "MEMORY_V4_BM25_PROFILE": "scoped_literal",
+        "MEMORY_V4_LEXICAL_GUARD_K": "3",
+        "TOKENIZERS_PARALLELISM": "false",
+        "MEMORY_V4_OPS_DIR": FROZEN_HOME + "/.local/state/memory-os/ops",
+        **FROZEN_RESOURCE_ENV,
+    },
+    "KeepAlive": True,
+    "RunAtLoad": True,
+    "StandardErrorPath": FROZEN_HOME + "/.local/state/memory-os/ops/logs/server.err",
+}
+
+
+def frozen_settings():
+    from pathlib import Path
+    from memory_os_v4.ops.settings import OpsSettings
+    home = Path(FROZEN_HOME)
+    return home, OpsSettings("http://127.0.0.1:43219/mcp/", home / ".config/memory-os/http.token",
+                             home / ".local/share/memory-os/store", home / "memory-os-backups",
+                             home / ".config/memory-os/backup.key", home / ".local/state/memory-os/ops",
+                             "test.memory-os")
+
+
+def test_semantic_service_definition_equals_the_frozen_4_0_9_reference():
+    """Green today, and must stay: keys, values, order and bytes of the historical plist."""
+    import hashlib
+    home, settings = frozen_settings()
+    service = qs._service_plan(settings, home, FROZEN_PYTHON, dict(FROZEN_RESOURCE_ENV))
+    document = plistlib.loads(service["plist"].encode())
+    assert document == FROZEN_SEMANTIC_PLIST
+    assert list(document["EnvironmentVariables"]) == list(FROZEN_SEMANTIC_PLIST["EnvironmentVariables"])
+    assert hashlib.sha256(service["plist"].encode()).hexdigest() == FROZEN_SEMANTIC_PLIST_SHA256
+    assert set(service["env"]) == SEMANTIC_ENV_KEYS and "MEMORY_V4_RETRIEVAL_PROFILE" not in service["env"]
+
+
+def test_explicit_semantic_profile_yields_the_same_frozen_bytes():
+    import hashlib
+    home, settings = frozen_settings()
+    service = qs._service_plan(settings, home, FROZEN_PYTHON, dict(FROZEN_RESOURCE_ENV), profile="semantic")
+    assert hashlib.sha256(service["plist"].encode()).hexdigest() == FROZEN_SEMANTIC_PLIST_SHA256
+
+
+def test_lexical_service_differs_from_the_frozen_reference_only_by_the_documented_variables():
+    home, settings = frozen_settings()
+    service = qs._service_plan(settings, home, FROZEN_PYTHON, {"MEMORY_V4_CL100K_PATH": "/c/cl100k_base.tiktoken",
+                                                                 "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
+                               profile="lexical")
+    frozen = FROZEN_SEMANTIC_PLIST["EnvironmentVariables"]
+    expected = {k: v for k, v in frozen.items() if k not in ENCODER_ENV}
+    expected["MEMORY_V4_RETRIEVAL_PROFILE"] = "lexical"
+    assert service["env"] == expected
+    document = plistlib.loads(service["plist"].encode())
+    assert {k: v for k, v in document.items() if k != "EnvironmentVariables"} == {
+        k: v for k, v in FROZEN_SEMANTIC_PLIST.items() if k != "EnvironmentVariables"}
 
 
 def test_semantic_plan_service_equals_the_legacy_definition(c):
@@ -200,7 +269,8 @@ def ready_payload(c, profile):
     return {"version": c.identity["version"], "commit": c.identity["commit"], "ready": True, "reason": "ready",
             "capabilities": {
                 "retrieval_profile": dict(LEXICAL_MARKER) if lexical else {"name": "semantic", "policy": None},
-                "store": {"backend": "sqlite_s1", "instance_id": "synthetic"}, "work_state": True,
+                "store": {"backend": "sqlite_s1", "instance_id": "synthetic", "sqlite_version": "3.53.4"},
+                "work_state": True,
                 "encoding": encoding,
                 "policies": {"bm25_profile": "scoped_literal", "lexical_guard_k": 3,
                              "ranking_policy": LEXICAL_POLICY if lexical else None},
@@ -223,6 +293,30 @@ def test_lexical_ready_needs_no_encoder_runtime_nor_granite_revision(c, monkeypa
     payload = ready_payload(c, "lexical")
     original = real_ready(monkeypatch, payload)
     assert original._ready(c.settings, c.identity, profile="lexical") == payload
+
+
+@pytest.mark.parametrize("profile", ["lexical", "semantic"])
+@pytest.mark.parametrize("version,code", [("3.51.2", "sqlite_runtime_too_old"), ("3.9.0", "sqlite_runtime_too_old"),
+                                          (None, "sqlite_runtime_unattested"), ("garbage", "sqlite_runtime_unattested")])
+def test_ready_requires_the_running_server_to_attest_a_fit_sqlite(c, monkeypatch, profile, version, code):
+    payload = ready_payload(c, profile)
+    if version is None:
+        del payload["capabilities"]["store"]["sqlite_version"]
+    else:
+        payload["capabilities"]["store"]["sqlite_version"] = version
+    original = real_ready(monkeypatch, payload)
+    with pytest.raises(original.QuickstartError) as refusal:
+        original._ready(c.settings, c.identity, profile=profile)
+    assert refusal.value.code == code
+
+
+def test_engine_capabilities_publish_the_sqlite_version_of_the_server_process(tmp_path):
+    """Real lexical engine (no ML): the deployed facts name the library the server loaded."""
+    import sqlite3
+    from memory_os_v4 import Config, MemoryV4, capabilities
+    with MemoryV4(config=Config.lexical(data_dir=str(tmp_path / "store"))) as engine:
+        facts = capabilities.deployed(engine, {})
+    assert facts["store"]["sqlite_version"] == sqlite3.sqlite_version
 
 
 @pytest.mark.parametrize("damage", ["marker-missing", "marker-policy", "encoder-present", "tokenizer",
@@ -280,13 +374,21 @@ def test_lexical_install_downloads_no_model_and_journals_its_profile(c):
     assert result["ops_env"]["MEMORY_V4_RETRIEVAL_PROFILE"] == "lexical"
 
 
-def test_install_journal_carries_the_timing_needed_by_clause_d1(c):
-    result = install(c, profile="lexical")
+def test_install_journal_carries_the_timing_needed_by_clause_d1(c, monkeypatch):
+    """Injected clock: every duration is the one the fake step declared, none can be invented."""
+    from memory_os_v4.ops import sqlite_runtime
+
+    def wal_probe(directory, **kwargs):
+        c.clock.advance(10)
+        return {"ok": True, "code": None, "journal_mode": "wal"}
+    monkeypatch.setattr(sqlite_runtime, "wal_probe", wal_probe)
+    result = install(c, profile="lexical", clients=("claude-code",), which=lambda name: "/usr/local/bin/claude")
     timing = result["timing"]
     assert set(timing) == {"profile", "download_bytes", "steps_ms", "total_s", "clock"}
     assert timing["profile"] == "lexical" and timing["download_bytes"] == 0 and timing["clock"] == "monotonic"
-    assert {"sqlite", "resources", "token", "service", "service_ready", "clients", "checks"} <= set(timing["steps_ms"])
-    assert all(isinstance(v, (int, float)) and v >= 0 for v in timing["steps_ms"].values())
+    assert timing["steps_ms"] == pytest.approx({"sqlite": 10, "resources": 2000, "token": 0, "service": 0,
+                                                "service_ready": 3000, "clients": 40, "checks": 1200})
+    assert timing["total_s"] == pytest.approx(6.25)
 
 
 # ---- command line ----
@@ -348,7 +450,7 @@ def deployed(profile, *, runtime_actual=None):
             "capabilities": {"schema_version": 1,
                              "retrieval_profile": dict(LEXICAL_MARKER) if lexical else {"name": "semantic", "policy": None},
                              "engine": {"version": __version__, "commit": "a" * 40},
-                             "store": {"backend": "sqlite_s1", "instance_id": "i"},
+                             "store": {"backend": "sqlite_s1", "instance_id": "i", "sqlite_version": "3.53.4"},
                              "encoding": encoding, "projects": {"registry_sha256": None},
                              "runtime": {"actual": actual},
                              "brief": {"compact": True, "tokenizer": {"ready": True}}, "policies": {}}}
@@ -397,3 +499,20 @@ def test_doctor_flags_a_malformed_profile_marker():
 def test_doctor_inspects_its_own_runtime_with_the_installation_profile(info, environ, expected):
     from memory_os_v4.ops import doctor
     assert doctor.installation_profile(info, environ) == expected
+
+
+@pytest.mark.parametrize("version,status,word", [
+    ("3.53.4", "PASS", "running server"), ("3.51.3", "PASS", "running server"),
+    ("3.51.2", "FAIL", "sqlite_runtime_too_old"), (None, "WARN", "not attested by the running server"),
+])
+def test_doctor_separates_the_server_sqlite_from_the_interpreter_of_the_command(version, status, word):
+    from memory_os_v4.ops import doctor
+    info = deployed("lexical")
+    if version is None:
+        del info["capabilities"]["store"]["sqlite_version"]
+    else:
+        info["capabilities"]["store"]["sqlite_version"] = version
+    by = {check.area: check for check in doctor._capabilities(info)}
+    check = by["server-sqlite-runtime"]
+    assert check.status == status and word in check.detail
+    assert "this interpreter" not in check.detail

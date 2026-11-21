@@ -119,6 +119,7 @@ def test_functional_wal_probe_runs_only_inside_the_given_private_directory(tmp_p
     assert report["ok"] is True and report["journal_mode"] == "wal" and report["code"] is None
     assert list(private.iterdir()) == []  # the probe database and its -wal/-shm are removed
     assert tree(outside) == before
+    assert report["proves"] == "WAL obtained on the volume of the probe directory only"
 
 
 def test_functional_wal_probe_refuses_when_wal_is_not_obtained(tmp_path):
@@ -181,6 +182,7 @@ def test_doctor_reports_the_sqlite_runtime(monkeypatch):
     from memory_os_v4.ops import doctor
     check = doctor._sqlite_runtime()
     assert (check.area, check.status) == ("sqlite-runtime", "PASS") and sqlite3.sqlite_version in check.detail
+    assert "this interpreter" in check.detail and "running server" not in check.detail
     monkeypatch.setattr(runtime(), "inspect", lambda **kw: {
         "ok": False, "code": "sqlite_runtime_too_old", "version": "3.40.0", "minimum": "3.51.3",
         "checks": {}, "fts5": False, "writes": "none"})
