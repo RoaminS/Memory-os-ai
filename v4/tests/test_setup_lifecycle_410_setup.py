@@ -685,7 +685,28 @@ DEPENDENTS = {
     "module-relay-explicit-other-port": (with_url(MODULE_RELAY, "http://127.0.0.1:9999/mcp/"), "none"),
     "module-relay-explicit-other-host": (with_url(MODULE_RELAY, "http://10.0.0.5:8765/mcp/"), "none"),
     "direct-http-other-port": ({"type": "http", "url": "http://127.0.0.1:9999/mcp/"}, "none"),
-    "direct-http-other-host": ({"type": "http", "url": "https://example.com:8765/mcp/"}, "none"),
+    # Contract §23: on OUR port a NAME may resolve to this machine; only another port, or a canonical
+    # IPv4 address of another machine, positively establishes another destination.
+    "direct-http-other-host": ({"type": "http", "url": "https://example.com:8765/mcp/"}, "indeterminate"),
+    "direct-http-other-host-other-port": ({"type": "http", "url": "https://example.com/mcp/"}, "none"),
+    "direct-http-other-machine-address": ({"type": "http", "url": "http://10.0.0.5:8765/mcp/"}, "none"),
+    "direct-http-alias-trailing-dot": ({"url": "http://localhost.:8765/mcp/"}, "indeterminate"),
+    "direct-http-alias-any-address": ({"serverUrl": "http://0.0.0.0:8765/mcp/"}, "indeterminate"),
+    "direct-http-alias-short-form": ({"url": "http://127.1:8765/mcp/"}, "indeterminate"),
+    "direct-http-alias-mapped-ipv6": ({"url": "http://[::ffff:127.0.0.1]:8765/mcp/"}, "indeterminate"),
+    "direct-http-alias-leading-zero": ({"url": "http://0177.0.0.1:8765/mcp/"}, "indeterminate"),
+    "direct-http-ipv6-loopback": ({"url": "http://[::1]:8765/mcp/"}, "wired"),
+    "direct-http-parser-differential": ({"url": "http://127.0.0.1:8765\\@example.com/mcp/"}, "indeterminate"),
+    "direct-http-userinfo": ({"url": "http://user@example.com:9999/mcp/"}, "indeterminate"),
+    "uvx-from-a-url-explicit-other-url": (with_url({"command": "uvx", "args": [
+        "--from", "memory-os-ai @ https://example.com/fork.whl", "memory-os-relay"]}, "http://127.0.0.1:9999/mcp/"),
+        "indeterminate"),
+    "uvx-python-path-explicit-other-url": (with_url({"command": "uvx", "args": [
+        "--python", "/any/python", "--from", "memory-os-ai", "memory-os-relay"]}, "http://127.0.0.1:9999/mcp/"),
+        "indeterminate"),
+    "legacy-v3-relative-interpreter": ({"command": "python3", "args": ["-m", "memory_os_ai.server"]}, "indeterminate"),
+    "legacy-v3-with-pythonpath": ({"command": "/old/python", "args": ["-m", "memory_os_ai.server"],
+                                   "env": {"PYTHONPATH": "/x"}}, "indeterminate"),
     "legacy-v3-exact-module": (EXISTING["legacy-v3"], "none"),
     # verdict n° 5, amendment 1: uvx with an explicit foreign URL, and contradictory URL fields
     "uvx-explicit-other-port": (with_url(README_UVX, "http://127.0.0.1:9999/mcp/"), "none"),
@@ -901,6 +922,100 @@ def test_a_selective_uninstall_does_not_need_to_attest_a_job_it_will_not_stop(c)
     result = uninstaller().apply(kept, c.settings, home=c.home, run=c.system)
     assert result["ok"] is True and result["service"]["outcome"] == "kept-clients-remaining"
     assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
+
+
+def test_a_client_config_behind_a_symbolic_link_is_kept_and_keeps_the_service(c):
+    """Never written through a link; and since its entry cannot be vouched for, the service stays."""
+    installed(c, clients=("cursor", "vscode"))
+    path = c.home / PATHS["vscode"]
+    real = path.with_name("mcp.real.json")
+    path.rename(real)
+    path.symlink_to(real)
+    plan = uninstall_plan(c)
+    by = {item["client"]: item for item in plan["clients"]}
+    assert plan["ok"] is True and by["vscode"]["action"] == "keep-unsafe-path" and by["cursor"]["action"] == "remove"
+    assert plan["service"]["remaining_dependencies"] == {"vscode": "indeterminate"}
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
+    assert "memory-os-ai" in json.loads(real.read_text())["servers"] and path.is_symlink()
+
+
+def test_the_pending_decision_on_the_default_profile_is_one_constant(c, monkeypatch):
+    """R1 is provisional: no default today; a default would be this constant, never a guess from packages."""
+    assert qs.NEW_INSTALL_DEFAULT_PROFILE is None
+    monkeypatch.setattr(qs, "NEW_INSTALL_DEFAULT_PROFILE", "lexical")
+    plan = qs.prepare(c.settings, home=c.home, python=c.python, clients=("cursor",), run=c.system)
+    assert plan["ok"] is True and plan["profile"] == "lexical"
+
+
+def test_a_project_scope_entry_of_claude_code_keeps_the_service(c):
+    """``~/.claude.json`` also holds per-project servers: never written by us, counted as dependencies."""
+    installed(c, clients=("cursor",))
+    path = c.home / PATHS["claude-code"]
+    data = json.loads(path.read_text())
+    data["projects"] = {"/work/repo": {"mcpServers": {"memory-os-ai": {"type": "http", "url": c.settings.url}}}}
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    plan = uninstall_plan(c)
+    assert plan["service"]["action"] == "keep-clients-remaining"
+    assert plan["service"]["remaining_dependencies"] == {"claude-code": "wired"}
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
+    assert json.loads(path.read_text())["projects"] == data["projects"]  # never touched
+
+
+def test_uninstall_says_what_it_cannot_inspect_before_it_stops_the_service(c):
+    installed(c, clients=("cursor",))
+    plan = uninstall_plan(c)
+    assert plan["service"]["action"] == "stop" and any(".mcp.json" in step for step in plan["next_steps"])
+
+
+def test_removal_refuses_a_json_file_with_duplicate_keys_and_keeps_the_proof(c):
+    """Contract §5.3 on the way out too: rewriting would silently drop one of the duplicates."""
+    installed(c, clients=("cursor", "vscode"))
+    path = c.home / PATHS["cursor"]
+    text = path.read_text().rstrip()[:-1].rstrip() + ',\n\t"theme": "dark",\n\t"theme": "light"\n}\n'
+    path.write_text(text)
+    result = uninstaller().apply(uninstall_plan(c, clients=("cursor",)), c.settings, home=c.home, run=c.system)
+    assert result["clients"][0]["status"] == "refused-removal-manual" and path.read_text() == text
+    assert result["ok"] is False and result["partial"] is True and result["service"]["outcome"] == "kept-clients-incomplete"
+    assert not any(record.get("revoked") for record in journal_records(c, "cursor"))
+
+
+def test_toml_removal_is_parsed_before_it_is_written(c):
+    """A hand-written Codex entry the line-based removal would mangle: refused, file and proof untouched."""
+    installed(c, clients=("cursor",))
+    path = c.home / PATHS["codex"]
+    text = path.read_text() + ('\n[mcp_servers.memory-os-ai]\ncommand = "/old/venv/bin/python"\n'
+                               'args = [\n"-m",\n"memory_os_v4.ops.relay",\n]\n'
+                               '[mcp_servers.memory-os-ai.tools]\nallowed = ["x"]\n')
+    path.write_text(text)
+    plan = uninstall_plan(c, clients=("codex",), remove_existing=("codex",))
+    assert plan["clients"][0]["action"] == "remove"
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["clients"][0]["status"] == "refused-removal-manual" and path.read_text() == text
+
+
+def test_a_foreign_toml_entry_holding_a_date_does_not_break_the_previews(c):
+    from setup_fixture_410 import write
+    installed(c, clients=("cursor",))
+    write(c.home, PATHS["codex"], '[mcp_servers.memory-os-ai]\ncommand = "x"\nsince = 2024-01-01\n')
+    by = {item["client"]: item for item in uninstall_plan(c)["clients"]}
+    assert by["codex"]["action"] == "keep-foreign"
+    item, = qs.preview(home=c.home, python=c.python, env={"MEMORY_V4_URL": c.settings.url}, clients=("codex",))["clients"]
+    assert item["action"] == "refuse-toml-existing-manual"
+
+
+def test_an_unreadable_client_file_is_a_refusal_not_a_crash(c):
+    installed(c, clients=("cursor", "vscode"))
+    path = c.home / PATHS["vscode"]
+    path.chmod(0o000)
+    try:
+        by = {item["client"]: item for item in uninstall_plan(c)["clients"]}
+        assert by["vscode"]["action"] == "keep-unreadable" and by["vscode"]["dependency"] == "indeterminate"
+        item, = qs.preview(home=c.home, python=c.python, env={"MEMORY_V4_URL": c.settings.url}, clients=("vscode",))["clients"]
+        assert item["action"] == "refuse-unreadable"
+    finally:
+        path.chmod(0o600)
 
 
 def test_uninstall_is_idempotent(c):

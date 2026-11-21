@@ -704,7 +704,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (482 tests), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (579 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -715,6 +715,10 @@ laisse l'inventaire de la machine inchangé.
 | Revue | verdict Codex « VALIDÉ » |
 
 ## 13. Tests
+
+**État après implémentation : 579 tests verts** (clients 183, cycle de vie 204, profil 62, reprise 45, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 50 d'écarts (§23). Le reste de
+cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
 conserver) et **400 rouges par construction**, sans `skip` ni `xfail`. `ruff check` : aucun
@@ -1038,4 +1042,59 @@ le client (`antigravity`, celui du test de désinstallation réelle) : sans clie
 Règles du contrat corrigées ou précisées pendant l'implémentation, avec leur raison. Chaque
 écart est reflété par les tests.
 
-(à compléter au fil des étapes)
+### 23.1 Règles corrigées (le test reflète la règle corrigée)
+
+| Règle du contrat | Constat | Règle appliquée · tests |
+|---|---|---|
+| §7 : HTTP directe ou relais à URL explicite, « `none` sinon (autre port, ou hôte hors bouclage) » | faux négatif possible : sur **notre** port, un nom d'hôte peut désigner cette machine (`localhost.`, `0.0.0.0`, `127.1`, `0177.0.0.1`, `[::ffff:127.0.0.1]`, nom DNS ou de `/etc/hosts`) ; deux analyseurs d'URL peuvent lire différemment une URL à barre oblique inverse ou à `userinfo` | seule une URL ASCII de forme simple est littérale ; **autre port → `none`** ; sur notre port : `127.0.0.1`, `localhost`, `[::1]` → `wired` ; adresse IPv4 canonique hors `127/8` et `0/8` → `none` ; tout autre hôte → `indeterminate`. Le cas `direct-http-other-host` (`https://example.com:8765`) devient `indeterminate` · 15 cas ajoutés à `DEPENDENTS` (× 2 tests) |
+| §7 : forme `uvx` et v3 exact | `--from "memory-os-ai @ https://…"`, `--python /chemin`, interpréteur v3 relatif ou `PYTHON*` dans l'`env` exécutent un code arbitraire | `--from` = nom d'index `memory-os-ai[extras][==version]` seulement ; `--python` = numéro de version ; v3 exact = interpréteur **absolu**, aucune variable `PYTHON*` · cas `uvx-from-a-url…`, `uvx-python-path…`, `legacy-v3-relative-interpreter`, `legacy-v3-with-pythonpath` |
+| §7 : « toutes les entrées de tout le registre » | les serveurs **par projet** de Claude Code (`~/.claude.json`, `projects.*.mcpServers`) n'étaient pas vus | ils comptent comme dépendances (jamais écrits ni retirés) ; les `.mcp.json` des projets ne sont pas énumérables : limite déclarée, dite dans `next_steps` · `test_a_project_scope_entry_of_claude_code_keeps_the_service`, `test_uninstall_says_what_it_cannot_inspect…` |
+| §7 : plan refusé si le job chargé n'est pas attesté | une désinstallation sélective qui **conserve** le service n'a pas à attester un job qu'elle ne touche pas | le job non attesté ne refuse le plan que si le plan l'arrêterait ; l'arrêt ré-atteste toujours (§6) · `test_a_selective_uninstall_does_not_need_to_attest_a_job_it_will_not_stop` |
+| §6 : `undo --with-service` arrête le service créé par cette installation | il arrêtait un service encore utilisé par un client d'une **autre** exécution, ou laissait un client non restauré pointer vers un service arrêté | même règle que la désinstallation : `kept-clients-remaining` (dépendances de tout le registre) et `kept-clients-incomplete` ; journal incapable de décrire son service (4.0.9) : `refused-job-not-attested` · `test_rollback_keeps_the_service_while_another_client_is_wired_to_it`, `…_when_a_client_could_not_be_restored`, `…_cannot_describe_its_service…` |
+| §6 : second `undo` | l'entrée déjà retirée rendait `refused-entry-changed-since-apply`, donc un arrêt en échec ne pouvait jamais être repris | entrée absente et preuve révoquée : `nothing-to-undo` ; plist déjà déplacé : `plist-already-absent` · `test_rollback_whose_stop_failed_is_finished_by_a_second_run` (3) |
+| §5.2 : une preuve révoquée ne prouve plus rien | `undo` retirait encore une entrée identique recréée à la main | `refused-proof-revoked` · `test_rollback_does_not_remove_an_entry_whose_proof_was_already_consumed` |
+| §6 : rétablissement de l'entrée précédente (Claude Code) | la CLI `claude` ne sait exprimer qu'une entrée stdio simple ; une entrée HTTP faisait échouer le retour arrière après le retrait, et les variables d'une entrée étrangère passaient en ligne de commande | seule une entrée précédente de **notre** forme stricte est rétablie par la CLI ; sinon `refused-removal-manual` **avant** toute modification (entrée et preuve intactes, l'ancienne entrée reste dans la sauvegarde privée) · `test_rollback_never_pushes_a_foreign_previous_entry_through_the_claude_cli` |
+| §5.3 : formats, au retrait aussi | clés dupliquées fusionnées au retrait ; retrait TOML par lignes non revérifié ; fins de ligne CRLF réécrites en LF | le fichier d'après retrait est calculé et **validé avant** révocation et écriture (`removal_text`) : sinon `refused-removal-manual` ; les fins de ligne sont conservées · `test_removal_refuses_a_json_file_with_duplicate_keys…`, `test_toml_removal_is_parsed_before_it_is_written`, `test_crlf_client_files_keep_their_line_endings` |
+| §6 : aucun lien symbolique sur le chemin du journal | seuls le dossier et sa racine étaient vérifiés | tous les ancêtres · `test_a_journal_below_a_symbolic_link_higher_on_the_path_is_not_trusted` |
+| §8 : `process_state` dans `startup_failure` | valeur libre recopiée de `launchctl print` | forme fermée (mot court en minuscules), sinon `null` · `test_process_state_is_a_closed_shape…` |
+| §14 : liste des scripts dans `test_distribution_d1a.py` | la liste est dans `tests/test_distribution_static.py` | adaptation faite dans ce fichier |
+
+### 23.2 Précisions et ajouts (sens sûr)
+
+- **Étape `service_ready`** : c'est une durée (`steps_ms`), pas un nom d'étape du journal ; `stage` reste
+  `"service"` pendant l'attente (comportement 4.0.9, exigé par `test_quickstart.py`).
+- **Codes hors du tableau du §11**, tous stables : `download_not_approved`, `preflight_changed`,
+  `service_not_ready`, `resources_failed`, `token_failed`, `client_write_failed` (application) ;
+  `undo_partial` (retour arrière : un client non restauré) ; `uninstall_refused` (défaut de
+  `UninstallError`). `quickstart_refused` reste le défaut des refus anciens sans code propre.
+- **Issues hors des tableaux** : `plist-already-absent`, `kept-clients-remaining`, `kept-clients-incomplete`,
+  `refused-proof-revoked`, `refused-removal-manual` (retour arrière et désinstallation) ;
+  `keep-unreadable`, `keep-unsafe-path` (configuration illisible ou derrière un lien symbolique : gardée,
+  dépendance `indeterminate`).
+- **`uninstall.settings_from_service`** : la CLI lit URL, jeton, store et dossier d'exploitation dans le plist
+  installé (un shell neuf ne porte pas ces variables) ; la propriété reste décidée par `plan`. Service
+  attesté aussi par le journal d'installation de confiance quand l'interpréteur de la commande diffère.
+- **R1 provisoire** : `quickstart.NEW_INSTALL_DEFAULT_PROFILE = None` ; un défaut serait cette constante.
+- **Journal** : `applied_entry` (notre entrée, sans secret) reste écrit à côté de son empreinte ;
+  `toml_appended` conserve le texte exact ajouté. Journal de désinstallation : `uninstall.json`, sous
+  `~/.local/state/memory-os/uninstall/<stamp>/`.
+- **Robustesse des aperçus** : fichier client de mode 000, entrée TOML portant une date, JSON trop
+  profond, journal non fiable ou mal formé : refus ou ignoré, jamais une exception.
+
+### 23.3 Limites résiduelles
+
+- Les `.mcp.json` de projet ne sont pas inspectés (ci-dessus).
+- Claude Code : si `claude mcp add` échoue après le `remove` d'un remplacement **consenti** d'une entrée
+  étrangère, celle-ci ne subsiste que dans la sauvegarde privée ; désinstallation sans CLI `claude` : la
+  preuve est révoquée puis le retrait échoue (`failed-entry-kept-unproven`), aucun contrôle `which` dans
+  `uninstall.plan`.
+- Un journal 4.0.9 annulé par une 4.0.9 (qui n'écrivait aucune marque) prouve encore une entrée identique
+  recréée à la main ; un remplacement prouvé E1 → E2 ne révoque pas la preuve de E1.
+- TOML : une entrée sous `[mcp.servers.*]` n'est pas lue quand une table `[mcp_servers.*]` existe
+  (comportement de `clients._toml_entry`, inchangé).
+- Le descripteur de construction atteste les deux paquets, pas le module de premier niveau
+  `memory_os_constraints.py` (couvert par l'inventaire source du sdist seulement).
+- Preuve du localisateur : wheel construit hors ligne depuis le commit scellé et inspecté (module, deux
+  fichiers de contraintes, point d'entrée) ; l'installation `pip --no-deps` dans un venv vierge (§12) reste
+  à faire sous GO.
+- Antigravity dans `ENV_PRECEDENCE_ESTABLISHED` : par rattachement à Gemini CLI, non lu dans ses sources.

@@ -134,6 +134,22 @@ def test_startup_failure_through_the_cli_prints_no_secret(c, monkeypatch, capsys
     assert not [value for value in forbidden(c) if value in out.out + out.err]
 
 
+def test_process_state_is_a_closed_shape_never_free_text_of_the_command_output(c, monkeypatch):
+    """``state = …`` comes from ``launchctl print``: only a short lowercase word is kept."""
+    service = {"label": "x", "argv": ["/p", "-m", "s"], "env": {"MEMORY_V4_TOKEN_FILE": "/t", "MEMORY_V4_DIR": "/d"}}
+
+    def run(argv, **kwargs):
+        from types import SimpleNamespace
+        text = ("program = /p\narguments = {\n/p\n-m\ns\n}\nMEMORY_V4_TOKEN_FILE => /t\nMEMORY_V4_DIR => /d\n"
+                "runs = 2\nlast exit code = 1\nstate = " + state + "\n")
+        return SimpleNamespace(returncode=0, stdout=text, stderr="")
+    state = "spawn scheduled"
+    assert qs._job_observation(service, run=run)["process_state"] == "spawn scheduled"
+    state = "LEAK " + LEAK_SECRET
+    observed = qs._job_observation(service, run=run)
+    assert observed["state"] == "loaded" and observed["process_state"] is None
+
+
 # ---- subprocess stdout / stderr ----
 
 @pytest.mark.parametrize("failure", ["none", "claude", "bootstrap", "rollback-stop", "uninstall-stop"])

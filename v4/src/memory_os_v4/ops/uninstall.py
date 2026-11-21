@@ -21,11 +21,9 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from . import quickstart as qs
-from .clients import CLIENTS, classify, read_entry
-from .settings import LOOPBACK_HOSTS
+from .clients import CLIENTS, SERVER, classify, read_entry
 
 JOURNAL_SUBDIR = ".local/state/memory-os/uninstall"  # below the selected HOME
 URL_FIELDS = ("url", "serverUrl", "httpUrl")
@@ -35,7 +33,8 @@ URL_FIELDS = ("url", "serverUrl", "httpUrl")
 ENV_PRECEDENCE_ESTABLISHED = frozenset({"vscode", "codex", "gemini-cli", "antigravity"})
 V3_ARGS = ["-m", "memory_os_ai.server"]
 CONSOLE_SCRIPT = "memory-os-relay"
-PACKAGE = re.compile(r"memory-os-ai(?![A-Za-z0-9._-])")
+PACKAGE = re.compile(r"memory-os-ai(\[[a-z]+(,[a-z]+)*\])?(==[0-9][0-9A-Za-z.]*)?")  # index name only: no URL, no path
+PYTHON_VERSION = re.compile(r"[0-9]+(\.[0-9]+){0,2}")
 
 
 class UninstallError(RuntimeError):
@@ -48,24 +47,50 @@ class UninstallError(RuntimeError):
 
 # ---------- dependency of an entry on our service (a fourth notion, distinct from ownership) ----------
 
+STRICT_URL = re.compile(r"(https?)://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(?::([0-9]{1,5}))?(/[A-Za-z0-9._~/-]*)?")
+IPV4 = re.compile(r"(?:0|[1-9][0-9]{0,2})(?:\.(?:0|[1-9][0-9]{0,2})){3}")
+
+
 def _destination(url):
-    """(host, port) of a literal http(s) URL, else None (variable, non-text, unparsable)."""
-    if not isinstance(url, str) or "$" in url or "{" in url or "%" in url:
+    """(host, port, verdict) of a literal URL of a plain shape, else None.
+
+    The verdict is about OUR service on ``port``: decided by ``_verdict``. Only a strictly plain
+    ASCII ``http(s)://host[:port][/path]`` is read: userinfo, backslashes, percent-encoding,
+    variables, non-ASCII or any other shape that two URL parsers could read differently is not
+    a literal destination (None, hence ``indeterminate``).
+    """
+    if not isinstance(url, str):
         return None
-    try:
-        parts = urlsplit(url)
-        port = parts.port
-    except ValueError:
+    match = STRICT_URL.fullmatch(url)
+    if not match:
         return None
-    if parts.scheme not in {"http", "https"} or not parts.hostname:
+    scheme, host, port = match.group(1), match.group(2).lower(), match.group(3)
+    number = int(port) if port else (443 if scheme == "https" else 80)
+    if not 0 < number < 65536:
         return None
-    host = parts.hostname.lower()
-    # Every loopback name designates the same local service: they never contradict each other.
-    return "loopback" if host in LOOPBACK_HOSTS else host, port if port is not None else (443 if parts.scheme == "https" else 80)
+    return ("loopback" if host in {"127.0.0.1", "localhost", "[::1]"} else host), number
+
+
+def _verdict(destination, port: int) -> str:
+    """``wired`` | ``none`` | ``indeterminate`` for a literal destination and our service port.
+
+    Another PORT is another destination, whatever the host. On OUR port: the three loopback
+    names are our service; a canonical dotted IPv4 address outside 127/8 and 0/8 is another
+    machine; anything else (a DNS or hosts-file name, ``localhost.``, ``0.0.0.0``, short or
+    IPv6-mapped forms) may resolve to this machine and establishes nothing.
+    """
+    host, number = destination
+    if number != port:
+        return "none"
+    if host == "loopback":
+        return "wired"
+    if IPV4.fullmatch(host) and all(int(part) < 256 for part in host.split(".")) and host.split(".")[0] not in {"0", "127"}:
+        return "none"
+    return "indeterminate"
 
 
 def _ours(destination, port: int) -> bool:
-    return destination[0] == "loopback" and destination[1] == port
+    return _verdict(destination, port) == "wired"
 
 
 def _plain_keys(entry: dict) -> bool:
@@ -81,15 +106,14 @@ def _uvx_relay(args) -> bool:
     while index < len(options):
         if options[index] == "--no-python-downloads":
             index += 1
-        elif options[index] in {"--python", "--from"} and index + 1 < len(options):
-            if options[index] == "--from":
-                if source is not None:
-                    return False
-                source = options[index + 1]
+        elif options[index] == "--python" and index + 1 < len(options) and PYTHON_VERSION.fullmatch(options[index + 1]):
+            index += 2  # a version, never a path to an arbitrary interpreter
+        elif options[index] == "--from" and index + 1 < len(options) and source is None:
+            source = options[index + 1]
             index += 2
         else:
             return False
-    return source is not None and PACKAGE.match(source) is not None
+    return source is not None and PACKAGE.fullmatch(source) is not None
 
 
 def _relay_launch(entry: dict) -> bool:
@@ -119,10 +143,12 @@ def _dependency(entry, port: int, client: str | None) -> str:
         destinations = [_destination(url) for url in urls]
         if None in destinations or len(set(destinations)) != 1:
             return "indeterminate"  # not literal, or several contradictory URL fields
-        return "wired" if _ours(destinations[0], port) else "none"
+        return _verdict(destinations[0], port)
     command = entry.get("command")
-    if (isinstance(command, str) and qs.INTERPRETER.fullmatch(os.path.basename(command))
-            and entry.get("args") == V3_ARGS and _plain_keys(entry)):
+    env = entry.get("env", {})
+    if (isinstance(command, str) and os.path.isabs(command) and qs.INTERPRETER.fullmatch(os.path.basename(command))
+            and entry.get("args") == V3_ARGS and _plain_keys(entry)
+            and isinstance(env, dict) and not any(str(key).upper().startswith("PYTHON") for key in env)):
         return "none"  # exact v3 server: a standalone stdio server with its own store
     if not _relay_launch(entry):
         return "indeterminate"  # wrapper, foreign or opaque command: it decides by itself where it connects
@@ -130,8 +156,9 @@ def _dependency(entry, port: int, client: str | None) -> str:
     destination = _destination(env.get("MEMORY_V4_URL")) if "MEMORY_V4_URL" in env else None
     if destination is None:
         return "indeterminate"  # inherited, variable or absent: the configuration does not establish it
-    if _ours(destination, port):
-        return "wired"
+    verdict = _verdict(destination, port)
+    if verdict != "none":
+        return verdict
     # Another destination is established only where the entry environment is known to win.
     return "none" if client in ENV_PRECEDENCE_ESTABLISHED else "indeterminate"
 
@@ -153,15 +180,37 @@ def remaining_dependencies(home: Path, port: int, *, removed=()) -> dict:
     """{client: dependency} for every ``memory-os-ai`` entry of the WHOLE registry that keeps the service."""
     found = {}
     for client in CLIENTS:
-        if client.key in removed:
-            continue
         state, entry = read_entry(client, home)
-        if state == "unreadable":
+        entries = [] if client.key in removed or entry is None else [entry]
+        if client.fmt == "claude-user":
+            entries += _claude_project_entries(client.config_path(home))  # never "removed" by us: always counted
+        if state == "unreadable" or client.config_path(home).is_symlink():
             found[client.key] = "indeterminate"  # an entry may be there: nothing proves the contrary
-        elif entry is not None:
-            dependency = _dependency(entry, port, client.key)
-            if dependency != "none":
-                found[client.key] = dependency
+            continue
+        verdicts = {_dependency(item, port, client.key) for item in entries}
+        if "wired" in verdicts:
+            found[client.key] = "wired"
+        elif "indeterminate" in verdicts:
+            found[client.key] = "indeterminate"
+    return found
+
+
+def _claude_project_entries(path: Path) -> list:
+    """``memory-os-ai`` entries of the per-project scopes kept in ``~/.claude.json`` (``projects.*.mcpServers``).
+
+    The user-scope entry is the only one we write or remove, but a project-scope entry depends
+    on the service just as much. Project ``.mcp.json`` files live in the projects themselves and
+    cannot be enumerated from here: a declared limit (next_steps says so).
+    """
+    try:
+        projects = json.loads(path.read_bytes().decode("utf-8")).get("projects")
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return []
+    found = []
+    for project in projects.values() if isinstance(projects, dict) else ():
+        servers = project.get("mcpServers") if isinstance(project, dict) else None
+        if isinstance(servers, dict) and SERVER in servers:
+            found.append(servers[SERVER])
     return found
 
 
@@ -245,11 +294,17 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
         blockers.append(message)
     for client in selected:
         path = client.config_path(home)
-        qs._safe_path(path, home)
-        state, entry = read_entry(client, home)
-        item = {"client": client.key, "name": client.name, "path": str(path), "file_sha256": qs._sha(path),
+        try:
+            qs._safe_path(path, home)
+            state, entry = read_entry(client, home)
+        except qs.QuickstartError:
+            state, entry = "unsafe-path", None  # symbolic link or special file: never written through
+        item = {"client": client.key, "name": client.name, "path": str(path),
+                "file_sha256": qs._sha(path) if state != "unsafe-path" else None,
                 "current_class": classify(entry), "ownership": None, "dependency": None}
-        if state == "missing-config":
+        if state == "unsafe-path":
+            item.update(action="keep-unsafe-path", dependency="indeterminate")
+        elif state == "missing-config":
             item["action"] = "missing-config"
         elif state == "unreadable":
             item.update(action="keep-unreadable", dependency="indeterminate")
@@ -261,7 +316,7 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
             explicit = _destination((entry.get("env") or {}).get("MEMORY_V4_URL")) if isinstance(entry.get("env"), dict) else None
             if qs.proof_of_ownership(journal_root, client.key, entry, identity):
                 item.update(action="remove", ownership="journal")
-            elif item["current_class"] == "relay" and (explicit is None or _ours(explicit, port)):
+            elif item["current_class"] == "relay" and (explicit is None or _verdict(explicit, port) != "none"):
                 # Relay-looking and possibly ours, but nothing proves we wrote it (or the proof was revoked).
                 consent = client.key in remove_existing
                 item.update(action="remove" if consent else "keep-unproven", ownership="consent" if consent else "unproven")
@@ -323,10 +378,12 @@ def _scope(items, service) -> dict:
 
 
 def _next_steps(remaining: dict) -> list:
-    steps = []
+    steps = ["not inspected: project-level .mcp.json files (Claude Code and others) live in each project; an entry "
+             "there that reaches this service is not seen — check them before the service stops"] if not remaining else []
     for key, dependency in sorted(remaining.items()):
-        reason = "points to this service" if dependency == "wired" else "may depend on this service"
-        steps.append(f"{key}: its memory-os-ai entry {reason} ({dependency}); the service is kept. Remove that entry "
+        reason = ("a memory-os-ai entry points to this service" if dependency == "wired" else
+                  "a memory-os-ai entry may depend on this service, or its configuration cannot be read")
+        steps.append(f"{key}: {reason} ({dependency}); the service is kept. Remove that entry "
                      f"(uninstall --clients {key}, with --remove-existing {key} for an unproven relay entry, "
                      "or by hand), or check where it connects, then run uninstall again")
     return steps
@@ -410,6 +467,13 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
             done["status"] = "backup-failed-entry-untouched"
             record()
             continue
+        try:
+            # Validated before anything is revoked or written: an unsafe removal leaves entry AND proof intact.
+            qs.removal_text(client, home, toml_appended=appended)
+        except (OSError, ValueError, qs.QuickstartError, RecursionError):
+            done["status"] = "refused-removal-manual"
+            record()
+            continue
         # Revocation first, removal second. Revocations already written are never undone.
         revoked = []
         try:
@@ -426,7 +490,7 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
             state, entry = read_entry(client, home)
             if state == "ok" and entry is None:
                 done["status"] = "removed"
-        except (OSError, ValueError, qs.QuickstartError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, qs.QuickstartError, subprocess.SubprocessError):
             pass
         record()
     incomplete = [done["client"] for done, item in zip(result["clients"], preview["clients"])
@@ -460,8 +524,8 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
 
 
 def _kept_status(action: str) -> str:
-    return {"keep-unproven": "kept-unproven", "keep-foreign": "kept-foreign",
-            "keep-unreadable": "kept-unreadable", "remove": "planned"}.get(action, action)
+    return {"keep-unproven": "kept-unproven", "keep-foreign": "kept-foreign", "keep-unreadable": "kept-unreadable",
+            "keep-unsafe-path": "kept-unsafe-path", "remove": "planned"}.get(action, action)
 
 
 def settings_from_service(settings, home: Path):

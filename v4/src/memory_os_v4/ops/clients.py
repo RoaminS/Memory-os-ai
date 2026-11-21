@@ -97,7 +97,7 @@ def read_entry(client: Client, home: Path) -> tuple[str, dict | None]:
         return "ok", entry
     except FileNotFoundError:
         return "missing-config", None
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
         return "unreadable", None
 
 
