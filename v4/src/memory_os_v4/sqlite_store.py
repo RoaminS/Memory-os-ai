@@ -5,14 +5,18 @@ The existing sqlite_s1 flag remains experimental. No implicit JSONL migration.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 from threading import RLock
 import time
+from urllib.parse import quote
 
+from .config import LEXICAL_MARKER, PROFILE_LEXICAL, PROFILE_SEMANTIC
 from .store import MemoryItem, Store, VALID_KINDS
 
 MIN_SQLITE = (3, 51, 3)
@@ -144,6 +148,134 @@ def validate_sqlite_target(directory: Path) -> None:
         path = directory / name
         if path.is_symlink() or (path.exists() and path.stat().st_nlink != 1):
             raise ValueError("Linked SQLite files are forbidden")
+
+
+# --------------------------------------------------------------------------------------
+# Retrieval-profile probe (docs/LEXICAL_PROFILE_4_1_0.md §5). Strictly read-only: it runs
+# before SQLiteStore, whose constructor already mutates (WAL pragma, migrations, journal).
+SEMANTIC_TRACE_KEYS = ("embed_model", "dim", "embed_compute_profile")
+_LEXICAL_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+_LEXICAL_MIN_VERSION = (4, 1, 0)
+
+
+def lexical_version_ok(version) -> bool:
+    """``X.Y.Z`` >= 4.1.0 compared as an integer triple; absent, non-text or malformed is refused."""
+    if not isinstance(version, str) or _LEXICAL_VERSION.fullmatch(version) is None:
+        return False
+    return tuple(int(part) for part in version.split(".")) >= _LEXICAL_MIN_VERSION
+
+
+@dataclass(frozen=True)
+class ProfileFinding:
+    """What one read-only probe saw. Two probes of an unchanged store compare equal."""
+    state: str  # "new" | "existing" | "unverifiable"
+    reason: str | None = None  # why the profile cannot be determined
+    has_marker: bool = False
+    marker: object = None
+    traces: tuple = ()  # semantic traces, computed only under a valid lexical marker
+    store_instance_id: object = None
+    application_id: int | None = None
+    user_version: int | None = None
+
+    @property
+    def marker_valid(self) -> bool:
+        return self.has_marker and type(self.marker) is dict and self.marker == LEXICAL_MARKER
+
+    @property
+    def contaminated(self) -> bool:
+        return self.marker_valid and bool(self.traces)
+
+    @property
+    def profile(self) -> str | None:
+        """Profile of a determined, valid store: marker absent means semantic."""
+        if self.state != "existing" or (self.has_marker and not self.marker_valid):
+            return None
+        return PROFILE_LEXICAL if self.has_marker else PROFILE_SEMANTIC
+
+
+def probe_retrieval_profile(data_dir) -> ProfileFinding:
+    """Read the retrieval profile of ``data_dir`` without creating or modifying any file.
+
+    No -wal/-shm: ``mode=ro&immutable=1``. Complete -wal/-shm pair: ``mode=ro`` so that the WAL
+    content is read (only the transient -shm bookkeeping of a reader may change). Anything
+    else that prevents a certain answer is reported as ``unverifiable`` and never opened.
+    """
+    database = Path(data_dir).expanduser().resolve() / "store.sqlite3"
+    has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
+    if not os.path.lexists(database):
+        if has_wal or has_shm:
+            return ProfileFinding("unverifiable", "a -wal/-shm file exists without store.sqlite3")
+        return ProfileFinding("new")
+    if has_wal != has_shm:
+        return ProfileFinding("unverifiable", "incomplete -wal/-shm pair")
+    if database.is_symlink() or not database.is_file():
+        return ProfileFinding("unverifiable", "store.sqlite3 is not a regular file")
+    uri = "file:" + quote(str(database)) + ("?mode=ro" if has_wal else "?mode=ro&immutable=1")
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=5)
+    except sqlite3.Error as error:
+        return ProfileFinding("unverifiable", f"cannot open read-only: {error}")
+    try:
+        application_id = connection.execute("PRAGMA application_id").fetchone()[0]
+        user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('store_metadata','embedding_cache')")}
+        row = (connection.execute("SELECT value_json FROM store_metadata WHERE key='metadata'").fetchone()
+               if "store_metadata" in tables else None)
+        # The single read of embedding_cache allowed to the lexical profile: is there at least one row?
+        cached = ("embedding_cache" in tables
+                  and connection.execute("SELECT 1 FROM embedding_cache LIMIT 1").fetchone() is not None)
+    except sqlite3.Error as error:
+        return ProfileFinding("unverifiable", f"cannot read: {error}")
+    finally:
+        connection.close()
+    meta = {}
+    if row is not None:
+        try:
+            meta = json.loads(row[0])
+        except (TypeError, ValueError):
+            return ProfileFinding("unverifiable", "metadata is not JSON")
+        if not isinstance(meta, dict):
+            return ProfileFinding("unverifiable", "metadata is not an object")
+    finding = ProfileFinding("existing", has_marker="retrieval_profile" in meta,
+                             marker=meta.get("retrieval_profile"),
+                             store_instance_id=meta.get("store_instance_id"),
+                             application_id=application_id, user_version=user_version)
+    if not finding.marker_valid:
+        return finding
+    traces = [key for key in SEMANTIC_TRACE_KEYS if key in meta]
+    if cached:
+        traces.append("embedding_cache")
+    if not lexical_version_ok(meta.get("version")):
+        traces.append("version")
+    return replace(finding, traces=tuple(traces))
+
+
+def profile_refusal(finding: ProfileFinding, requested: str) -> tuple[str, str] | None:
+    """(code, message) refusing ``finding`` for the requested profile, or None.
+
+    Priority: unverifiable, then invalid marker, then contamination, then the comparison
+    with the requested profile. Same verdict for both probes of an open.
+    """
+    if finding.state == "unverifiable":
+        return ("store_profile_unverifiable",
+                f"The retrieval profile of this existing store cannot be determined ({finding.reason}); "
+                "it is not opened in any profile")
+    if finding.state == "new":
+        return None
+    if finding.has_marker and not finding.marker_valid:
+        return ("store_profile_mismatch",
+                "The store carries an unknown or invalid retrieval_profile marker; it is never interpreted")
+    if finding.contaminated:
+        return ("store_profile_contaminated",
+                "Lexical store with semantic traces (" + ", ".join(finding.traces) + "): a lexical store has "
+                "no 4.0.x rollback. No automatic repair; restore the last 4.1.0 backup. Going back to a "
+                "4.0.x means resuming the semantic store or the backup taken before 4.1.0")
+    if finding.profile != requested:
+        return ("store_profile_mismatch",
+                f"The store belongs to the {finding.profile} profile, the {requested} profile was requested; "
+                "no implicit conversion: create a new store and rewrite the sources through the public API")
+    return None
 
 
 class SQLiteStore(Store):

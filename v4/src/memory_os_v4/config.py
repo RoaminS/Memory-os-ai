@@ -11,6 +11,36 @@ from dataclasses import dataclass
 
 DEPRECATED_COS_ENV = ("MEMORY_V4_DEDUP_COS", "MEMORY_V4_SUPERSEDE_COS")
 
+# Retrieval profiles (docs/LEXICAL_PROFILE_4_1_0.md). "semantic" is the historical engine and stays
+# the default; "lexical" is selected explicitly, never deduced from the installed dependencies.
+PROFILE_SEMANTIC = "semantic"
+PROFILE_LEXICAL = "lexical"
+RETRIEVAL_PROFILES = (PROFILE_SEMANTIC, PROFILE_LEXICAL)
+LEXICAL_POLICY = "lex-4.1.0-v1"
+# Exact, immutable value of store_metadata.metadata.retrieval_profile in a lexical store.
+LEXICAL_MARKER = {"name": PROFILE_LEXICAL, "policy": LEXICAL_POLICY}
+# Options frozen by policy lex-4.1.0-v1: exact value AND type, anything else is a conflict.
+LEXICAL_REQUIRED = {
+    "store_backend": "sqlite_s1", "use_dense": False, "use_bm25": True, "bm25_profile": "scoped_literal",
+    "use_entities": True, "use_stemming": True, "fusion": "cc", "w_bm25": 1.5, "w_entity": 0.5,
+    "candidates": 100, "lexical_guard_k": 3, "lexical_first": False, "multi_query_rrf_k": 20,
+    "index_keywords": True,
+}
+# Semantic-only or expansion options: must keep their default in the lexical profile.
+LEXICAL_DEFAULT_ONLY = (
+    "embed_model", "device", "embed_dtype", "embed_batch_size", "embed_max_seq_length", "hash_dim",
+    "batch_facts", "sqlite_embedding_namespace", "rerank_model", "multi_vector", "full_candidate_scoring",
+    "dense_norm", "neighbor_expansion", "entity_expansion", "temporal_query_mode", "facet_channel", "w_dense",
+)
+
+
+class ProfileError(ValueError):
+    """Refusal of a retrieval profile, its options or a store; ``code`` is stable."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def inert_cos_settings():
     return [name for name in DEPRECATED_COS_ENV if name in os.environ]
@@ -157,8 +187,25 @@ class Config:
     lexical_first: bool = False  # preserve positive lexical ranks; dense fills gaps
     lexical_guard_k: int = 3  # final protected raw-BM25 prefix; 0 disables C4
 
+    def validate_retrieval_profile(self) -> None:
+        """Profile selection and the options frozen by ``lex-4.1.0-v1``; touches no file."""
+        if self.retrieval_profile not in RETRIEVAL_PROFILES:
+            raise ProfileError("profile_unknown", "Unknown retrieval profile; choose semantic or lexical")
+        if self.retrieval_profile != PROFILE_LEXICAL:
+            return
+        defaults = type(self)()
+        wanted = {**LEXICAL_REQUIRED, **{name: getattr(defaults, name) for name in LEXICAL_DEFAULT_ONLY}}
+        conflicts = sorted(name for name, value in wanted.items()
+                           if type(getattr(self, name)) is not type(value) or getattr(self, name) != value)
+        if conflicts:
+            raise ProfileError(
+                "profile_option_conflict",
+                "Options incompatible with the lexical profile (" + LEXICAL_POLICY + "): " + ", ".join(
+                    f"{name} must be {wanted[name]!r}" for name in conflicts))
+
     def validate_lexical_policy(self) -> None:
         """Reject ambiguous rank policies before opening or modifying a store."""
+        self.validate_retrieval_profile()
         if self.embed_dtype not in {"native", "float32"}:
             raise ValueError("embed_dtype must be native or float32")
         if type(self.batch_facts) is not bool:
@@ -315,6 +362,15 @@ class Config:
     store_backend: str = "jsonl"  # "sqlite_s1" = experimental S2, fresh/S1 stores; not production
     work_state: bool = False  # L7b candidate; SQLite and separate operator GO required.
     sqlite_embedding_namespace: str = "v1"  # Bump when local model weights/revision change.
+    # 4.1.0: "semantic" (default, unchanged engine) or "lexical" (policy lex-4.1.0-v1, no encoder,
+    # no vector, SQLite only). Explicit choice; use_dense=False alone is still the semantic profile.
+    retrieval_profile: str = PROFILE_SEMANTIC
+
+    @classmethod
+    def lexical(cls, **options) -> "Config":
+        """Explicit lexical profile; ``options`` may only set what the policy leaves free."""
+        return cls(**{"retrieval_profile": PROFILE_LEXICAL, "store_backend": "sqlite_s1", "use_dense": False,
+                      **options})
 
     def half_life_days(self, kind: str) -> float:
         """Recency half-life (days) applicable to a given item kind."""
@@ -338,6 +394,10 @@ class Config:
         # An existing explicit alternative policy opts out of the new default guard.
         # An explicitly supplied nonzero guard still fails validation if incompatible.
         guard_default = d.lexical_guard_k if profile == "scoped_literal" and bm25 and not lexical_first else 0
+        retrieval_profile = _env_str("MEMORY_V4_RETRIEVAL_PROFILE", d.retrieval_profile)
+        # Same mechanism as guard_default: the lexical profile changes the DEFAULT of use_dense only;
+        # an explicit contradictory variable is kept and refused by validation.
+        dense_default = False if retrieval_profile == PROFILE_LEXICAL else d.use_dense
         if inert_cos_settings():
             import logging
             logging.getLogger("memory_os_v4").warning(
@@ -379,7 +439,8 @@ class Config:
             use_recency=_env_bool("MEMORY_V4_USE_RECENCY", d.use_recency),
             use_entities=_env_bool("MEMORY_V4_USE_ENTITIES", d.use_entities),
             use_bm25=bm25,
-            use_dense=_env_bool("MEMORY_V4_USE_DENSE", d.use_dense),
+            use_dense=_env_bool("MEMORY_V4_USE_DENSE", dense_default),
+            retrieval_profile=retrieval_profile,
             block_char_limit=_env_int("MEMORY_V4_BLOCK_CHAR_LIMIT", d.block_char_limit),
             episode_ttl_days=_env_int("MEMORY_V4_EPISODE_TTL_DAYS", d.episode_ttl_days),
             multi_vector=_env_bool("MEMORY_V4_MULTI_VECTOR", d.multi_vector),

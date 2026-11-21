@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-os-ai"
-version = "4.0.9"
+version = "4.1.0"
 description = "Local project memory shared by MCP clients, with dated decisions and work state"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
@@ -177,7 +177,7 @@ include = ["memory_os_ai*", "memory_os_v4*"]
 memory_os_v4 = ["resources/*.json", "resources/*.txt"]
 
 [tool.setuptools.data-files]
-"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/CLIENTS.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md", "docs/releases/v4.0.6.md", "docs/releases/v4.0.6.dev0.md", "docs/releases/v4.0.7.md", "docs/releases/v4.0.8.md", "docs/releases/v4.0.9.md"]
+"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/CLIENTS.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md", "docs/releases/v4.0.6.md", "docs/releases/v4.0.6.dev0.md", "docs/releases/v4.0.7.md", "docs/releases/v4.0.8.md", "docs/releases/v4.0.9.md", "docs/releases/v4.1.0.md"]
 "share/doc/memory-os-ai/v4" = ["v4/docs/*.md"]
 "share/doc/memory-os-ai/v4/contracts" = ["v4/docs/contracts/*.json"]
 

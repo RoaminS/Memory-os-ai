@@ -19,7 +19,7 @@ import numpy as np
 from . import consolidate as consolidate_mod
 from .blocks import BlockStore
 from .bm25 import BM25Index
-from .config import Config
+from .config import Config, LEXICAL_MARKER, PROFILE_LEXICAL, ProfileError
 from .projects import ProjectRegistry, matches
 from .embed import Embedder, HashEmbedder
 from .entities import EntityIndex, extract_entities
@@ -54,6 +54,37 @@ def _make_embedder(config: Config) -> Embedder | HashEmbedder:
         return HashEmbedder(dim=config.hash_dim)
     return Embedder(config.embed_model, config.device, config.embed_max_seq_length,
                     config.embed_batch_size, config.embed_dtype)
+
+
+def _module_available(name: str) -> bool:
+    """Presence of a top-level module, without importing it."""
+    import importlib.util
+    import sys
+
+    if name in sys.modules:
+        return sys.modules[name] is not None
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _require_semantic_closure(config: Config) -> None:
+    """Semantic profile only: refuse before any file when the ML closure is not installed.
+
+    FAISS is always needed (the vector index exists even with the hash encoder, with
+    use_dense=False and with a deferred model); torch, sentence-transformers and transformers
+    unless the encoder is ``hash``. Never called in the lexical profile; never a fallback.
+    """
+    modules = ["faiss"] if config.embed_model == "hash" else [
+        "faiss", "torch", "sentence_transformers", "transformers"]
+    missing = [name for name in modules if not _module_available(name)]
+    if missing:
+        raise ProfileError(
+            "semantic_dependency_missing",
+            "The semantic retrieval profile needs packages that are not installed (" + ", ".join(missing)
+            + "). Install memory-os-ai[semantic], or select the lexical profile explicitly "
+            "(Config.lexical() or MEMORY_V4_RETRIEVAL_PROFILE=lexical); there is no automatic fallback")
 
 
 def _package_version():
@@ -127,8 +158,12 @@ class MemoryV4:
         self._lock = RLock()
 
         self.config.validate_lexical_policy()
+        # Frozen at construction, like the maintenance and write policies.
+        self._lexical = self.config.retrieval_profile == PROFILE_LEXICAL
         self._maintenance_policy = MaintenancePolicy(self.config.maintenance_mode)
         self._write_policy = WritePolicy(self.config.write_mode)
+        if not self._lexical:
+            _require_semantic_closure(self.config)
         self.data_dir = Path(self.config.data_dir).expanduser()
         if self.config.store_backend not in {"jsonl", "sqlite_s1"}:
             raise ValueError("Unknown store backend; choose jsonl or experimental sqlite_s1")
@@ -138,6 +173,8 @@ class MemoryV4:
         elif (self.data_dir / "store.sqlite3").exists():
             raise ValueError("SQLite store present: explicit backend selection required; "
                              "no implicit downgrade")
+        # Probe 1: read-only, before the directory, the writer lease or any mutating open.
+        probed = self._probe_store_profile() if self.config.store_backend == "sqlite_s1" else None
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self._closed = False
@@ -149,6 +186,11 @@ class MemoryV4:
             if self.config.store_backend == "sqlite_s1":
                 from .sqlite_store import SQLiteStore
                 from .sqlite_engine import SQLiteBlocks, SQLiteRequests
+                # Probe 2, complete, under the writer lease and BEFORE the constructor (which
+                # already enables WAL, migrates and initializes the change journal).
+                if self._probe_store_profile() != probed:
+                    raise ProfileError("store_profile_unverifiable",
+                                       "The store changed while it was being opened; nothing was modified, retry")
                 self.store = SQLiteStore(self.data_dir)
                 self.requests = SQLiteRequests(self.store)
                 self.blocks = SQLiteBlocks(self.store, self.config.block_char_limit)
@@ -173,17 +215,24 @@ class MemoryV4:
                 self.blocks.write_guard = block_write_guard
             # Enrolment identifies this store lineage, NOT freshness of a restored snapshot.
             self.store.meta.setdefault("store_instance_id", uuid.uuid4().hex)
+            if self._lexical and probed.state == "new":
+                # One document, written once with the identity: a clean marked store always has a version.
+                self.store.meta["retrieval_profile"] = dict(LEXICAL_MARKER)
+                self.store.meta["version"] = _package_version()
             self.store.save_meta(dict(self.store.meta))
             if self.config.store_backend != "sqlite_s1":
                 sync_sources(self.data_dir)
             # SQLite work authority must open without resolving a GPU, reading
             # model weights or importing neural runtimes. Retrieval is explicit
             # on its first operation; JSONL/default behavior is unchanged.
-            self._retrieval_ready = not (self.config.store_backend == 'sqlite_s1'
-                                          and (self.config.work_state or defer_retrieval) and self.config.embed_model != 'hash')
+            # The lexical profile has no encoder and no vector: retrieval is ready at open.
+            self._retrieval_ready = self._lexical or not (
+                self.config.store_backend == 'sqlite_s1'
+                and (self.config.work_state or defer_retrieval) and self.config.embed_model != 'hash')
             self._retrieval_initializing = False
-            self.embedder = _make_embedder(self.config) if self._retrieval_ready else None
-            if self.config.store_backend == "sqlite_s1":
+            self.embedder = _make_embedder(self.config) if self._retrieval_ready and not self._lexical else None
+            self._embedding_cache = None
+            if self.config.store_backend == "sqlite_s1" and not self._lexical:
                 from .sqlite_embeddings import SQLiteEmbeddings
                 self._embedding_cache = SQLiteEmbeddings(self.store)
             self.llm = LLMClient()
@@ -196,7 +245,10 @@ class MemoryV4:
             # below from the live items' own (already-durable) `.facets`.
             self.facet_index = FacetIndex()
 
-            if not self._retrieval_ready:
+            if self._lexical:
+                self.vector_index = None  # never a VectorIndex: no FAISS, no vector, by profile
+                self._rebuild_bm25_entities()
+            elif not self._retrieval_ready:
                 self.vector_index = VectorIndex(self.store.meta.get('dim') or 1)
                 self._rebuild_bm25_entities()
             else:
@@ -220,6 +272,16 @@ class MemoryV4:
             finally:
                 self._writer_finalizer()
             raise
+
+    def _probe_store_profile(self):
+        """Read-only profile probe; raises the store refusal of the requested profile, if any."""
+        from .sqlite_store import probe_retrieval_profile, profile_refusal
+
+        finding = probe_retrieval_profile(self.data_dir)
+        refusal = profile_refusal(finding, self.config.retrieval_profile)
+        if refusal is not None:
+            raise ProfileError(*refusal)
+        return finding
 
     def ensure_retrieval(self):
         """Initialize attested retrieval on demand; failure never disables tasks.
