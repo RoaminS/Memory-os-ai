@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (581 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (590 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 581 tests verts** (clients 183, cycle de vie 205, profil 62, reprise 46, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 52 d'écarts et de décisions ultérieures (§23). Le reste de
+**État après implémentation : 590 tests verts** (clients 183, cycle de vie 214, profil 62, reprise 46, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 61 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1087,6 +1087,16 @@ Règles du contrat corrigées ou précisées pendant l'implémentation, avec leu
   `test_real_lexical_store_harness_needs_no_ml_module`, qui rejoue écriture, réouverture et recherche dans un
   interpréteur neuf où les modules ML sont bloqués.
 
+### 23.4 Revue d'implémentation Codex n° 1 (`codex_verdict_setup_impl_v1.md`, sur `58a9fd6`) : point par point
+
+| Point | Correction | Tests |
+|---|---|---|
+| **P1** — entrée devenue étrangère **pendant** la révocation, puis retirée | l'empreinte attendue est revérifiée au retrait, sur les octets mêmes dont l'écriture est construite (`remove_client_entry(expected_sha256=…)`, puis dernière relecture avant le remplacement atomique ; Claude Code : entrée relue avant `claude mcp remove`). Écart → `conflict-file-changed-since-preview` (désinstallation) ou `refused-entry-changed-since-apply` (retour arrière), résultat partiel, service conservé | `test_uninstall_never_removes_an_entry_that_changed_during_its_own_revocation`, `test_undo_never_removes…`, `test_claude_code_entry_changed_during_its_revocation…` |
+| **P2** — service annoncé conservé puis arrêté | l'empreinte du plan revalidée avant toute mutation comprend l'action du service, `remaining_clients` et `remaining_dependencies` (clients hors sélection compris) ; et un plan qui annonçait un service conservé ne l'arrête jamais dans la même exécution (`kept-as-planned`) | `test_a_service_announced_as_kept_is_not_stopped_when_the_other_client_vanishes_after_the_preview`, `test_a_kept_service_stays_kept_even_if_its_last_dependency_vanishes_during_the_apply` |
+| **P2** — chemins non sûrs traités différemment | une seule inspection (`uninstall._inspect`, contrôle complet du chemin) pour le plan et pour `remaining_dependencies` : lien symbolique sur un ancêtre, pendant ou non → `indeterminate` | `test_a_config_behind_a_symbolic_link_in_a_parent_directory_keeps_the_service` (2) |
+| **P1** — preuve de E1 survivant au remplacement E1 → E2 | un remplacement **consomme** la preuve de l'entrée remplacée : `apply_clients` révoque (même client, même empreinte, tous les journaux de confiance) avant d'écrire ; révocation impossible → `revocation-failed-entry-untouched`, aucune écriture | `test_a_replace_consumes_the_proof_of_the_entry_it_replaces` (séquence exacte) |
+| Ambiguïté détectable (TOML) | un fichier TOML portant **les deux** tables (`mcp_servers` et `mcp.servers`) avec notre nom dans l'une : `keep-ambiguous`, dépendance `indeterminate`, jamais une preuve d'absence | `test_a_toml_file_with_both_server_tables_is_ambiguous_never_a_proof_of_no_dependency` |
+
 ### 23.3 Limites résiduelles
 
 - Les `.mcp.json` de projet ne sont pas inspectés (ci-dessus).
@@ -1094,10 +1104,11 @@ Règles du contrat corrigées ou précisées pendant l'implémentation, avec leu
   étrangère, celle-ci ne subsiste que dans la sauvegarde privée ; désinstallation sans CLI `claude` : la
   preuve est révoquée puis le retrait échoue (`failed-entry-kept-unproven`), aucun contrôle `which` dans
   `uninstall.plan`.
-- Un journal 4.0.9 annulé par une 4.0.9 (qui n'écrivait aucune marque) prouve encore une entrée identique
-  recréée à la main ; un remplacement prouvé E1 → E2 ne révoque pas la preuve de E1.
-- TOML : une entrée sous `[mcp.servers.*]` n'est pas lue quand une table `[mcp_servers.*]` existe
-  (comportement de `clients._toml_entry`, inchangé).
+- Un journal 4.0.9 annulé **par une 4.0.9** (qui n'écrivait aucune marque de révocation) prouve encore une
+  entrée identique recréée à la main : limite de compatibilité historique seulement (toute opération 4.1
+  révoque, remplacement compris, §23.4).
+- Après un remplacement prouvé E1 → E2, `undo` remet E1 depuis la sauvegarde, mais E1 n'est plus prouvée
+  (sa preuve a été consommée par le remplacement) : une mise à jour ultérieure demandera un consentement nommé.
 - Le descripteur de construction atteste les deux paquets, pas le module de premier niveau
   `memory_os_constraints.py` (couvert par l'inventaire source du sdist seulement).
 - Preuve du localisateur : wheel construit hors ligne depuis le commit scellé et inspecté (module, deux
