@@ -440,6 +440,176 @@ def test_remaining_clients_are_looked_up_in_the_whole_registry_not_in_the_select
     assert result["service"]["outcome"] == "kept-clients-remaining" and "bootout" not in c.system.verbs()
 
 
+# ---- a removal durably revokes the proof it used ----
+
+def journal_records(c, key):
+    found = []
+    for path in sorted((c.home / STATE / "quickstart").glob("*/journal.json")):
+        found += [record for record in json.loads(path.read_text())["records"] if record["client"] == key]
+    return found
+
+
+def test_uninstall_revokes_the_proof_so_a_hand_made_copy_is_not_removed_later(c):
+    """Install Cursor + VS Code, uninstall Cursor, re-create its entry by hand, uninstall Cursor again."""
+    installed(c, clients=("cursor", "vscode"))
+    entry = servers(c.home, "cursor")["memory-os-ai"]
+    first = uninstaller().apply(uninstall_plan(c, clients=("cursor",)), c.settings, home=c.home, run=c.system)
+    assert {item["client"]: item["status"] for item in first["clients"]} == {"cursor": "removed"}
+    assert first["service"]["outcome"] == "kept-clients-remaining" and first["service"]["remaining_clients"] == ["vscode"]
+    records = journal_records(c, "cursor")
+    assert records and all(record["revoked"] is True and record["revoked_by"] == first["stamp"] for record in records)
+    assert all("revoked" not in record for record in journal_records(c, "vscode"))
+
+    set_entry(c.home, "cursor", entry)  # byte-for-byte the entry our journal once proved
+    plan = uninstall_plan(c, clients=("cursor",))
+    item, = plan["clients"]
+    assert (item["action"], item["ownership"]) == ("keep-unproven", "unproven")
+    second = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert servers(c.home, "cursor")["memory-os-ai"] == entry  # not removed without named consent
+    assert second["service"]["outcome"] == "kept-clients-remaining"
+    assert second["service"]["remaining_clients"] == ["cursor", "vscode"]
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+
+
+def test_revoked_proof_no_longer_lets_quickstart_replace_the_entry(c):
+    """The very entry our journal proved, re-created by hand after its removal, seen from a new interpreter."""
+    installed(c, clients=("cursor", "vscode"))
+    entry = servers(c.home, "cursor")["memory-os-ai"]
+    other = c.home / "runtime2/bin/python"
+    other.parent.mkdir(parents=True)
+    other.write_text("# synthetic executable, never executed")
+    other.chmod(0o700)
+    c.python = str(other)
+    proven, = [item for item in prepare(c, profile="lexical", clients=("cursor",))["clients"]]
+    assert (proven["action"], proven["ownership"]) == ("replace", "journal")  # before the removal: proven
+    uninstaller().apply(uninstall_plan(c, clients=("cursor",)), c.settings, home=c.home, run=c.system)
+    set_entry(c.home, "cursor", entry)
+    item, = prepare(c, profile="lexical", clients=("cursor",))["clients"]
+    assert (item["action"], item["ownership"]) == ("refuse-existing-relay-unproven", "unproven")
+
+
+def test_the_proof_is_revoked_before_the_entry_is_removed(c, monkeypatch):
+    """Fail-safe order: if the removal then fails, the entry is left unproven, never removable by default."""
+    installed(c, clients=("cursor", "vscode"))
+    plan = uninstall_plan(c, clients=("cursor",))
+    real = qs._atomic_write
+    order = []
+
+    def spy(path, text):
+        name = Path(path).name
+        if name == "journal.json" and '"revoked": true' in text:
+            order.append("revoke")
+        if name == "mcp.json" and str(path).endswith(PATHS["cursor"]):
+            order.append("remove")
+            raise OSError("disk full")
+        return real(path, text)
+    monkeypatch.setattr(qs, "_atomic_write", spy)
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert order[:2] == ["revoke", "remove"]
+    assert result["ok"] is False and result["partial"] is True
+    assert {item["client"]: item["status"] for item in result["clients"]} == {"cursor": "failed-entry-kept-unproven"}
+    monkeypatch.setattr(qs, "_atomic_write", real)
+    assert "memory-os-ai" in servers(c.home, "cursor")
+    assert uninstall_plan(c, clients=("cursor",))["clients"][0]["action"] == "keep-unproven"
+
+
+def test_undo_revokes_the_proof_too(c):
+    result = installed(c, clients=("cursor", "vscode"))
+    entry = servers(c.home, "cursor")["memory-os-ai"]
+    qs.undo(result["stamp"], home=c.home, run=c.system)
+    assert all(record["revoked"] is True for record in journal_records(c, "cursor"))
+    set_entry(c.home, "cursor", entry)
+    assert uninstall_plan(c, clients=("cursor",))["clients"][0]["action"] == "keep-unproven"
+
+
+# ---- the service is kept for every entry that depends, or may depend, on it ----
+
+DEFAULT_URL = "http://127.0.0.1:8765/mcp/"  # the relay's default; the fake machine never opens it
+README_UVX = {"command": "uvx", "args": ["--python", "3.11", "--no-python-downloads", "--from",
+                                         "memory-os-ai[ops,brief]==4.1.0", "memory-os-relay"]}
+DEPENDENTS = {  # entry, dependency on the service of a default-URL installation
+    "readme-uvx-no-environment": (README_UVX, "wired"),
+    "console-script-no-environment": ({"command": "memory-os-relay"}, "wired"),
+    "module-relay-no-environment": ({"command": "/x/venv/bin/python", "args": ["-m", "memory_os_v4.ops.relay"]}, "wired"),
+    "console-script-explicit-same-url": ({"command": "memory-os-relay", "env": {"MEMORY_V4_URL": DEFAULT_URL}}, "wired"),
+    "direct-http-same-url": ({"type": "http", "url": DEFAULT_URL}, "wired"),
+    "direct-http-no-trailing-slash": ({"serverUrl": "http://127.0.0.1:8765/mcp"}, "wired"),
+    "direct-http-localhost-name": ({"httpUrl": "http://localhost:8765/mcp/"}, "wired"),
+    "shell-wrapper": ({"command": "/bin/sh", "args": ["-c", "exec python -m memory_os_v4.ops.relay"]}, "indeterminate"),
+    "foreign-program": ({"command": "/opt/proxy", "args": ["--upstream", "memory_os_v4.ops.relay"]}, "indeterminate"),
+    "variable-in-url": ({"command": "memory-os-relay", "env": {"MEMORY_V4_URL": "${MEMORY_URL}"}}, "indeterminate"),
+    "console-script-other-port": ({"command": "memory-os-relay", "env": {"MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/"}}, "none"),
+    "direct-http-other-port": ({"type": "http", "url": "http://127.0.0.1:9999/mcp/"}, "none"),
+    "direct-http-other-host": ({"type": "http", "url": "https://example.com:8765/mcp/"}, "none"),
+    "legacy-v3": (EXISTING["legacy-v3"], "none"),
+}
+
+
+def default_url_install(c, clients=("cursor",)):
+    from dataclasses import replace
+    c.settings = replace(c.settings, url=DEFAULT_URL)
+    assert str(c.settings.token_file) == str(c.home / ".config/memory-os/http.token")  # the relay default
+    return installed(c, clients=clients)
+
+
+@pytest.mark.parametrize("case", sorted(DEPENDENTS))
+def test_service_dependency_of_an_entry_is_resolved_with_the_relay_defaults(c, case):
+    from dataclasses import replace
+    entry, expected = DEPENDENTS[case]
+    settings = replace(c.settings, url=DEFAULT_URL)
+    assert uninstaller().service_dependency(entry, settings, home=c.home) == expected
+
+
+@pytest.mark.parametrize("case", sorted(DEPENDENTS))
+def test_uninstall_keeps_the_service_for_an_entry_that_depends_or_may_depend_on_it(c, case):
+    entry, dependency = DEPENDENTS[case]
+    default_url_install(c)
+    set_entry(c.home, "antigravity", entry)
+    plan = uninstall_plan(c)
+    by = {item["client"]: item for item in plan["clients"]}
+    assert by["cursor"]["action"] == "remove" and by["antigravity"]["action"].startswith("keep-")
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert servers(c.home, "antigravity")["memory-os-ai"] == entry and "memory-os-ai" not in servers(c.home, "cursor")
+    if dependency == "none":
+        assert result["service"]["outcome"] == "stopped-and-plist-moved" and result["service"]["remaining_clients"] == []
+        assert c.system.verbs().count("bootout") == 1
+    else:
+        assert result["service"]["outcome"] == "kept-clients-remaining"
+        assert result["service"]["remaining_clients"] == ["antigravity"]
+        assert result["service"]["remaining_dependencies"] == {"antigravity": dependency}
+        assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+        assert any("antigravity" in step for step in result["next_steps"])
+
+
+def test_implicit_defaults_do_not_wire_an_entry_to_a_service_on_another_port(c):
+    """Our service is on port 43219 here: the default-URL relay entries point elsewhere, the resolution is real."""
+    installed(c, clients=("cursor",))
+    set_entry(c.home, "antigravity", README_UVX)
+    assert uninstaller().service_dependency(README_UVX, c.settings, home=c.home) == "none"
+    result = uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)
+    assert result["service"]["outcome"] == "stopped-and-plist-moved"
+    assert servers(c.home, "antigravity")["memory-os-ai"] == README_UVX
+
+
+def test_strict_ownership_still_excludes_the_console_script_that_counts_as_a_dependency(c):
+    default_url_install(c)
+    set_entry(c.home, "antigravity", README_UVX)
+    by = {item["client"]: item for item in uninstall_plan(c)["clients"]}
+    assert qs.relay_form(README_UVX) is False
+    assert (by["antigravity"]["action"], by["antigravity"]["ownership"]) == ("keep-unproven", "unproven")
+    assert by["antigravity"]["dependency"] == "wired"
+
+
+def test_an_entry_exactly_equal_to_ours_is_unchanged_whatever_its_history(c):
+    """Revoked proof or not: an entry already equal to the one we would write needs no write and no consent."""
+    installed(c, clients=("cursor", "vscode"))
+    entry = servers(c.home, "cursor")["memory-os-ai"]
+    uninstaller().apply(uninstall_plan(c, clients=("cursor",)), c.settings, home=c.home, run=c.system)
+    set_entry(c.home, "cursor", entry)
+    plan = prepare(c, profile="lexical", clients=("cursor",))
+    assert plan["ok"] is True and plan["clients"][0]["action"] == "unchanged"
+
+
 def test_uninstall_has_no_option_to_force_the_stop_of_a_shared_service(c):
     from memory_os_v4.ops import cli
     for flag in ("--stop-service", "--force-stop", "--service-only"):

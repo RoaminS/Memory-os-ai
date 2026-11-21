@@ -1,6 +1,8 @@
 # Installation multi-clients 4.1.0 — contrat (phase 1a-setup, étape 1)
 
-Statut : **contrat v3, écrit avant tout code d'outil**. La v1 (`779c3a7`) a reçu le verdict Codex
+Statut : **contrat v4, écrit avant tout code d'outil**. Le verdict n° 3 sur la v3 (`7e76eba`,
+`codex_verdict_setup_contract_v3.md` : deux lacunes de sûreté restantes) est traité en §21.
+Historique : La v1 (`779c3a7`) a reçu le verdict Codex
 « NON VALIDÉ » du 21/11 (`codex_verdict_setup_contract_v1.md`), traité point par point en §19 ;
 la v2 (`fc9b449`) le verdict n° 2, « NON VALIDÉ, plus étroit » (`codex_verdict_setup_contract_v2.md`),
 traité en §20. Base `cd83511` (`feature/4.1.0-lexical`, porte G1a atteinte), branche
@@ -277,9 +279,23 @@ Trois notions distinctes ; aucune ne remplace les autres.
    §6 : 0700/0600, propriétaire courant, un seul lien, aucun lien symbolique), contenant pour
    **ce client** un enregistrement `applied`, non annulé, dont `applied_entry_sha256` est
    l'empreinte de l'entrée actuellement en place et dont `installation_identity` est celle de
-   cette exécution. Chaque application écrit ces deux champs ; `undo` marque l'enregistrement
-   annulé. Un journal 4.0.9 (qui porte `applied_entry` sans empreinte) vaut preuve si cette
-   entrée est exactement celle en place.
+   cette exécution. Chaque application écrit ces deux champs. Un journal 4.0.9 (qui porte
+   `applied_entry` sans empreinte) vaut preuve si cette entrée est exactement celle en place.
+
+   **Une preuve est consommée par le retrait qu'elle autorise.** Tout retrait de notre entrée —
+   par `undo` **ou par `uninstall`** — **révoque durablement** les enregistrements
+   correspondants (même client, même empreinte) dans tous les journaux de confiance, journaux
+   4.0.9 compris : `revoked: true`, `revoked_by: <stamp de l'opération>`, écrits par
+   `_atomic_write`, mode conservé. Un enregistrement révoqué ne prouve plus rien : la même
+   entrée recréée à la main ensuite est `unproven`. **Ordre : révocation d'abord, retrait
+   ensuite.** Si le retrait échoue après la révocation, l'entrée reste en place et non prouvée
+   (`failed-entry-kept-unproven`, résultat partiel) : l'erreur va dans le sens sûr, un
+   consentement nommé sera demandé. Si la révocation est impossible, ce client n'est pas
+   touché. Les preuves des autres clients ne sont pas modifiées.
+
+   Chaque élément de la preuve est vérifié séparément, et testé en n'altérant que lui :
+   l'interpréteur seul (forme toujours stricte, même destination → l'empreinte ne concorde
+   plus), le champ `installation_identity` du journal seul, l'empreinte seule, le statut seul.
 
 `ownership` vaut `"journal"` quand les trois conditions sont réunies, sinon `"unproven"`.
 
@@ -398,7 +414,8 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
   - l'entrée `memory-os-ai` **prouvée par le journal** (§5.2 : forme reconnue, même
     destination, enregistrement concordant) : `remove`, `ownership: "journal"` ;
   - une entrée de classe `relay` pointant vers **notre** service mais sans preuve ou de forme
-    lâche : gardée, `keep-unproven` / `kept-unproven` ; retirée seulement avec un consentement
+    lâche, **ou dont la preuve a été révoquée par un retrait antérieur** (§5.2) : gardée,
+    `keep-unproven` / `kept-unproven` ; retirée seulement avec un consentement
     nommé `--remove-existing <client>` (`ownership: "consent"`, client non sélectionné →
     `client_consent_unselected`) ;
   - toute autre entrée (autre classe, autre destination) : gardée, `keep-foreign` /
@@ -406,14 +423,38 @@ Nouveau module `ops/uninstall.py` ; commande `memory-os-admin uninstall [--clien
 
   Sauvegarde de chaque fichier touché ; formats conservés (après installation puis
   désinstallation, les six fichiers retrouvent leurs octets d'origine).
-- **Le service partagé survit à une sélection partielle.** Après les retraits prévus, on
-  cherche dans **tout le registre** (pas seulement la sélection, pas seulement les six) les
-  clients dont l'entrée pointe encore vers notre service (même identité de destination,
-  prouvée ou non). S'il en reste : `service.action = "keep-clients-remaining"`,
-  `remaining_clients` les nomme, **aucun** `bootout`, plist en place ; le résultat est
-  `ok: true`, `selective: true`, `partial: false`. Le service n'est arrêté, par la séquence du
-  §6, que lorsque **plus aucun** client connu n'y est raccordé (`remaining_clients: []`). Il
-  n'existe pas d'option pour forcer l'arrêt d'un service encore utilisé.
+- **Le service survit tant qu'une entrée en dépend ou peut en dépendre.** La dépendance au
+  service est une quatrième notion, distincte de la propriété : une entrée que nous ne
+  retirons pas (non prouvée, forme lâche, HTTP directe) peut très bien utiliser notre service.
+  `uninstall.service_dependency(entry, settings, *, home) -> "wired" | "indeterminate" | "none"` :
+
+  | Entrée restante | Destination effective | Dépendance |
+  |---|---|---|
+  | relais de forme stricte, ou script console `memory-os-relay` (nu ou lancé par `uvx … memory-os-relay`, forme du README et de `server.json`) | `MEMORY_V4_URL` de son `env`, **sinon la valeur par défaut du relais** `http://127.0.0.1:8765/mcp/` (`ops/settings.py:73`) | `wired` si hôte de bouclage et port sont ceux de notre service ; `none` sinon |
+  | HTTP directe (`url`, `serverUrl`, `httpUrl`) | l'URL de l'entrée | `wired` si hôte de bouclage (`127.0.0.1`, `localhost`, `::1`) et port sont les nôtres, avec ou sans barre finale ; `none` sinon |
+  | classe `relay` d'une autre forme lâche (enveloppe `sh` ou `env`, programme étranger, arguments en plus) | non déterminable : la commande peut fixer sa destination elle-même | `indeterminate` |
+  | relais dont l'URL n'est pas une URL littérale (`${VAR}`, valeur non textuelle) | non déterminable | `indeterminate` |
+  | `legacy-v3` ; `other` | serveur distinct ; commande inconnue, non reconnue comme nôtre | `none` (limite déclarée pour `other`) |
+
+  La comparaison porte sur le **service** (hôte de bouclage et port), pas sur le fichier de
+  jeton : une entrée qui vise notre port dépend de notre service même avec un autre jeton.
+  Une destination absente n'est donc jamais lue comme « pas de dépendance » : elle est résolue
+  par les valeurs par défaut, et ce qui ne peut pas être résolu compte comme dépendance.
+
+  Après les retraits prévus, on évalue **toutes** les entrées `memory-os-ai` restantes de
+  **tout le registre** (pas seulement la sélection, pas seulement les six). S'il en reste une
+  `wired` ou `indeterminate` : `service.action = "keep-clients-remaining"`,
+  `remaining_clients` les nomme, `remaining_dependencies` donne la raison par client,
+  `next_steps` dit quoi retirer ou vérifier, **aucun** `bootout`, plist en place ; le résultat
+  est `ok: true`, `selective: true`, `partial: false`. Le service n'est arrêté, par la séquence
+  du §6, que lorsqu'il ne reste **aucune** dépendance (`remaining_clients: []`). Il n'existe
+  pas d'option pour forcer l'arrêt d'un service encore utilisé. Chaque client du plan porte
+  son champ `dependency`.
+
+  Exclure `memory-os-relay` de la forme stricte (§5.2) vaut pour la **propriété automatique**
+  seulement : cette entrée n'est jamais retirée ni remplacée sans consentement, mais elle
+  **compte** comme dépendance. À l'installation, une entrée déjà exactement égale à la nôtre
+  reste `unchanged`, quel que soit l'état de ses preuves.
 - **Ordre et issues** (arbitrage Q8) :
   1. **Revalidation globale avant toute mutation** : empreinte de chaque fichier client,
      empreinte du plist, identité du job. Tout écart → `UninstallError(code=
@@ -601,7 +642,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (409 tests), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (446 tests), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -613,8 +654,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-409 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
-conserver) et **327 rouges par construction**, sans `skip` ni `xfail`. `ruff check` : aucun
+446 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
+conserver) et **364 rouges par construction**, sans `skip` ni `xfail`. `ruff check` : aucun
 défaut. Module d'appui `setup_fixture_410.py` :
 
 - HOME temporaire avec les six clients (entrées étrangères, commentaires, indentations variées,
@@ -633,8 +674,8 @@ défaut. Module d'appui `setup_fixture_410.py` :
 |---|---|---|---|
 | `test_sqlite_runtime_410_setup.py` | 2 | 26 | SQLite chargé vérifié |
 | `test_setup_profile_410_setup.py` | 6 | 56 | profil, référence figée, readiness, horloge, `doctor`, CLI |
-| `test_setup_clients_410_setup.py` | 58 | 123 | six clients, formats, conflits, forme reconnue, preuve de propriété |
-| `test_setup_lifecycle_410_setup.py` | 4 | 44 | D2 : aperçu, sauvegarde, secrets du chemin nominal, retour arrière, désinstallation, sélection |
+| `test_setup_clients_410_setup.py` | 58 | 125 | six clients, formats, conflits, forme reconnue, preuve de propriété |
+| `test_setup_lifecycle_410_setup.py` | 4 | 79 | D2 : aperçu, sauvegarde, secrets du chemin nominal, retour arrière, désinstallation, sélection, révocation des preuves, dépendance au service |
 | `test_setup_recovery_410_setup.py` | 1 | 33 | arrêts en échec ou indéterminés, journal sûr, installation interrompue, conflits tardifs, **vrai store** |
 | `test_setup_secrets_410_setup.py` | 6 | 25 | secrets sur les chemins d'échec, log brut, liste fermée d'exceptions |
 | `test_setup_release_tooling_410_setup.py` | 5 | 20 | README, `server.json`, portes de résolution (`main()` compris), localisateur |
@@ -660,7 +701,7 @@ défaut. Module d'appui `setup_fixture_410.py` :
 - Outillage (5) : `server.json` ; relais et CLI sans ML ; contraintes empaquetées ; porte
   sémantique inchangée.
 
-**Rouges (327), et ce que chacun prouvera.**
+**Rouges (364), et ce que chacun prouvera.**
 
 - `test_sqlite_runtime_410_setup.py` (26) : rapport sans écriture ; constante unique ; trois
   versions refusées, trois acceptées ; JSON absent ; WAL non compilé ; bibliothèque non
@@ -676,7 +717,7 @@ défaut. Module d'appui `setup_fixture_410.py` :
   publiant la version ; huit altérations lexicales ; installation lexicale de bout en bout ;
   chronométrage à horloge déterministe ; CLI (4) ; `doctor` lexical, dépendance manquante,
   marqueur malformé, profil d'installation (5), SQLite du serveur distinct (4).
-- `test_setup_clients_410_setup.py` (123) : table en ligne Codex (2) ; candidat analysé ; octets
+- `test_setup_clients_410_setup.py` (125) : table en ligne Codex (2) ; candidat analysé ; octets
   après `undo` Codex ; indentation (2) ; sans saut de ligne final ; octets après `undo` JSON
   (2) ; clés dupliquées ; entrée étrangère non remplacée (15) ; remplacement consenti (9) ;
   consentement non transmissible ; hors sélection ; **forme reconnue** : trois formes strictes
@@ -685,13 +726,15 @@ défaut. Module d'appui `setup_fixture_410.py` :
   console, script hérité, entrée portant aussi une URL, variable en plus) ; identité de
   destination distincte de la propriété ; **entrée prouvée par le journal mise à jour sans
   consentement** (3) ; **même entrée écrite à la main non remplacée** ; **preuve non
-  transmissible à un autre client** ; **entrée modifiée après notre écriture** ; **journal non
-  sûr, à lien physique, annulé, ou d'une autre destination** (5) ; **forme lâche jamais
+  transmissible à un autre client** ; **entrée dont seul l'interpréteur absolu a changé**
+  (forme stricte conservée : c'est l'empreinte qui refuse) ; **journal non sûr, à lien
+  physique, annulé, ou dont un seul champ est altéré — `installation_identity`, empreinte,
+  statut** (7) ; **forme lâche jamais
   remplacée sans consentement** (33 : trois clients × onze formes) ; autre destination (8) ;
   remplacement avec consentement nommé (15) ; **journal 4.0.9 accepté s'il porte l'entrée
   exacte, refusé pour un autre client** ; **le journal lie client, entrée et installation** ;
   journal sans entrée précédente en clair ; `undo` depuis la sauvegarde ; sauvegarde altérée.
-- `test_setup_lifecycle_410_setup.py` (44) : aperçu complet (2), refusé (2) ; dix refus à code
+- `test_setup_lifecycle_410_setup.py` (79) : aperçu complet (2), refusé (2) ; dix refus à code
   stable ; six clients configurés et sauvegardés ; aucun secret dans journaux, plist, CLI,
   refus (3) ; secret préexistant dans la seule sauvegarde ; `undo` par défaut ; retour arrière
   avec service ; service non créé par l'installation ; service modifié ; désinstallation :
@@ -699,7 +742,16 @@ défaut. Module d'appui `setup_fixture_410.py` :
   le journal prouve est retiré** (3 : copie écrite à la main, enveloppe, argument en plus),
   **retrait d'une entrée non prouvée sur consentement nommé**, **sélection partielle : service
   conservé**, **arrêt seulement au dernier client**, **clients restants cherchés dans tout le
-  registre**, **aucune option de forçage**, idempotence, service étranger, Desktop ouvert,
+  registre**, **aucune option de forçage**, **révocation des preuves** (4 : séquence
+  installer Cursor et VS Code → désinstaller Cursor → recréer l'entrée à la main →
+  désinstaller Cursor, entrée gardée et service conservé pour VS Code ; même entrée refusée
+  par `quickstart` alors qu'elle était prouvée avant le retrait ; révocation avant retrait,
+  échec du retrait laissant l'entrée non prouvée ; `undo` révoque aussi), **dépendance au
+  service** (31 : résolution de quatorze entrées avec les valeurs par défaut du relais ; les
+  mêmes quatorze en désinstallation réelle — service conservé pour `wired` et
+  `indeterminate`, arrêté pour `none` ; valeurs par défaut pointant vers un autre port ;
+  script console exclu de la propriété mais compté comme dépendance ; entrée exactement égale
+  `unchanged`), idempotence, service étranger, Desktop ouvert,
   refus global si changement depuis l'aperçu, jamais « complète » et retrait manuel à
   formulation conditionnelle, absence de purge, CLI ; store conservé non adopté.
 - `test_setup_recovery_410_setup.py` (33) : plist jamais déplacé après `bootout` en échec, en
@@ -868,3 +920,14 @@ mise à niveau d'une installation 4.0.x.
 | Question 2 — `exception_types` | liste fermée explicite et testée ; classe inconnue → `"other"` ; étendue à `doctor` et à la CLI | §8 · `test_exception_names_come_from_an_explicit_closed_list`, classification d'un log (5 cas), journal, CLI et `doctor` (3) |
 | Question 3 — extension sous C | toujours signalée, `inspected: False`, `present: None`, formulation conditionnelle | §7 · `test_uninstall_never_claims_to_be_complete_and_names_what_it_cannot_see` |
 | Mentions « à arbitrer / à confirmer » sur des décisions arrêtées | retirées ; seules R1, R2, R4, R6 (nom, auteur) et R7 attendent Romain | §2.1, §5.4, §7, §16 |
+
+## 21. Verdict Codex n° 3 sur la v3 : point par point
+
+| Point du verdict | Changement | Section · tests |
+|---|---|---|
+| **N1** — la désinstallation ne périme pas la preuve de propriété | une preuve est consommée par le retrait qu'elle autorise : `undo` **et** `uninstall` révoquent durablement les enregistrements correspondants de tous les journaux de confiance (`revoked`, `revoked_by`) ; révocation avant retrait ; échec du retrait → entrée laissée non prouvée | §5.2, §7 · `test_uninstall_revokes_the_proof_so_a_hand_made_copy_is_not_removed_later` (la séquence exacte, service conservé pour VS Code), `test_revoked_proof_no_longer_lets_quickstart_replace_the_entry`, `test_the_proof_is_revoked_before_the_entry_is_removed`, `test_undo_revokes_the_proof_too` |
+| **N2** — destination inconnue ou implicite lue comme « pas de dépendance » | dépendance au service = quatrième notion, résolue avec les valeurs par défaut du relais ; `wired`, `indeterminate`, `none` ; service conservé pour `wired` et `indeterminate` ; script console et `uvx … memory-os-relay` du README comptés ; HTTP directe vers notre port comptée ; comparaison sur hôte de bouclage et port | §7 · `test_service_dependency_of_an_entry_is_resolved_with_the_relay_defaults` (14), `test_uninstall_keeps_the_service_for_an_entry_that_depends_or_may_depend_on_it` (14), `test_implicit_defaults_do_not_wire_an_entry_to_a_service_on_another_port` |
+| `memory-os-relay` exclu de la forme stricte mais dépendance détectée | énoncé ; champ `dependency` par client | §7 · `test_strict_ownership_still_excludes_the_console_script_that_counts_as_a_dependency` |
+| Entrée exactement égale reste `unchanged` | énoncé, y compris après révocation | §7 · `test_an_entry_exactly_equal_to_ours_is_unchanged_whatever_its_history` |
+| Test `:445` : l'argument ajouté rendait la forme lâche | seul l'interpréteur absolu change ; forme stricte et destination vérifiées dans le test | §5.2 · `test_an_entry_edited_after_our_write_is_no_longer_proven` |
+| Test `:466` : la destination demandée changeait | seul le champ `installation_identity` du journal est altéré ; deux cas voisins ajoutés (empreinte seule, statut seul) ; le test vérifie que la destination concorde toujours | §5.2 · `test_only_a_trusted_matching_journal_counts_as_proof` (7) |

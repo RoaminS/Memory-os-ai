@@ -443,13 +443,18 @@ def test_a_journal_proof_does_not_transfer_to_another_client(home, tmp_path):
 
 
 def test_an_entry_edited_after_our_write_is_no_longer_proven(home, tmp_path):
+    """Only the absolute interpreter changes: still a strict form, same destination — the digest decides."""
     install_from(home, tmp_path, "cursor")
     entry = servers(home, "cursor")["memory-os-ai"]
-    set_entry(home, "cursor", {**entry, "args": [*entry["args"], "--added-by-someone"]})
-    assert preview_one(home, tmp_path, "cursor")["action"] == "refuse-existing-relay-unproven"
+    edited = {**entry, "command": "/another/venv/bin/python3"}
+    assert qs.relay_form(edited) is True and qs.entry_identity(edited) == qs.installation_identity(ENV)
+    set_entry(home, "cursor", edited)
+    item = preview_one(home, tmp_path, "cursor")
+    assert (item["action"], item["ownership"]) == ("refuse-existing-relay-unproven", "unproven")
 
 
-@pytest.mark.parametrize("damage", ["journal-mode", "directory-mode", "hardlink", "undone", "other-destination"])
+@pytest.mark.parametrize("damage", ["journal-mode", "directory-mode", "hardlink", "undone", "journal-identity",
+                                    "journal-digest", "journal-status"])
 def test_only_a_trusted_matching_journal_counts_as_proof(home, tmp_path, damage):
     first = install_from(home, tmp_path, "cursor")
     journal = Path(first["journal"])
@@ -463,12 +468,22 @@ def test_only_a_trusted_matching_journal_counts_as_proof(home, tmp_path, damage)
         entry = servers(home, "cursor")["memory-os-ai"]
         qs.undo(first["stamp"], home=home, journal_root=tmp_path / "journal")
         set_entry(home, "cursor", entry)
-    else:  # our journal is about another service than the one this run installs
-        item, = qs.preview(home=home, python=PY, env={**ENV, "MEMORY_V4_URL": "http://127.0.0.1:9999/mcp/"},
-                           clients=("cursor",), journal_root=tmp_path / "journal")["clients"]
-        assert item["action"] == "refuse-existing-relay-other-installation"
-        return
-    assert preview_one(home, tmp_path, "cursor")["action"] == "refuse-existing-relay-unproven"
+    else:  # ONE field of the journal record is altered; entry, destination and form are untouched
+        document = json.loads(journal.read_text())
+        record, = document["records"]
+        if damage == "journal-identity":
+            assert record["installation_identity"] == qs.installation_identity(ENV)
+            record["installation_identity"] = "0" * 64
+        elif damage == "journal-digest":
+            record["applied_entry_sha256"] = "0" * 64
+            record.pop("applied_entry", None)
+        else:
+            record["status"] = "pending"
+        journal.write_text(json.dumps(document))
+        journal.chmod(0o600)
+    item = preview_one(home, tmp_path, "cursor")
+    assert (item["action"], item["ownership"]) == ("refuse-existing-relay-unproven", "unproven")
+    assert item["current_identity"] == item["installation_identity"]  # the destination was never the issue
 
 
 @pytest.mark.parametrize("key", ["cursor", "claude-desktop", "claude-code"])
