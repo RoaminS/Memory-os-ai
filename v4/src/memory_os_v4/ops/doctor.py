@@ -274,6 +274,47 @@ def _backup_capacity(settings):
         return Check("backup_capacity", "FAIL", str(exc))
 
 
+def _sqlite_runtime() -> Check:
+    """SQLite loaded by the interpreter of THIS command; it does not certify a process already started."""
+    from . import sqlite_runtime
+
+    report = sqlite_runtime.inspect()
+    if report.get("ok"):
+        return Check("sqlite-runtime", "PASS",
+                     f"SQLite {report.get('version')} loaded by this interpreter (minimum {report.get('minimum')})")
+    return Check(
+        "sqlite-runtime",
+        "FAIL",
+        f"{report.get('code')}: SQLite {report.get('version')} loaded by this interpreter, "
+        f"minimum {report.get('minimum')}",
+        "use a Python 3.11 linked with SQLite >= " + str(report.get("minimum")) + " (JSON functions, WAL)",
+    )
+
+
+def _server_sqlite(caps: dict) -> Check:
+    """SQLite attested by the server process itself (``capabilities.store.sqlite_version``)."""
+    from .sqlite_runtime import MIN_VERSION
+
+    minimum = ".".join(str(part) for part in MIN_VERSION)
+    store = caps.get("store")
+    value = store.get("sqlite_version") if isinstance(store, dict) else None
+    version = _sqlite_triplet(value)
+    if version is None:
+        return Check("server-sqlite-runtime", "WARN", "SQLite version not attested by the running server",
+                     "server older than 4.1.0: restart it on a qualified build")
+    if version < tuple(MIN_VERSION):
+        return Check("server-sqlite-runtime", "FAIL",
+                     f"sqlite_runtime_too_old: running server loaded SQLite {value}, minimum {minimum}",
+                     "restart the service with an interpreter linked with a fit SQLite")
+    return Check("server-sqlite-runtime", "PASS", f"SQLite {value} loaded by the running server (minimum {minimum})")
+
+
+def _sqlite_triplet(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value):
+        return None
+    return tuple(int(part) for part in value.split("."))
+
+
 def _clients(home: Path) -> list[Check]:
     hints = {
         "direct-http": "HTTP authentication not checked: prefer the token-file relay (memory-os-admin setup)",
@@ -336,6 +377,7 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
             ),
         )
     )
+    checks.append(_sqlite_runtime())
     checks += _server(settings)
     checks += [_service(settings), _store(settings), _backup(settings), _storage(settings)]
     if (settings.store_dir / "store.sqlite3").exists():

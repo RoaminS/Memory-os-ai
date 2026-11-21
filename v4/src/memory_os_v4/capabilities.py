@@ -34,6 +34,7 @@ def deployed(engine, build: dict) -> dict:
             "backend": cfg.store_backend,
             "instance_id": engine.store.meta.get("store_instance_id"),
             "atomic_mutations": cfg.store_backend == "sqlite_s1",
+            "sqlite_version": __import__("sqlite3").sqlite_version,  # library loaded by THIS server process
         },
         "encoding": encoding,
         "policies": {

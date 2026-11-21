@@ -30,6 +30,7 @@ import uuid
 import platform
 from pathlib import Path
 
+from . import sqlite_runtime
 from .clients import CLIENTS, SERVER, Client, classify, read_entry, relay_command
 
 DEFAULT_CLIENTS = ("claude-code", "codex")
@@ -38,7 +39,11 @@ SENSITIVE = ("TOKEN", "KEY", "SECRET", "PASSWORD", "BEARER")
 
 
 class QuickstartError(RuntimeError):
-    pass
+    """Refusal with a stable ``code`` (SETUP_4_1_0.md §11); the message never carries foreign text."""
+
+    def __init__(self, message: str, code: str = "quickstart_refused"):
+        super().__init__(message)
+        self.code = code
 
 
 # ---------- pure helpers ----------
@@ -497,49 +502,58 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     identity = build_identity()
     service = _service_plan(settings, home, python, resource_plan['env'], backend=backend)
     runtime = inspect_current(extras=('ops', 'brief'))
-    blockers = []
+    blockers, blocker_codes = [], []
+
+    def block(code, message):
+        blocker_codes.append(code)
+        blockers.append(message)
+    sqlite_report = sqlite_runtime.inspect()
+    if backend == 'sqlite' and not sqlite_report.get('ok'):
+        block(sqlite_report.get('code') or 'sqlite_runtime_unavailable',
+              f"{sqlite_report.get('code')}: SQLite loaded by this interpreter is unfit "
+              f"(version {sqlite_report.get('version')}, minimum {sqlite_report.get('minimum')}); nothing written")
     if sys.version_info[:2] != (3, 11):
-        blockers.append('runtime_unqualified: macOS Python 3.11 closure required for quickstart')
+        block('runtime_unqualified', 'runtime_unqualified: macOS Python 3.11 closure required for quickstart')
     if sys.platform != 'darwin' or platform.machine().lower() not in {'arm64', 'aarch64'}:
-        blockers.append('macOS Apple Silicon launchd onboarding only; other platforms remain manual')
+        block('runtime_unqualified', 'macOS Apple Silicon launchd onboarding only; other platforms remain manual')
     if identity.get('identity_source') != 'embedded_descriptor' or not identity.get('commit') or identity.get('source_dirty'):
-        blockers.append('build_unqualified: install a qualified wheel; source/env identity is insufficient')
+        block('build_unqualified', 'build_unqualified: install a qualified wheel; source/env identity is insufficient')
     if not runtime['ok']:
-        blockers.append('runtime_unqualified: package versions differ: ' + ', '.join(sorted(runtime['mismatches']))
-                        + '; install the exact qualified dependencies, then re-preview')
+        block('runtime_unqualified', 'runtime_unqualified: package versions differ: ' + ', '.join(sorted(runtime['mismatches']))
+              + '; install the exact qualified dependencies, then re-preview')
     if not Path(python).is_file() or not os.access(python, os.X_OK) or any(s in python for s in ('/cache/uv/', 'pip-build-env', 'uvx')):
-        blockers.append('absolute durable Python executable required (no uvx ephemeral runtime)')
+        block('runtime_unqualified', 'absolute durable Python executable required (no uvx ephemeral runtime)')
     if importlib.util.find_spec('tiktoken') is None:
-        blockers.append('install memory-os-ai[ops,brief] before apply; no implicit dependency install')
+        block('runtime_unqualified', 'install memory-os-ai[ops,brief] before apply; no implicit dependency install')
     if result['unknown_clients']:
-        blockers.append('unknown clients')
+        block('client_unknown', 'unknown clients')
     if any(c['action'].startswith('refuse') for c in result['clients']):
-        blockers.append('manual client setup required; select only eligible clients')
+        block('client_config_manual', 'manual client setup required; select only eligible clients')
     if 'claude-desktop' in clients:
         desktop = run(['pgrep', '-x', 'Claude'], capture_output=True, text=True, timeout=5)
         if desktop.returncode != 1:
-            blockers.append('quit Claude Desktop before apply; live config may be rewritten by the app')
+            block('client_app_running', 'quit Claude Desktop before apply; live config may be rewritten by the app')
     token = read_token(settings.token_file)  # strict permissions/owner/format, never returned
     required = max(minimum, resource_plan['peak_additional_bytes_upper_bound'] + 1_000_000_000)
     if result['disk_free_bytes'] < required:
-        blockers.append(f'disk guard: {result["disk_free_bytes"]} bytes free < required {required} bytes '
-                        f'(effective minimum {minimum} bytes; provisioning peak + 1000000000 bytes margin)')
+        block('disk_guard', f'disk guard: {result["disk_free_bytes"]} bytes free < required {required} bytes '
+              f'(effective minimum {minimum} bytes; provisioning peak + 1000000000 bytes margin)')
     loaded = _job_state(service, run=run) if sys.platform == 'darwin' else 'unsupported'
     service['loaded_state'] = loaded
     if service['state'] not in {'absent', 'owned'} or loaded in {'unknown', 'foreign-or-unattested'}:
-        blockers.append('foreign/different/unattested service: no repair, stop or overwrite')
+        block('service_foreign', 'foreign/different/unattested service: no repair, stop or overwrite')
     if service['state'] == 'absent' and (loaded != 'absent' or result['port_state'] != 'free'):
-        blockers.append('port or launchd label occupied; nothing activated')
+        block('port_or_label_occupied', 'port or launchd label occupied; nothing activated')
     if service['state'] == 'owned' and token is None:
-        blockers.append('existing service token missing; no replacement token')
+        block('service_foreign', 'existing service token missing; no replacement token')
     if service['state'] == 'absent' and settings.store_dir.exists() and any(settings.store_dir.iterdir()):
-        blockers.append('non-empty store: use the qualified upgrade runbook, never reset/migrate here')
+        block('store_not_empty', 'non-empty store: use the qualified upgrade runbook, never reset/migrate here')
     if backend == 'sqlite':
         from ..sqlite_store import validate_sqlite_target
         try:
             validate_sqlite_target(settings.store_dir)
         except ValueError:
-            blockers.append('SQLite target refused: choose a fresh non-legacy directory; no implicit migration')
+            block('store_not_empty', 'SQLite target refused: choose a fresh non-legacy directory; no implicit migration')
     # Reject unexpected path redirects before any download/token write.
     for path in (settings.token_file, settings.store_dir / ('store.sqlite3' if backend == 'sqlite' else 'items.jsonl'),
                  settings.ops_dir / 'logs/server.err'):
@@ -549,7 +563,8 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         notices.append('Project .mcp.json can override user scope; inspect it before claiming a connection')
     if 'gemini-cli' in clients:
         notices.append('Gemini CLI folder trust is a separate user choice; configuration does not prove a connection')
-    return {**result, 'ok': not blockers, 'identity': identity, 'service': service, 'blockers': blockers, 'notices': notices,
+    return {**result, 'ok': not blockers, 'identity': identity, 'service': service, 'blockers': blockers,
+            'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
             'disk_min_free_bytes': minimum, 'disk_required_free_bytes': required,
             'backend': backend, 'work_state': backend == 'sqlite', 'runtime_qualification': runtime,
             'client_env': client_env, 'writes': 'none (preview)', 'stage': 'preview'}
@@ -654,7 +669,7 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
     import anyio
     home = home or Path.home()
     if not plan.get('ok'):
-        raise QuickstartError('Preflight refused: ' + '; '.join(plan.get('blockers', [])))
+        raise QuickstartError('Preflight refused: ' + '; '.join(plan.get('blockers', [])), code='preflight_refused')
     if plan['provision']['download_bytes'] and not download_approved:
         raise QuickstartError('Resource download needs --download-approved; no token/service/config changed')
     # Revalidate every mutable input before resources or setup writes.
