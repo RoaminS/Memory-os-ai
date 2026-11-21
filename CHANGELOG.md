@@ -8,6 +8,9 @@
 - Marqueur `retrieval_profile` dans les métadonnées d'un store lexical ; sonde en lecture seule avant toute
   ouverture mutante, refaite sous bail d'écriture. Refus : `store_profile_unverifiable`, `store_profile_mismatch`,
   `store_profile_contaminated`. Aucune conversion implicite. Un store lexical n'a pas de retour arrière 4.0.x.
+- Finalisation automatique du moteur (ramasse-miettes, sortie de l'interpréteur sans `close()`) : la connexion
+  SQLite est désormais fermée AVANT le relâchement du bail d'écriture, comme dans `close()`. Correction d'ordre
+  pure, pour les deux profils (sémantique compris) ; aucune donnée stockée, schéma ni migration modifiés.
 - Un store existant dont le profil ne peut pas être lu (fichier illisible, métadonnées invalides, paire
   `-wal`/`-shm` incomplète, fichier annexe orphelin) est désormais refusé aussi par le profil sémantique.
 - Empaquetage : fermeture ML dans l'extra `[semantic]` ; métadonnées à bornes compatibles ; verrous exacts dans

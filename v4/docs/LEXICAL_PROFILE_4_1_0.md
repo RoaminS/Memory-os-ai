@@ -328,6 +328,14 @@ tout écrivain qui ne prend pas le bail (`sqlite3` en ligne de commande, restaur
 manuelle). S'il ferme la base entre les `stat` et l'ouverture `mode=ro` de la sonde n° 2, des
 annexes peuvent être recréées ; le bail est la seule protection et il a été violé.
 
+**Le bail couvre toute la vie de la connexion SQLite du moteur, sur tous les chemins de
+fermeture** (§17). Un moteur ne possède qu'une connexion SQLite, celle de `SQLiteStore`
+(`SQLiteRequests`, `SQLiteBlocks`, `SQLiteEmbeddings`, le journal des changements et l'état de
+travail la partagent). Elle est fermée **avant** le relâchement du bail par `close()`, par un
+échec du constructeur, et par la finalisation automatique (ramasse-miettes, sortie de
+l'interpréteur). Le moteur suivant ne peut donc pas observer une paire `-wal`/`-shm` qu'une
+connexion du moteur précédent supprimerait après coup.
+
 **Conséquence pour un écrivain vivant.** Un moteur ouvert tient le bail et sa paire
 `-wal`/`-shm` existe : une seconde ouverture concurrente reçoit `deferred_to_lease` à la
 sonde n° 1, puis le refus habituel de `WriterLock` (`WriterConflictError`, « already has an
@@ -841,3 +849,39 @@ différent produit `store_profile_unverifiable`.
 
 Ces deux corrections portent `test_lexical_store_guard.py` de 48 à 59 tests (6 pour la course,
 5 pour la garde de version).
+
+## 17. Amendement du verdict Codex sur l'implémentation v2 (21/11)
+
+| # | Défaut | Correction | Où |
+|---|---|---|---|
+| 1 | Course résiduelle en finalisation automatique : le finaliseur du moteur ne relâchait que le bail (`WriterLock.close`), sans fermer le store. À la sortie de l'interpréteur ou à la collecte du moteur, le bail pouvait être libre alors que la connexion SQLite existait encore ; le moteur suivant observait la paire à la sonde n° 2, la destruction tardive de la connexion supprimait les annexes, et l'ouverture `mode=ro` pouvait les recréer avant un refus | Le finaliseur (`memory._release_engine`) ferme chaque connexion SQLite du moteur **puis** relâche le bail : même ordre que `close()` | `memory.py`, §5.1, `test_engine_finalizer_410.py` |
+
+**Ordre exact du finaliseur**, identique sur les trois chemins (`close()`, échec du
+constructeur, finalisation automatique) : (1) `SQLiteStore.close()` — fermeture de la connexion,
+point de contrôle du WAL et suppression de `-wal`/`-shm` par SQLite si c'était la dernière
+connexion ; (2) `WriterLock.close()`. Une erreur à l'étape 1 n'empêche pas l'étape 2 : le bail
+est relâché **après** la tentative de fermeture, jamais avant, et l'erreur est propagée.
+
+**Propriétés.** Le finaliseur ne référence pas le moteur : il reçoit la liste des stores et le
+verrou eux-mêmes (références fortes), qui ne peuvent donc pas être collectés avant lui. Il ne
+s'exécute qu'une fois (`weakref.finalize`) ; `close()` après lui ne fait rien, et inversement ;
+un moteur finalisé refuse toute opération (« Memory engine is closed »). Dans un processus
+enfant issu d'un `fork`, il ne ferme rien : la connexion et le bail hérités appartiennent au
+parent (`WriterLock.close` ne déverrouille déjà pas depuis un enfant). Le store JSONL n'a pas
+de connexion persistante : rien à fermer.
+
+**Portée.** Correction d'ordre pure, appliquée aux deux profils, sémantique compris. Elle ne
+change aucune donnée stockée, ni le schéma, ni les migrations, ni `embed.py`, ni
+`writer_lock.py`. Un processus tué (`SIGKILL`, `os._exit`) n'exécute aucun finaliseur : le noyau
+relâche le bail et ferme la connexion ensemble, sans point de contrôle ; la paire reste alors
+sur disque, stable, et relève de la sonde n° 2 (§5.1).
+
+**Tests** (`test_engine_finalizer_410.py`, 11) : ordre au moment du relâchement (connexion déjà
+fermée, annexes absentes) par le finaliseur seul, par le ramasse-miettes, par `close()` et par
+un constructeur en échec, dans les deux profils ; idempotence avec `close()` ; bail relâché
+après une fermeture en échec ; aucune fermeture depuis un `fork` ; et, entre deux processus,
+un écrivain qui sort **sans** `close()` : à l'instant où son bail est libre (processus encore
+vivant, bloqué dans le relâchement), un second processus est refusé par la sonde n° 2 sans
+qu'aucun fichier soit créé, remplacé ou réécrit, puis ouvre le store sous bail ; le journal
+d'événements de l'écrivain est `store_closed` puis `lease_released`. Sur l'ancien ordre, huit
+de ces tests échouent (bail relâché connexion ouverte, paire présente).

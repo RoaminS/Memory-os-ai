@@ -5,6 +5,7 @@ index, BM25, entities, retrieval, blocks, and consolidation together.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import uuid
@@ -160,6 +161,29 @@ def _atomic_mutation(method):
     return guarded
 
 
+def _release_engine(owner_pid: int, stores: list, writer_lock: WriterLock) -> None:
+    """Engine finalizer: close every SQLite connection of the engine, THEN release the lease.
+
+    Never references the engine: it holds the stores and the lock themselves, so neither can be
+    collected before it runs. Releasing the lease first would let the next engine probe a
+    -wal/-shm pair that this connection deletes when it is destroyed afterwards. A failing close
+    does not keep the lease: it is released afterwards and the error propagates. A forked child
+    closes nothing: the inherited connection and lease belong to the parent.
+    """
+    try:
+        if os.getpid() == owner_pid:
+            errors = []
+            for store in reversed(stores):
+                try:
+                    store.close()
+                except BaseException as error:  # the lease must still be released below
+                    errors.append(error)
+            if errors:
+                raise errors[0]
+    finally:
+        writer_lock.close()
+
+
 class MemoryV4:
     """Local-first long-term memory engine façade. Thread-safe via a single RLock."""
 
@@ -197,7 +221,11 @@ class MemoryV4:
         self._mutation_depth = 0
         self._index_error = False
         self._writer_lock = WriterLock(self.data_dir)
-        self._writer_finalizer = weakref.finalize(self, self._writer_lock.close)
+        # Every store the engine opens is appended here; the finalizer closes them BEFORE releasing
+        # the lease, on every path (close(), garbage collection, interpreter exit).
+        self._owned_stores: list = []
+        self._writer_finalizer = weakref.finalize(
+            self, _release_engine, os.getpid(), self._owned_stores, self._writer_lock)
         try:
             if self.config.store_backend == "sqlite_s1":
                 from .sqlite_store import SQLiteStore
@@ -212,6 +240,7 @@ class MemoryV4:
                                        "The store changed while it was being opened; nothing was modified, retry")
                 probed = leased
                 self.store = SQLiteStore(self.data_dir)
+                self._owned_stores.append(self.store)
                 self.requests = SQLiteRequests(self.store)
                 self.blocks = SQLiteBlocks(self.store, self.config.block_char_limit)
                 self.blocks.mutate = self._sql_mutation
@@ -332,7 +361,7 @@ class MemoryV4:
 
     def _ensure_open(self) -> None:
         self._writer_lock.assert_owner()
-        if self._closed:
+        if self._closed or not self._writer_finalizer.alive:
             raise RuntimeError("Memory engine is closed; open a new engine or use the shared HTTP server")
         if getattr(self.store, "_poisoned", False):
             raise RuntimeError("SQLite commit outcome uncertain; inspect/reopen before further operations")
@@ -342,7 +371,8 @@ class MemoryV4:
     def close(self) -> None:
         """Flush and release the lifetime writer lease, even when flushing fails."""
         with self._lock:
-            if self._closed:
+            if self._closed or not self._writer_finalizer.alive:
+                self._closed = True  # the finalizer already closed the store and released the lease
                 return
             try:
                 if self._write_policy.mode == "read_write":
