@@ -213,10 +213,14 @@ def _real_repo(tmp_path, new_bytes):
     init = tmp_path / INIT
     init.parent.mkdir(parents=True)
     init.write_bytes(subprocess.check_output(["git", "show", BASE + ":" + INIT], cwd=ROOT))
+    health = tmp_path / HEALTH
+    health.parent.mkdir(parents=True, exist_ok=True)
+    health.write_bytes(subprocess.check_output(["git", "show", BASE + ":" + HEALTH], cwd=ROOT))
     git("add", "-A")
     git("commit", "-q", "-m", "base")
     base = git("rev-parse", "HEAD")
     init.write_bytes(new_bytes)
+    health.write_bytes(subprocess.check_output(["git", "show", gate.HEALTH_BLOB], cwd=ROOT))
     git("add", "-A")
     git("commit", "-q", "-m", "candidate")
     return base, git("rev-parse", "HEAD")
@@ -231,7 +235,7 @@ def test_real_git_crlf_version_file_is_refused_and_lf_bump_accepted(tmp_path, mo
         base, candidate = _real_repo(repo, data)
         monkeypatch.setattr(gate, "FROZEN_BASE", base)
         if accepted:
-            assert gate.verify_engine_version_only(repo, candidate, "4.0.9")["observed_changed_paths"] == [INIT]
+            assert gate.verify_engine_version_only(repo, candidate, "4.0.9")["observed_changed_paths"] == [INIT, HEALTH]
         else:
             with pytest.raises(ValueError, match="__version__ line"):
                 gate.verify_engine_version_only(repo, candidate, "4.0.9")
@@ -252,10 +256,11 @@ def test_rule_lists_both_sides_of_renames_and_uses_frozen_base(monkeypatch):
     assert diff[4] == BASE and diff[5] == "c" * 40 and diff[-2:] == ["--", "v4/src"]
 
 
-def test_version_only_bump_without_health_change_is_a_subset(monkeypatch):
+def test_version_only_bump_without_health_change_is_refused(monkeypatch):
+    # The reviewed health fix is an unconditional part of 4.0.9: a candidate reverting it refuses.
     fake_git(monkeypatch, [INIT], base_init().replace('"4.0.8"', '"4.0.9"'))
-    engine = gate.verify_engine_version_only(ROOT, "c" * 40, "4.0.9")
-    assert engine["observed_changed_paths"] == [INIT]
+    with pytest.raises(ValueError, match="health fix missing"):
+        gate.verify_engine_version_only(ROOT, "c" * 40, "4.0.9")
 
 
 @pytest.mark.parametrize(

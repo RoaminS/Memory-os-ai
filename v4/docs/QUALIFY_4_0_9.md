@@ -17,7 +17,7 @@ conservés, jamais réutilisés). Aucun téléchargement.
 - `__init__.py` doit changer, et UNIQUEMENT par la ligne `__version__ = "4.0.8"` →
   `__version__ = "4.0.9"` ;
 - tout autre chemin (notamment `brief*.py`, `text.py`, `bm25.py`, store/sqlite) refuse ;
-- `ops/health.py` doit être EXACTEMENT le correctif relu (blob git `3aa1dfe5d023f6f7efa91cbe6c41e1abeb5ba8b9`,
+- `ops/health.py` doit être présent dans le diff et EXACTEMENT le correctif relu (contrôle inconditionnel) (blob git `3aa1dfe5d023f6f7efa91cbe6c41e1abeb5ba8b9`,
   a745b40) : tout autre contenu refuse ;
 - comparaison en octets (une conversion CRLF ou une fin de ligne modifiée refuse).
 
@@ -33,7 +33,8 @@ installés. release_ready=false jusqu'à la dernière preuve. Aucune erreur/skip
 admise ; test lent désélectionné par le harnais standard puis test sémantique
 cached séparé obligatoire.
 
-**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1_chain.sh`** (désactivé, non validé) **ni
+**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1_chain.sh` ni `qualify_409_v2_chain.sh`** (désactivés, non
+validés) **ni
 `~/memory-os-local/ops/qualify_409_c1_chain.sh`** (orphelin du
 31/10, visait un autre commit, 06199a2). Seules les commandes ci-dessous valent.
 
@@ -64,7 +65,7 @@ harnais ne réduit aucune de ces formules. Ni saut, ni réutilisation d'un S4
 antérieur ; une erreur laisse release_ready=false. Swap≤8,5Go mesurable ;
 nice15, concurrence1. Au plus un job de cette chaîne actif.
 
-**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v2_chain.sh` :** pendant
+**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v3_chain.sh` :** pendant
 TOUTES les étapes, disque libre ≥ 5 Go et swap ≤ 8,5 Go (Go décimaux), mesurés toutes les 5 s ; sinon l'étape
 est arrêtée et marquée en échec (aucune relance automatique). La copie ne démarre qu'avec ≥ 9,2 Go libres
 (budget adaptive ≈4,1 Go + 5 Go). Les départs à 3,05–3,25 Go du tableau sont les gardes internes du harnais
@@ -218,7 +219,12 @@ Seule la preuve finale peut lever release_ready. Inventaire/round-trip, panne,
 reconnexion sans rejeu, statut local pendant panne et handshake4.0.9 requis pour
 wheel ET sdist. `scripts/installed_relay_case.py` exécute le brief compact et
 `memory_request_status` pendant la panne pour 4.0.8 et 4.0.9 (ces versions manquaient de sa liste dans ce dépôt,
-ce qui aurait fait refuser `--record-relay-proof`). release_ready=true n'autorise ni publication PyPI ni bascule de
+ce qui aurait fait refuser `--record-relay-proof`). Ce script fait partie de l'inventaire scellé 4.0.8 : un
+manifeste 4.0.8 se vérifie avec son outillage historique, jamais en réécrivant ses empreintes.
+
+**Attention : `--record-relay-proof` positionne déjà `release_ready=true`.** Seul compte le résultat de la
+vérification finale : la chaîne v3 écrit `CHAIN_RESULT=PASS` dans son dossier de logs uniquement après elle ; un
+arrêt ou un refus de cette dernière commande interdit toute publication même si `release_ready` vaut true. release_ready=true n'autorise ni publication PyPI ni bascule de
 production : chacune exige un GO distinct de Romain. La procédure de bascule
 (`SWITCH_4_0_8_SQLITE.md`) doit être adaptée/revue pour 4.0.9, jamais exécutée
 telle quelle.

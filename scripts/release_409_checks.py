@@ -80,6 +80,7 @@ def verify_engine_version_only(root, commit, version):
         + ", ".join(sorted(set(names) - set(ENGINE_ALLOWED_CHANGES))),
     )
     require(VERSION_FILE in names, "Engine version not bumped to " + RELEASE_VERSION)
+    require(HEALTH_FILE in names, "Reviewed 4.0.9 health fix missing from the candidate")
 
     def show(revision):
         # Bytes, not text: text mode would normalise CRLF and hide line-ending changes.
@@ -96,14 +97,13 @@ def verify_engine_version_only(root, commit, version):
         and new[changed[0]] == ('__version__ = "%s"\n' % RELEASE_VERSION).encode(),
         "Version file changed beyond its __version__ line",
     )
-    if HEALTH_FILE in names:
-        blob = subprocess.check_output(
-            ["git", "rev-parse", commit + ":" + HEALTH_FILE], cwd=root, text=True
-        ).strip()
-        require(blob == HEALTH_BLOB, "ops/health.py differs from the reviewed 4.0.9 health fix")
+    blob = subprocess.check_output(
+        ["git", "rev-parse", commit + ":" + HEALTH_FILE], cwd=root, text=True
+    ).strip()
+    require(blob == HEALTH_BLOB, "ops/health.py differs from the reviewed 4.0.9 health fix")
     return {
         "base": FROZEN_BASE,
-        "health_blob": HEALTH_BLOB if HEALTH_FILE in names else None,
+        "health_blob": HEALTH_BLOB,
         "allowed_changed_paths": list(ENGINE_ALLOWED_CHANGES),
         "observed_changed_paths": sorted(names),
         "version_file_change": [PREVIOUS_VERSION, RELEASE_VERSION],
