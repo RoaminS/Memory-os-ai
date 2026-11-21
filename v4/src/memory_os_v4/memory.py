@@ -93,6 +93,19 @@ def _package_version():
     return __version__
 
 
+def _require_final_version():
+    """A lexical store is stamped with the running version and refused on reopening unless that
+    version is a final ``X.Y.Z`` >= 4.1.0: refuse a dev/rc build before anything is touched."""
+    from .sqlite_store import lexical_version_ok
+
+    version = _package_version()
+    if not lexical_version_ok(version):
+        raise ProfileError(
+            "profile_version_not_final",
+            f"The lexical profile only runs on a final X.Y.Z release >= 4.1.0 (running {version!r}): the store "
+            "would be stamped with a version that every later open refuses; nothing was created or modified")
+
+
 def index_text(item: MemoryItem, config: Config) -> str:
     """Context-enriched dense text; legacy BM25 also indexes this string.
     scoped_literal BM25 indexes item.text independently (production
@@ -160,6 +173,8 @@ class MemoryV4:
         self.config.validate_lexical_policy()
         # Frozen at construction, like the maintenance and write policies.
         self._lexical = self.config.retrieval_profile == PROFILE_LEXICAL
+        if self._lexical:
+            _require_final_version()
         self._maintenance_policy = MaintenancePolicy(self.config.maintenance_mode)
         self._write_policy = WritePolicy(self.config.write_mode)
         if not self._lexical:

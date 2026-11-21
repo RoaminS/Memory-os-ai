@@ -707,3 +707,23 @@ def test_store_vanishing_after_a_deferred_probe_one_is_refused(tmp_path, monkeyp
     code, after_race = raced_open(monkeypatch, lexical_config(hot), vanish)
     assert code == "store_profile_unverifiable"
     assert_only_the_lease_file_may_be_new(hot, after_race)
+
+
+# ------------------------------------------------ version guard, before any mutation
+@pytest.mark.parametrize("version", ["4.1.1.dev1", "4.2.0rc1", "4.1.0+local", "4.1", "4.0.9"])
+def test_non_final_package_version_is_refused_by_the_lexical_profile_before_any_mutation(tmp_path, monkeypatch, version):
+    """The version stamped in a lexical store must be a final X.Y.Z >= 4.1.0, or every later open would
+    refuse the store as contaminated: a dev/rc build neither creates nor opens (hence never stamps) one."""
+    existing = lexical_store(tmp_path / "existing")
+    monkeypatch.setattr(memory_os_v4, "__version__", version)
+    fresh = tmp_path / "fresh"
+    assert refused(lexical_config(fresh)) == "profile_version_not_final"
+    assert not fresh.exists()  # not even the directory
+    assert refused(lexical_config(tmp_path / "existing")) == "profile_version_not_final"
+    assert_unchanged(tmp_path / "existing", existing)
+    # The semantic profile has no such constraint and is unchanged.
+    with MemoryV4(config=semantic_config(tmp_path / "semantic")) as engine:
+        assert "retrieval_profile" not in engine.store.meta
+    monkeypatch.undo()
+    with MemoryV4(config=lexical_config(tmp_path / "existing")) as engine:  # still clean with the final version
+        assert engine.store.meta["version"] == memory_os_v4.__version__

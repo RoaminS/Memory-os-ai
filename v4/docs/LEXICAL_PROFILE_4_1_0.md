@@ -185,7 +185,7 @@ La validation **ne précède pas tout accès disque** : l'ordre réel, conservé
 |---|---|---|
 | 1 | `Config.from_env()` si aucune configuration n'est passée | aucun (environnement) |
 | 2 | `ProjectRegistry.load` | si un registre est configuré : ouverture en lecture seule, `fstat`, lecture ≤ 1 Mio + 1 octet de **ce fichier** ; rien n'est créé ni écrit ; une erreur de registre est levée avant la validation de profil (ordre inchangé) |
-| 3 | `validate_lexical_policy()` + validation de profil | aucun |
+| 3 | `validate_lexical_policy()` + validation de profil ; profil lexical : version du paquet finale `X.Y.Z` ≥ 4.1.0, sinon `profile_version_not_final` | aucun |
 | 4 | politiques de maintenance et d'écriture | aucun |
 | 5 | profil sémantique : présence de la fermeture ML (§8) | `importlib.util.find_spec` : lecture des répertoires d'import, aucun import, aucune écriture. **Jamais exécutée en profil lexical** |
 | 6 | contrôle du backend, `validate_sqlite_target` | `resolve` et `stat` du dossier cible, de `items.jsonl`, `blocks.jsonl`, `requests.jsonl`, `meta.json`, `store.sqlite3` et de ses `-wal`/`-shm` |
@@ -204,6 +204,7 @@ effet possible sur le système de fichiers avant ce refus est celui de `WriterLo
 |---|---|
 | `profile_unknown` | `retrieval_profile` hors `{"semantic", "lexical"}` |
 | `profile_option_conflict` | option incompatible avec `lex-4.1.0-v1` (ci-dessous) |
+| `profile_version_not_final` | profil lexical demandé alors que la version du paquet en cours d'exécution n'est pas une version finale `X.Y.Z` ≥ 4.1.0 (`.devN`, `rcN`, suffixe local…) : la version estampillée rendrait le store refusé (`store_profile_contaminated`) à toute réouverture. Refus avant tout accès au store, création comme réouverture ; le profil sémantique n'est pas concerné |
 | `semantic_dependency_missing` | profil sémantique demandé, fermeture ML non installée (§8) |
 | `store_profile_unverifiable` | fichier existant dont le profil est indéterminable, ou store changé entre les deux sondes (§5.1) — **dans les deux profils** |
 | `store_profile_mismatch` | marqueur invalide, ou store de l'autre profil |
@@ -836,4 +837,7 @@ différent produit `store_profile_unverifiable`.
 | # | Défaut | Correction | Où |
 |---|---|---|---|
 | 1 | Course dans la sonde : `stat` des annexes puis ouverture `mode=ro` ; si le dernier écrivain fermait entre les deux, la sonde n° 1 pouvait recréer `-wal`/`-shm` avant de refuser | La sonde n° 1 n'ouvre jamais sans `immutable=1` ; paire présente → `deferred_to_lease`, décision par la sonde n° 2 sous bail ; garantie reformulée (seul effet avant refus : `WriterLock`) ; écrivains sans bail hors contrat | §4.1, §5.1, §5.2, `test_lexical_store_guard.py` (fermeture du dernier écrivain entre observation et ouverture ; aucune connexion sans `immutable=1` hors bail) |
+| 2 | Risque latent : aucune garde avant l'écriture d'une version non finale dans un store lexical | `profile_version_not_final` à l'étape 3 du §4.1, avant tout accès au store | §4.1, `test_lexical_store_guard.py` |
 
+Ces deux corrections portent `test_lexical_store_guard.py` de 48 à 59 tests (6 pour la course,
+5 pour la garde de version).
