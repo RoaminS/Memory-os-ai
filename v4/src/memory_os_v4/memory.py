@@ -185,7 +185,7 @@ def _connection_closed(store) -> bool:
 
 # Releases that failed and are still holding their lease: a handle to retry them once the
 # ``weakref.finalize`` of a collected engine is consumed. The exclusion itself does not rely on this
-# reference (interpreter shutdown clears it) but on the pinned lease descriptor (``WriterLock.pin``).
+# reference (interpreter shutdown clears it) but on the descriptor reserved with the lease (WriterLock).
 _UNRELEASED: set = set()
 
 
@@ -205,9 +205,11 @@ class _EngineRelease:
     again (``engine.close()`` does) retries only the pending stores and releases the lease once
     they are all closed. After a success every further call is a no-op.
 
-    A failed release pins the lease (``WriterLock.pin``): the lock descriptor is duplicated into a
-    raw integer that no Python object owns, so the kernel lock no longer depends on the lifetime
-    of the lock object. When nobody can retry any more (the engine was collected, or the
+    The engine reserves its lease (``WriterLock.reserve``) BEFORE any SQLite open: the lock
+    descriptor is duplicated into a raw integer that no Python object owns, so the kernel lock
+    never depends on the lifetime of the lock object, and keeping it after a failed release
+    allocates nothing (no late ``dup`` that descriptor exhaustion could defeat). When nobody can
+    retry any more (the engine was collected, or the
     interpreter is exiting) the exclusion lasts until the process itself is gone, whatever the
     order in which interpreter shutdown destroys the lock and the connection: a connection closed
     late by that shutdown is closed under the lease. The release also keeps itself in
@@ -244,8 +246,10 @@ class _EngineRelease:
                     else:
                         self.stores.remove(store)
                 if errors:
-                    self.writer_lock.pin()  # first: the lease no longer depends on any Python object
-                    _UNRELEASED.add(self)
+                    # The lease is already independent of every Python object (descriptor reserved
+                    # at acquisition): nothing below is needed for the exclusion, nothing can lose it.
+                    self.writer_lock.pin()  # a mark; allocation-free, cannot fail
+                    _UNRELEASED.add(self)  # retry handle only
                     raise errors[0]
             self.writer_lock.close()
             self.released = True
@@ -294,6 +298,9 @@ class MemoryV4:
         self._mutation_depth = 0
         self._index_error = False
         self._writer_lock = WriterLock(self.data_dir)
+        # The raw descriptor that keeps the lease after a failed release exists BEFORE probe 2 and
+        # any SQLite open; if it cannot be reserved the lease is given back and the open refused.
+        self._writer_lock.reserve()
         # Every store the engine opens is appended here; the finalizer closes them BEFORE releasing
         # the lease, on every path (close(), garbage collection, interpreter exit).
         self._owned_stores: list = []

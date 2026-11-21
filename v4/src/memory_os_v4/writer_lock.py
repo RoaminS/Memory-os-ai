@@ -12,9 +12,11 @@ from threading import Lock
 
 _registry_lock = Lock()
 _owned: set[Path] = set()
-# Raw duplicates of pinned lease descriptors (see ``WriterLock.pin``). Plain integers: no Python
-# object owns them, so interpreter shutdown cannot close them; only ``WriterLock.close`` does.
-_pinned_fds: set[int] = set()
+# Raw duplicates of the lease descriptors reserved right after acquisition (``WriterLock.reserve``).
+# Plain integers: no Python object owns them, so neither garbage collection nor interpreter
+# shutdown can close them; only ``WriterLock.close`` does. (Inventory only: the kernel keeps a
+# descriptor open whether or not this set still exists.)
+_reserved_fds: set[int] = set()
 
 
 class WriterConflictError(RuntimeError):
@@ -25,7 +27,8 @@ class WriterLock:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir.resolve() / "writer.lock"
         self._file = None
-        self._pinned_fd = None
+        self._reserved_fd = None
+        self._pinned = False
         self._pid = os.getpid()
         with _registry_lock:
             if self.path in _owned:
@@ -61,29 +64,47 @@ class WriterLock:
         if os.getpid() != self._pid:
             raise RuntimeError("An inherited memory engine cannot be used after fork; connect to the shared HTTP server")
 
-    def pin(self) -> None:
-        """Make the lease outlive this object: it then ends only with ``close()`` or the process.
+    def reserve(self) -> None:
+        """Duplicate the lock descriptor into a raw integer, NOW: the memory engine calls this
+        right after taking the lease and before it opens anything under it.
 
         The kernel lock belongs to the open file description, not to a descriptor: it lasts until
-        an explicit unlock or until EVERY descriptor on it is closed. Duplicating the descriptor
-        into a raw integer that no Python object owns means that destroying this lock or its file
-        object (garbage collection, interpreter shutdown, in any order) only closes the original
-        descriptor: the lease stays held until the operating system closes the duplicate, when the
-        process is gone and nothing in it can still close a SQLite connection. Only ``close()``
-        unlocks; nothing else in this module does. Idempotent.
+        an explicit unlock or until EVERY descriptor on it is closed. With the raw duplicate, the
+        destruction of this object or of its file object (garbage collection, interpreter
+        shutdown, in any order) only closes the original descriptor: the lease then ends only
+        with ``close()`` or with the process itself. Reserving up front means that keeping the
+        lease after a failed release needs no late allocation that could itself fail
+        (descriptor exhaustion). If the reservation fails, the lease is released and the error
+        raised: the caller has opened nothing yet and must not. A reserved lock MUST be closed
+        explicitly to release the lease (the engine's release state does). Idempotent.
         """
         with _registry_lock:
-            if self._file is None or self._pinned_fd is not None or os.getpid() != self._pid:
+            if self._file is None or self._reserved_fd is not None or os.getpid() != self._pid:
                 return
-            self._pinned_fd = os.dup(self._file.fileno())
-            _pinned_fds.add(self._pinned_fd)
+            try:
+                self._reserved_fd = os.dup(self._file.fileno())
+                _reserved_fds.add(self._reserved_fd)
+                return
+            except BaseException as exc:
+                failure = exc
+        self.close()  # no guarantee: give the lease back (and any duplicate) and refuse
+        if isinstance(failure, OSError):
+            raise RuntimeError(f"Cannot reserve the writer lease descriptor for {self.path.parent}: "
+                               f"{failure}; the store was not opened") from failure
+        raise failure
+
+    def pin(self) -> None:
+        """Record that a failed release keeps this lease. Allocates nothing, calls nothing, cannot
+        fail: the raw descriptor that makes the lease outlive this object was reserved at
+        acquisition (``reserve()``); without a reservation this is only a mark."""
+        self._pinned = True
 
     def close(self) -> None:
         with _registry_lock:
             if self._file is None:
                 return
             fh, self._file = self._file, None
-            pinned, self._pinned_fd = self._pinned_fd, None
+            reserved, self._reserved_fd = self._reserved_fd, None
             try:
                 if os.getpid() != self._pid:
                     # A fork inherits the open file description. Explicitly
@@ -101,6 +122,7 @@ class WriterLock:
                     fh.close()
                 finally:
                     _owned.discard(self.path)
-                    if pinned is not None:  # after the explicit unlock above: the lease is released
-                        _pinned_fds.discard(pinned)
-                        os.close(pinned)
+                    self._pinned = False
+                    if reserved is not None:  # after the explicit unlock above: the lease is released
+                        _reserved_fds.discard(reserved)
+                        os.close(reserved)

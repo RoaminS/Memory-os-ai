@@ -13,6 +13,7 @@ until a later ``close()`` succeeds.
 Needs the semantic closure (FAISS) for the semantic-hash cases. Not part of the ML-free subset.
 """
 
+import errno
 import gc
 import json
 import os
@@ -235,7 +236,7 @@ def test_failing_store_close_keeps_the_lease_until_a_retry_closes_the_connection
     with pytest.raises(error, match=message):  # (b)
         engine.close() if path == "close" else engine._writer_finalizer()
     assert len(attempts) == 1 and not engine._release.released and lock._file is not None
-    assert lock._pinned_fd in writer_lock_module._pinned_fds  # held by the process, not by an object
+    assert lock._pinned and lock._reserved_fd in writer_lock_module._reserved_fds  # held by the process
     assert_exclusion_kept(tmp_path, connection, profile)  # (a)
     assert [event[0] for event in events] == []  # nothing closed, nothing released
     if path == "close":
@@ -252,7 +253,7 @@ def test_failing_store_close_keeps_the_lease_until_a_retry_closes_the_connection
     engine.close()  # (c) even though the weakref finalizer may already be consumed
     assert events == [("store_closed", True), ("lease_released", [True], [])]
     assert connection_closed(connection) and lock._file is None and engine._release.released
-    assert lock._pinned_fd is None and not writer_lock_module._pinned_fds  # the pin went with the lease
+    assert lock._reserved_fd is None and not writer_lock_module._reserved_fds  # gone with the lease
     assert not SIDE_FILES & names(tmp_path)
     assert not memory_module._UNRELEASED
     assert contender(tmp_path, profile) == FREE
@@ -353,7 +354,7 @@ def test_store_constructor_failing_after_connect_is_covered_from_the_connection_
         with pytest.raises(OSError, match="injected initialization failure"):
             MemoryV4(config=lexical_config(tmp_path))
         assert len(connections) == 1 and connection_closed(connections[0])
-        assert not memory_module._UNRELEASED and not writer_lock_module._pinned_fds
+        assert not memory_module._UNRELEASED and not writer_lock_module._reserved_fds
         assert contender(tmp_path)["lease"] == "free"
         return
 
@@ -369,7 +370,7 @@ def test_store_constructor_failing_after_connect_is_covered_from_the_connection_
     pending = list(memory_module._UNRELEASED)
     assert len(pending) == 1 and len(pending[0].stores) == 1 and not pending[0].released
     assert pending[0].stores[0]._connection is connections[0]
-    assert pending[0].writer_lock._pinned_fd in writer_lock_module._pinned_fds
+    assert pending[0].writer_lock._reserved_fd in writer_lock_module._reserved_fds
     with pytest.raises(sqlite3.OperationalError, match="injected close failure"):
         pending[0]()  # still failing: still held
     assert contender(tmp_path) == HELD
@@ -377,23 +378,26 @@ def test_store_constructor_failing_after_connect_is_covered_from_the_connection_
     broken["close"] = False  # the cause is removed: the same release closes, then frees the lease
     pending[0]()
     assert connection_closed(connections[0]) and pending[0].released
-    assert not memory_module._UNRELEASED and not writer_lock_module._pinned_fds
+    assert not memory_module._UNRELEASED and not writer_lock_module._reserved_fds
     assert contender(tmp_path)["lease"] == "free"
 
 
 PERSISTENT = r"""
-import gc, json, os, sqlite3, sys, weakref
+import errno, gc, json, os, sqlite3, sys, weakref
 from pathlib import Path
 from memory_os_v4 import Config, MemoryV4
 from memory_os_v4 import memory as memory_module
 from memory_os_v4.sqlite_store import SQLiteStore
+from memory_os_v4.writer_lock import WriterLock
 
 directory, mutation = Path(sys.argv[1]), sys.argv[2]
 SIDE = {"store.sqlite3-wal", "store.sqlite3-shm"}
+late_dups = []
 
 
 def step(**event):
     event["side_files"] = sorted(SIDE & {entry.name for entry in directory.iterdir()})
+    event["late_dups"] = len(late_dups)
     os.write(1, (json.dumps(event, sort_keys=True) + "\n").encode())
     os.read(0, 1)  # until the parent has looked at the lease from another process
 
@@ -402,15 +406,20 @@ def broken(self):
     raise sqlite3.OperationalError("injected close failure")
 
 
-if mutation == "unpinned":  # the previous behaviour: the lease only held by Python references
-    from memory_os_v4.writer_lock import WriterLock
-    WriterLock.pin = lambda self: None
+def exhausted(fd, *args, **kwargs):
+    late_dups.append(fd)
+    raise OSError(errno.EMFILE, "Too many open files")
+
+
+if mutation == "unreserved":  # the previous behaviour: no descriptor reserved with the lease
+    WriterLock.reserve = lambda self: None
 engine = MemoryV4(config=Config(data_dir=str(directory), retrieval_profile="lexical",
                                 store_backend="sqlite_s1", use_dense=False))
 engine.add_episodes_bulk([{"text": "Alice Martin adopted a grey cat named Pixel.", "item_id": "g1",
                            "project": "alpha"}])
 connection, lock = engine.store._connection, weakref.ref(engine._writer_lock)
 SQLiteStore.close = broken  # persistent: never repaired
+os.dup = exhausted  # descriptor exhaustion from now on: nothing can be duplicated any more
 try:
     engine.close()
 except sqlite3.OperationalError:
@@ -451,30 +460,112 @@ def persistent_failure(directory, mutation):
 
 
 def test_persistent_close_failure_keeps_the_lease_until_the_process_is_gone(tmp_path):
-    """The lease must not depend on the order in which interpreter shutdown destroys the lock and
-    the connection. Here the lock object is destroyed FIRST and the connection closed late, while
-    the process is alive: another process is refused at every step, and gets the lease only once
-    the process has exited."""
-    seen, code = persistent_failure(tmp_path, "pinned")
+    """The lease must depend neither on the order in which interpreter shutdown destroys the lock
+    and the connection, nor on any allocation made after the failure. Here ``os.dup`` fails
+    (EMFILE) from the failed close on, the lock object is destroyed FIRST and the connection closed
+    late, while the process is alive: another process is refused at every step, and gets the lease
+    only once the process has exited. Keeping the lease never called ``dup``."""
+    seen, code = persistent_failure(tmp_path, "reserved")
     assert code == 0
+    pair = sorted(SIDE_FILES)
     assert seen == [
-        {"event": "close_failed", "lock_alive": True, "side_files": sorted(SIDE_FILES), "contender": HELD},
+        {"event": "close_failed", "lock_alive": True, "side_files": pair, "late_dups": 0, "contender": HELD},
         # No Python object holds the lease any more, the connection is open: still excluded.
-        {"event": "lock_destroyed", "lock_alive": False, "side_files": sorted(SIDE_FILES), "contender": HELD},
+        {"event": "lock_destroyed", "lock_alive": False, "side_files": pair, "late_dups": 0,
+         "contender": HELD},
         # The late close deleted the side files UNDER the lease: nobody could observe the pair.
-        {"event": "connection_destroyed", "lock_alive": False, "side_files": [], "contender": HELD},
+        {"event": "connection_destroyed", "lock_alive": False, "side_files": [], "late_dups": 0,
+         "contender": HELD},
     ]
     assert contender(tmp_path) == FREE  # the process is gone: the kernel dropped the lease
 
 
-def test_without_the_pinned_descriptor_the_lease_is_lost_with_the_lock_object(tmp_path):
-    """Discrimination of the test above: with ``WriterLock.pin`` disabled (references only), the
-    destruction of the lock object frees the lease while the connection and its pair still exist,
-    and another process opens the store next to it."""
-    seen, _ = persistent_failure(tmp_path, "unpinned")
+def test_without_the_reserved_descriptor_the_lease_is_lost_with_the_lock_object(tmp_path):
+    """Discrimination of the test above: with a lease taken WITHOUT the reserved descriptor
+    (references only; a late dup is impossible, EMFILE), the destruction of the lock object frees
+    the lease while the connection and its pair still exist: another process opens the store."""
+    seen, _ = persistent_failure(tmp_path, "unreserved")
     assert seen[0]["contender"] == HELD
     assert seen[1] == {"event": "lock_destroyed", "lock_alive": False, "side_files": sorted(SIDE_FILES),
-                       "contender": FREE}
+                       "late_dups": 0, "contender": FREE}
+
+
+def open_descriptors():
+    return len(os.listdir("/dev/fd"))
+
+
+def exhaust_dup(monkeypatch):
+    calls = []
+
+    def exhausted(fd, *args, **kwargs):
+        calls.append(fd)
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(writer_lock_module.os, "dup", exhausted)
+    return calls
+
+
+@pytest.mark.parametrize("profile", ["lexical", "semantic"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_open_is_refused_before_any_sqlite_open_when_the_descriptor_cannot_be_reserved(
+        tmp_path, monkeypatch, profile, existing):
+    """Descriptor exhaustion (EMFILE) when the lease is taken: without the raw descriptor the lease
+    could not be kept after a failed close, so the open is abandoned BEFORE probe 2 and before the
+    store connection; the lease is given back."""
+    if existing:
+        written_engine(profile, tmp_path).close()
+    before, connects, real_connect = inventory(tmp_path), [], sqlite3.connect
+
+    def connect(*args, **kwargs):
+        connects.append((args, kwargs))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", connect)
+    dups = exhaust_dup(monkeypatch)
+    with pytest.raises(RuntimeError, match="Cannot reserve the writer lease descriptor") as raised:
+        MemoryV4(config=CONFIGS[profile](tmp_path))
+    assert not isinstance(raised.value, WriterConflictError) and raised.value.__cause__.errno == errno.EMFILE
+    assert len(dups) == 1
+    # Nothing was opened under the lease: at most probe 1 (immutable, read-only, before the lease).
+    assert len(connects) == (1 if existing else 0)
+    assert all("immutable=1" in args[0] and "check_same_thread" not in kwargs for args, kwargs in connects)
+    # Only the lease file itself may have appeared (new directory); nothing else changed.
+    after = inventory(tmp_path)
+    assert after == (before if existing else {"writer.lock": after["writer.lock"]})
+    assert not SIDE_FILES & names(tmp_path) and ("store.sqlite3" in names(tmp_path)) == existing
+    assert not writer_lock_module._reserved_fds and not memory_module._UNRELEASED
+    assert tmp_path.resolve() / "writer.lock" not in writer_lock_module._owned
+    # The lease was given back: another process takes it (and opens the existing store).
+    assert contender(tmp_path, profile)["lease"] == "free"
+    monkeypatch.undo()
+    with MemoryV4(config=CONFIGS[profile](tmp_path)) as engine:  # and so does this process
+        assert (engine.store.get("g1") is not None) == existing
+
+
+@pytest.mark.parametrize("path", ["close", "finalizer", "collected"])
+def test_normal_release_closes_the_reserved_descriptor(tmp_path, path):
+    """The reserved descriptor never outlives a successful release: no leaked lease, no leaked fd."""
+    gc.collect()
+    baseline = open_descriptors()
+    engine = written_engine("lexical", tmp_path)
+    lock = engine._writer_lock
+    reserved = lock._reserved_fd
+    assert reserved in writer_lock_module._reserved_fds and reserved != lock._file.fileno()
+    assert os.path.samestat(os.fstat(reserved), os.stat(tmp_path / "writer.lock"))
+    assert open_descriptors() >= baseline + 2  # the lock file and its reserved duplicate, at least
+    assert contender(tmp_path)["lease"] == "held"
+    if path == "close":
+        engine.close()
+    elif path == "finalizer":
+        engine._writer_finalizer()
+    del engine
+    gc.collect()
+    assert lock._reserved_fd is None and lock._file is None and not writer_lock_module._reserved_fds
+    with pytest.raises(OSError) as closed:
+        os.fstat(reserved)
+    assert closed.value.errno == errno.EBADF
+    assert open_descriptors() == baseline
+    assert contender(tmp_path) == FREE
 
 
 def test_partial_failure_keeps_the_lease_and_never_closes_a_store_twice():

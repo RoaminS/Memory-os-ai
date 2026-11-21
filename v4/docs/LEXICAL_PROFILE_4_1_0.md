@@ -939,6 +939,10 @@ Avec un relâchement du bail malgré l'échec, douze de ces tests échouent.
 
 ## 19. Amendement du verdict Codex n° 4 sur `acc637d` (21/11)
 
+> Le mécanisme d'épinglage du défaut 1 ci-dessous (duplication **au moment de l'échec**) est
+> remplacé par le §20 : le descripteur brut est réservé **à la prise du bail**. Le reste du §19
+> (raisonnement `flock`, défaut 2, tests) reste valable.
+
 | # | Défaut | Correction | Où |
 |---|---|---|---|
 | 1 | Après un échec persistant, le bail ne tenait qu'à des références Python (`_UNRELEASED`). Pendant la destruction finale de l'interpréteur, l'objet verrou pouvait être détruit (descripteur fermé, `flock` libéré) **avant** la fermeture tardive de la connexion SQLite | Le bail en échec est **épinglé au processus** : `WriterLock.pin()` duplique le descripteur du verrou (`os.dup`) dans un entier brut qu'aucun objet Python ne possède | `writer_lock.py` (`pin`, `_pinned_fds`, `close`), `memory.py` (`_EngineRelease`) |
@@ -984,3 +988,50 @@ ouverte, **bail conservé et épinglé**, relâchement rejouable. Les autres app
   toujours refusé ; cause levée → connexion fermée puis bail libre. Variante fermeture de
   secours réussie : bail libre, rien d'épinglé. Sans l'inscription dès la connexion, le premier
   cas échoue (bail libre, connexion ouverte).
+
+## 20. Amendement du verdict Codex n° 5 sur `c2e94a8` (21/11)
+
+| # | Défaut | Correction | Où |
+|---|---|---|---|
+| 1 | `WriterLock.pin()` dupliquait le descripteur **au moment de l'échec** de relâchement. Sous saturation des descripteurs (`EMFILE`), `os.dup` levait : pas de doublon, pas d'inscription dans `_UNRELEASED`, et le verrou pouvait de nouveau disparaître avant une connexion ouverte | Le descripteur brut est **réservé à la prise du bail**, avant toute ouverture SQLite ; si la réservation échoue, l'ouverture est **abandonnée**. Conserver le bail après un échec n'alloue plus rien | `writer_lock.py` (`WriterLock.reserve`, `_reserved_fds`, `pin`, `close`), `memory.py` |
+
+**Réservation.** Sitôt son bail pris (`WriterLock(data_dir)`, étape `WriterLock` du §4.1), le
+moteur appelle `WriterLock.reserve()`, **avant** la sonde n° 2 et avant `SQLiteStore` : `os.dup`
+crée le doublon : un entier brut, inscrit dans
+`writer_lock._reserved_fds`, qu'aucun objet Python ne possède. Dès cet instant, et pour toute
+la vie du moteur, le bail ne dépend plus de la durée de vie de l'objet verrou : seuls
+`WriterLock.close()` (unique `LOCK_UN` du code) ou la disparition du processus y mettent fin
+(raisonnement `flock` du §19).
+
+**Échec de la réservation** (`EMFILE`, etc.) : le bail est rendu (`WriterLock.close()` :
+`LOCK_UN`, fichier fermé, chemin retiré des baux possédés) et l'ouverture est refusée par
+`RuntimeError("Cannot reserve the writer lease descriptor …; the store was not opened")`. À ce
+stade seuls ont eu lieu la sonde n° 1 (lecture seule, `immutable=1`), `mkdir` et la création de
+`writer.lock` : aucune sonde sous bail, aucune connexion de store, aucune annexe.
+
+**Après un échec de relâchement.** `_EngineRelease` n'a plus rien à obtenir : `pin()` ne fait
+que poser un indicateur (aucune allocation, aucun appel système, ne peut pas lever), puis le
+relâchement s'inscrit dans `_UNRELEASED` (poignée de reprise ; si cette inscription échouait,
+le bail resterait tenu quand même) et l'erreur de fermeture est propagée. Aucun `dup` tardif.
+
+**Chemins sans échec.** Tout relâchement réussi — `close()`, finaliseur, ramasse-miettes,
+sortie de l'interpréteur, constructeur en échec — passe par `WriterLock.close()` : `LOCK_UN`,
+fermeture du fichier, puis fermeture du doublon réservé. Le doublon ne survit donc jamais à un
+relâchement réussi. La réservation est une méthode distincte, appelée par le seul moteur :
+`sqlite_migrate` (`closing(WriterLock(…))`)
+est inchangé. `fork` : l'enfant hérite du doublon comme du descripteur d'origine ; son
+`close()` ne déverrouille pas et ne ferme que ses propres copies ; le parent n'est pas affecté.
+
+**Tests** (`test_engine_finalizer_410.py`, 34).
+- Réservation impossible (`os.dup` → `EMFILE`), deux profils, dossier neuf et store existant :
+  ouverture refusée ; un seul `dup` tenté ; aucune connexion hors la sonde n° 1 `immutable=1` ;
+  rien de créé ni modifié hors `writer.lock` ; aucune annexe ; bail libre pour un autre
+  processus puis pour le même.
+- Échec persistant **avec `os.dup` en échec dès la fermeture en échec** : scénario du §19
+  (références au bail détruites d'abord, connexion détruite ensuite, sortie normale) ; l'autre
+  processus est refusé aux trois étapes et le compteur d'appels à `dup` reste à zéro. Test
+  discriminant associé : bail pris **sans** réservation → à la destruction de l'objet verrou,
+  l'autre processus obtient le bail et ouvre le store, connexion et paire encore présentes.
+- Relâchement normal par `close()`, par le finaliseur et par le ramasse-miettes : le doublon
+  réservé désigne bien `writer.lock`, puis est fermé (`EBADF`), le nombre de descripteurs
+  ouverts revient à sa valeur initiale, le bail est libre pour un autre processus.
