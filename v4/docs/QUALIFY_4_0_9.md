@@ -33,7 +33,7 @@ installés. release_ready=false jusqu'à la dernière preuve. Aucune erreur/skip
 admise ; test lent désélectionné par le harnais standard puis test sémantique
 cached séparé obligatoire.
 
-**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1/v2/v3/v4_chain.sh`** (désactivés, non
+**Ne pas utiliser `~/memory-os-local/ops/qualify_409_v1/v2/v3/v4/v5_chain.sh`** (désactivés, non
 validés) **ni
 `~/memory-os-local/ops/qualify_409_c1_chain.sh`** (orphelin du
 31/10, visait un autre commit, 06199a2). Seules les commandes ci-dessous valent.
@@ -65,12 +65,14 @@ harnais ne réduit aucune de ces formules. Ni saut, ni réutilisation d'un S4
 antérieur ; une erreur laisse release_ready=false. Swap≤8,5Go mesurable ;
 nice15, concurrence1. Au plus un job de cette chaîne actif.
 
-**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v5_chain.sh` :** pendant
+**Règle de Romain, appliquée en permanence par `~/memory-os-local/ops/qualify_409_v6_chain.sh` :** pendant
 TOUTES les étapes, disque libre ≥ 5 Go et swap ≤ 8,5 Go (Go décimaux), mesurés toutes les 2 s ; sinon les processus dont la filiation avec l'étape
 est PROUVÉE (descendants suivis par point fixe, identité pid + heure de démarrage) sont gelés puis arrêtés, l'étape
 est marquée en échec, sans relance automatique. Un balayage de DÉTECTION (jamais de signal) repère les processus
 démarrés après la chaîne sous la branche ou sous `qual-envs/409-installed-claude-*` ; s'il en reste, le verrou
-commun `ops/logs/qualify_409.lock` est conservé et la liste affichée pour inspection humaine.
+commun `ops/logs/qualify_409.lock` est conservé et la liste affichée pour inspection humaine. Une détection impossible
+(ps/lsof en échec) vaut refus : verrou conservé. Un parent n'est exploré que si son identité (pid + heure de
+démarrage) est vérifiée, ce qui exclut les pid réattribués.
 **Garantie réduite, à accepter explicitement par Romain avant tout lancement :** sur macOS sans privilèges
 (environnement des processus illisible), un orphelin créé puis abandonné entre deux relevés n'est pas arrêté
 automatiquement ; il n'est que détecté s'il travaille sous ces chemins. Alternative à garantie complète : exécuter
@@ -230,7 +232,7 @@ ce qui aurait fait refuser `--record-relay-proof`). Ce script fait partie de l'i
 manifeste 4.0.8 se vérifie avec son outillage historique, jamais en réécrivant ses empreintes.
 
 **Attention : `--record-relay-proof` positionne déjà `release_ready=true`.** Seul compte le résultat de la
-vérification finale : la chaîne v5 écrit `CHAIN_RESULT=PASS` dans son dossier de logs uniquement après elle ; un
+vérification finale : la chaîne v6 écrit `CHAIN_RESULT=PASS` dans son dossier de logs uniquement après elle ; un
 arrêt ou un refus de cette dernière commande interdit toute publication même si `release_ready` vaut true. release_ready=true n'autorise ni publication PyPI ni bascule de
 production : chacune exige un GO distinct de Romain. La procédure de bascule
 (`SWITCH_4_0_8_SQLITE.md`) doit être adaptée/revue pour 4.0.9, jamais exécutée
