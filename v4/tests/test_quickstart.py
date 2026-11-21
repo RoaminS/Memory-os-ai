@@ -160,7 +160,8 @@ def install_context(home, monkeypatch):
 
 
 def installation(c, clients=('cursor',), backend=None):
-    return qs.prepare(c.settings, home=c.home, python=c.python, clients=clients, backend=backend, run=c.run)
+    return qs.prepare(c.settings, home=c.home, python=c.python, clients=clients, backend=backend, run=c.run,
+                      profile='semantic')  # 4.1.0 setup contract §2.1: explicit for a new install
 
 
 def synthetic_resource_guard(monkeypatch, free):
@@ -299,7 +300,8 @@ def test_crashing_new_service_fails_fast_with_masked_tail_and_attested_stop(
     assert not result['ok'] and 'Server startup failed' in result['error']
     failed = result['startup_failure']
     assert failed['runs'] == runs and failed['last_exit_code'] == 1
-    assert 'AttributeError' in failed['stderr_tail'] and len(failed['stderr_tail']) <= 4096
+    # 4.1.0 setup contract §8: structured facts from a closed list, never a tail of the log.
+    assert failed['exception_types'] == ['AttributeError'] and 'stderr_tail' not in failed
     from memory_os_v4.ops.auth import read_token
     assert read_token(c.settings.token_file) not in json.dumps(result)
     stopped = [a for a in c.calls if a[:2] == ['launchctl', 'bootout']]
@@ -569,7 +571,9 @@ def test_ready_requires_actual_retrieval_profile_and_identity(install_context, m
     from memory_os_v4.ops import auth, provision
     c = install_context
     info = {'version': c.identity['version'], 'commit': c.identity['commit'], 'ready': True, 'reason': 'ready',
-            'capabilities': {'store': {'backend': 'sqlite_s1', 'instance_id': 'synthetic'}, 'work_state': True,
+            'capabilities': {'store': {'backend': 'sqlite_s1', 'instance_id': 'synthetic',
+                                       'sqlite_version': '3.53.4'},  # 4.1.0: attested by the server process
+                'work_state': True,
                 'encoding': {'requested_device': 'auto', 'model': provision.catalog()['model_id'],
                     'profile': {'dtype': 'native', 'batch_size': 32, 'max_seq_length': 512,
                                'model_revision': provision.catalog()['revision']}},

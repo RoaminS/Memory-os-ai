@@ -62,7 +62,7 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
             return 0 if all(r['undo'] in {'restored', 'nothing-to-undo'} for r in result['results']) else 1
         chosen = tuple(args.clients.split(',')) if args.clients else quickstart.DEFAULT_CLIENTS
         s, backend = quickstart.settings_for_install(s, backend=args.backend)
-        plan = quickstart.prepare(s, clients=chosen, backend=backend)
+        plan = quickstart.prepare(s, clients=chosen, backend=backend, profile=getattr(args, 'profile', None))
         if args.apply:
             result = quickstart.apply_install(plan, s, download_approved=args.download_approved, demo=args.demo)
             if args.report:
@@ -74,12 +74,16 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
                           'real_client_usage': 'unmeasured'}
         else:
             result = {**quickstart.report(plan), 'ok': plan['ok'], 'stage': 'preview',
-                      'writes': 'none', 'blockers': plan['blockers']} if args.report else plan
+                      'writes': 'none', 'blockers': plan['blockers'],
+                      'blocker_codes': plan.get('blocker_codes', [])} if args.report else plan
         _print_json(result)
         return 0 if result['ok'] else 1
-    except (OSError, ValueError, RuntimeError, ProvisionError) as exc:
-        _print_json({'ok': False, 'code': 'quickstart_refused',
-                     'error': str(exc) if isinstance(exc, (quickstart.QuickstartError, ProvisionError)) else type(exc).__name__})
+    except Exception as exc:
+        # Only our own messages are printed; a foreign exception is reduced to a listed class name (§8).
+        from .diagnostics import exception_label
+        ours = isinstance(exc, (quickstart.QuickstartError, ProvisionError))
+        _print_json({'ok': False, 'code': getattr(exc, 'code', None) if isinstance(exc, quickstart.QuickstartError)
+                     else 'quickstart_refused', 'error': str(exc) if ours else exception_label(exc)})
         return 1
 
 
@@ -441,6 +445,8 @@ def main(argv: list[str] | None = None) -> int:
     qs.add_argument('--clients', help='comma-separated chosen clients (default: claude-code,codex)')
     qs.add_argument('--backend', choices=('sqlite', 'jsonl'), default=None,
                     help='new installs: sqlite + tasks by default; existing backend is preserved; never migrates')
+    qs.add_argument('--profile', choices=('lexical', 'semantic'), default=None,
+                    help='required for a new install (no default); an existing install keeps its own profile')
     mode = qs.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--undo', metavar='STAMP')

@@ -112,8 +112,10 @@ def test_lexical_capabilities_declare_the_encoder_absent_by_profile(tmp_path, mo
         assert facts["runtime"]["profile_id"] == "lexical-macos-arm64-py311-v1"
         assert not set(ML_PACKAGES) & set(facts["runtime"]["expected"])
         assert facts["retrieval_ready"] is True
+        import sqlite3
         assert facts["store"] == {"backend": "sqlite_s1", "atomic_mutations": True,
-                                  "instance_id": engine.store.meta["store_instance_id"]}
+                                  "instance_id": engine.store.meta["store_instance_id"],
+                                  "sqlite_version": sqlite3.sqlite_version}  # 4.1.0 setup contract §3
         # "No model" never waives the brief tokenizer: cl100k and its attested table stay reported.
         assert facts["brief"]["tokenizer"]["encoding"] == "cl100k_base"
         assert len(facts["brief"]["tokenizer"]["table_sha256"]) == 64

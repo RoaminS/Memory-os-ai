@@ -20,6 +20,8 @@ from .auth import SecretFileError, http_get, read_token
 from .clients import CLIENTS, classify, read_entry
 from .settings import OpsSettings
 
+PROFILES = ("lexical", "semantic")
+
 
 @dataclass
 class Check:
@@ -358,9 +360,17 @@ def _clients(home: Path) -> list[Check]:
 def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[Check]:
     from .qualified_runtime import inspect_current
 
-    local_runtime = inspect_current(extras=("ops", "brief"))
     settings = settings or OpsSettings.from_env()
     home = home or Path.home()
+    deployed_info = None
+    try:
+        code, raw = http_get(settings.ready_url, settings)
+        deployed_info = json.loads(raw) if code == 200 else None
+    except (SecretFileError, ValueError, TypeError):
+        pass
+    # This environment is inspected with the catalog of the INSTALLATION profile, whose source is shown.
+    profile, source = installation_profile(deployed_info, os.environ)
+    local_runtime = inspect_current(profile=profile, extras=("ops", "brief"))
     checks = [
         _secret(settings.token_file, "token", required=True),
         _secret(settings.backup_key, "backup-key", required=False, key=True),
@@ -369,7 +379,7 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
         Check(
             "local-runtime",
             "PASS" if local_runtime["ok"] else "FAIL",
-            "doctor/relay environment runtime versions (not the server): "
+            f"doctor/relay environment runtime versions (not the server), profile {profile} ({source}): "
             + (
                 local_runtime["profile_id"]
                 if local_runtime["ok"]
@@ -416,9 +426,8 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
 
     current_identity = None
     try:
-        code, raw = http_get(settings.ready_url, settings)
-        deployed = json.loads(raw)
-        if code == 200 and deployed.get("ready") is True:
+        deployed = deployed_info
+        if isinstance(deployed, dict) and deployed.get("ready") is True:
             current_identity = {
                 "version": deployed["version"],
                 "commit": deployed["commit"],
@@ -443,6 +452,33 @@ def render(checks: list[Check]) -> str:
     return "\n".join(lines)
 
 
+def installation_profile(info, environ) -> tuple[str, str]:
+    """(profile, source) used to inspect THIS environment: what the reachable service says, else
+    ``MEMORY_V4_RETRIEVAL_PROFILE``, else the engine default, always shown with its source."""
+    marker = None
+    if isinstance(info, dict) and isinstance(info.get("capabilities"), dict):
+        marker = info["capabilities"].get("retrieval_profile")
+    if isinstance(marker, dict) and marker.get("name") in PROFILES:
+        return marker["name"], "deployed"
+    if environ.get("MEMORY_V4_RETRIEVAL_PROFILE") in PROFILES:
+        return environ["MEMORY_V4_RETRIEVAL_PROFILE"], "environment"
+    return "semantic", "engine-default"
+
+
+def _store_profile(caps: dict) -> Check | None:
+    from ..config import LEXICAL_MARKER
+
+    marker = caps.get("retrieval_profile")
+    if marker is None:
+        return None  # server older than the profile marker: nothing to compare
+    if marker == LEXICAL_MARKER:
+        return Check("store-profile", "PASS", f"retrieval profile lexical, policy {marker['policy']}")
+    if marker == {"name": "semantic", "policy": None}:
+        return Check("store-profile", "PASS", "retrieval profile semantic")
+    return Check("store-profile", "FAIL", "malformed retrieval profile marker",
+                 "the deployed profile marker is not one this release knows; do not convert a store in place")
+
+
 def _capabilities(info: dict) -> list[Check]:
     """Compare explicit deployment expectations, not this host's default Config."""
     from .. import __version__
@@ -450,17 +486,22 @@ def _capabilities(info: dict) -> list[Check]:
     caps = info.get("capabilities")
     if not isinstance(caps, dict) or caps.get("schema_version") != 1:
         return [Check("capabilities", "WARN", "deployed capabilities unknown (older server)")]
+    profile, _ = installation_profile(info, {})
+    lexical = profile == "lexical"
     try:
+        encoder = caps["encoding"]["profile"]
+        if encoder is None and not lexical:
+            raise TypeError("encoder profile missing on a semantic deployment")
         values = {
             "SERVER_VERSION": caps["engine"]["version"],
             "BACKEND": caps["store"]["backend"],
-            "DEVICE": caps["encoding"]["profile"]["device"],
+            "DEVICE": encoder["device"] if encoder is not None else None,  # lexical: no encoder, no device
             "REGISTRY_SHA256": caps["projects"]["registry_sha256"],
         }
         consistent = (
             values["SERVER_VERSION"] == info["version"]
             and caps["engine"]["commit"] == info["commit"]
-            and caps["encoding"]["profile"] == info["encoding_profile"]
+            and encoder == info["encoding_profile"]
             and values["BACKEND"] in {"jsonl", "sqlite_s1"}
         )
         mismatches = [
@@ -491,35 +532,50 @@ def _capabilities(info: dict) -> list[Check]:
 
     deployed_runtime = caps.get("runtime")
     if isinstance(deployed_runtime, dict) and isinstance(deployed_runtime.get("actual"), dict):
-        proof = compare(deployed_runtime["actual"], extras=("ops", "brief"))
+        proof = compare(deployed_runtime["actual"], extras=("ops", "brief"), profile=profile)
         checks.append(
             Check(
                 "server-runtime",
                 "PASS" if proof["ok"] else "FAIL",
-                "deployed core/ops/brief runtime versions"
+                f"deployed core/ops/brief runtime versions ({profile} catalog)"
                 if proof["ok"]
-                else "deployed runtime drift: " + ", ".join(sorted(proof["mismatches"])),
+                else f"deployed runtime drift ({profile} catalog): " + ", ".join(sorted(proof["mismatches"])),
             )
         )
     else:
         checks.append(Check("server-runtime", "WARN", "deployed core runtime attestation unavailable"))
-    runtime = caps.get("encoding", {}).get("profile", {}).get("runtime")
-    if isinstance(runtime, dict):
+    runtime = encoder.get("runtime") if isinstance(encoder, dict) else None
+    if lexical:
+        checks.append(Check("encoder-runtime", "PASS", "encoder absent by profile (lexical): nothing to attest"))
+    elif isinstance(runtime, dict):
         proof = compare(runtime, encoding_only=True)
-        checks.append(
-            Check(
-                "encoder-runtime",
-                "PASS" if proof["ok"] else "FAIL",
-                "qualified encoder package versions"
-                if proof["ok"]
-                else "deployed encoder version drift: " + ", ".join(sorted(proof["mismatches"])),
-                ""
-                if proof["ok"]
-                else "review the qualified runtime; do not re-encode/mix vectors implicitly",
+        names = ", ".join(sorted(proof["mismatches"]))
+        if proof["ok"]:
+            checks.append(Check("encoder-runtime", "PASS", "qualified encoder package versions"))
+        elif proof["state"] == "missing_dependency":
+            checks.append(
+                Check(
+                    "encoder-runtime",
+                    "FAIL",
+                    "deployed encoder missing dependency: " + names,
+                    f'pip install -c qualified_runtime_constraints_v1.txt "memory-os-ai[ops,brief,semantic]=={__version__}"',
+                )
             )
-        )
+        else:
+            checks.append(
+                Check(
+                    "encoder-runtime",
+                    "FAIL",
+                    "deployed encoder version drift: " + names,
+                    "review the qualified runtime; do not re-encode/mix vectors implicitly",
+                )
+            )
     else:
         checks.append(Check("encoder-runtime", "WARN", "deployed package versions unavailable"))
+    marker = _store_profile(caps)
+    if marker is not None:
+        checks.append(marker)
+    checks.append(_server_sqlite(caps))
     if caps.get("brief", {}).get("compact"):
         checks.append(
             Check(

@@ -35,6 +35,7 @@ from .clients import CLIENTS, SERVER, Client, classify, read_entry, relay_comman
 
 DEFAULT_CLIENTS = ("claude-code", "codex")
 JOURNAL_ROOT = Path("~/.local/state/memory-os/quickstart")
+JOURNAL_SUBDIR = ".local/state/memory-os/quickstart"  # below the selected HOME
 SENSITIVE = ("TOKEN", "KEY", "SECRET", "PASSWORD", "BEARER")
 
 
@@ -101,6 +102,15 @@ def _entry_hash(entry: dict) -> str:
     return hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
 
 
+def installation_identity(env: dict) -> str:
+    """Destination identity: WHICH service an entry points to (URL + token file).
+
+    It is not a proof of ownership: anyone can write these two values in a configuration.
+    """
+    document = {"url": env.get("MEMORY_V4_URL"), "token_file": env.get("MEMORY_V4_TOKEN_FILE")}
+    return hashlib.sha256(json.dumps(document, sort_keys=True).encode()).hexdigest()
+
+
 def _port_state(port: int) -> str:
     with socket.socket() as s:
         s.settimeout(0.5)
@@ -110,7 +120,8 @@ def _port_state(port: int) -> str:
 # ---------- preview (Q1: zero writes) ----------
 
 def preview(*, home: Path, python: str, env: dict[str, str], clients: tuple[str, ...] = DEFAULT_CLIENTS,
-            port: int = 8765, token_file: Path | None = None, provision_plan: dict | None = None) -> dict:
+            port: int = 8765, token_file: Path | None = None, provision_plan: dict | None = None,
+            replace_existing: tuple[str, ...] = (), journal_root: Path | None = None) -> dict:
     """Read-only plan. ``provision_plan`` = result of provision.plan() (computed by the caller, without network)."""
     selected = [c for c in CLIENTS if c.key in clients]
     unknown = sorted(set(clients) - {c.key for c in selected})
@@ -290,7 +301,7 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
     """Q3: restores the previous entry ONLY if our entry is still the one applied; otherwise refusal."""
     if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]{32}", stamp):
         raise QuickstartError("Invalid journal stamp")
-    journal_root = journal_root or home / ".local/state/memory-os/quickstart"
+    journal_root = journal_root or home / JOURNAL_SUBDIR
     journal = journal_root / stamp / "journal.json"
     _safe_path(journal, journal_root)
     if stat.S_IMODE(journal.stat().st_mode) != 0o600:
@@ -394,9 +405,22 @@ def settings_for_install(settings, *, backend=None, home=None):
     return settings, chosen
 
 
-def _service_plan(settings, home, python, resource_env, *, backend=None):
+PROFILES = ('lexical', 'semantic')
+# Encoder settings a lexical service must not carry (Config.validate_retrieval_profile refuses them).
+ENCODER_ENV = ('MEMORY_V4_EMBED_MODEL', 'MEMORY_V4_EMBED_MAX_SEQ_LENGTH', 'MEMORY_V4_DEVICE',
+               'MEMORY_V4_EMBED_DTYPE', 'MEMORY_V4_EMBED_BATCH_SIZE', 'HF_HUB_CACHE')
+PROFILE_INSTALL = {
+    'lexical': ('memory-os-ai[ops,brief]', 'qualified_runtime_constraints_lexical_v1.txt'),
+    'semantic': ('memory-os-ai[ops,brief,semantic]', 'qualified_runtime_constraints_v1.txt'),
+}
+
+
+def _service_plan(settings, home, python, resource_env, *, backend=None, profile='semantic'):
+    """Service definition of one profile. ``semantic`` is the frozen 4.0.9 definition, byte for byte;
+    ``lexical`` is that definition minus the encoder variables, plus the profile selector."""
     from .cli import _plist
-    from .provision import catalog
+    if profile not in PROFILES:
+        raise QuickstartError('Unknown install profile', code='setup_profile_unknown')
     label = settings.service_label or "local.memory-os-v4"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", label):
         raise QuickstartError("Invalid service label")
@@ -406,13 +430,18 @@ def _service_plan(settings, home, python, resource_env, *, backend=None):
     env = {"MEMORY_V4_DIR": str(settings.store_dir), "MEMORY_V4_TOKEN_FILE": str(settings.token_file),
            "MEMORY_V4_URL": settings.url, "MEMORY_V4_SERVICE_LABEL": label,
            "MEMORY_V4_STORE_BACKEND": 'sqlite_s1' if backend == 'sqlite' else 'jsonl',
-           "MEMORY_V4_WORK_STATE": 'true' if backend == 'sqlite' else 'false',
-           "MEMORY_V4_EMBED_MODEL": catalog()['model_id'], "MEMORY_V4_EMBED_MAX_SEQ_LENGTH": "512",
-           "MEMORY_V4_MAINTENANCE_MODE": "disabled",
-           "MEMORY_V4_DEVICE": "auto", "MEMORY_V4_EMBED_DTYPE": "native",
-           "MEMORY_V4_EMBED_BATCH_SIZE": "32", "MEMORY_V4_BM25_PROFILE": "scoped_literal",
-           "MEMORY_V4_LEXICAL_GUARD_K": "3", "TOKENIZERS_PARALLELISM": "false",
-           "MEMORY_V4_OPS_DIR": str(settings.ops_dir), **resource_env}
+           "MEMORY_V4_WORK_STATE": 'true' if backend == 'sqlite' else 'false'}
+    if profile == 'semantic':
+        from .provision import catalog
+        env.update({"MEMORY_V4_EMBED_MODEL": catalog()['model_id'], "MEMORY_V4_EMBED_MAX_SEQ_LENGTH": "512"})
+    env["MEMORY_V4_MAINTENANCE_MODE"] = "disabled"
+    if profile == 'semantic':
+        env.update({"MEMORY_V4_DEVICE": "auto", "MEMORY_V4_EMBED_DTYPE": "native", "MEMORY_V4_EMBED_BATCH_SIZE": "32"})
+    env.update({"MEMORY_V4_BM25_PROFILE": "scoped_literal", "MEMORY_V4_LEXICAL_GUARD_K": "3",
+                "TOKENIZERS_PARALLELISM": "false", "MEMORY_V4_OPS_DIR": str(settings.ops_dir), **resource_env})
+    if profile == 'lexical':
+        env = {key: value for key, value in env.items() if key not in ENCODER_ENV}
+        env["MEMORY_V4_RETRIEVAL_PROFILE"] = "lexical"
     argv = [python, "-m", "memory_os_v4.server", "--transport", "http", "--host", "127.0.0.1",
             "--port", str(settings.port), "--warm"]
     xml = _plist(label, argv, env=env, keepalive=True, log=settings.ops_dir / "logs/server.err")
@@ -431,30 +460,58 @@ def _service_plan(settings, home, python, resource_env, *, backend=None):
             "state": state, "sha256": _sha(path)}
 
 
+def _installed_profile(settings, home):
+    """Profile recorded by an existing service definition (absent variable = semantic); None without one."""
+    import plistlib
+    label = settings.service_label or 'local.memory-os-v4'
+    path = home / 'Library/LaunchAgents' / (label + '.plist')
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        env = plistlib.loads(path.read_bytes()).get('EnvironmentVariables', {})
+        value = env.get('MEMORY_V4_RETRIEVAL_PROFILE', 'semantic') if isinstance(env, dict) else None
+    except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
+        return None
+    return value if value in PROFILES else None
+
+
+def _job_run(argv, *, run, timeout):
+    """One system command reduced to (return code, stdout, stderr); a timeout or OS error gives None.
+
+    Callers only ever copy the command name and its return code into what we produce (§8).
+    """
+    try:
+        result = run(argv, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.SubprocessError, OSError):
+        return None, '', ''
+    return result.returncode, result.stdout or '', result.stderr or ''
+
+
 def _job_observation(service, *, run):
-    result = run(["launchctl", "print", f"gui/{os.getuid()}/{service['label']}"],
-                 capture_output=True, text=True, timeout=5)
-    if result.returncode == 0:
+    code, stdout, stderr = _job_run(["launchctl", "print", f"gui/{os.getuid()}/{service['label']}"], run=run, timeout=5)
+    if code is None:
+        return {'state': 'unknown'}  # a timeout is never evidence of absence
+    if code == 0:
         # A plist on disk alone cannot attest the currently loaded launchd job.
         # Check the launchctl output's program and first argument, not just a label.
-        program = re.search(r"(?m)^\s*program = (.+?)\s*$", result.stdout)
-        args = re.search(r"arguments = \{\s*\n([\s\S]*?)\n\s*\}", result.stdout)
+        program = re.search(r"(?m)^\s*program = (.+?)\s*$", stdout)
+        args = re.search(r"arguments = \{\s*\n([\s\S]*?)\n\s*\}", stdout)
         def unquote(text):
             return text.strip().strip('"')
         actual_args = [unquote(line) for line in args.group(1).splitlines() if line.strip()] if args else []
         if not program or not args or unquote(program.group(1)) != service['argv'][0] or actual_args != service['argv']:
             return {'state': 'foreign-or-unattested'}
         for key in ('MEMORY_V4_TOKEN_FILE', 'MEMORY_V4_DIR'):
-            match = re.search(r"(?m)^\s*" + re.escape(key) + r" => (.+?)\s*$", result.stdout)
+            match = re.search(r"(?m)^\s*" + re.escape(key) + r" => (.+?)\s*$", stdout)
             if not match or unquote(match.group(1)) != service['env'][key]:
                 return {'state': 'foreign-or-unattested'}
         def number(key):
-            match = re.search(r'(?m)^\s*' + re.escape(key) + r' = (-?\d+)\s*$', result.stdout)
+            match = re.search(r'(?m)^\s*' + re.escape(key) + r' = (-?\d+)\s*$', stdout)
             return int(match[1]) if match else None
-        process_state = re.search(r'(?m)^\s*state = (.+?)\s*$', result.stdout)
+        process_state = re.search(r'(?m)^\s*state = (.+?)\s*$', stdout)
         return {'state': 'loaded', 'runs': number('runs'), 'last_exit_code': number('last exit code'),
                 'pid': number('pid'), 'process_state': process_state[1] if process_state else None}
-    if "Could not find service" in (result.stdout + result.stderr):
+    if "Could not find service" in (stdout + stderr):
         return {'state': 'absent'}
     return {'state': 'unknown'}  # permissions/syntax/IPC failures are not evidence of absence
 
@@ -463,55 +520,105 @@ def _job_state(service, *, run):
     return _job_observation(service, run=run)['state']
 
 
-def _startup_log_tail(settings, home):
-    """Bounded private diagnostic; never follow links or return a bearer token."""
-    from .auth import read_token
+def _startup_failure(observed, settings, home):
+    """Structured, allow-listed facts about a crashing service (§8): never a line of its log.
+
+    The raw log stays where the server wrote it, bytes unchanged; only its path, its size and
+    class names of the closed list leave it.
+    """
+    from .diagnostics import exception_types
     path = settings.ops_dir / 'logs/server.err'
+    facts = {key: observed.get(key) for key in ('state', 'runs', 'last_exit_code', 'pid', 'process_state')}
+    facts.update(exception_types=[], log_path=str(path), log_bytes=None)
     try:
         _safe_path(path, home)
         with path.open('rb') as stream:
             stream.seek(0, 2)
-            stream.seek(max(0, stream.tell() - 8192))
-            text = stream.read(8192).decode('utf-8', errors='replace')
-        text = '\n'.join(text.splitlines()[-24:])
-        token = read_token(settings.token_file)
-        if token:
-            text = text.replace(token, '[REDACTED]')
-        text = re.sub(r'(?i)bearer\s+[^\s"\']+', 'Bearer [REDACTED]', text)
-        return text.replace(str(home), '~')[-4096:]
+            facts['log_bytes'] = stream.tell()
+            stream.seek(max(0, facts['log_bytes'] - 8192))
+            facts['exception_types'] = exception_types(stream.read(8192).decode('utf-8', errors='replace'))
     except (OSError, ValueError, RuntimeError):
-        return 'Server log unavailable or unsafe; inspect the retained private log manually.'
+        pass
+    return facts
 
 
-def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backend=None, run=subprocess.run):
-    """Pure read-only preflight. Does not invoke setup/create_token or use client auth."""
-    from ..readiness import build_identity
-    from . import provision
-    from .qualified_runtime import inspect_current
+def _install_journals(root):
+    """``install.json`` documents below a journal root, newest first; unreadable ones are skipped."""
+    found = []
+    try:
+        directories = sorted((p for p in root.iterdir() if p.is_dir() and not p.is_symlink()), reverse=True)
+    except OSError:
+        return found
+    for directory in directories:
+        try:
+            document = json.loads((directory / 'install.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if isinstance(document, dict):
+            found.append((directory, document))
+    return found
+
+
+def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backend=None, run=subprocess.run,
+            profile=None, replace_existing=(), which=shutil.which):
+    """Pure read-only preflight. Does not invoke setup/create_token or use client auth.
+
+    ``profile``: explicit for a new install (R1: no default); an owned service gives its own
+    profile, which is read and never converted.
+    """
+    from .. import readiness
+    from . import provision, qualified_runtime
     from .auth import read_token
     import importlib.util
+    if profile is not None and profile not in PROFILES:
+        raise QuickstartError('Unknown install profile: choose lexical or semantic', code='setup_profile_unknown')
     minimum = provision.min_free_bytes()
     home = home or Path.home()
     python = python or str(Path(sys.executable).absolute())
     backend = _selected_backend(settings, home, backend)
-    resource_plan = provision.plan()
     client_env = {"MEMORY_V4_URL": settings.url, "MEMORY_V4_TOKEN_FILE": str(settings.token_file),
                   "MEMORY_V4_OPS_DIR": str(settings.ops_dir)}
-    result = preview(home=home, python=python, env=client_env, clients=clients, port=settings.port,
-                     token_file=settings.token_file, provision_plan=resource_plan)
-    identity = build_identity()
-    service = _service_plan(settings, home, python, resource_plan['env'], backend=backend)
-    runtime = inspect_current(extras=('ops', 'brief'))
     blockers, blocker_codes = [], []
 
     def block(code, message):
         blocker_codes.append(code)
         blockers.append(message)
+    installed = _installed_profile(settings, home)
+    effective = profile or installed
+    if effective is None:
+        # New install without --profile: refused, never defaulted, and nothing else is evaluated.
+        result = preview(home=home, python=python, env=client_env, clients=clients, port=settings.port,
+                         token_file=settings.token_file, provision_plan=None, replace_existing=replace_existing)
+        block('setup_profile_required', 'setup_profile_required: a new install needs --profile lexical or '
+              '--profile semantic; no default is chosen')
+        return {**result, 'ok': False, 'profile': None, 'blockers': blockers, 'blocker_codes': blocker_codes,
+                'service': None, 'backend': backend, 'work_state': backend == 'sqlite', 'notices': [],
+                'client_env': client_env, 'writes': 'none (preview)', 'stage': 'preview'}
+
+    def resources_for(name):
+        return provision.plan(resources=('cl100k',)) if name == 'lexical' else provision.plan()
+    resource_plan = resources_for(effective)
+    service = _service_plan(settings, home, python, resource_plan['env'], backend=backend, profile=effective)
+    if service['state'] == 'foreign-or-different' and installed and installed != effective:
+        # The existing definition may be ours under ITS profile: a conversion request, not a foreign service.
+        other_plan = resources_for(installed)
+        other = _service_plan(settings, home, python, other_plan['env'], backend=backend, profile=installed)
+        if other['state'] == 'owned':
+            block('setup_profile_conflict', f'setup_profile_conflict: this installation is {installed}; '
+                  f'--profile {effective} is refused (a profile is read, never converted)')
+            resource_plan, service = other_plan, other
+    result = preview(home=home, python=python, env=client_env, clients=clients, port=settings.port,
+                     token_file=settings.token_file, provision_plan=resource_plan,
+                     replace_existing=replace_existing)
+    if effective == 'lexical' and backend != 'sqlite':
+        block('setup_profile_backend_conflict', 'setup_profile_backend_conflict: the lexical profile requires the sqlite backend')
     sqlite_report = sqlite_runtime.inspect()
     if backend == 'sqlite' and not sqlite_report.get('ok'):
         block(sqlite_report.get('code') or 'sqlite_runtime_unavailable',
               f"{sqlite_report.get('code')}: SQLite loaded by this interpreter is unfit "
               f"(version {sqlite_report.get('version')}, minimum {sqlite_report.get('minimum')}); nothing written")
+    identity = readiness.build_identity()
+    runtime = qualified_runtime.inspect_current(profile=effective, extras=('ops', 'brief'))
     if sys.version_info[:2] != (3, 11):
         block('runtime_unqualified', 'runtime_unqualified: macOS Python 3.11 closure required for quickstart')
     if sys.platform != 'darwin' or platform.machine().lower() not in {'arm64', 'aarch64'}:
@@ -519,19 +626,34 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     if identity.get('identity_source') != 'embedded_descriptor' or not identity.get('commit') or identity.get('source_dirty'):
         block('build_unqualified', 'build_unqualified: install a qualified wheel; source/env identity is insufficient')
     if not runtime['ok']:
-        block('runtime_unqualified', 'runtime_unqualified: package versions differ: ' + ', '.join(sorted(runtime['mismatches']))
-              + '; install the exact qualified dependencies, then re-preview')
+        from .. import __version__
+        requirement, constraints = PROFILE_INSTALL[effective]
+        block('runtime_unqualified', f"runtime_unqualified ({runtime.get('state', 'drift')}): package versions differ: "
+              + ', '.join(sorted(runtime['mismatches']))
+              + f'; install the exact qualified dependencies of the {effective} profile '
+              + f'(pip install -c {constraints} "{requirement}=={__version__}"), then re-preview')
     if not Path(python).is_file() or not os.access(python, os.X_OK) or any(s in python for s in ('/cache/uv/', 'pip-build-env', 'uvx')):
         block('runtime_unqualified', 'absolute durable Python executable required (no uvx ephemeral runtime)')
     if importlib.util.find_spec('tiktoken') is None:
         block('runtime_unqualified', 'install memory-os-ai[ops,brief] before apply; no implicit dependency install')
     if result['unknown_clients']:
         block('client_unknown', 'unknown clients')
-    if any(c['action'].startswith('refuse') for c in result['clients']):
+    conflicts = [c['client'] for c in result['clients'] if c['action'].startswith('refuse-existing')]
+    if conflicts:
+        block('client_entry_conflict', 'client_entry_conflict: an existing memory-os-ai entry is not proven to be ours for '
+              + ', '.join(conflicts) + '; nothing is overwritten silently (name the client with --replace-existing, '
+              'or edit it by hand)')
+    if any(c['action'].startswith('refuse') and not c['action'].startswith('refuse-existing') for c in result['clients']):
         block('client_config_manual', 'manual client setup required; select only eligible clients')
+    client_cli = {}
+    if any(c['client'] == 'claude-code' and c['action'] in {'create', 'replace'} for c in result['clients']):
+        client_cli['claude'] = which('claude')
+        if not client_cli['claude']:
+            block('client_cli_missing', 'client_cli_missing: the claude CLI is not on PATH; Claude Code is configured '
+                  'only through claude mcp add --scope user')
     if 'claude-desktop' in clients:
-        desktop = run(['pgrep', '-x', 'Claude'], capture_output=True, text=True, timeout=5)
-        if desktop.returncode != 1:
+        desktop, _, _ = _job_run(['pgrep', '-x', 'Claude'], run=run, timeout=5)
+        if desktop != 1:
             block('client_app_running', 'quit Claude Desktop before apply; live config may be rewritten by the app')
     token = read_token(settings.token_file)  # strict permissions/owner/format, never returned
     required = max(minimum, resource_plan['peak_additional_bytes_upper_bound'] + 1_000_000_000)
@@ -544,10 +666,17 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         block('service_foreign', 'foreign/different/unattested service: no repair, stop or overwrite')
     if service['state'] == 'absent' and (loaded != 'absent' or result['port_state'] != 'free'):
         block('port_or_label_occupied', 'port or launchd label occupied; nothing activated')
+    if service['state'] == 'owned' and loaded == 'absent':
+        # An interrupted install (plist written, job never loaded) is said here, not discovered at apply.
+        stamp = next((directory.name for directory, document in _install_journals(home / JOURNAL_SUBDIR)
+                      if document.get('steps', {}).get('service', {}).get('created') is True
+                      and document.get('service', {}).get('path') == service['path']), '<stamp>')
+        block('service_not_loaded', 'service_not_loaded: the service definition exists but its job is not loaded '
+              f'(interrupted install); roll it back with quickstart --undo {stamp} --with-service, then re-preview')
     if service['state'] == 'owned' and token is None:
         block('service_foreign', 'existing service token missing; no replacement token')
     if service['state'] == 'absent' and settings.store_dir.exists() and any(settings.store_dir.iterdir()):
-        block('store_not_empty', 'non-empty store: use the qualified upgrade runbook, never reset/migrate here')
+        block('store_not_empty', 'store_not_empty: non-empty store: use the qualified upgrade runbook, never reset/migrate here')
     if backend == 'sqlite':
         from ..sqlite_store import validate_sqlite_target
         try:
@@ -563,14 +692,22 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         notices.append('Project .mcp.json can override user scope; inspect it before claiming a connection')
     if 'gemini-cli' in clients:
         notices.append('Gemini CLI folder trust is a separate user choice; configuration does not prove a connection')
-    return {**result, 'ok': not blockers, 'identity': identity, 'service': service, 'blockers': blockers,
-            'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
+    return {**result, 'ok': not blockers, 'profile': effective, 'identity': identity, 'service': service,
+            'blockers': blockers, 'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
             'disk_min_free_bytes': minimum, 'disk_required_free_bytes': required,
             'backend': backend, 'work_state': backend == 'sqlite', 'runtime_qualification': runtime,
-            'client_env': client_env, 'writes': 'none (preview)', 'stage': 'preview'}
+            'client_env': client_env, 'client_cli': client_cli, 'replace_existing': sorted(replace_existing),
+            'writes': 'none (preview)', 'stage': 'preview'}
 
 
-def _ready(settings, identity, *, backend='sqlite'):
+def _sqlite_triplet(value):
+    if not isinstance(value, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value):
+        return None
+    return tuple(int(part) for part in value.split('.'))
+
+
+def _ready(settings, identity, *, backend='sqlite', profile='semantic'):
+    """Readiness of the started service, exactly for the expected profile; None while it is not ready."""
     from .auth import http_get
     status, body = http_get(settings.ready_url, settings, timeout=2)
     if status not in (200, 503):
@@ -581,28 +718,49 @@ def _ready(settings, identity, *, backend='sqlite'):
         raise QuickstartError('Invalid readiness response') from None
     if response.get('commit') != identity['commit'] or response.get('version') != identity['version']:
         raise QuickstartError('Service build identity differs; no client config written')
-    if status == 200:
-        if response.get('ready') is not True or response.get('reason') != 'ready':
-            raise QuickstartError('Retrieval not ready (work-only is insufficient)')
-        caps = response.get('capabilities') or {}
-        expected_backend = 'sqlite_s1' if backend == 'sqlite' else 'jsonl'
-        if (caps.get('store', {}).get('backend') != expected_backend or not caps.get('store', {}).get('instance_id')
-                or caps.get('work_state') is not (backend == 'sqlite')):
-            raise QuickstartError('Existing store/profile differs; use qualified upgrade runbook')
-        profile = caps.get('encoding', {}).get('profile') or {}
+    if status != 200:
+        return None
+    mismatch = 'service_profile_mismatch'
+    if response.get('ready') is not True or response.get('reason') != 'ready':
+        raise QuickstartError('Retrieval not ready (work-only is insufficient)')
+    caps = response.get('capabilities') or {}
+    store = caps.get('store') if isinstance(caps.get('store'), dict) else {}
+    expected_backend = 'sqlite_s1' if backend == 'sqlite' else 'jsonl'
+    if (store.get('backend') != expected_backend or not store.get('instance_id')
+            or caps.get('work_state') is not (backend == 'sqlite')):
+        raise QuickstartError('Existing store/profile differs; use qualified upgrade runbook', code=mismatch)
+    policies = caps.get('policies') if isinstance(caps.get('policies'), dict) else {}
+    encoding = caps.get('encoding') if isinstance(caps.get('encoding'), dict) else {}
+    tokenizer_ready = bool((caps.get('brief') or {}).get('tokenizer', {}).get('ready'))
+    if profile == 'lexical':
+        from ..config import LEXICAL_MARKER, LEXICAL_POLICY
+        if (caps.get('retrieval_profile') != LEXICAL_MARKER or policies.get('ranking_policy') != LEXICAL_POLICY
+                or policies.get('bm25_profile') != 'scoped_literal' or policies.get('lexical_guard_k') != 3
+                or encoding.get('state') != 'absent_by_profile' or encoding.get('profile') is not None
+                or not tokenizer_ready):
+            raise QuickstartError('Service is not exactly the lexical profile; no client config written', code=mismatch)
+    else:
+        encoder = encoding.get('profile') or {}
         from .provision import catalog
         from .qualified_runtime import compare
-        if not compare(profile.get('runtime') or {}, encoding_only=True)['ok']:
-            raise QuickstartError('Server encoder runtime differs from qualified package versions')
-        if (caps.get('encoding', {}).get('requested_device') != 'auto' or profile.get('dtype') != 'native'
-                or profile.get('batch_size') != 32 or profile.get('model_revision') != catalog()['revision']
-                or profile.get('max_seq_length') != 512 or caps.get('encoding', {}).get('model') != catalog()['model_id']
-                or caps.get('policies', {}).get('bm25_profile') != 'scoped_literal'
-                or caps.get('policies', {}).get('lexical_guard_k') != 3
-                or not caps.get('brief', {}).get('tokenizer', {}).get('ready')):
-            raise QuickstartError('Service profile or exact tokenizer differs')
-        return response
-    return None
+        if not compare(encoder.get('runtime') or {}, encoding_only=True)['ok']:
+            raise QuickstartError('Server encoder runtime differs from qualified package versions', code=mismatch)
+        if (encoding.get('requested_device') != 'auto' or encoder.get('dtype') != 'native'
+                or encoder.get('batch_size') != 32 or encoder.get('model_revision') != catalog()['revision']
+                or encoder.get('max_seq_length') != 512 or encoding.get('model') != catalog()['model_id']
+                or policies.get('bm25_profile') != 'scoped_literal' or policies.get('lexical_guard_k') != 3
+                or not tokenizer_ready):
+            raise QuickstartError('Service profile or exact tokenizer differs', code=mismatch)
+    if backend == 'sqlite':
+        # The SERVER process attests the library it loaded; this interpreter's own check is not enough.
+        version = _sqlite_triplet(store.get('sqlite_version'))
+        if version is None:
+            raise QuickstartError('The running server does not attest a readable SQLite version',
+                                  code='sqlite_runtime_unattested')
+        if version < tuple(sqlite_runtime.MIN_VERSION):
+            raise QuickstartError('The running server loaded a SQLite older than the engine floor',
+                                  code='sqlite_runtime_too_old')
+    return response
 
 
 async def _relay_probe(python, env, *, demo=False, expected=None):
@@ -660,61 +818,113 @@ async def _relay_probe(python, env, *, demo=False, expected=None):
             return result
 
 
+def _bootout(service, *, run):
+    """One ``launchctl bootout``; returns 'ok', 'failed' (non-zero code) or 'timeout'. Output is never kept."""
+    try:
+        result = run(['launchctl', 'bootout', f"gui/{os.getuid()}/{service['label']}"],
+                     capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return 'timeout'
+    except (subprocess.SubprocessError, OSError):
+        return 'failed'
+    return 'ok' if result.returncode == 0 else 'failed'
+
+
 def apply_install(plan, settings, *, download_approved=False, demo=False, home=None, run=subprocess.run,
-                  probe=None, doctor_run=None, timeout=180):
-    """Explicit apply. Journal every stage; failure preserves evidence, never repairs a foreign job."""
-    from dataclasses import asdict, replace
+                  probe=None, doctor_run=None, timeout=180, clock=time.monotonic):
+    """Explicit apply. Journal every stage; failure preserves evidence, never repairs a foreign job.
+
+    Stages: sqlite (WAL probe) -> resources -> token -> service -> service_ready -> clients -> checks
+    -> demo (on request). Every duration comes from ``clock``. Diagnostics are structured and
+    allow-listed (§8): no log line, subprocess output, doctor detail or foreign exception text.
+    """
+    from dataclasses import replace
     from . import provision, doctor
     from .auth import create_token, read_token
+    from .diagnostics import exception_label
     import anyio
     home = home or Path.home()
     if not plan.get('ok'):
         raise QuickstartError('Preflight refused: ' + '; '.join(plan.get('blockers', [])), code='preflight_refused')
     if plan['provision']['download_bytes'] and not download_approved:
-        raise QuickstartError('Resource download needs --download-approved; no token/service/config changed')
+        raise QuickstartError('Resource download needs --download-approved; no token/service/config changed',
+                              code='download_not_approved')
+    profile = plan.get('profile') or 'semantic'
     # Revalidate every mutable input before resources or setup writes.
+    cli_paths = plan.get('client_cli') or {}
     current = prepare(settings, clients=tuple(c['client'] for c in plan['clients']), home=home,
-                      python=plan['python'], backend=plan['backend'], run=run)
+                      python=plan['python'], backend=plan['backend'], run=run, profile=profile,
+                      replace_existing=tuple(plan.get('replace_existing', ())),
+                      which=lambda name: cli_paths.get(name))
     if not current['ok'] or any(current[k] != plan[k] for k in ('identity', 'service', 'client_env')):
-        raise QuickstartError('Preflight changed; re-preview, nothing activated')
+        raise QuickstartError('Preflight changed; re-preview, nothing activated', code='preflight_changed')
     if any(a['file_sha256'] != b['file_sha256'] for a, b in zip(current['clients'], plan['clients'])):
-        raise QuickstartError('Client file changed; re-preview before apply')
-    if plan['service']['state'] == 'owned' and _ready(settings, plan['identity'], backend=plan['backend']) is None:
-        raise QuickstartError('Existing owned service not ready: no repair or config writes')
+        raise QuickstartError('Client file changed; re-preview before apply', code='preflight_changed')
+    if plan['service']['state'] == 'owned' and _ready(settings, plan['identity'], backend=plan['backend'],
+                                                      profile=profile) is None:
+        raise QuickstartError('Existing owned service not ready: no repair or config writes', code='service_not_ready')
     provision.guard(home)  # includes swap attestation even when all resources are already present
-    journal = new_journal(home / '.local/state/memory-os/quickstart')
-    progress = {'version': 1, 'stamp': journal.name, 'ok': False, 'stage': 'resources', 'steps': {},
+    journal = new_journal(home / JOURNAL_SUBDIR)
+    service = plan['service']
+    began = clock()
+    progress = {'version': 1, 'stamp': journal.name, 'ok': False, 'stage': 'sqlite', 'steps': {},
+                'profile': profile,
                 'retained_on_undo': ['resources', 'token', 'service', 'store'], 'started_at': time.time(),
                 'backend': plan['backend'], 'work_state': plan['work_state'],
                 'runtime_qualification': plan['runtime_qualification'],
-                'ops_env': {**plan['service']['env'], 'MEMORY_V4_BACKUP_DIR': str(settings.backup_dir),
+                'installation_identity': installation_identity(plan['client_env']),
+                'service': {'label': service['label'], 'path': service['path'], 'argv': service['argv'],
+                            'env': {key: service['env'][key] for key in ('MEMORY_V4_TOKEN_FILE', 'MEMORY_V4_DIR')},
+                            'state_at_preview': service['state']},
+                'paths': {'store': str(settings.store_dir), 'backups': str(settings.backup_dir),
+                          'backup-key': str(settings.backup_key), 'token': str(settings.token_file),
+                          'resources': {key: plan['provision']['env'][key]
+                                        for key in ('HF_HUB_CACHE', 'MEMORY_V4_CL100K_PATH')
+                                        if key in plan['provision'].get('env', {})},
+                          'logs': str(settings.ops_dir / 'logs')},
+                'ops_env': {**service['env'], 'MEMORY_V4_BACKUP_DIR': str(settings.backup_dir),
                             'MEMORY_V4_BACKUP_KEY': str(settings.backup_key)},
                 'ops_notice': 'Use ops_env for doctor/health/backup in a fresh shell; quickstart never changes shell defaults.'}
     def record():
         _atomic_write(journal / 'install.json', json.dumps(progress, indent=1))
         (journal / 'install.json').chmod(0o600)
+
+    def enter(stage):
+        progress['stage'] = stage
+        record()
+        return clock()
+
+    def leave(step, started, **facts):
+        progress['steps'].setdefault(step, {}).update(elapsed_ms=1000 * (clock() - started), **facts)
     record()
+    failure_code = 'sqlite_wal_unavailable'  # stable code of the step in progress, used for a foreign exception
     try:
-        started = time.monotonic()
+        started = clock()
+        if plan['backend'] == 'sqlite':
+            # Functional proof, in the private journal directory, before resources, token and service.
+            wal = sqlite_runtime.wal_probe(journal)
+            if not wal.get('ok'):
+                raise QuickstartError('SQLite cannot open a WAL database here; nothing activated',
+                                      code=wal.get('code') or 'sqlite_wal_unavailable')
+        leave('sqlite', started)
+        failure_code = 'resources_failed'
+        started = enter('resources')
         resources = provision.apply(plan['provision'], download_approved=download_approved)
         if not resources.get('ok') or not resources.get('ready'):
-            raise QuickstartError('Resources not ready; no service activation')
-        progress['steps']['resources'] = {'elapsed_ms': 1000 * (time.monotonic() - started),
-                                         'download_bytes': plan['provision']['download_bytes']}
-        progress['stage'] = 'token'
-        record()
-        started = time.monotonic()
+            raise QuickstartError('Resources not ready; no service activation', code='resources_failed')
+        leave('resources', started, download_bytes=plan['provision']['download_bytes'])
+        failure_code = 'token_failed'
+        started = enter('token')
         created = create_token(settings.token_file)
-        progress['steps']['token'] = {'created': created, 'elapsed_ms': 1000 * (time.monotonic() - started)}
-        progress['stage'] = 'service'
-        record()
-        service = plan['service']
+        leave('token', started, created=created)
+        failure_code = 'service_bootstrap_failed'
+        started = enter('service')
         plist = Path(service['path'])
         if service['state'] == 'absent':
             if _sha(plist) != service['sha256'] or _port_state(settings.port) != 'free' or _job_state(service, run=run) != 'absent':
-                raise QuickstartError('Port/job/plist changed; token retained, nothing overwritten')
+                raise QuickstartError('Port/job/plist changed; token retained, nothing overwritten', code='preflight_changed')
             if settings.store_dir.exists() and any(settings.store_dir.iterdir()):
-                raise QuickstartError('Store changed; nothing activated')
+                raise QuickstartError('Store changed; nothing activated', code='preflight_changed')
             settings.store_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             (settings.ops_dir / 'logs').mkdir(parents=True, exist_ok=True, mode=0o700)
             # No previous plist exists: create exclusively, never replace a race winner.
@@ -722,24 +932,27 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
             write_secret_file(plist, service['plist'].encode())
             progress['steps']['service'] = {'created': True, 'plist_sha256': _sha(plist)}
             record()
-            res = run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)],
-                      capture_output=True, text=True, timeout=15)
-            if res.returncode:
-                raise QuickstartError('launchd bootstrap failed; plist/journal retained; no automatic repair')
-        start = time.monotonic()
+            code, _, _ = _job_run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], run=run, timeout=15)
+            if code != 0:
+                raise QuickstartError('launchd bootstrap failed; plist/journal retained; no automatic repair '
+                                      f'(roll back with quickstart --undo {journal.name} --with-service)',
+                                      code='service_bootstrap_failed')
+        leave('service', started)
+        failure_code = 'service_startup_failed'
+        start = enter('service')  # the stage stays "service" until the service answers ready
         ready = None
-        while time.monotonic() - start < timeout:
+        for _ in range(int(timeout / .25) + 2):
+            if clock() - start >= timeout:
+                break
             try:
                 provision.guard(home)
             except provision.ProvisionError:
                 if (service['state'] == 'absent' and _sha(plist) == progress['steps']['service']['plist_sha256']
                         and _job_state(service, run=run) == 'loaded'):
                     # Only our newly created, still attested job is stopped on a resource breach.
-                    stopped = run(['launchctl', 'bootout', f"gui/{os.getuid()}/{service['label']}"],
-                                  capture_output=True, text=True, timeout=15)
-                    progress['guard_stop'] = {'attempted': True, 'stopped': stopped.returncode == 0}
+                    progress['guard_stop'] = {'attempted': True, 'stopped': _bootout(service, run=run) == 'ok'}
                 raise
-            ready = _ready(settings, plan['identity'], backend=plan['backend'])
+            ready = _ready(settings, plan['identity'], backend=plan['backend'], profile=profile)
             if ready:
                 break
             observed = _job_observation(service, run=run)
@@ -747,64 +960,73 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
                     and observed.get('last_exit_code') not in (None, 0)
                     and ((observed.get('runs') or 0) >= 2 or
                          (not observed.get('pid') and observed.get('process_state') != 'running'))):
-                progress['startup_failure'] = {**observed, 'stderr_tail': _startup_log_tail(settings, home)}
+                progress['startup_failure'] = _startup_failure(observed, settings, home)
                 # Only our new, unchanged plist and re-attested job can be stopped.
                 if (service['state'] == 'absent' and _sha(plist) == progress['steps']['service']['plist_sha256']
                         and _job_state(service, run=run) == 'loaded'):
-                    stopped = run(['launchctl', 'bootout', f"gui/{os.getuid()}/{service['label']}"],
-                                  capture_output=True, text=True, timeout=15)
                     progress['startup_failure']['stop_attempted'] = True
-                    progress['startup_failure']['stopped'] = stopped.returncode == 0
+                    progress['startup_failure']['stopped'] = _bootout(service, run=run) == 'ok'
                 raise QuickstartError('Server startup failed: ' + str(observed.get('runs')) +
                                       ' runs, last exit code ' + str(observed.get('last_exit_code')) +
-                                      '; retained server.err tail: ' + progress['startup_failure']['stderr_tail'])
+                                      '; private server log kept, content not copied: ' +
+                                      progress['startup_failure']['log_path'], code='service_startup_failed')
             time.sleep(.25)
         if not ready:
-            raise QuickstartError('Readiness timeout; preserve logs/plist; no client config written')
-        progress['steps']['service_ready'] = {'elapsed_ms': 1000 * (time.monotonic() - start)}
-        progress['stage'] = 'clients'
-        record()
-        started = time.monotonic()
+            raise QuickstartError('Readiness timeout; preserve logs/plist; no client config written',
+                                  code='service_startup_failed')
+        leave('service_ready', start)
+        failure_code = 'client_write_failed'
+        started = enter('clients')
         clients = apply_clients(plan, home=home, python=plan['python'], env=plan['client_env'],
                                 journal_dir=journal, run=run)
         progress['clients'] = clients
-        progress['steps']['clients'] = {'elapsed_ms': 1000 * (time.monotonic() - started)}
+        leave('clients', started)
         if any(r['status'] not in ('applied', 'unchanged') for r in clients['records']):
-            raise QuickstartError('Client configuration refused; review retained journal, no forced write')
-        progress['stage'] = 'checks'
-        record()
-        started = time.monotonic()
+            raise QuickstartError('Client configuration refused; review retained journal, no forced write',
+                                  code='client_write_failed')
+        failure_code = 'doctor_failed'
+        started = enter('checks')
         effective = replace(settings, service_label=service['label'])
         checks = (doctor_run or doctor.run)(effective)
         selected = {c['client'] for c in plan['clients']}
         checks = [c for c in checks if not c.area.startswith('client:') or c.area.split(':', 1)[1] in selected]
-        progress['doctor'] = [asdict(c) for c in checks]
-        if any(c.status == 'FAIL' for c in checks):
-            raise QuickstartError('Doctor failed; journal retained, connection not qualified')
+        # Areas and statuses only: details and hints may quote anything (run doctor again to read them).
+        progress['doctor'] = [{'area': c.area, 'status': c.status} for c in checks]
+        failed = [c.area for c in checks if c.status == 'FAIL']
+        if failed:
+            raise QuickstartError('Doctor failed in: ' + ', '.join(failed) + '; journal retained, connection not '
+                                  'qualified (run memory-os-admin doctor for the details)', code='doctor_failed')
         if read_token(settings.token_file) is None:
-            raise QuickstartError('Token vanished; no handshake attempted')
+            raise QuickstartError('Token vanished; no handshake attempted', code='doctor_failed')
+        failure_code = 'relay_probe_failed'
         ready = {**ready, '_data_dir': str(settings.store_dir)}
         async def connect():
             return await (probe or _relay_probe)(plan['python'], plan['client_env'], demo=False, expected=ready)
         progress['relay'] = anyio.run(connect)
-        progress['steps']['checks'] = {'elapsed_ms': 1000 * (time.monotonic() - started)}
+        leave('checks', started)
         if progress['relay'].get('connected') is not True:
-            raise QuickstartError('Relay connection not proven')
+            raise QuickstartError('Relay connection not proven', code='relay_probe_failed')
         if demo:
-            progress['stage'] = 'demo'
-            record()
-            started = time.monotonic()
+            started = enter('demo')
             async def demonstrate():
                 return await (probe or _relay_probe)(plan['python'], plan['client_env'], demo=True, expected=ready)
             progress['demo'] = anyio.run(demonstrate)
-            progress['steps']['demo'] = {'elapsed_ms': 1000 * (time.monotonic() - started)}
+            leave('demo', started)
         progress.update(ok=True, stage='complete', clients_restart_required=True, real_client_usage='unmeasured')
         progress['client_next_steps'] = [{'client': item['client'], 'state': 'configured',
                                         'action': 'restart client, check MCP tools, then perform an explicit save/search',
                                         'note': item['note']} for item in plan['clients']]
     except Exception as exc:  # MCP/AnyIO can wrap a failure in an ExceptionGroup; keep journal, never replay
-        progress['error'] = str(exc) if isinstance(exc, (QuickstartError, provision.ProvisionError)) else type(exc).__name__
+        ours = isinstance(exc, (QuickstartError, provision.ProvisionError))
+        # Our own messages are built without foreign content; anything else is reduced to a listed class name.
+        progress['error'] = str(exc) if ours else exception_label(exc)
+        code = getattr(exc, 'code', None) if isinstance(exc, QuickstartError) else None
+        progress['code'] = code if code and code != 'quickstart_refused' else failure_code
     finally:
-        progress['elapsed_s'] = time.time() - progress['started_at']
+        steps = progress['steps']
+        progress['timing'] = {'profile': profile, 'download_bytes': plan['provision']['download_bytes'],
+                              'steps_ms': {name: steps[name]['elapsed_ms'] for name in steps if 'elapsed_ms' in steps[name]},
+                              'total_s': clock() - began, 'clock': 'monotonic'}
+        progress['elapsed_s'] = progress['timing']['total_s']
         record()
     return progress
