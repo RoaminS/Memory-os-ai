@@ -434,6 +434,9 @@ def _h_consolidate(engine: MemoryV4, args: models.ConsolidateIn) -> dict:
             "superseded_pairs": [list(p) for p in result["superseded_pairs"]],
             "decayed": result["decayed"],
             "summary_proposals": result["summary_proposals"],
+            # Lexical profile only: an empty list means "unavailable", not "no cluster found".
+            **({"summary_proposals_status": result["summary_proposals_status"]}
+               if "summary_proposals_status" in result else {}),
         }
     )
 
