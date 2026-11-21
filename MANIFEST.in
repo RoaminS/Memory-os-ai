@@ -4,6 +4,7 @@ include AGENTS.md CLAUDE.md CHANGELOG.md
 include server.json
 include conftest.py
 include setup.py memory_os_build.py
+include v4/src/memory_os_constraints.py
 recursive-include v4/src/memory_os_v4/resources *.json *.txt
 exclude .mcp.json .vscode/mcp.json
 include v4/pyproject.toml

@@ -20,8 +20,14 @@
   `absent_by_profile` en lexical.
 - `bench/evaluation_manifest.py` : mode `retrospective_no_selection` pour une mesure sur corpus déjà observé.
 - Inchangés : schéma SQLite 8, `embed.py`, cache d'embeddings, comportement du profil sémantique.
-- Non fait : preuve du wheel lexical installé, copie de store qualifiée, mesure H2, adaptation de `quickstart`,
-  `provision` et `doctor` au profil lexical. Contrat : `v4/docs/LEXICAL_PROFILE_4_1_0.md`.
+- Installation multi-clients (phase 1a-setup, `v4/docs/SETUP_4_1_0.md`) : `quickstart --profile {lexical,semantic}`
+  (obligatoire pour une installation neuve, relu d'un service existant, jamais converti), SQLite chargé vérifié
+  avant toute écriture et attesté par le serveur (`capabilities.store.sqlite_version`), codes de refus stables,
+  entrée cliente existante jamais écrasée en silence (`--replace-existing`), diagnostics structurés sans queue de
+  log, `quickstart --undo --with-service`, `memory-os-admin uninstall` (données jamais supprimées), localisateur
+  `memory-os-constraints` et portes de résolution par profil. `doctor` accepte un déploiement lexical.
+- Non fait : preuve du wheel lexical installé, copie de store qualifiée, mesure H2, preuve d'installation réelle et
+  mesure de la clause D1 pour le profil lexical. Contrat moteur : `v4/docs/LEXICAL_PROFILE_4_1_0.md`.
 
 ## 4.0.9 — candidate à chaîne finale (2026-11-21) ; état à la préparation : non publiée / non déployée
 

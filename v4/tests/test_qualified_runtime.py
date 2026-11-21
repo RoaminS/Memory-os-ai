@@ -106,7 +106,8 @@ def test_network_gate_uses_guarded_dry_run_private_home_and_no_credentials(tmp_p
         (output / 'pip-report.json').write_text(json.dumps(report))
         return {'simulated': True}
     monkeypatch.setattr(gate, 'command', command)
-    monkeypatch.setattr(sys, 'argv', ['tool', '--wheel', str(wheel), '--output', str(output)])
+    # 4.1.0 setup contract §9: the gate has no default profile; comparisons unchanged.
+    monkeypatch.setattr(sys, 'argv', ['tool', '--wheel', str(wheel), '--output', str(output), '--profile', 'semantic'])
     assert gate.main() == 0
     proof = json.loads((output / 'report.json').read_text())
     assert proof['installed'] is False and proof['min_free_bytes'] == minimum
@@ -190,7 +191,8 @@ def test_network_guard_refuses_invalid_override_before_resolution(tmp_path, monk
     monkeypatch.setattr(gate, 'ROOT', tmp_path)
     monkeypatch.setenv('MEMORY_V4_MIN_FREE_BYTES', override)
     output = tmp_path / '.local-qualification/proof'
-    monkeypatch.setattr(sys, 'argv', ['tool', '--wheel', str(tmp_path / 'fixture.whl'), '--output', str(output)])
+    monkeypatch.setattr(sys, 'argv', ['tool', '--wheel', str(tmp_path / 'fixture.whl'), '--output', str(output),
+                                      '--profile', 'semantic'])  # 4.1.0 setup contract §9
     monkeypatch.setattr(gate, 'command', lambda *a: pytest.fail('must not resolve'))
     monkeypatch.setattr(gate, 'guard', lambda *a: pytest.fail('must validate threshold first'))
     with pytest.raises(ProvisionError, match='integer bytes >= 3000000000'):

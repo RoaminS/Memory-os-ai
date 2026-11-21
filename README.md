@@ -7,7 +7,8 @@ Connected assistants — Claude Code, Codex, Cursor, VS Code Copilot, Gemini CLI
 the same project state on your machine: dated decisions, open tasks and verifiable history.
 
 > **Status: ALPHA — macOS Apple Silicon only** (Linux/Windows planned, not qualified). Local clients on the same Mac;
-> remote/cloud agents are not qualified. Current release: **4.0.9**.
+> remote/cloud agents are not qualified. Current release: **4.1.0** (in preparation, not published yet; latest
+> published release: 4.0.9).
 > Limits and evaluation results: [see below](#limits-and-evaluations).
 
 ## Why
@@ -21,44 +22,79 @@ help with handoffs, but need upkeep. Memory OS AI is a **local MCP server** your
 - **Hand over** — shared tasks (open / blocked / done) with compare-and-set: two assistants cannot silently
   overwrite each other's update (SQLite backend).
 
-No LLM inside: your assistant extracts the facts; search runs locally (hybrid BM25 + a 97M-parameter embedding
-model). No account, no telemetry, no cloud service of ours.
+No LLM inside: your assistant extracts the facts; search runs locally, with the profile you choose at install time:
+**lexical** (literal BM25, no embedding model) or **semantic** (hybrid BM25 + a 97M-parameter embedding model).
+No account, no telemetry, no cloud service of ours.
 
 ## Install on macOS
 
-Prerequisites: Apple Silicon, **Python 3.11** (e.g. Homebrew), ~1.2 GB free for the environment and model, plus a
-5 GB free-disk safety reserve. Check the SQLite library of that Python:
-`python3.11 -c 'import sqlite3; print(sqlite3.sqlite_version)'`. SQLite ≥ 3.51.3 is required for the SQLite backend;
-check the library linked to this Python interpreter, not the sqlite3 command-line tool.
+Prerequisites: Apple Silicon, **Python 3.11** (e.g. Homebrew) and a 5 GB free-disk safety reserve. Check the SQLite
+library of that Python: `python3.11 -c 'import sqlite3; print(sqlite3.sqlite_version)'`. SQLite ≥ 3.51.3 is required
+for the SQLite backend; check the library linked to this Python interpreter, not the sqlite3 command-line tool
+(`quickstart` and `doctor` check it too, before anything is written).
+
+Choose **one install profile**. It is explicit (`--profile` has no default for a new install), it is never guessed
+from the installed packages, and an existing installation keeps its profile: there is no in-place conversion.
+
+**Lexical profile** — literal BM25 search, no embedding model: the only download is the 1.7 MB tokenizer table
+(with `--download-approved`); nothing is fetched from a model hub.
 
 ```bash
 python3.11 -m venv ~/.memory-os/venv
-~/.memory-os/venv/bin/pip install "memory-os-ai[ops,brief]==4.0.9"
-~/.memory-os/venv/bin/memory-os-admin quickstart --clients claude-code,codex        # preview: writes nothing
-~/.memory-os/venv/bin/memory-os-admin quickstart --clients claude-code,codex --apply --download-approved --demo
+V=~/.memory-os/venv/bin
+$V/pip install --no-deps "memory-os-ai==4.1.0"
+$V/pip install -c "$($V/memory-os-constraints lexical)" "memory-os-ai[ops,brief]==4.1.0"
+$V/memory-os-admin quickstart --profile lexical --clients claude-code,codex          # preview: writes nothing
+$V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --apply --download-approved --demo
 ```
 
-`quickstart` installs a local background service (launchd, `127.0.0.1` only, private 0600 token file), downloads the
-pinned embedding model and tokenizer table (221.9 MB, only with `--download-approved`), configures the assistants you
-chose (backup + `--undo` of each config file) and proves the connection with a save/search demo. New installs use
-SQLite with shared tasks; `--backend jsonl` keeps a plain-file store without tasks. Existing installations are never
-migrated implicitly: back up and qualify an upgrade on a copy first.
+**Semantic profile** — hybrid BM25 + embedding model; ~1.2 GB for the environment and model: `--download-approved`
+fetches the pinned embedding model and the tokenizer table (221.9 MB).
+
+```bash
+python3.11 -m venv ~/.memory-os/venv
+V=~/.memory-os/venv/bin
+$V/pip install --no-deps "memory-os-ai==4.1.0"
+$V/pip install -c "$($V/memory-os-constraints semantic)" "memory-os-ai[ops,brief,semantic]==4.1.0"
+$V/memory-os-admin quickstart --profile semantic --clients claude-code,codex         # preview: writes nothing
+$V/memory-os-admin quickstart --profile semantic --clients claude-code,codex --apply --download-approved --demo
+```
+
+The first `pip` command installs the package alone so that `memory-os-constraints` can name the constraints file of
+your profile; the second installs the dependencies at exactly the qualified versions. `quickstart` refuses a runtime
+whose installed versions differ from that lock.
+
+`quickstart` installs a local background service (launchd, `127.0.0.1` only, private 0600 token file), downloads only
+what your profile needs and only with `--download-approved`, configures the assistants you chose (backup + `--undo` of
+each config file) and proves the connection with a save/search demo. An existing `memory-os-ai` entry that the tool
+cannot prove it wrote is never overwritten silently: name the client with `--replace-existing <client>`, or edit it by
+hand. New installs use SQLite with shared tasks; `--backend jsonl` (semantic profile only) keeps a plain-file store
+without tasks. Existing installations are never migrated implicitly: back up and qualify an upgrade on a copy first.
+
+**Roll back / uninstall.** `quickstart --undo <stamp>` restores our entry in each client config;
+`--undo <stamp> --with-service` also stops the service that install created. `memory-os-admin uninstall` (preview),
+then `uninstall --apply`, removes the client entries our journal proves we wrote and stops our service once no client
+entry depends, or may depend, on it. `uninstall` never deletes your data: store, backups, backup key, token,
+downloaded resources, journals and logs stay where they are, and there is no purge option. What it cannot see is
+listed for manual removal (a Claude Desktop extension, Claude Code hooks, auxiliary launchd jobs, the Python
+environment).
 
 Measured on an isolated clean **4.0.6** install on macOS Apple Silicon (12 October 2026): **77 s** SQLite / **80 s**
-JSONL end to end (pip, model, service, demo). These are not 4.0.9 measurements, nor a user productivity study.
+JSONL end to end (pip, model, service, demo). These are not 4.1.0 measurements, nor a user productivity study; the
+install time of the lexical profile has not been measured yet.
 
 ### Add another assistant later
 
 Recommended: `~/.memory-os/venv/bin/memory-os-admin quickstart --clients cursor,vscode` (preview), then `--apply`;
-it reuses the qualified interpreter with absolute paths.
+it reuses the qualified interpreter with absolute paths and the profile of the existing installation.
 
 One-click alternatives (they add only the **relay**; the service, token and tokenizer table must already be installed;
 they need [`uv`](https://docs.astral.sh/uv/) on the PATH of the app and reinstall the package in uv's own environment):
 
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp/install?name=memory-os-ai&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLXB5dGhvbiIsIjMuMTEiLCItLW5vLXB5dGhvbi1kb3dubG9hZHMiLCItLWZyb20iLCJtZW1vcnktb3MtYWlbb3BzLGJyaWVmXT09NC4wLjkiLCJtZW1vcnktb3MtcmVsYXkiXX0%3D)
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_memory--os--ai-0098FF)](https://vscode.dev/redirect/mcp/install?name=memory-os-ai&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--python%22%2C%223.11%22%2C%22--no-python-downloads%22%2C%22--from%22%2C%22memory-os-ai%5Bops%2Cbrief%5D%3D%3D4.0.9%22%2C%22memory-os-relay%22%5D%7D)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp/install?name=memory-os-ai&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLXB5dGhvbiIsIjMuMTEiLCItLW5vLXB5dGhvbi1kb3dubG9hZHMiLCItLWZyb20iLCJtZW1vcnktb3MtYWlbb3BzLGJyaWVmXT09NC4xLjAiLCJtZW1vcnktb3MtcmVsYXkiXX0%3D)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_memory--os--ai-0098FF)](https://vscode.dev/redirect/mcp/install?name=memory-os-ai&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--python%22%2C%223.11%22%2C%22--no-python-downloads%22%2C%22--from%22%2C%22memory-os-ai%5Bops%2Cbrief%5D%3D%3D4.1.0%22%2C%22memory-os-relay%22%5D%7D)
 
-VS Code fallback: `code --add-mcp '{"name":"memory-os-ai","command":"uvx","args":["--python","3.11","--no-python-downloads","--from","memory-os-ai[ops,brief]==4.0.9","memory-os-relay"]}'`
+VS Code fallback: `code --add-mcp '{"name":"memory-os-ai","command":"uvx","args":["--python","3.11","--no-python-downloads","--from","memory-os-ai[ops,brief]==4.1.0","memory-os-relay"]}'`
 
 | Client | quickstart | Notes |
 |---|---|---|
@@ -85,7 +121,8 @@ Handoff check: in Claude, *"project acme-api: we decided to use Postgres 17 for 
 ## Operate
 
 `memory-os-admin doctor` · `health` · `backup --backend sqlite --online --apply` · `restore-drill` ·
-`quickstart --undo <stamp>` (restores only our entry in each client config). Interrupted writes are reported as
+`quickstart --undo <stamp>` (restores only our entry in each client config) · `uninstall` (preview; never deletes
+data). Interrupted writes are reported as
 *uncertain* and **never replayed automatically**.
 
 ## Limits and evaluations
@@ -108,6 +145,11 @@ Loopback-only service, bearer token in a 0600 file (never written into client co
 policy, dated append-only history, compare-and-set on tasks and core blocks.
 
 ## Release notes
+
+**4.1.0** (in preparation, not published): explicit install profile — `lexical` (no embedding model) or `semantic` —
+with per-profile qualified constraints; `quickstart --profile`, loaded-SQLite check before any write, no silent
+overwrite of an existing client entry, structured diagnostics without log excerpts, `quickstart --undo --with-service`
+and `uninstall` (never deletes data). No measured user-productivity gain; no lexical/semantic parity measurement.
 
 **4.0.9**: the operator health report probes `/health` and `/ready` with a 15 s timeout (the `/ready` integrity audit takes several seconds on a large store) and reports explicit client corrections as information instead of pending reviews; more than 10 replaced targets in 24 h raise an anomaly. Documentation states the published versions. No engine, brief, schema or encoder change. No measured user-productivity gain.
 

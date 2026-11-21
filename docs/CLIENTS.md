@@ -5,6 +5,25 @@ New quickstart installations default to SQLite + tasks; `--backend jsonl` is ava
 An existing service/store is never migrated by quickstart. Relay configurations stay the same for both backends.
 Claude draft integrated after Codex review, 2026-10-11.
 
+**4.1.0 (in preparation, not published).** `quickstart` needs an explicit `--profile lexical|semantic` for a new
+install and keeps the profile of an existing one. Qualified clients of that release: Claude Code, Claude Desktop,
+Codex, Cursor, VS Code, Antigravity. Three rules changed for every JSON client:
+
+- **An existing `memory-os-ai` entry is never overwritten silently.** `quickstart` replaces it on its own only when
+  it is the strict relay form (absolute interpreter, exactly `-m memory_os_v4.ops.relay`), points to this
+  installation, and a private journal of this installation proves the tool wrote it. Any other entry — direct HTTP,
+  old v3 server, wrapper, console script, hand-written copy, another installation — is refused
+  (`client_entry_conflict`) until you name the client: `--replace-existing cursor,claude-desktop`. The previous file
+  is always copied verbatim into the private journal first (0600; it may hold the secrets your old entry carried).
+  Codex TOML is never rewritten: an existing entry is edited by hand.
+- **The file keeps its formatting**: indentation unit, final newline, key order, non-ASCII text. A JSON file with
+  duplicate keys, a JSONC file, or a TOML structure that an append would break is refused, not rewritten.
+- **Removal.** `quickstart --undo <stamp>` removes our entry (original bytes back when nothing else changed);
+  `memory-os-admin uninstall` removes the entries the journal proves we wrote, keeps the others (`--remove-existing
+  <client>` for an unproven relay entry), and stops the service only when no entry of any known client depends, or
+  may depend, on it. A one-click `uvx … memory-os-relay` entry without an explicit `MEMORY_V4_URL` keeps the service
+  until you remove that entry. Data is never deleted.
+
 ## Principle
 
 A single local server and **a single relay command** for every assistant. The relay reads your private token

@@ -42,6 +42,7 @@ def test_console_scripts_resolve_to_source_functions_without_importing_server():
     assert set(scripts) == {
         "memory-os-ai", "memory-os-v4", "memory-os-ai-v3",
         "memory-os-relay", "memory-os-admin",
+        "memory-os-constraints",  # 4.1.0 setup contract §9: stdlib-only constraints locator
     }
     for entry in scripts.values():
         module, function = entry.split(":")

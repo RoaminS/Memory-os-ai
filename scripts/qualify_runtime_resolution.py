@@ -18,14 +18,28 @@ import tomllib
 from check_runtime_resolution import check
 from qualify_distribution_d1a import command
 from memory_os_v4.ops.provision import guard, min_free_bytes
+from memory_os_v4.ops.qualified_runtime import CONSTRAINTS
 
 ROOT = Path(__file__).resolve().parents[1]
+REQUIREMENTS = {'lexical': '[ops,brief]', 'semantic': '[ops,brief,semantic]'}
+
+
+def resolution_command(python, wheel, output, *, profile):
+    """The resolution of ONE profile: its extras, under its constraints. No default profile."""
+    if profile not in REQUIREMENTS:
+        raise ValueError('Unknown profile: choose lexical or semantic')
+    return [str(python), '-B', '-m', 'pip', 'install', '--dry-run',
+            '--ignore-installed', '--only-binary=:all:', '--disable-pip-version-check', '--no-cache-dir',
+            '--index-url', 'https://pypi.org/simple', '--report', str(Path(output) / 'pip-report.json'),
+            '-c', str(CONSTRAINTS[profile]), str(wheel) + REQUIREMENTS[profile]]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--wheel', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--profile', choices=tuple(REQUIREMENTS), required=True,
+                        help='install profile resolved: its extras, under its constraints (no default)')
     args = parser.parse_args()
     wheel, output = args.wheel.resolve(), args.output.resolve()
     if output.exists() or not output.is_relative_to(ROOT / '.local-qualification'):
@@ -41,15 +55,15 @@ def main():
                XDG_CACHE_HOME=str(output / 'home/.cache'),
                PYTHONDONTWRITEBYTECODE='1', PYTHONNOUSERSITE='1', PIP_CONFIG_FILE=os.devnull)
     result = {'ok': False, 'model_calls': 0, 'api_calls': 0, 'installed': False,
-              'min_free_bytes': minimum}
+              'min_free_bytes': minimum, 'profile': args.profile,
+              'constraints_sha256': hashlib.sha256(CONSTRAINTS[args.profile].read_bytes()).hexdigest()}
     try:
         os.setpriority(os.PRIO_PROCESS, 0, 15)
-        result['command'] = command([sys.executable, '-B', '-m', 'pip', 'install', '--dry-run',
-            '--ignore-installed', '--only-binary=:all:', '--disable-pip-version-check', '--no-cache-dir',
-            '--index-url', 'https://pypi.org/simple', '--report', str(output / 'pip-report.json'),
-            str(wheel) + '[ops,brief]'], output, env, output / 'pip-resolution.log', guard)
+        result['command'] = command(resolution_command(sys.executable, wheel, output, profile=args.profile),
+                                    output, env, output / 'pip-resolution.log', guard)
         version = tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['version']
-        result.update(check(json.loads((output / 'pip-report.json').read_text()), version, wheel=wheel))
+        result.update(check(json.loads((output / 'pip-report.json').read_text()), version, wheel=wheel,
+                            profile=args.profile))
         result['wheel_sha256'] = hashlib.sha256(wheel.read_bytes()).hexdigest()
         result['pip_report_sha256'] = hashlib.sha256((output / 'pip-report.json').read_bytes()).hexdigest()
     except (OSError, ValueError, KeyError, RuntimeError) as exc:

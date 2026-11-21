@@ -57,6 +57,7 @@ def main() -> None:
         "memory-os-ai-v3": "memory_os_ai.server:run",
         "memory-os-relay": "memory_os_v4.ops.relay:main",
         "memory-os-admin": "memory_os_v4.ops.cli:main",
+        "memory-os-constraints": "memory_os_constraints:main",
     }
     entry_points = {ep.name: ep.value for ep in distribution.entry_points if ep.group == "console_scripts"}
     assert expected.items() <= entry_points.items(), entry_points

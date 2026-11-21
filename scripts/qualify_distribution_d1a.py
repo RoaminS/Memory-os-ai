@@ -155,7 +155,8 @@ def main():
                 python = private / "bin/python"
                 report["steps"][f"install-{index}"] = command([str(python), "-B", "-m", "pip", "--isolated", "install",
                     "--no-index", "--no-deps", "--force-reinstall", str(wheel)], output, isolated, output / f"install-{index}.log", guard)
-                for executable in ("memory-os-ai", "memory-os-v4", "memory-os-ai-v3", "memory-os-relay", "memory-os-admin"):
+                for executable in ("memory-os-ai", "memory-os-v4", "memory-os-ai-v3", "memory-os-relay", "memory-os-admin",
+                                   "memory-os-constraints"):
                     if not (private / "bin" / executable).is_file():
                         raise RuntimeError("Installed console command missing: " + executable)
                 # Relay main is a blocking stdio client: verify entrypoint import without calling it.

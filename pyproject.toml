@@ -180,6 +180,12 @@ memory-os-v4 = "memory_os_v4.server:run"
 memory-os-ai-v3 = "memory_os_ai.legacy_cli:main"
 memory-os-relay = "memory_os_v4.ops.relay:main"
 memory-os-admin = "memory_os_v4.ops.cli:main"
+# Standard library only: usable right after `pip install --no-deps`, before any dependency exists.
+memory-os-constraints = "memory_os_constraints:main"
+
+[tool.setuptools]
+py-modules = ["memory_os_constraints"]
+package-dir = {"" = "v4/src"}
 
 [tool.setuptools.packages.find]
 where = ["src", "v4/src"]
