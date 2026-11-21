@@ -1,8 +1,11 @@
 # Profil lexical 4.1.0 — contrat (phase 1a-cœur, étapes 1 à 3)
 
-Statut : **contrat v2, écrit avant tout code moteur**. La v1 (`7bb9a89`) a reçu le verdict Codex
-« VALIDÉ AVEC AMENDEMENTS » du 21/11 (`codex_verdict_contract_410_v1.md`) ; cette v2 intègre
-chaque amendement et consigne les dix arbitrages (§14). Base `83ddead`
+Statut : **contrat v2.1, écrit avant tout code moteur**. La v1 (`7bb9a89`) a reçu le verdict Codex
+« VALIDÉ AVEC AMENDEMENTS » du 21/11 (`codex_verdict_contract_410_v1.md`) ; la v2 (`6f1f40b`)
+intègre chaque amendement et consigne les dix arbitrages (§14). Le verdict Codex sur la v2
+(`codex_verdict_contract_410_v2.md`, « VALIDÉ AVEC AMENDEMENTS ») demandait trois corrections,
+intégrées ici (v2.1, §15) : DDL initial d'`embedding_cache` autorisé (§6.8), mode rétrospectif
+implémenté **avant** G1a (§13), tests de priorité des refus et version `10.0.0` (§12). Base `83ddead`
 (`release/4.0.9-hygiene`, non qualifiée), branche `feature/4.1.0-lexical`. Plan de référence :
 `PLAN_STRATEGIQUE_OEM_v3_1.md` §4. Ce document ne modifie aucun fichier sous `v4/src/` ni
 `src/`. Aucun banc n'a été exécuté pour l'écrire ; les sorties de référence du §3 ont été
@@ -383,10 +386,17 @@ Ce que la 4.1.0 fait et documente — **détection et avertissement, rien d'autr
    modèle connue**, lignes de cache valides (dimension, longueur, SHA-256, finitude). Une
    révision inconnue impose le nonce `unattested_revision_nonce` : chaque processus ré-encode
    alors tout le corpus, par conception ; ce n'est pas une régression de cette promesse.
-8. Le profil lexical n'écrit jamais `embedding_cache` et ne la lit jamais, **à la seule
-   exception de la sonde de contamination du §5.1** (`existe-t-il au moins une ligne ?`, sur sa
-   propre connexion en lecture seule). La connexion du moteur lexical n'émet aucune instruction
-   SQL nommant `embedding_cache`.
+8. Le profil lexical n'écrit jamais de vecteur dans `embedding_cache` et n'en lit jamais les
+   données, **à la seule exception de la sonde de contamination du §5.1** (`existe-t-il au moins
+   une ligne ?`, sur sa propre connexion en lecture seule). Sur la connexion du moteur lexical :
+   - **autorisé** : le DDL initial du schéma **inchangé** (`SCHEMA_CACHE`, migration 3,
+     `CREATE TABLE embedding_cache`), exécuté par `SQLiteStore.__init__` à la création d'un
+     store neuf comme dans le profil sémantique — le schéma 8 et ses sommes restent identiques,
+     la table existe donc, vide, dans tout store lexical ;
+   - **interdit** : toute lecture de données de cette table (`SELECT`) hors de la sonde, et
+     toute écriture de vecteur (`INSERT`, `UPDATE`, `DELETE`). Une fois le store ouvert, la
+     connexion du moteur n'émet plus aucune instruction SQL nommant `embedding_cache`
+     (vérifié par trace SQL dans `test_lexical_profile.py`).
 
 ## 7. Découplage : ce que fait chaque opération en profil lexical
 
@@ -546,7 +556,7 @@ Relevé de référence dans `.local-baseline/` (session parente, `83ddead`) :
 | Critère | Vérification |
 |---|---|
 | Non-régression | mêmes commandes que le relevé ; l'ensemble trié des identifiants `FAILED`/`ERROR` est **identique** aux deux listes, **et la cause de chaque échec est vérifiée inchangée** ; 0 test ignoré. Les tests existants à adapter (§11.1) ne figurent pas parmi les échecs de référence : l'identité des listes reste atteignable. |
-| Nouveaux tests | les sept fichiers du §12 verts (142 tests) |
+| Nouveaux tests | les sept fichiers du §12 verts (148 tests), **mode rétrospectif du manifeste compris** (§13, étape 7 bis) |
 | Aucun ML en lexical | `test_import_write_search_reopen_never_import_ml_modules` : interpréteur neuf, import bloqué ; aucune **tentative** d'import ni module `torch`, `sentence_transformers`, `faiss`, `transformers` dans `sys.modules` après import, écriture, recherche, réouverture |
 | SHA d'`embed.py` | `shasum -a 256 v4/src/memory_os_v4/embed.py` = valeur du §6 ; `git diff 83ddead -- v4/src/memory_os_v4/embed.py` vide |
 | Migrations | `schema_checksums()` égal aux 8 sommes épinglées ; `SCHEMA_VERSION == 8` |
@@ -608,9 +618,11 @@ réouverture, mêmes résultats.
 
 ## 12. Tests
 
-142 tests dans sept fichiers ; **32 verts dès maintenant** (comportement actuel, à maintenir),
-**110 rouges par construction** jusqu'aux étapes 4 à 7 (ou jusqu'au mode rétrospectif pour le
-dernier fichier), sans `skip` ni `xfail`. Modules d'appui : `lexical_fixture_410.py` (corpus,
+148 tests dans sept fichiers (142 au contrat v2, plus 6 ajoutés par l'amendement Codex du
+21/11 dans `test_lexical_store_guard.py` : la version `10.0.0` et cinq cas cumulés de priorité
+des refus) ; avant les étapes 4 à 7, **32 verts** (comportement de `83ddead`, à maintenir) et
+**116 rouges par construction**, sans `skip` ni `xfail`. Les sept fichiers, mode rétrospectif
+compris, sont verts avant G1a (§13). Modules d'appui : `lexical_fixture_410.py` (corpus,
 scénarios partagés entre le bras de référence et le bras lexical, rejeu interprocessus,
 détecteur d'accès vectoriel) et `lexical_frozen_83ddead.py` (sorties figées de `83ddead`).
 
@@ -619,7 +631,7 @@ détecteur d'accès vectoriel) et `lexical_frozen_83ddead.py` (sorties figées d
 | `test_semantic_invariants_410.py` | 20 | 0 | invariants sémantiques |
 | `test_lexical_reference_410.py` | 9 | 0 | le moteur de base reproduit les données figées |
 | `test_lexical_profile.py` | 0 | 44 | profil lexical, sans ML |
-| `test_lexical_store_guard.py` | 0 | 42 | sonde, refus, courses |
+| `test_lexical_store_guard.py` | 0 | 48 | sonde, refus, courses, priorité des refus |
 | `test_lexical_capabilities_410.py` | 0 | 5 | capacités, readiness, états du runtime |
 | `test_lexical_packaging_410.py` | 1 | 4 | métadonnées et contraintes par profil |
 | `test_evaluation_manifest_retrospective_410.py` | 2 | 15 | mode rétrospectif H2 |
@@ -656,13 +668,15 @@ détecteur d'accès vectoriel) et `lexical_frozen_83ddead.py` (sorties figées d
   bruts, ancres — pas l'ordre final) ; rollback après faute SQL à quatre points ; corrections,
   reçus et CAS de blocs ; consolidation partielle ; ces trois derniers avec détecteur d'accès
   vectoriel et trace SQL ; refus sémantique sans ML avant toute création de fichier, sans repli.
-- `test_lexical_store_guard.py` (42) : store sémantique refusé en lexical sans mutation ; copie
+- `test_lexical_store_guard.py` (48) : store sémantique refusé en lexical sans mutation ; copie
   sans `writer.lock` ; stores historiques ; WAL vivant ; store lexical refusé en sémantique ;
   autre politique ; marqueur malformé (5) ; contamination groupée ; configuration refusée ;
   **profil indéterminable dans les deux profils** (4) ; **WAL ou SHM isolé** (2) ; fichier
   annexe orphelin (2) ; **marqueur présent seulement dans le WAL** ; **contamination par chaque
   trace séparée** (10, dont version absente et malformée) ; comparaison de version par triplet
-  d'entiers (4) ; store neuf estampillé ; **courses** entre les deux sondes — contamination à
+  d'entiers (5, dont `10.0.0`, que la comparaison textuelle classerait avant `4.1.0`) ;
+  **priorité des refus sur cas cumulés** (5 : indéterminable > marqueur invalide > contamination
+  > comparaison au profil demandé) ; store neuf estampillé ; **courses** entre les deux sondes — contamination à
   marqueur inchangé, identité remplacée, changement de profil, store apparu ; **création
   interrompue avant marquage**.
 - `test_lexical_capabilities_410.py` (5) : catalogues par profil ; dépendance manquante contre
@@ -677,7 +691,7 @@ détecteur d'accès vectoriel) et `lexical_frozen_83ddead.py` (sorties figées d
 Aujourd'hui les rouges échouent sur `Config(retrieval_profile=…)`/`Config.lexical`
 (`TypeError`/`AttributeError`), sur les API de runtime par profil, sur les ressources lexicales
 absentes ou sur le mode de manifeste absent. Tant qu'ils sont rouges, la suite `v4/tests`
-compte 110 échecs de plus que le relevé ; G1a se mesure une fois qu'ils sont verts.
+compte 116 échecs de plus que le relevé ; G1a se mesure une fois qu'ils sont verts.
 
 ## 13. Ordre d'implémentation, fichier par fichier (étapes 4 à 7, aucun code maintenant)
 
@@ -726,9 +740,14 @@ compte 110 échecs de plus que le relevé ; G1a se mesure une fois qu'ils sont v
 15. Construction du wheel, preuve du §11.2 sur le paquet **installé** ; vérification que
     l'installation sémantique contrainte reproduit le catalogue `granite-macos-arm64-py311-v1`.
 
-Puis étape 8 : revue adverse Codex, mesure de G1a. Avant H2 seulement, hors G1a :
-`bench/evaluation_manifest.py` reçoit le mode rétrospectif du §10
-(→ `test_evaluation_manifest_retrospective_410.py` vert).
+Étape 7 bis — mode rétrospectif du manifeste (**avant G1a**, amendement Codex du 21/11) :
+
+16. `bench/evaluation_manifest.py` reçoit le mode rétrospectif du §10, sans changer le
+    comportement ni les messages du mode `dev_only_then_freeze`
+    (→ `test_evaluation_manifest_retrospective_410.py` vert). Le critère « sept fichiers
+    verts » du §11 inclut donc ce fichier ; la mesure H2 elle-même reste postérieure à G1a.
+
+Puis étape 8 : revue adverse Codex, mesure de G1a.
 
 ## 14. Décisions arbitrées par Codex (verdict du 21/11 sur le contrat v1)
 
@@ -746,3 +765,16 @@ Puis étape 8 : revue adverse Codex, mesure de G1a. Avant H2 seulement, hors G1a
 | 10 | Installation nue | **Défaut sémantique maintenu**, erreur explicite demandant `[semantic]` ; lexical sélectionné explicitement ; aucun repli automatique selon les dépendances installées. | §8 |
 
 Aucune question ouverte ne subsiste dans ce contrat.
+
+## 15. Amendements du verdict Codex sur la v2 (21/11), intégrés en v2.1
+
+| # | Amendement | Correction | Où |
+|---|---|---|---|
+| 1 | Contradiction SQL : le §6.8 interdisait toute instruction nommant `embedding_cache`, alors que le constructeur conservé crée cette table | DDL initial du schéma inchangé explicitement autorisé ; lectures de données hors sonde et écritures de vecteurs toujours interdites | §6.8 |
+| 2 | Critère G1a contradictoire : « tous les tests verts » exigé, mode rétrospectif reporté après G1a | Mode rétrospectif implémenté avant G1a (étape 7 bis) | §11, §13 |
+| 3 | Tests discriminants | Version `10.0.0` ajoutée ; cinq cas cumulés verrouillent la priorité indéterminable > marqueur invalide > contamination > comparaison de profil | §12, `test_lexical_store_guard.py` |
+
+Lectures confirmées par ce verdict, appliquées telles quelles : la priorité du §4.1 concerne les
+motifs de refus du **store** (les validations de configuration et de dépendances restent
+antérieures) ; à la seconde sonde, le code de son propre refus prévaut, sinon un constat
+différent produit `store_profile_unverifiable`.

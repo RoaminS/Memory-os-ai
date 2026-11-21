@@ -58,8 +58,24 @@ def file_record(record: object, base: Path, label: str) -> Path:
     return path
 
 
+SELECTION = "dev_only_then_freeze"
+# Retrospective measure on an already observed corpus (contract LEXICAL_PROFILE_4_1_0 §10):
+# no dev/test split exists, so none may be invented; the manifest says so explicitly.
+RETROSPECTIVE = "retrospective_no_selection"
+
+
+def retrospective_block(value: object) -> None:
+    block = mapping(value, "retrospective")
+    require(block.get("independence_claim") is False,
+            "retrospective.independence_claim must be false: no statistical independence is claimed")
+    require(block.get("tuning_allowed") is False, "retrospective.tuning_allowed must be false")
+    for index, sentence in enumerate(entries(block.get("prior_exposure"), "retrospective.prior_exposure")):
+        text(sentence, f"retrospective.prior_exposure[{index}]")
+
+
 def validate(manifest: object, base: Path) -> None:
     manifest = mapping(manifest, "manifest")
+    retrospective = manifest.get("selection_rule") == RETROSPECTIVE
     require(manifest.get("protocol_version") == "1.0", "protocol_version must be 1.0")
     require(manifest.get("stage") == "final", "final preflight requires stage=final")
     text(manifest.get("run_id"), "run_id")
@@ -166,6 +182,21 @@ def validate(manifest: object, base: Path) -> None:
         )
         seen_rows = set()
         groups = {key: {} for key in group_keys}
+        if retrospective:
+            require(set(split) == {"evaluation"},
+                    f"{name}: a retrospective split has the single partition 'evaluation' (no dev/test)")
+            for row in entries(split["evaluation"], f"{name}.evaluation"):
+                row = mapping(row, f"{name}.evaluation.row")
+                row_id = text(row.get("id"), f"{name}.row.id")
+                require(row_id not in seen_rows, f"{name}: duplicate sample {row_id}")
+                seen_rows.add(row_id)
+                for key in group_keys:
+                    text(row.get(key), f"{name}.{row_id}.{key}")
+            require("test_count" not in dataset, f"{name}: test_count is forbidden in a retrospective manifest")
+            count = dataset.get("evaluation_count")
+            require(isinstance(count, int) and not isinstance(count, bool) and count == len(split["evaluation"]),
+                    f"{name}: evaluation_count mismatch")
+            continue
         for partition in ("dev", "test"):
             for row in entries(split.get(partition), f"{name}.{partition}"):
                 row = mapping(row, f"{name}.{partition}.row")
@@ -177,9 +208,16 @@ def validate(manifest: object, base: Path) -> None:
                     previous = groups[key].setdefault(group, partition)
                     require(previous == partition, f"{name}: {key}={group} leaks between dev and test")
         require(dataset.get("test_count") == len(split["test"]), f"{name}: test_count mismatch")
+        require("evaluation" not in split and "evaluation_count" not in dataset,
+                f"{name}: an 'evaluation' partition belongs to the retrospective mode only")
     require(
-        manifest.get("selection_rule") == "dev_only_then_freeze", "selection_rule must freeze before test"
+        manifest.get("selection_rule") in {SELECTION, RETROSPECTIVE}, "selection_rule must freeze before test"
     )
+    if retrospective:
+        retrospective_block(manifest.get("retrospective"))
+    else:
+        require("retrospective" not in manifest,
+                "a retrospective block is refused under dev_only_then_freeze")
     require(
         manifest.get("reporting") == "separate_task_families",
         "retrieval, response and task scores must remain separate",

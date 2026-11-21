@@ -369,14 +369,71 @@ def test_each_semantic_trace_alone_contaminates_a_marked_store(tmp_path, trace):
     assert_unchanged(tmp_path, before)
 
 
-@pytest.mark.parametrize("version", ["4.1.0", "4.1.7", "4.10.0", "5.0.0"])
+@pytest.mark.parametrize("version", ["4.1.0", "4.1.7", "4.10.0", "5.0.0", "10.0.0"])
 def test_version_is_compared_as_an_integer_triple_not_as_text(tmp_path, version):
-    """A later release stamp (4.10.0 > 4.1.0 numerically) is not a contamination trace."""
+    """A later release stamp (4.10.0 > 4.1.0 numerically) is not a contamination trace.
+
+    "10.0.0" is the discriminating case: as TEXT it sorts before "4.1.0" ("1" < "4"), so a string
+    comparison would refuse it; as an integer triple (10, 0, 0) >= (4, 1, 0) it is accepted.
+    """
+    assert version >= "4.1.0" or version == "10.0.0"  # every other case also passes a text comparison
+    assert not "10.0.0" >= "4.1.0"
     lexical_store(tmp_path)
     rewrite_metadata(tmp_path, lambda meta, _connection: meta.__setitem__("version", version))
     with MemoryV4(config=lexical_config(tmp_path)) as engine:
         assert engine.store.meta["retrieval_profile"] == MARKER
         assert [hit.item.id for hit in engine.search("cat Pixel", top_k=3, project="alpha")][0] == "g1"
+
+
+# ------------------------------------------- refusal priority on combined cases
+def set_other_policy(meta, _connection):
+    meta["retrieval_profile"] = {"name": "lexical", "policy": "lex-9.9.9-v1"}
+
+
+def add_every_trace(meta, connection):
+    meta.update(embed_model="hash", dim=16, version="4.0.9",
+                embed_compute_profile={"device": "hash", "model_revision": "hash-v1"})
+    add_cache_row(meta, connection)
+
+
+def lone_side_file(suffix):
+    """An incomplete -wal/-shm pair next to a cleanly checkpointed database: nothing can be probed."""
+    def build(path):
+        (Path(path) / ("store.sqlite3" + suffix)).write_bytes(b"leftover" * 64)
+    return build
+
+
+PRIORITY = {
+    # name: (offline metadata edits, file-level edit, expected code in BOTH profiles)
+    "unverifiable_over_invalid_marker": ([set_other_policy], lone_side_file("-shm"), "store_profile_unverifiable"),
+    "unverifiable_over_contaminated": ([add_every_trace], lone_side_file("-wal"), "store_profile_unverifiable"),
+    "unverifiable_over_invalid_marker_and_traces": ([set_other_policy, add_every_trace], lone_side_file("-shm"),
+                                                    "store_profile_unverifiable"),
+    "invalid_marker_over_contaminated": ([set_other_policy, add_every_trace], None, "store_profile_mismatch"),
+    "contaminated_over_profile_comparison": ([add_every_trace], None, "store_profile_contaminated"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(PRIORITY))
+def test_refusal_priority_is_locked_when_several_cases_apply(tmp_path, case):
+    """unverifiable > invalid marker (mismatch) > contaminated > comparison with the requested profile.
+
+    Every case starts from a clean marked store and accumulates several refusal causes; both profiles
+    must answer with the code of the highest-priority cause, and touch nothing.
+    """
+    edits, file_edit, expected = PRIORITY[case]
+    lexical_store(tmp_path)
+    for edit in edits:
+        rewrite_metadata(tmp_path, edit)
+    if file_edit is not None:
+        file_edit(tmp_path)
+    before = snapshot(tmp_path)
+    # A semantic open of a store carrying a valid lexical marker would be a profile mismatch by
+    # comparison alone: the higher-priority causes must win over it, in each profile.
+    assert refused(lexical_config(tmp_path)) == expected
+    assert refused(semantic_config(tmp_path)) == expected
+    assert refused(Config(data_dir=str(tmp_path), store_backend="sqlite_s1"), defer_retrieval=True) == expected
+    assert_unchanged(tmp_path, before)
 
 
 def test_fresh_lexical_store_is_stamped_with_marker_and_version_before_any_write(tmp_path):
