@@ -774,12 +774,24 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
         # A client still configured must not be left pointing to a stopped service.
         result["service"] = {"undo": "kept-clients-incomplete"}
     else:
-        stopped = stop_owned_service(installed["service"], installed["steps"]["service"].get("plist_sha256"),
-                                     directory, run=run, stop_timeout=stop_timeout, sleep=sleep)
-        code = stopped.pop("code", None)
-        result["service"] = {"undo": stopped.pop("outcome"), **stopped}
-        if code:
-            result.update(ok=False, code=code)
+        from . import uninstall
+        from urllib.parse import urlsplit
+        try:
+            port = urlsplit(installed.get("ops_env", {}).get("MEMORY_V4_URL", "")).port
+        except ValueError:
+            port = None
+        # Same rule as the uninstall (§7): the service outlives every entry that depends, or may depend, on it.
+        remaining = uninstall.remaining_dependencies(home, port) if port else {}
+        if remaining:
+            result["service"] = {"undo": "kept-clients-remaining", "remaining_clients": sorted(remaining),
+                                 "remaining_dependencies": dict(sorted(remaining.items()))}
+        else:
+            stopped = stop_owned_service(installed["service"], installed["steps"]["service"].get("plist_sha256"),
+                                         directory, run=run, stop_timeout=stop_timeout, sleep=sleep)
+            code = stopped.pop("code", None)
+            result["service"] = {"undo": stopped.pop("outcome"), **stopped}
+            if code:
+                result.update(ok=False, code=code)
     if isinstance(installed, dict) and isinstance(installed.get("paths"), dict):
         result["retained"] = retained_items({**installed["paths"], "journals": str(journal_root)})
     else:

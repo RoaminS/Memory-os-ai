@@ -7,6 +7,8 @@ backup [--no-stop]           encrypted, consistent backup (stops/restarts the la
 restore-drill [--no-server]  decrypt latest backup in a temp dir, verify manifest, serve it on a temp port
 hook session-start|stop-nudge   Claude Code hooks (stdin JSON → stdout JSON)
 setup [--write-launchd DIR]  print client configs (Claude Code, Claude Desktop, Codex, hooks) and launchd jobs
+quickstart --profile P       guided install: preview by default, --apply to write, --undo STAMP [--with-service]
+uninstall [--apply]          remove our client entries and our service; never deletes data
 """
 
 from __future__ import annotations
@@ -57,9 +59,10 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
     from .provision import ProvisionError
     try:
         if args.undo:
-            result = quickstart.undo(args.undo, home=Path.home())
+            result = quickstart.undo(args.undo, home=Path.home(), with_service=bool(getattr(args, 'with_service', False)))
             _print_json(result)
-            return 0 if all(r['undo'] in {'restored', 'nothing-to-undo'} for r in result['results']) else 1
+            restored = all(r['undo'] in {'restored', 'nothing-to-undo'} for r in result['results'])
+            return 0 if restored and result.get('ok', True) else 1
         chosen = tuple(args.clients.split(',')) if args.clients else quickstart.DEFAULT_CLIENTS
         s, backend = quickstart.settings_for_install(s, backend=args.backend)
         consent = getattr(args, 'replace_existing', None)
@@ -86,6 +89,31 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
         ours = isinstance(exc, (quickstart.QuickstartError, ProvisionError))
         _print_json({'ok': False, 'code': getattr(exc, 'code', None) if isinstance(exc, quickstart.QuickstartError)
                      else 'quickstart_refused', 'error': str(exc) if ours else exception_label(exc)})
+        return 1
+
+
+def cmd_uninstall(args, s: OpsSettings) -> int:
+    """Preview by default; ``--apply`` removes OUR entries and OUR service. Data is never deleted."""
+    import subprocess
+
+    from . import uninstall
+    from .provision import ProvisionError
+    try:
+        home = Path.home()
+        s = uninstall.settings_from_service(s, home)
+        chosen = tuple(args.clients.split(',')) if args.clients else None
+        consent = tuple(args.remove_existing.split(',')) if args.remove_existing else ()
+        plan = uninstall.plan(s, home=home, python=str(Path(sys.executable).absolute()), run=subprocess.run,
+                              clients=chosen, remove_existing=consent)
+        result = uninstall.apply(plan, s, home=home, run=subprocess.run) if args.apply else plan
+        _print_json(result)
+        return 0 if result['ok'] else 1
+    except Exception as exc:
+        from .diagnostics import exception_label
+        from .quickstart import QuickstartError
+        ours = isinstance(exc, (uninstall.UninstallError, QuickstartError, ProvisionError))
+        _print_json({'ok': False, 'code': getattr(exc, 'code', None) if ours and hasattr(exc, 'code') else 'uninstall_refused',
+                     'error': str(exc) if ours else exception_label(exc)})
         return 1
 
 
@@ -455,9 +483,18 @@ def main(argv: list[str] | None = None) -> int:
     mode = qs.add_mutually_exclusive_group()
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--undo', metavar='STAMP')
+    qs.add_argument('--with-service', action='store_true',
+                    help='with --undo: also stop the service THAT install created (confirmed stop, plist moved '
+                         'into its journal); data is never touched')
     qs.add_argument('--download-approved', action='store_true')
     qs.add_argument('--demo', action='store_true', help='opt-in save/search through relay in a unique demo project')
     qs.add_argument('--report', action='store_true', help='anonymized diagnostic summary')
+    un = sub.add_parser('uninstall', allow_abbrev=False,
+                        help='remove OUR client entries and OUR service; preview by default; never deletes data')
+    un.add_argument('--clients', help='comma-separated clients (default: the whole registry)')
+    un.add_argument('--remove-existing', metavar='CLIENTS',
+                    help='comma-separated clients whose unproven relay entry may be removed (named consent)')
+    un.add_argument('--apply', action='store_true')
     pv = sub.add_parser("provision", help="preview pinned resources; no download without two explicit flags")
     pv.add_argument("--resources", default="granite,cl100k")
     pv.add_argument("--cache-dir", type=Path)
@@ -492,11 +529,14 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if args.cmd == 'quickstart' and (args.download_approved or args.demo) and not args.apply:
         p.error('--download-approved/--demo require --apply')
+    if args.cmd == 'quickstart' and args.with_service and not args.undo:
+        p.error('--with-service requires --undo STAMP')
     s = OpsSettings.from_env()
     handler = {
         "journal-prune": cmd_journal_prune,
         "provision": cmd_provision,
         "quickstart": cmd_quickstart,
+        "uninstall": cmd_uninstall,
         "token": cmd_token,
         "health": cmd_health,
         "backup": cmd_backup,

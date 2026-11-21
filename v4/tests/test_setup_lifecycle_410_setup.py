@@ -873,6 +873,36 @@ def test_uninstall_has_no_option_to_force_the_stop_of_a_shared_service(c):
     assert not {"stop_service", "force_stop"} & set(inspect.signature(uninstaller().apply).parameters)
 
 
+def test_uninstall_reads_the_settings_of_the_installed_service_from_its_definition(c):
+    """A fresh shell does not carry the variables the install chose; the plist does (paths only)."""
+    from memory_os_v4.ops.settings import OpsSettings
+    installed(c, clients=("cursor",))
+    blank = OpsSettings("http://127.0.0.1:8765/mcp/", c.home / "x.token", c.home / "x-store",
+                        c.settings.backup_dir, c.settings.backup_key, c.home / "x-ops", "test.memory-os")
+    found = uninstaller().settings_from_service(blank, c.home)
+    assert (found.url, found.token_file, found.store_dir, found.ops_dir) == (
+        c.settings.url, c.settings.token_file, c.settings.store_dir, c.settings.ops_dir)
+    plan = uninstaller().plan(found, home=c.home, python=c.python, run=c.system)
+    assert plan["ok"] is True and plan["service"]["state"] == "owned"
+    assert {item["client"]: item["action"] for item in plan["clients"]}["cursor"] == "remove"
+    (c.home / PLIST).unlink()
+    assert uninstaller().settings_from_service(blank, c.home) == blank  # nothing installed: nothing assumed
+
+
+def test_a_selective_uninstall_does_not_need_to_attest_a_job_it_will_not_stop(c):
+    """Contract §23: the unattested job refuses the plan only when the plan would stop it."""
+    installed(c, clients=("cursor", "vscode"))
+    c.system.job_replaced = True
+    kept = uninstall_plan(c, clients=("cursor",))
+    assert kept["ok"] is True and kept["service"]["action"] == "keep-clients-remaining"
+    assert kept["service"]["loaded_state"] == "foreign-or-unattested"
+    full = uninstall_plan(c)
+    assert full["ok"] is False and full["blocker_codes"] == ["uninstall_service_foreign"]
+    result = uninstaller().apply(kept, c.settings, home=c.home, run=c.system)
+    assert result["ok"] is True and result["service"]["outcome"] == "kept-clients-remaining"
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
+
+
 def test_uninstall_is_idempotent(c):
     installed(c)
     uninstaller().apply(uninstall_plan(c), c.settings, home=c.home, run=c.system)

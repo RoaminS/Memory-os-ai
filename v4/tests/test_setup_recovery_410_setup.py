@@ -15,7 +15,7 @@ import pytest
 
 from memory_os_v4.ops import quickstart as qs
 from setup_fixture_410 import (
-    PATHS, SIX, contents, install, prepare, read_memories, servers, setup_context, tree, write_memories,
+    PATHS, SIX, contents, install, prepare, read_memories, servers, set_entry, setup_context, tree, write_memories,
 )
 
 PLIST = "Library/LaunchAgents/test.memory-os.plist"
@@ -138,6 +138,30 @@ def test_rollback_trusts_only_a_private_journal_on_safe_paths(c, damage, monkeyp
     assert refusal.value.code == "journal_unsafe"
     assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists()
     assert (c.home / PATHS["cursor"]).read_bytes() == before
+
+
+def test_rollback_keeps_the_service_while_another_client_is_wired_to_it(c):
+    """Contract §23: the rollback applies the uninstall rule. Install A created the service, install B wired VS Code."""
+    first = install(c, profile="lexical")
+    install(c, profile="lexical", clients=("vscode",))
+    out = qs.undo(first["stamp"], home=c.home, run=c.system, with_service=True)
+    assert out["ok"] is True and out["service"]["undo"] == "kept-clients-remaining"
+    assert out["service"]["remaining_clients"] == ["vscode"]
+    assert out["service"]["remaining_dependencies"] == {"vscode": "wired"}
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+    assert "memory-os-ai" not in servers(c.home, "cursor") and "memory-os-ai" in servers(c.home, "vscode")
+
+
+def test_rollback_keeps_the_service_when_a_client_could_not_be_restored(c):
+    """Contract §23: a client still configured is never left pointing to a stopped service."""
+    result = install(c, profile="lexical")
+    entry = servers(c.home, "cursor")["memory-os-ai"]
+    set_entry(c.home, "cursor", {**entry, "command": "/edited/venv/bin/python3"})
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert out["results"] == [{"client": "cursor", "undo": "refused-entry-changed-since-apply"}]
+    assert out["ok"] is False and out["code"] == "undo_partial"
+    assert out["service"] == {"undo": "kept-clients-incomplete"}
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
 
 
 # ---- interrupted install ----
