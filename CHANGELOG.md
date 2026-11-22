@@ -19,7 +19,8 @@
 - Runtime qualifié par profil ; états `qualified` / `missing_dependency` / `drift` ; capacités : encodeur
   `absent_by_profile` en lexical.
 - `bench/evaluation_manifest.py` : mode `retrospective_no_selection` pour une mesure sur corpus déjà observé.
-- Inchangés : schéma SQLite 8, `embed.py`, cache d'embeddings, comportement du profil sémantique.
+- Inchangés : schéma SQLite 8, `embed.py`, cache d'embeddings et algorithme de récupération
+  sémantique ; les changements d'ouverture et de fermeture sont décrits ci-dessus.
 - Installation multi-clients (phase 1a-setup, `v4/docs/SETUP_4_1_0.md`) : `quickstart --profile {lexical,semantic}`
   (obligatoire pour une installation neuve, relu d'un service existant, jamais converti), SQLite chargé vérifié
   avant toute écriture et attesté par le serveur (`capabilities.store.sqlite_version`), codes de refus stables,
@@ -40,6 +41,9 @@
   reste expérimental.
 - Statut de publication vérifié sur PyPI le 2026-11-22 : 4.0.8, publiée le 2026-10-31,
   reste la dernière version publiée ; 4.0.9 reste une candidate non publiée.
+- Documentation mise à jour pour la candidate 4.0.9 : README.md (statut, commandes
+  d'installation, boutons Cursor/VS Code, notes de version), docs/CLIENTS.md,
+  server.json (registre MCP) et docs/releases/v4.0.9.md (note embarquée).
 - Le numéro 4.0.9 avait été préparé le 31/10 sur une autre arborescence (commit 06199a2, sources absentes de
   ce dépôt, suite complète en échec, ops/qualify_409_c1_chain.sh orphelin) : cette candidate-ci le remplace.
 - Précision sur l'entrée 4.0.9.dev1 ci-dessous : l'instantané unique et l'isolation d'une fiche corrompue concernent
@@ -315,9 +319,13 @@
   du relais installé. Activation de production réservée à Romain.
 - Voir `docs/releases/v4.0.2.md`, `v4/docs/RELEASE_4_0_2_DECISIONS.md`
   et `releases/4.0.2/QUALIFICATION.md`.
-- Évaluation post-publication BEAM 100K : le critère préenregistré C4 contre BM25
-  n'est pas atteint (ΔRecall +0,017, IC95 [-0,004;+0,040] ; ΔMRR +0,008
-  [+0,003;+0,015]). Aucun score d'exactitude ni rang leaderboard revendiqué.
+- Évaluation post-publication BEAM 100K du moteur 4.0.x, sur corpus déjà observé :
+  Recall@10 C4 0,462 / BM25 0,445 ; écart C4 − BM25 +0,017,
+  IC95 [-0,004 ; +0,040] ; critère préenregistré non atteint.
+  ΔMRR +0,008, IC95 [+0,003 ; +0,015]. Mesure CPU/bfloat16 ;
+  profil de production documenté à l'époque : auto/MPS native.
+  Cette mesure est distincte de H2 4.1.0 et ne constitue pas une confirmation
+  sur données inédites. Aucun score d'exactitude ni rang leaderboard revendiqué.
 
 ## 4.0.1 — ALPHA intermédiaire, publication soumise à qualification finale
 
