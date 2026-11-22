@@ -17,8 +17,9 @@ exige un GO distinct de Romain. Exécution par Claude hors sandbox, sur GO expli
   lancée : aucune preuve 4.0.9 n'existe, aucune n'est transférée.
 - **La règle moteur de 4.0.9 ne s'applique plus** (diff limité à `__init__.py` + `ops/health.py`
   depuis `9ecb4d0`) : 21 fichiers de `v4/src` ont changé, dont `memory.py`, `retrieval.py`,
-  `sqlite_store.py`, `config.py`, `writer_lock.py`. Conséquence : **aucun transfert de preuve**,
-  P-A comprise (l'argument « périmètre identique à l'octet » de 4.0.9 est caduc). Invariants
+  `sqlite_store.py`, `config.py`, `writer_lock.py`. Conséquence : **aucun transfert automatique
+  de preuve** ; pour P-A, le seul transfert possible est celui de la porte G13 (identité à l'octet
+  du périmètre du brief, prouvée), jamais un rejeu. Invariants
   contrôlés à la place : `SCHEMA_VERSION == 8` et 8 sommes de migration épinglées ;
   SHA-256 de `embed.py` (valeur de `LEXICAL_PROFILE §6`) ; contraintes et catalogue sémantiques
   historiques identiques à l'octet à `83ddead` ; version `4.1.0` partout.
@@ -105,10 +106,27 @@ Une porte en échec, absente ou non rejouée sur le commit final laisse `release
 | G9 | **Copie installée du store de production**, schéma 8→8 : coupe par l'API de sauvegarde du candidat, source en lecture seule, workers baseline 4.0.7 / wheel / sdist 4.1.0 et réouvertures, comparaison exhaustive, instance et autorité identiques, journal inchangé, aucune migration, dix recherches figées, MPS/natif, `doctor` lecture seule 0 FAIL ; **ajout** : ouverture lexicale de la copie refusée sans aucune écriture | 4.0.9 + ajout | sémantique |
 | G10 | **Sauvegarde + exercice de restauration** (S4 ×2, même archive, deux artefacts) sur la copie | 4.0.9 | sémantique |
 | G11 | **Store lexical neuf** via le wheel installé : écriture, recherche, fermeture, réouverture, mêmes résultats ; marqueur présent ; ouverture sémantique refusée ; sauvegarde + restauration | **nouvelle** | lexical |
-| G12 | **P-B** (intégrité, synthétique) : nouvelle liaison au commit final, 40/40, six portes, rejeu vrai ; scorer, cas et seuils inchangés, gold jamais lu | 4.0.9 | sémantique |
-| G13 | **P-A** (brief, synthétique) : à REJOUER sur le commit final, 40/40, scellés et scorer inchangés (voir §8, point 1) | 4.0.7, plus transférable | sémantique |
+| G12 | **P-B** (intégrité, synthétique) : nouvelle liaison au commit final, 40/40, six portes, rejeu vrai ; scorer, cas et seuils inchangés, gold jamais lu. **À confirmer par Romain** : ses scellés sont sous `brief_v5_val/pb/` (voir règle ci-dessous) | 4.0.9 | sémantique |
+| G13 | **P-A (brief) : TRANSFERT motivé, jamais de rejeu.** Acquise seulement si (a) chaque fichier du périmètre du brief (liste ci-dessous) a le même SHA-256 au commit 4.0.7 qualifié `9e41ea4` et au commit final 4.1.0, empreintes calculées depuis les objets Git (`git show <commit>:<chemin>`), les deux colonnes consignées ; (b) la preuve P-A 40/40 existante de 4.0.7 (acquise sur `ceedb5c`, CHANGELOG 4.0.7rc1) est référencée par son empreinte archivée, fournie par Romain. Périmètre non identique à l'octet, ou empreinte non fournie : **« non transférable → décision de Romain »**, `release_ready=false` jusqu'à cette décision | 4.0.7 (transfert) | sémantique |
 | G14 | Relais installés : inventaire, panne, reconnexion sans rejeu, statut local pendant panne, handshake 4.1.0 ; wheel ET sdist | 4.0.9 | sémantique + wheel lexical |
 | G15 | Vérification finale du manifeste, rejouée en dernier, jamais sautée ; `CHAIN_RESULT=PASS` écrit seulement après elle | 4.0.9 | — |
+
+**Règle permanente de Romain** : aucun agent ne lance la validation scellée P-A ; aucun agent, ni
+la chaîne, ni aucun de ses scripts ne lit ni ne liste `~/memory-os-local/brief_v5_val/`
+(ni `brient_v5_val/`). G13 se prouve uniquement depuis Git. G12 (P-B) lisait ce dossier en 4.0.9
+par ses outils : elle n'est donc pas planifiée ici, mais **à confirmer par Romain** (il la lance
+lui-même, l'autorise explicitement, ou tranche) ; sans cela G12 reste non acquise.
+
+**Périmètre du brief pour G13** (fermeture des imports relatifs statiques de `brief*.py` dans
+`v4/src/memory_os_v4/`, 23 fichiers) : `brief.py`, `brief_coverage.py`, `brief_selection.py`,
+`brief_tokens.py`, `brief_value.py` ; importés directement : `models.py`, `projects.py`,
+`qualification.py`, `temporal.py`, `text.py`, `work_state.py` ; transitivement : `blocks.py`,
+`changes.py`, `compensation.py`, `config.py`, `corrections.py`, `entities.py`, `extract.py`,
+`fact_updates.py`, `identity_policy.py`, `llm.py`, `sqlite_store.py`, `store.py`. La liste est
+recalculée par le script au commit final ; un module ajouté à la fermeture y entre.
+**Constat à `453a893` (`git diff --no-renames --stat 9e41ea4 453a893`)** : les cinq `brief*.py`
+et les importés directs sauf un sont identiques ; `config.py`, `models.py` et `sqlite_store.py`
+diffèrent. En l'état, G13 rend donc « non transférable → décision de Romain ».
 
 **Mesurés et rapportés, PAS des portes** :
 
@@ -119,8 +137,8 @@ Une porte en échec, absente ou non rejouée sur le commit final laisse `release
   la machine n'est pas vierge (compte jetable simulé par `HOME` jetable + `env -i`), le wheel est
   local (4.1.0 n'est pas sur PyPI), le modèle sémantique est pré-placé. D1 est re-signée par
   Romain sur ces chiffres ; la qualification ne la tranche pas.
-- M2 — P-A et P-B en profil lexical (les protocoles scellés ont été acquis sur le moteur
-  sémantique) : résultat rapporté, sans seuil.
+- M2 — P-B en profil lexical : **à confirmer par Romain** (même dossier scellé que G12) ; si
+  confirmé, résultat rapporté, sans seuil. Aucune mesure P-A, dans aucun profil.
 - M3 — pic disque, pic de swap et durée de chaque étape (relevés du superviseur).
 - M4 — rappel H2 : déjà mesuré (`H2_RUN_v3.md`), NON rejoué, hors qualification.
 
@@ -143,7 +161,7 @@ mesuré le 22/11 : 157,9 Mo (78 Mo en 4.0.9). Aucun chiffre ci-dessous n'est une
 | 6. Environnements sémantiques wheel + sdist hors dépôt (`.pth`, hors ligne) | 0,1 Go | 1–2 min | ≥ 5 Go |
 | 7. Installation réelle sémantique + undo + uninstall + D1 (G7, G8, M1) | 1,0–1,6 Go si GO D5, sinon 0,1 Go | 5–12 min | ≥ 5 Go |
 | 8. **Copie + S4 ×2** (G9, G10) | budget du harnais `adaptive_v1` ≈ 3 + 10 F + 0,30 = **4,9 Go exigés libres** ; écrit ≈ 10 F ≈ 1,6 Go au pire | ≤ 9 min observés en 4.0.8, plafond 900 s | **≥ 9,2 Go** |
-| 9. P-B, P-A (G12, G13, M2) | 0,1 Go | 1–3 min | ≥ 5 Go |
+| 9. Périmètre du brief depuis Git (G13) ; P-B si confirmée (G12, M2) | 0,1 Go | 1–3 min | ≥ 5 Go |
 | 10. Relais, vérification finale (G14, G15) | 0,05 Go | < 1 min | ≥ 5 Go |
 
 Cumul estimé avant la copie : ≈ 1,2 Go sans D5, ≈ 2,7 Go avec. Durée totale estimée : 25–50 min.
@@ -197,20 +215,22 @@ Dans `scripts/` (versionnés, hachés dans l'inventaire d'outillage du manifeste
 | `qualify_install_410.sh` | G7, G8, M1 pour UN profil (`--profile`), dérivé de `run_install_proof_v2.sh` | wheel + SHA, dossier neuf, graines locales → `report.json`, journaux, `SHA256SUMS` |
 | `qualify_lexical_wheel_410.py` | G6 dans le venv lexical de G7 | venv, fichiers de test → `report.json` |
 | `qualify_sqlite_release_410.py` + `sqlite_release_worker_410.py` | G9, G10, G11 | manifeste, environnements, plist et store (lus) → `410-copy-claude-<tag>/report.json` |
-| `score_release_410_gate.py`, `record_release_410_gate.py` | P-B (et P-A) liés au commit final | scellés, scorer haché, collecte → preuve de porte |
+| `check_brief_perimeter_410.py` | G13 : fermeture des imports de `brief*.py`, SHA-256 des deux côtés depuis les objets Git ; ne lit aucun scellé, n'exécute aucun brief | commit 4.0.7 `9e41ea4`, commit final, empreinte archivée de la preuve P-A → `report.json` (`transferable` vrai/faux, tableau des empreintes) |
+| `score_release_410_gate.py`, `record_release_410_gate.py` | P-B seulement, et seulement si Romain confirme G12 | scellés, scorer haché, collecte → preuve de porte |
 | `verify_release_manifest.py` (modification) | branche `4.1.0` + enregistrements `--record-resolution-proof`, `--record-install-proof`, `--record-lexical-proof` | preuve → manifeste |
 
 Réutilisés sans changement : `qualify_405_test_isolation.py`, `qualify_distribution_d1a.py`,
-`qualify_runtime_resolution.py`, `check_runtime_resolution.py`, `run_integrity_v5_validation.py`,
+`qualify_runtime_resolution.py`, `check_runtime_resolution.py`, `run_integrity_v5_validation.py` (seulement si G12 est confirmée),
 `installed_relay_e2e.py` (`installed_relay_case.py` : une ligne, §9 point 6). Hors dépôt :
 `~/memory-os-local/ops/qualify_410_v1_chain.sh` (§3) ; superviseur 4.0.9 inchangé.
 
 ## 9. Points ouverts pour Codex et Romain (rien n'est tranché ici)
 
-1. **P-A** : `run_brief_v5_validation.py` a ses deux commits (baseline, candidat) écrits en dur ;
-   le rejouer sur 4.1.0 demande une variante. Si elle exige de toucher aux scellés, au scorer ou
-   au gold : ARRÊT, décision de Romain. Alternative à arbitrer : transfert motivé (les fichiers
-   `brief*.py` sont inchangés, mais `memory.py`, `retrieval.py` et `sqlite_store.py` ne le sont pas).
+1. **P-A** : aucun rejeu par un agent (règle de Romain). À `453a893` le périmètre de G13 n'est pas
+   identique à l'octet (`config.py`, `models.py`, `sqlite_store.py`) : la décision revient à Romain.
+   L'empreinte archivée de la preuve 40/40 n'est pas dans le dépôt : à fournir par Romain. Limite
+   du périmètre : il suit les imports de `brief*.py`, pas leurs appelants (`server.py`, `memory.py`,
+   modifiés), qui fournissent les données au brief. **P-B** : statut à confirmer par Romain (G12).
 2. **Suite complète** : les relevés de développement (`.local-baseline/`) portent 12 échecs
    (`v4/tests`) et 51 échecs/erreurs (racine) déjà présents à `83ddead`. La porte G2 exige zéro
    dans l'environnement de qualification ; s'ils y persistent, c'est un ARRÊT, pas une tolérance.
