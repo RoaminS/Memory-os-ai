@@ -1,8 +1,9 @@
 # Qualification 4.1.0 — contrat court (avant tout script)
 
 22 novembre 2026 — **contrat seulement** : rien exécuté, rien construit, rien téléchargé.
-Révision 5 : applique les sept textes d'amendement du verdict Codex « outillage n° 2 » (sur `54bee95`) ;
-la révision 4 appliquait les verdicts Codex « NON VALIDÉ » sur `7109491` puis `f85a0b6`. L'outillage
+Révision 6 : applique les textes du verdict Codex « outillage n° 3 » (sur `577c1b2`) : exception
+`none_short_command` de M3 et relais d'exécution M3 au §3. La révision 5 appliquait les sept textes
+d'amendement du verdict Codex « outillage n° 2 » (sur `54bee95`) ; la révision 4 appliquait les verdicts Codex « NON VALIDÉ » sur `7109491` puis `f85a0b6`. L'outillage
 du §8 est désormais écrit et en cours de revue ; ces amendements ne le valident pas et ne
 constituent aucun GO d'exécution.
 Candidat : branche `feature/4.1.0-qual`, base `453a893` (le commit
@@ -92,6 +93,9 @@ chaîne). La **chaîne**, elle, change. Écarts par rapport à `qualify_409_v9_c
 | Service launchd de test | contrôles ci-dessous (détection ; aucun signal à un processus) |
 | Finalisation | `release_ready` levé seulement par la vérification finale (§4) ; `CHAIN_RESULT=PASS` écrit après elle et après les contrôles de sortie |
 | Instrumentation M3 | échantillons horodatés pris par la chaîne, hors superviseur (§4) |
+| Relais d’exécution M3 | Pour chaque appel à `step`, l’enfant direct du superviseur est un relais qui consigne son PID et une borne monotone antérieure à `exec`, puis se remplace par la commande avec `exec`, sans processus intermédiaire persistant. Le PID et la filiation sont conservés. La sonde M3 est un enfant distinct de la chaîne et n’envoie aucun signal. Le superviseur reste inchangé et ne signale que son enfant direct. |
+
+L’écriture du marqueur de départ ne prouve pas que `exec` a eu lieu. Une observation limitée au relais avant `exec` ne compte ni comme mesure « pendant », ni comme observation de chevauchement avec la commande. Toute impossibilité de distinguer ces états doit être traitée conformément aux règles M3, sans fabriquer de chevauchement.
 
 **Service launchd de test** (son parent est `launchd` : il échappe au relevé des descendants).
 Libellé `local.memory-os-v4.qual410`, port 18765 ; jamais un libellé commençant par
@@ -183,7 +187,7 @@ comme telle, sans prétendre qu'elle démontre l'équivalence.
   variante `.pth`, la durée est libellée « variante à dépendances réutilisées ».
 - M2 — P-B en profil lexical : décision indépendante de Romain (§10) ; aucun agent ni script ne
   la produit ; sans preuve externe : « non mesuré », sans effet sur `release_ready`. Aucune mesure P-A, dans aucun profil.
-- M3 rapporte les durées des commandes, le minimum d’espace libre observé et le maximum de swap observé, à partir d’échantillons horodatés conservés. Les bornes de chaque commande et de chaque sonde sont enregistrées séparément ; les durées utilisent une horloge monotone. Chaque étape possède une mesure avant et une mesure après. Une mesure « pendant » exige un chevauchement temporel démontré entre la sonde et l’exécution de la commande. Pour une commande terminée avant la fin de la première sonde démarrée pendant son exécution, cette sonde peut être conservée comme observation de chevauchement, avec ses bornes explicites ; elle ne prouve pas un instant de mesure intérieur à la commande. Une sonde achevée avant le démarrage de la commande ne compte jamais. Toute exception pour une commande trop courte est signalée explicitement dans la preuve et la synthèse, sans inventer d’échantillon « pendant ». Les échecs des sondes et du sampler sont bloquants, même si aucun marqueur d’erreur ne peut être écrit. Les échantillons sont scellés et leur synthèse recalculée en finale. Les extrema sont échantillonnés, non des pics garantis. Le superviseur reste inchangé.
+- M3 rapporte les durées des commandes, le minimum d’espace libre observé et le maximum de swap observé, à partir d’échantillons horodatés conservés. Les bornes de chaque commande et de chaque sonde sont enregistrées séparément ; les durées utilisent une horloge monotone. Chaque étape possède une mesure avant et une mesure après. Une mesure « pendant » exige un chevauchement temporel démontré entre la sonde et l’exécution de la commande. Pour une commande terminée avant la fin de la première sonde démarrée pendant son exécution, cette sonde peut être conservée comme observation de chevauchement, avec ses bornes explicites ; elle ne prouve pas un instant de mesure intérieur à la commande. Une sonde achevée avant le démarrage de la commande ne compte jamais. Toute exception pour une commande trop courte est signalée explicitement dans la preuve et la synthèse, sans inventer d’échantillon « pendant ». Les échecs des sondes et du sampler sont bloquants, même si aucun marqueur d’erreur ne peut être écrit. Les échantillons sont scellés et leur synthèse recalculée en finale. Les extrema sont échantillonnés, non des pics garantis. Le superviseur reste inchangé. L’exception `none_short_command` n’est admissible que si la durée majorée de la commande est inférieure ou égale à 10 secondes. Cette majoration est calculée entre la borne de départ enregistrée avant `exec` et l’horodatage de l’observation après retour du superviseur et terminaison de la sonde ; elle est publiée sous `command_seconds_upper_bound`, séparément de la durée de l’étape. L’exception conserve zéro échantillon « pendant » et figure explicitement dans la preuve et la synthèse. Une détection impossible ou un échec de sonde ne constitue jamais une exception de commande courte.
 - M4 — H2 : résultat **historique** (`H2_RUN_v3.md`, rétrospectif, avec ses limites), non rejoué,
   jamais une porte du commit final.
 
