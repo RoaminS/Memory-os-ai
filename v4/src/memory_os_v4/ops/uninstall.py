@@ -467,7 +467,7 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
     result.update(stamp=journal_dir.name, journal=str(journal))
 
     def record():
-        qs._atomic_write(journal, json.dumps(result, indent=1, ensure_ascii=False))
+        qs._atomic_write(journal, json.dumps(result, indent=1, ensure_ascii=False), expected=qs.UNGUARDED)
         journal.chmod(0o600)
     record()
     journal_root = home / qs.JOURNAL_SUBDIR

@@ -202,12 +202,12 @@ def test_codex_candidate_is_parsed_before_it_replaces_the_file(home, tmp_path, m
     real = qs._atomic_write
     written = []
 
-    def spy(path, text):
+    def spy(path, text, **expectation):
         if Path(path).name == "config.toml":
             import tomllib
             tomllib.loads(text)  # must already be valid when it reaches the write
             written.append(text)
-        return real(path, text)
+        return real(path, text, **expectation)
     monkeypatch.setattr(qs, "_atomic_write", spy)
     write(home, PATHS["codex"], 'mcp_servers = { other = { command = "x" } }\n')
     apply(home, tmp_path, ("codex",))
@@ -543,8 +543,8 @@ def inject(monkeypatch, home, key, marker):
     real = qs._atomic_write
     seen = []
 
-    def hooked(path, text):
-        real(path, text)
+    def hooked(path, text, **expectation):
+        real(path, text, **expectation)
         if Path(path).name == "journal.json" and marker in text and not seen:
             seen.append(str(path))
             write_foreign(home, key)
@@ -703,6 +703,219 @@ def test_a_journal_changed_while_its_revocation_is_prepared_is_not_overwritten(h
     assert seen and out["results"] == [{"client": "cursor", "undo": "revocation-failed-entry-untouched"}]
     assert servers(home, "cursor")["memory-os-ai"] == entry
     assert not any(record.get("revoked") for record in json.loads(journal.read_text())["records"])
+
+
+def test_undo_never_overwrites_an_entry_written_while_a_json_restoration_is_prepared(home, tmp_path, monkeypatch):
+    """The RESTORATION path (previous entry put back), not only the removal: F written meanwhile stays."""
+    set_entry(home, "cursor", EXISTING["legacy-v3"])
+    _, result = apply(home, tmp_path, ("cursor",), replace_existing=("cursor",))
+    assert status(result) == {"cursor": "applied"}
+    seen = inject_during_preparation(monkeypatch, home, "cursor")
+    out = qs.undo(result["stamp"], home=home, journal_root=tmp_path / "journal")
+    assert seen and out["results"] == [{"client": "cursor", "undo": "refused-entry-changed-since-apply"}]
+    assert servers(home, "cursor")["memory-os-ai"] == FOREIGN_NOW and no_temporary_left(home, "cursor")
+
+
+class FailingAdd(FakeSystem):
+    """``claude mcp add`` fails; optionally another writer puts its entry right after that failure."""
+
+    def __init__(self, home, *, writer):
+        super().__init__(home)
+        self.writer, self.failed = writer, False
+
+    def __call__(self, argv, **kwargs):
+        argv = [str(a) for a in argv]
+        if argv[:3] == ["claude", "mcp", "add"] and not self.failed:
+            self.failed = True
+            self.calls.append(argv)
+            if self.writer:
+                set_entry(self.home, "claude-code", FOREIGN_NOW)
+            return self._done(1, stderr="refused")
+        return super().__call__(argv, **kwargs)
+
+
+@pytest.mark.parametrize("writer", [False, True])
+def test_claude_code_best_effort_return_after_a_failed_add_is_revalidated(home, tmp_path, writer):
+    """Replace E1 by E2: ``remove`` works, ``add`` fails. E1 is put back through the CLI only if our
+    name is still absent; an entry written by someone else right after the failure is kept."""
+    install_from(home, tmp_path, "claude-code")
+    first = servers(home, "claude-code")["memory-os-ai"]
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
+    system = FailingAdd(home, writer=writer)
+    with pytest.raises(qs.QuickstartError, match="private journal retained"):
+        qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
+    verbs = [argv[2] for argv in system.calls]
+    if writer:
+        assert verbs == ["remove", "add"] and servers(home, "claude-code")["memory-os-ai"] == FOREIGN_NOW
+    else:
+        assert verbs == ["remove", "add", "add"] and servers(home, "claude-code")["memory-os-ai"] == first
+
+
+# ---- the write primitive: an explicit, required expectation and no state between calls ----
+
+def sha(text):
+    import hashlib
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def target(tmp_path, text="zero"):
+    path = tmp_path / "config" / "file.json"
+    path.parent.mkdir()
+    path.write_text(text)
+    return path
+
+
+def leftovers(path):
+    return [item.name for item in path.parent.iterdir() if item.name != path.name]
+
+
+def test_a_write_without_an_expectation_is_impossible(tmp_path):
+    path = target(tmp_path)
+    with pytest.raises(TypeError):
+        qs._atomic_write(path, "new")
+    with pytest.raises(TypeError):
+        qs._atomic_write(path, "new", sha("zero"))  # keyword only: never a positional accident
+    for bad in (None, "", "abc", 0, object()):
+        with pytest.raises(qs.QuickstartError):
+            qs._atomic_write(path, "new", expected=bad)
+    assert path.read_text() == "zero" and leftovers(path) == []
+
+
+def test_expected_digest_and_absent_are_each_enforced(tmp_path):
+    path = target(tmp_path)
+    qs._atomic_write(path, "one", expected=sha("zero"))
+    assert path.read_text() == "one"
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "two", expected=sha("zero"))  # stale expectation
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "two", expected=qs.ABSENT)    # ABSENT requires absence
+    assert path.read_text() == "one" and leftovers(path) == []
+    fresh = path.with_name("new.json")
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(fresh, "x", expected=sha("zero"))   # a digest requires the file
+    qs._atomic_write(fresh, "x", expected=qs.ABSENT)
+    assert fresh.read_text() == "x" and leftovers(path) == ["new.json"]
+
+
+def test_unguarded_is_only_for_a_journal_file_in_a_fresh_private_directory_of_this_run(tmp_path):
+    path = target(tmp_path)
+    with pytest.raises(qs.QuickstartError, match="Unguarded"):
+        qs._atomic_write(path, "new", expected=qs.UNGUARDED)
+    private = tmp_path / ("20260101-000000-" + "a" * 32)
+    private.mkdir(mode=0o700)  # private, well named, but NOT created by new_journal in this run
+    with pytest.raises(qs.QuickstartError, match="Unguarded"):
+        qs._atomic_write(private / "journal.json", "{}", expected=qs.UNGUARDED)
+    journal = qs.new_journal(tmp_path / "journals")
+    with pytest.raises(qs.QuickstartError, match="Unguarded"):
+        qs._atomic_write(journal / "anything.json", "{}", expected=qs.UNGUARDED)  # not a journal file
+    qs._atomic_write(journal / "journal.json", "{}", expected=qs.UNGUARDED)
+    qs._atomic_write(journal / "journal.json", "{ }", expected=qs.UNGUARDED)
+    journal.chmod(0o755)
+    with pytest.raises(qs.QuickstartError, match="Unguarded"):
+        qs._atomic_write(journal / "journal.json", "{}", expected=qs.UNGUARDED)  # no longer private
+    assert path.read_text() == "zero" and (journal / "journal.json").read_text() == "{ }"
+
+
+def test_a_nested_write_on_the_same_path_does_not_disturb_the_expectation_of_the_outer_one(tmp_path, monkeypatch):
+    """The inner write (correct expectation) lands while the outer one is prepared: the outer one,
+    still holding ITS expectation, sees the change and writes nothing."""
+    path = target(tmp_path)
+    real = qs.tempfile.mkstemp
+    depth = []
+
+    def mkstemp(*args, **kwargs):
+        made = real(*args, **kwargs)
+        if not depth:
+            depth.append(1)
+            qs._atomic_write(path, "inner", expected=sha("zero"))
+        return made
+    monkeypatch.setattr(qs.tempfile, "mkstemp", mkstemp)
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "outer", expected=sha("zero"))
+    assert path.read_text() == "inner" and leftovers(path) == []
+    qs._atomic_write(path, "after", expected=sha("inner"))  # nothing stale is left behind
+    assert path.read_text() == "after"
+
+
+def test_two_threads_on_the_same_path_each_keep_their_own_expectation(tmp_path, monkeypatch):
+    """T2 is called first with the digest it read and is held after its temporary file is prepared;
+    T1 then writes completely; T2 resumes: its own expectation is still the one it was given."""
+    import threading
+    path = target(tmp_path)
+    prepared, release = threading.Event(), threading.Event()
+    real = qs.os.chmod
+    outcome = {}
+
+    def chmod(name, mode, *args, **kwargs):
+        real(name, mode, *args, **kwargs)
+        if threading.current_thread().name == "second":
+            prepared.set()
+            assert release.wait(10)
+
+    def write(label, text):
+        try:
+            qs._atomic_write(path, text, expected=sha("zero"))
+            outcome[label] = "written"
+        except qs.EntryChanged:
+            outcome[label] = "conflict"
+    monkeypatch.setattr(qs.os, "chmod", chmod)
+    second = threading.Thread(target=write, args=("second", "from-second"), name="second")
+    second.start()
+    assert prepared.wait(10)
+    first = threading.Thread(target=write, args=("first", "from-first"), name="first")
+    first.start()
+    first.join(10)
+    release.set()
+    second.join(10)
+    assert outcome == {"first": "written", "second": "conflict"}
+    assert path.read_text() == "from-first" and leftovers(path) == []
+
+
+def test_writes_on_distinct_paths_do_not_share_anything(tmp_path):
+    one = target(tmp_path)
+    two = one.with_name("other.json")
+    two.write_text("zero")
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(one, "x", expected=sha("something else"))
+    qs._atomic_write(two, "y", expected=sha("zero"))
+    assert (one.read_text(), two.read_text()) == ("zero", "y")
+
+
+def test_an_exception_during_a_write_leaves_no_state_and_no_temporary_file(tmp_path, monkeypatch):
+    path = target(tmp_path)
+    real = qs.os.replace
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+    monkeypatch.setattr(qs.os, "replace", broken)
+    with pytest.raises(OSError):
+        qs._atomic_write(path, "new", expected=sha("zero"))
+    monkeypatch.setattr(qs.os, "replace", real)
+    assert path.read_text() == "zero" and leftovers(path) == []
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "new", expected=sha("not zero"))  # still checked after the failure
+    qs._atomic_write(path, "new", expected=sha("zero"))
+    assert path.read_text() == "new"
+
+
+def test_aliases_of_a_file_are_the_same_checked_path_or_a_refusal(tmp_path, monkeypatch):
+    path = target(tmp_path)
+    link = path.with_name("link.json")
+    link.symlink_to(path)
+    with pytest.raises(qs.QuickstartError, match="Unsafe"):
+        qs._atomic_write(link, "x", expected=sha("zero"))  # symbolic link: refused
+    link.unlink()
+    os.link(path, link)
+    for alias in (path, link):
+        with pytest.raises(qs.QuickstartError, match="hard links"):
+            qs._atomic_write(alias, "x", expected=sha("zero"))  # two names for one file: refused
+    link.unlink()
+    monkeypatch.chdir(path.parent)
+    relative = Path(path.name)
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(relative, "x", expected=sha("stale"))  # a relative name is the same checked file
+    qs._atomic_write(relative, "x", expected=sha("zero"))
+    assert path.read_text() == "x" and leftovers(path) == []
 
 
 def test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent(home, tmp_path):

@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (608 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (619 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 608 tests verts** (clients 199, cycle de vie 216, profil 62, reprise 46, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 79 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.6). Le reste de
+**État après implémentation : 619 tests verts** (clients 210, cycle de vie 216, profil 62, reprise 46, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 90 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.7). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1113,18 +1113,20 @@ Limite de la garantie : précisée et réduite au §23.6.
 Discipline unique, **« préparer d'abord, vérifier en dernier, puis remplacer »** : `_atomic_write` écrit,
 vide, synchronise (`fsync`), ferme et règle le mode du fichier temporaire **avant** de relire la cible ; la
 comparaison de son empreinte à celle des octets dont l'écriture a été construite est la **dernière** étape,
-suivie du seul `os.replace`. Écart → temporaire supprimé, `EntryChanged`, rien n'est remplacé. L'empreinte
-attendue est déclarée par `_expecting(path, sha)` autour de l'appel, pour que toute écriture continue de
-passer par `quickstart._atomic_write(path, text)`.
+suivie du seul `os.replace`. Écart → temporaire supprimé, `EntryChanged`, rien n'est remplacé. L'attente
+est un **argument explicite et obligatoire** de `_atomic_write` (§23.7 ; le mécanisme hors bande de la
+première version de cette section est supprimé).
 
 | Chemin de mutation | Vérification au dernier moment | Test |
 |---|---|---|
 | `quickstart` — création JSON, création TOML (`_write_client`) | empreinte des octets lus (égale à celle de l'aperçu), revérifiée juste avant `os.replace` | `test_a_create_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (Cursor, VS Code, Codex) |
 | `quickstart` — remplacement JSON | idem, après la révocation | `test_a_replace_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (2), et pendant la révocation : `…_written_during_its_own_revocation` (4) |
-| `undo` — retrait ou rétablissement JSON, retrait TOML (`remove_client_entry`) | empreinte de l'entrée attendue sur les octets lus, puis empreinte de ces octets juste avant `os.replace` | `test_undo_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (Cursor, Codex) |
+| `undo` — retrait JSON, retrait TOML (`remove_client_entry`) | empreinte de l'entrée attendue sur les octets lus, puis empreinte de ces octets juste avant `os.replace` | `test_undo_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (Cursor, Codex) |
+| `undo` — **rétablissement** JSON de l'entrée précédente (même fonction, autre branche) | idem | `test_undo_never_overwrites_an_entry_written_while_a_json_restoration_is_prepared` |
 | `uninstall` — retrait JSON, TOML | même fonction | `test_uninstall_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (Cursor, Codex) |
 | Claude Code — `claude mcp remove` (remplacement, retour arrière, désinstallation) | fichier (empreinte de l'aperçu) ou entrée attendue relus immédiatement avant la commande | `test_claude_code_create_is_revalidated_immediately_before_the_cli`, `test_claude_code_entry_changed_during_its_revocation…` |
-| Claude Code — `claude mcp add` (création, ajout après `remove`, rétablissement de l'entrée précédente, retour au mieux après échec) | notre nom doit être **absent** du fichier immédiatement avant chaque `add` (`_claude_add`) | `test_claude_code_replace_is_revalidated_between_remove_and_add`, `test_claude_code_undo_is_revalidated_before_it_restores_the_previous_entry` |
+| Claude Code — `claude mcp add` : création, ajout après `remove`, rétablissement de l'entrée précédente | notre nom doit être **absent** du fichier immédiatement avant chaque `add` (`_claude_add`) | `test_claude_code_replace_is_revalidated_between_remove_and_add`, `test_claude_code_undo_is_revalidated_before_it_restores_the_previous_entry` |
+| Claude Code — retour au mieux à l'entrée précédente après un `add` en échec | même contrôle avant ce second `add` : une entrée posée par un autre écrivain après l'échec est conservée ; sinon l'entrée précédente (notre forme stricte) est remise | `test_claude_code_best_effort_return_after_a_failed_add_is_revalidated` (2) |
 | Révocation — réécriture d'un journal de confiance (`revoke_proofs`) | empreinte des octets lus du journal, juste avant `os.replace` ; écart → révocation en échec, client intact | `test_a_journal_changed_while_its_revocation_is_prepared_is_not_overwritten` |
 | Journaux propres à l'exécution (`journal.json`, `install.json`, `uninstall.json` d'un dossier neuf 0700 créé par cette exécution) | sans objet : aucun autre écrivain n'a ce chemin ; pas d'empreinte attendue | — |
 | Jeton, plist | création exclusive (`O_EXCL`), jamais d'écrasement (inchangé) ; plist déplacé seulement après arrêt confirmé et empreinte revérifiée (§6) | tests du §6 |
@@ -1135,6 +1137,43 @@ clients ne peut la fermer. (2) *Interne à la CLI `claude`* : entre notre relect
 que la CLI fait elle-même de `~/.claude.json`, et pendant celle-ci ; son atomicité est celle de la CLI (§4).
 Entre nos deux commandes d'un remplacement (`remove` puis `add`), la fenêtre évitable est fermée par la
 revalidation avant `add`.
+
+### 23.7 Revue d'implémentation Codex n° 4 (`codex_verdict_setup_impl_v4.md`, sur `fb5c02d`) : attente d'écriture explicite, aucun état hors bande
+
+Le mécanisme `_expecting` (attente posée dans un dictionnaire de module autour de l'appel) était fautif :
+contextes imbriqués sur un même chemin (le `pop` ne rétablissait pas l'attente externe), fils concurrents, et
+surtout « pas d'attente » équivalait à « pas de contrôle ». **Choix : la recommandation du coordinateur,
+l'argument explicite**, plutôt qu'un `ContextVar` — il supprime la classe de défauts au lieu de la couvrir :
+il n'y a plus aucun état partagé entre deux appels, donc ni imbrication, ni fil, ni alias de chemin à gérer.
+
+`_atomic_write(path, text, *, expected)` — `expected` est **obligatoire, nommé, sans valeur par défaut** :
+
+- une empreinte SHA-256 (64 chiffres hexadécimaux) : la cible doit avoir exactement ces octets au dernier moment ;
+- `ABSENT` : la cible ne doit pas exister ;
+- `UNGUARDED` : accepté seulement pour `journal.json`, `install.json` ou `uninstall.json` dans un dossier
+  privé 0700 que `new_journal` a créé **dans cette exécution** (registre `_FRESH_JOURNALS`, en ajout seul,
+  qui ne peut que restreindre) ; partout ailleurs, refus ;
+- toute autre valeur (`None` compris) : refus ; argument oublié : `TypeError`.
+
+Une cible qui est un lien symbolique, qui n'est pas un fichier ordinaire ou qui a plusieurs liens physiques
+est refusée : tout alias d'un fichier est soit le même chemin à lien unique, soit un refus. Les espions des
+tests de la phase (sept, tous dans les fichiers `*_410_setup.py`) passent à la signature à trois arguments ;
+aucun test préexistant du §14 n'utilisait `_atomic_write`.
+
+Reste, distinct et assumé : `_write_client(expected_file_sha256=…)` garde une valeur par défaut « pas
+d'empreinte d'aperçu » pour ses appelants historiques (`test_quickstart.py`) ; elle ne désactive rien,
+l'écriture elle-même attend toujours l'empreinte des octets dont elle est construite.
+
+| Cas | Test |
+|---|---|
+| attente absente (`TypeError`), positionnelle, ou invalide | `test_a_write_without_an_expectation_is_impossible` |
+| empreinte exigée, périmée ; `ABSENT` exige l'absence ; une empreinte exige le fichier | `test_expected_digest_and_absent_are_each_enforced` |
+| `UNGUARDED` hors d'un journal neuf de cette exécution (autre dossier, dossier 0700 non créé par l'exécution, autre nom de fichier, dossier devenu non privé) | `test_unguarded_is_only_for_a_journal_file_in_a_fresh_private_directory_of_this_run` |
+| appels imbriqués sur le même chemin | `test_a_nested_write_on_the_same_path_does_not_disturb_the_expectation_of_the_outer_one` |
+| deux fils entrelacés sur le même chemin (événements, aucun `sleep`) | `test_two_threads_on_the_same_path_each_keep_their_own_expectation` |
+| chemins distincts | `test_writes_on_distinct_paths_do_not_share_anything` |
+| exception pendant l'écriture : ni état, ni temporaire | `test_an_exception_during_a_write_leaves_no_state_and_no_temporary_file` |
+| alias : lien symbolique, lien physique, chemin relatif | `test_aliases_of_a_file_are_the_same_checked_path_or_a_refusal` |
 
 ### 23.3 Limites résiduelles
 

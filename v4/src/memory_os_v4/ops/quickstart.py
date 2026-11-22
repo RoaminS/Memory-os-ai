@@ -268,8 +268,7 @@ def revoke_proofs(journal_root: Path, client_key: str, digest: str, by: str, *, 
                 changed = True
         if changed:
             # The journal must still be the bytes this rewrite was built from (another run of the tool).
-            with _expecting(path, read_sha256):
-                _atomic_write(path, json.dumps(document, indent=1, ensure_ascii=False))
+            _atomic_write(path, json.dumps(document, indent=1, ensure_ascii=False), expected=read_sha256)
             done.append(str(path))
     return len(done)
 
@@ -437,8 +436,19 @@ def _is_jsonc(raw: str) -> bool:
 
 # ---------- client writes ----------
 
-_ANY = object()  # no expectation on the target (our own fresh journal files)
-_EXPECTED: dict[str, object] = {}
+class _Sentinel:
+    def __init__(self, name: str):
+        self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+ABSENT = _Sentinel("ABSENT")        # the target must not exist at the last moment
+UNGUARDED = _Sentinel("UNGUARDED")  # only a journal file inside a fresh private directory created by THIS run
+_ANY = _Sentinel("ANY")             # (callers of _write_client only) no preview digest to compare with
+JOURNAL_FILES = frozenset({"journal.json", "install.json", "uninstall.json"})
+_FRESH_JOURNALS: set[str] = set()   # directories created by new_journal() in this process; only ever added to
 
 
 class EntryChanged(QuickstartError):
@@ -448,36 +458,39 @@ class EntryChanged(QuickstartError):
         super().__init__(message, code="client_entry_changed")
 
 
-class _expecting:
-    """``with _expecting(path, sha256): _atomic_write(path, text)``.
-
-    Declares the digest the target must STILL have at the last moment (None: it must not exist).
-    Out of band on purpose: every write keeps going through the two-argument ``_atomic_write``.
-    """
-
-    def __init__(self, path: Path, sha256):
-        self.key, self.sha256 = str(path), sha256
-
-    def __enter__(self):
-        _EXPECTED[self.key] = self.sha256
-
-    def __exit__(self, *exc):
-        _EXPECTED.pop(self.key, None)
+def _expected_of(digest: str | None):
+    """Expectation for a target whose bytes were read with digest ``digest`` (None: there was no file)."""
+    return ABSENT if digest is None else digest
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    """Prepare first, verify last, then replace.
+def _atomic_write(path: Path, text: str, *, expected) -> None:
+    """Prepare first, verify last, then replace. ``expected`` is REQUIRED and explicit:
 
-    The temporary file is fully prepared (write, flush, fsync, close, chmod) BEFORE the target is
-    looked at one last time; when a digest is expected (``_expecting``), it is re-read and compared
-    as the very last step, with nothing but ``os.replace`` after it. A mismatch unlinks the
-    temporary file and raises ``EntryChanged``: another writer's content is never replaced.
+    - a SHA-256 hex string: the target must still have exactly these bytes;
+    - ``ABSENT``: the target must not exist;
+    - ``UNGUARDED``: accepted only for ``journal.json`` / ``install.json`` / ``uninstall.json`` inside a
+      private 0700 directory that ``new_journal`` created in this very run; anywhere else it is refused.
+
+    There is no default and no state shared between calls: a forgotten expectation is a
+    ``TypeError``, never an unprotected write. The temporary file is fully prepared (write, flush,
+    fsync, close, chmod) BEFORE the target is looked at one last time; the comparison is the very
+    last step, with nothing but ``os.replace`` after it. A mismatch unlinks the temporary file
+    and raises ``EntryChanged``. A target that is a symbolic link, not a regular file, or has
+    several hard links is refused: every alias of a file is either the same single-link path or a refusal.
     """
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise QuickstartError("Unsafe write target")
+    if path.exists() and path.stat().st_nlink != 1:
+        raise QuickstartError("Unsafe write target: several hard links")
+    if expected is UNGUARDED:
+        directory = path.parent
+        if (path.name not in JOURNAL_FILES or str(directory.resolve()) not in _FRESH_JOURNALS
+                or not _private(directory, 0o700, directory=True)):
+            raise QuickstartError("Unguarded write refused outside a fresh private journal of this run")
+    elif expected is not ABSENT and not (isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{64}", expected)):
+        raise QuickstartError("Invalid write expectation")
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    expected = _EXPECTED.get(str(path), _ANY)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
@@ -485,7 +498,7 @@ def _atomic_write(path: Path, text: str) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, mode)
-        if expected is not _ANY and _sha(path) != expected:
+        if expected is not UNGUARDED and _sha(path) != (None if expected is ABSENT else expected):
             raise EntryChanged("The target changed while the write was prepared; nothing written")
         os.replace(tmp, path)
         fd = os.open(path.parent, os.O_RDONLY)
@@ -570,16 +583,14 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
         candidate = _toml_candidate(client, raw or "", entry)
         if candidate is None:
             raise QuickstartError("TOML structure cannot be extended safely; apply the snippet by hand")
-        with _expecting(path, built_from):
-            _atomic_write(path, candidate[0])
+        _atomic_write(path, candidate[0], expected=_expected_of(built_from))
         return "toml-append"
     if raw is not None and _json_has_duplicate_keys(raw):
         raise QuickstartError("JSON config with duplicate keys; edit it by hand")
     data = json.loads(raw or "{}") if raw is not None else {}
     data.setdefault(_json_key(client), {})[SERVER] = entry
     text = _dump_json(data, raw)
-    with _expecting(path, built_from):
-        _atomic_write(path, text)
+    _atomic_write(path, text, expected=_expected_of(built_from))
     return "json-merge"
 
 
@@ -688,8 +699,7 @@ def remove_client_entry(client: Client, home: Path, *, run=subprocess.run, previ
         return
     path = client.config_path(home)
     # Prepare first, verify last: the target must still be the bytes the candidate was built from.
-    with _expecting(path, hashlib.sha256(original.encode("utf-8")).hexdigest()):
-        _atomic_write(path, candidate)
+    _atomic_write(path, candidate, expected=hashlib.sha256(original.encode("utf-8")).hexdigest())
 
 
 def backup_client_file(path: Path, backup: Path) -> str:
@@ -725,7 +735,7 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
     identity = installation_identity(env)
     def persist():
         _atomic_write(journal, json.dumps({"version": 1, "stamp": stamp, "records": records},
-                                         indent=1, ensure_ascii=False))
+                                         indent=1, ensure_ascii=False), expected=UNGUARDED)
         journal.chmod(0o600)
     persist()
     for item in plan["clients"]:
@@ -805,7 +815,8 @@ def new_journal(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.chmod(0o700)
     path = root / (time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex)
-    path.mkdir(mode=0o700)
+    path.mkdir(mode=0o700)  # exclusive creation: a fresh directory nobody else has
+    _FRESH_JOURNALS.add(str(path.resolve()))
     return path
 
 
@@ -1580,7 +1591,7 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
                             'MEMORY_V4_BACKUP_KEY': str(settings.backup_key)},
                 'ops_notice': 'Use ops_env for doctor/health/backup in a fresh shell; quickstart never changes shell defaults.'}
     def record():
-        _atomic_write(journal / 'install.json', json.dumps(progress, indent=1))
+        _atomic_write(journal / 'install.json', json.dumps(progress, indent=1), expected=UNGUARDED)
         (journal / 'install.json').chmod(0o600)
 
     def enter(stage):

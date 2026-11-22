@@ -495,14 +495,14 @@ def test_the_proof_is_revoked_before_the_entry_is_removed(c, monkeypatch):
     real = qs._atomic_write
     order = []
 
-    def spy(path, text):
+    def spy(path, text, **expectation):
         name = Path(path).name
         if name == "journal.json" and '"revoked": true' in text:
             order.append("revoke")
         if name == "mcp.json" and str(path).endswith(PATHS["cursor"]):
             order.append("remove")
             raise OSError("disk full")
-        return real(path, text)
+        return real(path, text, **expectation)
     monkeypatch.setattr(qs, "_atomic_write", spy)
     result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
     assert order[:2] == ["revoke", "remove"]
@@ -562,11 +562,11 @@ def test_a_failed_revocation_leaves_the_client_untouched_and_the_result_partial(
     journals = {path: path.read_bytes() for path in (c.home / STATE / "quickstart").glob("*/journal.json")}
     real = qs._atomic_write
 
-    def failing(path, text):
+    def failing(path, text, **expectation):
         if Path(path).name == "journal.json" and any(
                 record["client"] == "cursor" and record.get("revoked") for record in json.loads(text)["records"]):
             raise OSError("read-only file system")
-        return real(path, text)
+        return real(path, text, **expectation)
     monkeypatch.setattr(qs, "_atomic_write", failing)
     result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
     statuses = {item["client"]: item["status"] for item in result["clients"]}
@@ -602,12 +602,12 @@ def test_a_revocation_failing_on_the_second_journal_keeps_the_first_and_resumes(
     real = qs._atomic_write
     revocations = []
 
-    def failing(path, text):
+    def failing(path, text, **expectation):
         if Path(path).name == "journal.json" and '"revoked": true' in text:
             revocations.append(str(path))
             if len(revocations) == 2:
                 raise OSError("read-only file system")
-        return real(path, text)
+        return real(path, text, **expectation)
     monkeypatch.setattr(qs, "_atomic_write", failing)
     partial = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
     item, = partial["clients"]
@@ -1029,8 +1029,8 @@ def rewrite_during_revocation(c, monkeypatch, key="cursor"):
     real = qs._atomic_write
     seen = []
 
-    def hooked(path, text):
-        real(path, text)
+    def hooked(path, text, **expectation):
+        real(path, text, **expectation)
         if Path(path).name == "journal.json" and '"revoked": true' in text and not seen:
             seen.append(str(path))
             set_entry(c.home, key, FOREIGN_NOW)
@@ -1120,8 +1120,8 @@ def test_a_kept_service_stays_kept_even_if_its_last_dependency_vanishes_during_t
     plan = uninstall_plan(c, clients=("cursor",))
     real = qs._atomic_write
 
-    def hooked(path, text):
-        real(path, text)
+    def hooked(path, text, **expectation):
+        real(path, text, **expectation)
         if str(path).endswith(PATHS["cursor"]):  # while the apply runs, after its revalidation
             vscode = c.home / PATHS["vscode"]
             data = json.loads(vscode.read_text())
