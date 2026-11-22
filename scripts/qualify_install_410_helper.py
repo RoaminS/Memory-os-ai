@@ -30,11 +30,21 @@ ML_LIBRARIES = re.compile(r"torch|sentence_transformers|faiss|transformers", re.
 ML_PACKAGES = {"torch", "sentence-transformers", "transformers", "faiss-cpu", "faiss", "tokenizers", "safetensors",
                "huggingface-hub", "scipy", "scikit-learn"}
 BOOTSTRAP = {"pip", "setuptools", "wheel"}
+# Every client configuration of the product catalogue (memory_os_v4.ops.clients.CLIENTS); a unit test keeps
+# this list equal to the catalogue. This file stays import-free of the repository.
 REAL_CLIENT_CONFIGS = (
-    ".cursor/mcp.json", ".codex/config.toml", ".gemini/config/mcp_config.json",
-    "Library/Application Support/Claude/claude_desktop_config.json", "Library/Application Support/Code/User/mcp.json",
+    ".claude.json", "Library/Application Support/Claude/claude_desktop_config.json", ".codex/config.toml",
+    "Library/Application Support/Code/User/mcp.json", ".cursor/mcp.json", ".gemini/config/mcp_config.json",
+    ".gemini/settings.json", ".grok/config.toml", ".config/zed/settings.json", ".config/devin/mcp_config.json",
+    ".codeium/windsurf/mcp_config.json",
 )
-TEST_CLIENT_FILES = (".codex/config.toml", ".cursor/mcp.json")
+# Rewritten continuously by a running client: only its MCP sections are fingerprinted.
+VOLATILE_JSON_CONFIGS = (".claude.json",)
+PROTECTED_TREES = (".config/memory-os",)  # real token, key, tables: never written by a qualification
+TEST_CLIENTS = {"codex": ".codex/config.toml", "cursor": ".cursor/mcp.json"}  # the two clients a run requests
+TEST_CLIENT_FILES = tuple(TEST_CLIENTS.values())
+REQUIRED_DOCTOR_AREAS = ("token", "local-runtime", "server", "security", "ready", "service", "store", "storage",
+                         "store-profile", "relay-journals", "client:codex", "client:cursor")
 EXIT_UNOBSERVABLE = 3
 
 
@@ -51,9 +61,16 @@ def sha256_file(path):
 
 
 def refuse_forbidden(path):
+    """Refuse a sealed validation folder: lexical form first (no stat), then the resolved form.
+
+    Called before any read or traversal of a path received from outside (seeds, caches, proofs,
+    inventories), and on the target of every link met while walking.
+    """
     text = os.path.abspath(os.fspath(path))
     if any(name in Path(text).parts for name in FORBIDDEN_NAMES):
         raise SystemExit("REFUS: sealed validation folder (never read or listed)")
+    if any(name in Path(os.path.realpath(text)).parts for name in FORBIDDEN_NAMES):
+        raise SystemExit("REFUS: path resolves into a sealed validation folder")
     return Path(text)
 
 
@@ -176,13 +193,14 @@ def inventory(root):
     """Every entry below ``root``: type, mode, size AND content SHA-256 (names/sizes/dates are not enough)."""
     root = refuse_forbidden(root)
     rows = {}
-    for folder, names, files in os.walk(root):
+    for folder, names, files in os.walk(root):  # links to folders are recorded, never followed
         names.sort()
         for name in sorted(names + files):
             path = Path(folder) / name
             rel = str(path.relative_to(root))
             info = path.lstat()
             if path.is_symlink():
+                refuse_forbidden(os.path.join(folder, os.readlink(path)))  # an alias cannot lead inside
                 rows[rel] = {"type": "link", "target": os.readlink(path)}
             elif path.is_dir():
                 rows[rel] = {"type": "dir", "mode": info.st_mode & 0o7777}
@@ -280,7 +298,7 @@ def tree_bytes(root):
 
 def verify_granite(cache, catalog):
     """Pre-placed model checked file by file against provision_v1.json (size and SHA-256)."""
-    cache = Path(cache)
+    cache = refuse_forbidden(cache)
     snapshots = sorted((cache / "snapshots").iterdir()) if (cache / "snapshots").is_dir() else []
     rows, ok = [], len(snapshots) == 1
     for record in catalog.get("files", []):
@@ -293,38 +311,121 @@ def verify_granite(cache, catalog):
             "revision": snapshots[0].name if len(snapshots) == 1 else None}
 
 
+def complete_hf_cache(model_dir):
+    """A usable offline Hugging Face model cache: refs/main -> one snapshot whose every entry reaches a blob.
+
+    ``config.json`` alone proves nothing: the reference, the snapshot, the tokenizer and non-empty weights
+    must all be there, each snapshot link resolving inside ``blobs/``. Read-only; downloads nothing.
+    """
+    model_dir = refuse_forbidden(model_dir)
+    problems = []
+    ref = model_dir / "refs/main"
+    revision = ref.read_text().strip() if ref.is_file() else ""
+    snapshot = model_dir / "snapshots" / revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None
+    blobs = (model_dir / "blobs").resolve()
+    files = {}
+    if snapshot is None or not snapshot.is_dir():
+        problems.append("refs/main does not name an existing snapshot")
+    else:
+        for folder, _, names in os.walk(snapshot):
+            for name in names:
+                path = Path(folder) / name
+                rel = str(path.relative_to(snapshot))
+                target = path.resolve()
+                refuse_forbidden(target)
+                if path.is_symlink() and blobs not in target.parents:
+                    problems.append("snapshot entry outside blobs/: " + rel)
+                elif not target.is_file() or target.stat().st_size == 0:
+                    problems.append("snapshot entry without a non-empty blob: " + rel)
+                else:
+                    files[rel] = target.stat().st_size
+        for required in ("config.json", "modules.json", "tokenizer.json", "tokenizer_config.json"):
+            if required not in files:
+                problems.append("missing " + required)
+        if not any(name in files for name in ("model.safetensors", "pytorch_model.bin")):
+            problems.append("missing model weights")
+    return {"ok": not problems, "revision": revision or None, "files": len(files), "problems": problems}
+
+
 # ---------- production: read only ----------
 
+def _fingerprint(path, volatile=False):
+    """None = absent (explicit); a digest = read; anything unreadable is a refusal, never "unchanged"."""
+    if not os.path.lexists(path):
+        return None
+    try:
+        if os.path.islink(path):
+            return {"link": os.readlink(path)}
+        if volatile:
+            found = []
+
+            def walk(node, trail):
+                if isinstance(node, dict):
+                    for key in sorted(node):
+                        if key == "mcpServers":
+                            found.append([trail + [key], node[key]])
+                        else:
+                            walk(node[key], trail + [key])
+
+            walk(json.loads(Path(path).read_text()), [])
+            return {"mcp_sections_sha256": hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()}
+        return {"sha256": sha256_file(path)}
+    except (OSError, ValueError) as exc:
+        raise Unobservable("protected file unreadable: %s (%s)" % (path, type(exc).__name__))
+
+
+def _tree(root):
+    if not os.path.lexists(root):
+        return None
+    rows = {}
+    try:
+        for folder, names, files in os.walk(root):
+            names.sort()
+            for name in sorted(files):
+                path = os.path.join(folder, name)
+                rows[os.path.relpath(path, root)] = _fingerprint(path)
+    except OSError as exc:
+        raise Unobservable("protected folder unreadable: %s (%s)" % (root, type(exc).__name__))
+    return rows
+
+
 def production_snapshot(real_home, uid=None, run=subprocess.run):
-    """Fingerprints of what must never change: prod plist, real LaunchAgents, real client configs, prod pid."""
+    """Content fingerprints of what must never change (read only).
+
+    Every client configuration of the catalogue, EVERY file of the real LaunchAgents (content, not
+    names), the real ``~/.config/memory-os`` tree, and the production pid. Absence is recorded as
+    absence; an unreadable file is a refusal.
+    """
     real_home = Path(real_home)
-    files = {}
-    for rel in (*REAL_CLIENT_CONFIGS, "Library/LaunchAgents/%s.plist" % PRODUCTION_LABEL):
-        path = real_home / rel
-        files[rel] = {"sha256": sha256_file(path), "mtime_ns": path.stat().st_mtime_ns} if path.is_file() else None
-    agents = real_home / "Library/LaunchAgents"
+    clients = {rel: _fingerprint(real_home / rel, volatile=rel in VOLATILE_JSON_CONFIGS) for rel in REAL_CLIENT_CONFIGS}
+    agents = _tree(real_home / "Library/LaunchAgents")
+    trees = {rel: _tree(real_home / rel) for rel in PROTECTED_TREES}
     state, text = label_state(PRODUCTION_LABEL, uid=uid, run=run)
-    row = {"files": files, "launch_agents": sorted(os.listdir(agents)) if agents.is_dir() else None,
+    row = {"client_configs": clients, "launch_agents": agents, "protected_trees": trees,
+           "production_plist": (agents or {}).get(PRODUCTION_LABEL + ".plist"),
            "production_label_state": state, "production_pid": parse_print(text)["pid"] if state == "present" else None}
-    row["sha256"] = hashlib.sha256(json.dumps({k: row[k] for k in ("files", "launch_agents")}, sort_keys=True).encode()).hexdigest()
+    row["sha256"] = hashlib.sha256(json.dumps(
+        {k: row[k] for k in ("client_configs", "launch_agents", "protected_trees")}, sort_keys=True).encode()).hexdigest()
     return row
 
 
+def production_unchanged(before, after):
+    """The exit booleans, over the whole protected perimeter."""
+    return {
+        "production_plist_unchanged": before["production_plist"] is not None
+        and before["production_plist"] == after["production_plist"],
+        "production_pid_unchanged": before["production_pid"] is not None
+        and before["production_pid"] == after["production_pid"],
+        "real_launch_agents_unchanged": before["launch_agents"] is not None
+        and before["launch_agents"] == after["launch_agents"],
+        "real_client_configs_unchanged": set(before["client_configs"]) == set(REAL_CLIENT_CONFIGS)
+        and before["client_configs"] == after["client_configs"],
+        "real_memory_os_config_unchanged": set(before["protected_trees"]) == set(PROTECTED_TREES)
+        and before["protected_trees"] == after["protected_trees"],
+    }
+
+
 # ---------- client entries and user data (G8) ----------
-
-def client_state(home, port):
-    home = Path(home)
-    rows = {}
-    for rel in TEST_CLIENT_FILES:
-        path = home / rel
-        if path.is_file():
-            text = path.read_text(errors="replace")
-            rows[rel] = {"sha256": sha256_file(path), "mentions_test_service": (":%d/" % int(port)) in text
-                         or "memory-os" in text}
-        else:
-            rows[rel] = None
-    return rows
-
 
 def store_logical(store_dir):
     """Identity and logical content of a SQLite store, read only; survives WAL checkpoint/close."""
@@ -359,8 +460,10 @@ IMMUTABLE = {
     "key": (".config/memory-os/backup.key",),
 }
 STORE_PREFIX = ".local/share/memory-os/store/"
-JOURNAL_PREFIX = ".local/state/memory-os/"
+STATE_PREFIX = ".local/state/memory-os/"
+QUICKSTART_PREFIX = ".local/state/memory-os/quickstart/"
 UNINSTALL_PREFIX = ".local/state/memory-os/uninstall/"
+WITNESS_BACKUP = "memory-os-backups/qualify-410-witness.mosb"
 
 
 def kind_of(rel):
@@ -370,44 +473,89 @@ def kind_of(rel):
     return None
 
 
-def data_conservation(before, after, store_before, store_after, label, created_clients):
-    """Only the expected, inventoried mutations of the uninstall protocol are admitted."""
+def revocation_only(before_text, after_text, stamp):
+    """The ONLY journal rewrite uninstall may do: records gaining ``revoked: true, revoked_by: <its stamp>``.
+
+    Field by field: same document, same records in the same order, nothing else added, removed or changed.
+    """
+    try:
+        before, after = json.loads(before_text), json.loads(after_text)
+    except (TypeError, ValueError):
+        return False
+    if not (isinstance(before, dict) and isinstance(after, dict) and isinstance(before.get("records"), list)
+            and isinstance(after.get("records"), list) and len(before["records"]) == len(after["records"])):
+        return False
+    if {k: v for k, v in before.items() if k != "records"} != {k: v for k, v in after.items() if k != "records"}:
+        return False
+    revoked = 0
+    for old, new in zip(before["records"], after["records"]):
+        if old == new:
+            continue
+        if not (isinstance(old, dict) and isinstance(new, dict) and not old.get("revoked")
+                and new.get("revoked") is True and new.get("revoked_by") == stamp and stamp
+                and {k: v for k, v in new.items() if k not in ("revoked", "revoked_by")}
+                == {k: v for k, v in old.items() if k not in ("revoked", "revoked_by")}):
+            return False
+        revoked += 1
+    return revoked > 0
+
+
+def data_conservation(before, after, store_before, store_after, label, created_clients, *, stamp, text_before, text_after):
+    """Only the expected, inventoried mutations of the uninstall protocol are admitted.
+
+    ``text_before`` / ``text_after`` give the content of a state file (copies taken by the script) so a
+    journal change is checked field by field. Anything not recognised refuses the gate.
+    """
     delta = diff(before, after)
     plist = "Library/LaunchAgents/%s.plist" % label
     expected, unexpected = [], []
     immutable_changed = []
+
+    def note(target, rel, change, why):
+        target.append({"path": rel, "change": change, "why": why})
+
     for change, paths in delta.items():
         for rel in paths:
             kind = kind_of(rel)
-            is_dir = (after.get(rel) or before.get(rel) or {}).get("type") == "dir"
+            old, new = before.get(rel) or {}, after.get(rel) or {}
+            is_dir = (new or old).get("type") == "dir"
+            is_log = rel.endswith(".log") or ("/" + rel).startswith("/Library/Logs/")
             if kind:
                 immutable_changed.append(rel)
-                unexpected.append({"path": rel, "change": change, "why": "immutable " + kind})
+                note(unexpected, rel, change, "immutable " + kind)
             elif change == "removed" and rel == plist:
-                expected.append({"path": rel, "change": change, "why": "plist moved out of its active place"})
+                note(expected, rel, change, "plist moved out of its active place")
             elif change == "added" and rel.startswith(UNINSTALL_PREFIX):
-                expected.append({"path": rel, "change": change, "why": "new uninstall journal"})
-            elif change != "removed" and rel.startswith(JOURNAL_PREFIX):
-                expected.append({"path": rel, "change": change, "why": "journal update (revocation)"})
-            elif change == "changed" and rel in created_clients:
-                expected.append({"path": rel, "change": change, "why": "our client entry removed"})
+                note(expected, rel, change, "new uninstall journal")
+            elif is_dir and change in ("changed", "added") and (change == "changed" or rel.startswith(STATE_PREFIX)):
+                note(expected, rel, change, "directory metadata")
+            elif change == "changed" and rel.startswith(QUICKSTART_PREFIX) and rel.endswith("/journal.json") \
+                    and revocation_only(text_before(rel), text_after(rel), stamp):
+                note(expected, rel, change, "proof revocation, field by field")
+            elif rel in created_clients and change in ("changed", "removed"):
+                note(expected, rel, change, "our client entry removed (structure checked apart)")
             elif rel.startswith(STORE_PREFIX) and rel[len(STORE_PREFIX):] in ("store.sqlite3", "store.sqlite3-wal",
                                                                              "store.sqlite3-shm"):
-                expected.append({"path": rel, "change": change, "why": "SQLite close transition (logical content compared)"})
-            elif change != "removed" and (rel.endswith(".log") or "/Logs/" in "/" + rel):
-                expected.append({"path": rel, "change": change, "why": "log still present"})
-            elif change == "changed" and is_dir:
-                expected.append({"path": rel, "change": change, "why": "directory metadata"})
+                note(expected, rel, change, "SQLite close transition (logical content compared)")
+            elif is_log and change == "changed" and new.get("bytes", -1) >= old.get("bytes", 0):
+                note(expected, rel, change, "log still present, not shortened")
+            elif is_log and change == "added":
+                note(expected, rel, change, "new log")
             else:
-                unexpected.append({"path": rel, "change": change, "why": "not part of the uninstall protocol"})
-    kinds = {kind: sorted(rel for rel in before if kind_of(rel) == kind and before[rel].get("type") == "file")
-             for kind in IMMUTABLE}
-    journals_before = [rel for rel in before if rel.startswith(JOURNAL_PREFIX)]
+                note(unexpected, rel, change, "not part of the uninstall protocol")
+    kinds = {kind: sorted(rel for rel in before if kind_of(rel) == kind and before[rel].get("type") == "file"
+                          and before[rel].get("bytes", 0) > 0) for kind in IMMUTABLE}
+    journals_before = [rel for rel in before if rel.startswith(QUICKSTART_PREFIX)]
     logs_before = [rel for rel in before if rel.endswith(".log") and before[rel].get("type") == "file"]
+    original = (before.get(plist) or {}).get("sha256")
+    copies = [rel for rel, row in after.items() if rel.startswith(UNINSTALL_PREFIX) and row.get("type") == "file"
+              and original and row.get("sha256") == original]
     return {
         "immutable_kinds": sorted(IMMUTABLE),
         "immutable_files": {kind: len(paths) for kind, paths in kinds.items()},
-        "immutable_unchanged": not immutable_changed and bool(kinds["token"]) and bool(kinds["resources"]),
+        # Witnesses: every kind has at least one non-empty file, so "unchanged" is a real observation.
+        "immutable_witnessed": all(kinds[kind] for kind in IMMUTABLE),
+        "immutable_unchanged": not immutable_changed and all(kinds[kind] for kind in IMMUTABLE),
         "store_identity_unchanged": bool(store_before["store_instance_id"])
         and store_before["store_instance_id"] == store_after["store_instance_id"],
         "store_logical_unchanged": store_before["logical_sha256"] == store_after["logical_sha256"]
@@ -415,7 +563,8 @@ def data_conservation(before, after, store_before, store_after, label, created_c
         "journals_present": bool(journals_before) and all(rel in after for rel in journals_before)
         and all(rel in after for rel in logs_before),
         "plist_removed_from_active": plist in before and plist not in after,
-        "plist_journal_copy_kept": any(rel.startswith(JOURNAL_PREFIX) and rel.endswith(".plist") for rel in after),
+        "plist_journal_copy_kept": bool(copies),  # a copy with exactly the bytes of the original plist
+        "plist_journal_copies": copies,
         "expected_mutations": expected,
         "unexpected_changes": unexpected,
     }
@@ -423,7 +572,7 @@ def data_conservation(before, after, store_before, store_after, label, created_c
 
 # ---------- M1 ----------
 
-def m1(timeline, install_json, profile, variant, pip_download_bytes):
+def m1(timeline, install_json, profile, variant, pip_cache_bytes):
     """T0 = launch of ``python3.11 -m venv``; T1 = return of ``quickstart --apply --demo`` with ok: true."""
     spans = {name: end - start for name, (start, end) in timeline["spans"].items()}
     t0, t1 = timeline["spans"]["venv"][0], timeline["spans"]["apply"][1]
@@ -438,7 +587,11 @@ def m1(timeline, install_json, profile, variant, pip_download_bytes):
         "t0_epoch": t0, "t1_epoch": t1, "total_s": total, "pip_s": pip_s, "controls_s": controls_s,
         "net_s": total - controls_s, "spans_s": spans, "install_json_timing": timing,
         "outside_model_s": total - steps_ms.get("resources", 0) / 1000.0,
-        "pip_download_bytes": int(pip_download_bytes), "pip_download_bytes_nature": "bytes of the run's own pip cache",
+        # Not measured: pip reports no transferred byte count. The size of the run's own (fresh) pip cache
+        # is reported under its real name; it includes index responses and is NOT a download measure.
+        "pip_downloaded_bytes": None, "pip_downloaded_bytes_measured": False,
+        "pip_cache_bytes": int(pip_cache_bytes),
+        "pip_cache_bytes_nature": "size of the run's own pip cache (wheels and index responses); not transferred bytes",
         "quickstart_download_bytes": timing.get("download_bytes"),
         "protocol_deviations": deviations,
         "label": "reused-dependencies variant" if variant == "pth" else "first installation",
@@ -504,9 +657,8 @@ def main(argv=None):
     s = sub.add_parser("production-snapshot")
     s.add_argument("--real-home", required=True)
     s.add_argument("--output", required=True)
-    s = sub.add_parser("client-state")
-    s.add_argument("--home", required=True)
-    s.add_argument("--output", required=True)
+    s = sub.add_parser("refuse-forbidden")
+    s.add_argument("paths", nargs="+")
     s = sub.add_parser("store-logical")
     s.add_argument("--store", required=True)
     s.add_argument("--output", required=True)
@@ -523,6 +675,13 @@ def main(argv=None):
     s = sub.add_parser("assemble")
     s.add_argument("--proof-dir", required=True)
     args = parser.parse_args(argv)
+    # One gate for every path received from outside, before any read or traversal.
+    for name in ("root", "home", "venv", "cache", "catalog", "store", "proof_dir", "constraints", "freeze", "input",
+                 "wheel", "before", "after", "real_home", "output"):
+        if getattr(args, name, None):
+            refuse_forbidden(getattr(args, name))
+    for value in getattr(args, "paths", []):
+        refuse_forbidden(value)
     try:
         if args.command == "service-state":
             check_test_identity(args.label, args.port)
@@ -559,9 +718,8 @@ def main(argv=None):
         if args.command == "production-snapshot":
             out(production_snapshot(args.real_home), args.output)
             return 0
-        if args.command == "client-state":
-            out(client_state(args.home, TEST_PORT), args.output)
-            return 0
+        if args.command == "refuse-forbidden":
+            return 0  # every path was checked above, lexically then resolved
         if args.command == "store-logical":
             out(store_logical(args.store), args.output)
             return 0
@@ -589,6 +747,33 @@ def main(argv=None):
     return 2
 
 
+REQUIRED_EVIDENCE = (
+    "meta.json", "constraints_check.json", "locations.json", "pip_check.json", "production_before.json",
+    "production_after.json", "timeline.json", "pip_cache_bytes.json", "safety_net.json", "shell_verdict.json",
+    *("install%s/%s" % (i, name) for i in ("1", "2") for name in (
+        "pre_state.json", "post_state.json", "apply.json", "apply_rc.json", "install.json", "service.json",
+        "doctor.json", "doctor_rc.json", "clients_after_apply.json")),
+    "install1/preview.json", "install1/preview_inventory.json", "install1/undo.json", "install1/undo_state.json",
+    "install1/clients_before_apply.json", "install1/clients_after_undo.json",
+    "install2/uninstall_preview.json", "install2/uninstall_preview_inventory.json", "install2/uninstall.json",
+    "install2/uninstall_state.json", "install2/clients_after_uninstall.json", "install2/data_before.json",
+    "install2/data_after.json", "install2/store_before.json", "install2/store_after.json", "install2/witness.json",
+)
+
+
+def doctor_summary(checks, returncode):
+    areas = sorted({c.get("area") for c in checks if isinstance(c, dict)})
+    return {"returncode": returncode, "checks": len(checks), "areas": areas,
+            "fail": sum(1 for c in checks if c.get("status") == "FAIL"),
+            "statuses": {c.get("area"): c.get("status") for c in checks if c.get("area") in REQUIRED_DOCTOR_AREAS},
+            "missing_areas": sorted(set(REQUIRED_DOCTOR_AREAS) - set(areas))}
+
+
+def relay_entries(state):
+    """Files whose STRUCTURED entry is ours (parsed by the installed product, not searched as text)."""
+    return sorted(row["path"] for row in state.values() if row and row.get("entry_present") and row.get("kind") == "relay")
+
+
 def assemble(d):
     """Build ``report.json`` from the files the shell wrote. A missing or truncated piece is a failure."""
     meta = load(d / "meta.json")
@@ -601,15 +786,17 @@ def assemble(d):
         env = {**check, "venv": meta["venv"], "pip_check_ok": load(d / "pip_check.json")["returncode"] == 0,
                "locator_under_site_packages": located["locator_under_site_packages"],
                "package_under_site_packages": located["package_under_site_packages"],
-               "package_path": located["package_path"]}
+               "package_path": located["package_path"], "package_version": located["version"],
+               "candidate_origin_sha256": located["candidate_origin_sha256"]}
         if variant == "autonomous":
             env["distributions"], env["wheels_only"] = pip_distributions(load(d / "pip_install_report.json"))
         else:
-            env.update(reused_paths=located["reused_paths"], candidate_origin_sha256=located["candidate_origin_sha256"])
+            env["reused_paths"] = located["reused_paths"]
         report["environment"] = env
         prod_before, prod_after = load(d / "production_before.json"), load(d / "production_after.json")
+        flags = production_unchanged(prod_before, prod_after)
         report["production"] = {
-            "unchanged": prod_before == prod_after, "pid_before": prod_before["production_pid"],
+            **flags, "unchanged": all(flags.values()), "pid_before": prod_before["production_pid"],
             "pid_after": prod_after["production_pid"], "snapshot_before_sha256": prod_before["sha256"],
             "snapshot_after_sha256": prod_after["sha256"]}
         for index in ("1", "2"):
@@ -617,7 +804,6 @@ def assemble(d):
             apply_json = load(p / "apply.json")
             install_json = load(p / "install.json")
             doctor = load(p / "doctor.json")
-            checks = doctor if isinstance(doctor, list) else doctor.get("checks", [])
             pre, post = load(p / "pre_state.json"), load(p / "post_state.json")
             block = {
                 "home": load(p / "home.json")["home"],
@@ -628,10 +814,10 @@ def assemble(d):
                           "download_bytes": (install_json.get("timing") or {}).get("download_bytes"),
                           "timing": install_json.get("timing")},
                 "service": load(p / "service.json"),
-                "doctor": {"returncode": load(p / "doctor_rc.json")["returncode"], "checks": len(checks),
-                           "fail": sum(1 for c in checks if c.get("status") == "FAIL")},
+                "doctor": doctor_summary(doctor, load(p / "doctor_rc.json")["returncode"]),
                 "clients_after_apply": load(p / "clients_after_apply.json"),
             }
+            block["client_entries_created"] = relay_entries(block["clients_after_apply"])
             report["install_" + index] = block
         one, d1 = report["install_1"], d / "install1"
         one["preview"] = {**load(d1 / "preview_inventory.json"), "ok": load(d1 / "preview.json").get("ok") is True,
@@ -642,23 +828,37 @@ def assemble(d):
                        "with_service": True, "label_absent": after_undo["label_state"] == "absent",
                        "port_free": after_undo["port_state"] == "free",
                        "plist_removed": not (Path(one["home"]) / "Library/LaunchAgents" / (meta["label"] + ".plist")).exists(),
-                       "client_entries_restored": load(d1 / "clients_before_apply.json") == load(d1 / "clients_after_undo.json")}
+                       "client_entries_restored": load(d1 / "clients_before_apply.json") == load(d1 / "clients_after_undo.json")
+                       and not relay_entries(load(d1 / "clients_after_undo.json"))}
         two, d2 = report["install_2"], d / "install2"
-        created = sorted(rel for rel, row in two["clients_after_apply"].items() if row and row["mentions_test_service"])
+        created = two["client_entries_created"]
         after_uninstall = load(d2 / "clients_after_uninstall.json")
-        removed = sorted(rel for rel in created
-                         if not after_uninstall.get(rel) or not after_uninstall[rel]["mentions_test_service"])
+        still = relay_entries(after_uninstall)
+        present = sorted(row["path"] for row in after_uninstall.values() if row and row.get("entry_present"))
+        removed = sorted(rel for rel in created if rel not in still and rel not in present)
         uninstall, state = load(d2 / "uninstall.json"), load(d2 / "uninstall_state.json")
+
+        def text(folder):
+            def read(rel):
+                try:
+                    return (d2 / folder / rel[len(STATE_PREFIX):]).read_text()
+                except (OSError, ValueError):
+                    return None
+            return read
+
         data = data_conservation(load(d2 / "data_before.json")["rows"], load(d2 / "data_after.json")["rows"],
-                                 load(d2 / "store_before.json"), load(d2 / "store_after.json"), meta["label"], created)
+                                 load(d2 / "store_before.json"), load(d2 / "store_after.json"), meta["label"], created,
+                                 stamp=uninstall.get("stamp"), text_before=text("state_before"),
+                                 text_after=text("state_after"))
         data["checked_after_stop"] = state["label_state"] == "absent" and state["port_state"] == "free"
-        two["client_entries_created"] = created
+        data["witness"] = load(d2 / "witness.json")
         two["uninstall_preview"] = {**load(d2 / "uninstall_preview_inventory.json"),
                                     "ok": load(d2 / "uninstall_preview.json").get("ok") is True,
                                     "returncode": load(d2 / "uninstall_preview_rc.json")["returncode"]}
         two["uninstall"] = {
             "ok": uninstall.get("ok") is True, "partial": uninstall.get("partial"),
             "complete": uninstall.get("complete"), "data_deleted": uninstall.get("data_deleted"),
+            "stamp": uninstall.get("stamp"),
             "returncode": load(d2 / "uninstall_rc.json")["returncode"], "entries_removed": removed,
             "label_absent": state["label_state"] == "absent", "port_free": state["port_state"] == "free",
             "plist_removed_from_active": data["plist_removed_from_active"],
@@ -669,12 +869,18 @@ def assemble(d):
         report["safety_net_fired"] = load(d / "safety_net.json")["fired"]
         if profile == "semantic":
             report["model_pre_placed"] = [load(d / ("install%s" % i) / "granite.json") for i in ("1", "2")]
-        report["evidence_sha256"] = {str(p.relative_to(d)): sha256_file(p) for p in sorted(d.rglob("*"))
-                                     if p.is_file() and p.suffix in (".json", ".log", ".txt") and p.name != "report.json"
-                                     and not any(part in ("venv", "pip-cache", "tmp") or part.startswith("home")
-                                                 for part in p.relative_to(d).parts)}
+        # Sealed pieces: re-verified at the final verification from this folder. proof.log is still being
+        # written while this runs, and the state copies are covered by the inventories: both stay out.
+        report["evidence_sha256"] = {
+            str(p.relative_to(d)): sha256_file(p) for p in sorted(d.rglob("*"))
+            if p.is_file() and not p.is_symlink() and p.suffix in (".json", ".txt") and p.name != "report.json"
+            and not any(part in ("venv", "pip-cache", "tmp", "state_before", "state_after") or part.startswith("home")
+                        for part in p.relative_to(d).parts)}
+        missing = sorted(set(REQUIRED_EVIDENCE) - set(report["evidence_sha256"]))
+        if missing:
+            raise ValueError("required evidence missing: " + ", ".join(missing))
         report["ok"] = load(d / "shell_verdict.json")["ok"] is True
-    except (OSError, KeyError, ValueError, TypeError) as exc:
+    except (OSError, KeyError, ValueError, TypeError, AttributeError) as exc:
         report["error"] = type(exc).__name__ + ": " + str(exc)
     return report
 

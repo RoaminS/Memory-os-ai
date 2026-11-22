@@ -60,8 +60,11 @@ else
   else [ -x "$PTH_PY" ] || usage "--pth-python requis pour la variante .pth"; fi
   [ -d "$GRANITE/snapshots" ] || usage "--granite-cache : cache local du modèle requis"
 fi
-[ ! -e "$P" ] || { echo "PROOF_DIR existe déjà : jamais réutilisé"; exit 2; }
 [ -x "$PY" ] && [ -x "$SYS_PY" ] && [ -f "$HELPER" ] && [ -f "$CATALOG" ] || { echo "outil absent"; exit 2; }
+# Même refus sur les chemins RÉSOLUS (un alias extérieur ne contourne pas la règle), avant toute lecture.
+INPUTS=("$WHEEL" "$P" "$SEED"); [ -n "$GRANITE" ] && INPUTS+=("$GRANITE"); [ -n "$PTH_PY" ] && INPUTS+=("$PTH_PY")
+"$SYS_PY" -I "$HELPER" refuse-forbidden $INPUTS || { echo "REFUS : chemin d'entrée interdit"; exit 2; }
+[ ! -e "$P" ] || { echo "PROOF_DIR existe déjà : jamais réutilisé"; exit 2; }
 [ "$(shasum -a 256 "$WHEEL" | cut -c1-64)" = "$WHEEL_SHA" ] || { echo "sha du wheel"; exit 2; }
 [ "$(shasum -a 256 "$SEED" | cut -c1-64)" = "$CL100K_SHA" ] || { echo "sha de la table cl100k locale"; exit 2; }
 
@@ -117,6 +120,23 @@ tenv() {   # $1 = HOME jetable ; environnement vide, hors ligne sauf pip sous GO
     PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_CACHE_DIR="$P/pip-cache" PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 MEMORY_V4_URL="http://127.0.0.1:$PORT/mcp/" \
     MEMORY_V4_SERVICE_LABEL="$LABEL" "$@"
+}
+clients_state() {   # $1 = HOME, $2 = sortie ; entrées STRUCTURÉES lues par le produit installé (jamais une recherche de texte)
+  tenv "$1" "$VENV/bin/python" -I - "$1" > "$2" <<'EOF'
+import hashlib, json, sys
+from pathlib import Path
+from memory_os_v4.ops.clients import CLIENTS, classify, read_entry
+home, out = Path(sys.argv[1]), {}
+for client in CLIENTS:
+    if client.key not in ("codex", "cursor"):
+        continue
+    path = client.config_path(home)
+    state, entry = read_entry(client, home)
+    out[client.key] = {"path": client.path, "state": state, "entry_present": entry is not None,
+                       "kind": classify(entry) if entry is not None else None,
+                       "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None}
+print(json.dumps(out, sort_keys=True))
+EOF
 }
 seed_table() { mkdir -p "$1/.config/memory-os" && chmod 700 "$1/.config" "$1/.config/memory-os" \
   && cp "$SEED" "$1/.config/memory-os/cl100k_base.tiktoken" && chmod 600 "$1/.config/memory-os/cl100k_base.tiktoken"; }
@@ -191,7 +211,7 @@ tenv "$H1" "$VENV/bin/memory-os-admin" quickstart --profile "$PROFILE" --clients
 helper inventory --root "$H1" --output "$D1/inv_preview_after.json" || fail "inventaire"
 print -r -- "control_preview $t0 $EPOCHREALTIME" >> "$P/timeline.txt"
 helper same-inventory "$D1/inv_preview_before.json" "$D1/inv_preview_after.json" --output "$D1/preview_inventory.json" || fail "l'aperçu a écrit dans HOME"
-helper client-state --home "$H1" --output "$D1/clients_before_apply.json" || fail "état client"
+clients_state "$H1" "$D1/clients_before_apply.json" || fail "état client"
 
 install_apply() {   # $1 = HOME, $2 = dossier de preuve, $3… = options supplémentaires ; attestation puis armement
   local home=$1 d=$2 rc; shift 2
@@ -212,7 +232,7 @@ after_apply() {   # $1 = HOME, $2 = dossier, $3 = rc de l'application
   journal="$home/.local/state/memory-os/quickstart/$stamp/install.json"
   [ -f "$journal" ] && cp "$journal" "$d/install.json" || fail "install.json absent du journal"
   tenv "$home" MEMORY_V4_DIR="$home/.local/share/memory-os/store" "$VENV/bin/memory-os-admin" doctor --json > "$d/doctor.json"; rcfile "$d/doctor_rc.json" $?
-  helper client-state --home "$home" --output "$d/clients_after_apply.json" || fail "état client"
+  clients_state "$home" "$d/clients_after_apply.json" || fail "état client"
   print -r -- "$stamp" > "$d/stamp.txt"
 }
 
@@ -227,7 +247,7 @@ step "5. Installation 1 : retour arrière (--undo STAMP --with-service)"
 tenv "$H1" "$VENV/bin/memory-os-admin" quickstart --undo "$(cat "$D1/stamp.txt")" --with-service > "$D1/undo.json"; rcfile "$D1/undo_rc.json" $?
 sleep 2
 absent "$D1/undo_state.json"; SERVICE_OURS=0   # libellé reconnu absent, port libre : le filet est désarmé
-helper client-state --home "$H1" --output "$D1/clients_after_undo.json" || fail "état client"
+clients_state "$H1" "$D1/clients_after_undo.json" || fail "état client"
 [ ! -e "$H1/Library/LaunchAgents/$LABEL.plist" ] || fail "plist de test encore en place après undo"
 absent "$D1/post_state.json"
 
@@ -236,19 +256,33 @@ absent "$D2/pre_state.json"
 install_apply "$H2" "$D2"; after_apply "$H2" "$D2" $?
 
 step "7. Installation 2 : désinstallation (aperçu sans écriture, puis --apply)"
+# Témoins NON VIDES : sans sauvegarde ni clé présentes, leur conservation par uninstall ne serait pas démontrée.
+# Écrits après doctor, avant tout inventaire ; uninstall ne doit ni les ouvrir ni les modifier.
+WITNESS_KEY=false
+mkdir -p "$H2/memory-os-backups" && chmod 700 "$H2/memory-os-backups" \
+  && print -r -- "qualify-410 witness backup $RUN_TAG $COMMIT $EPOCHREALTIME" > "$H2/memory-os-backups/qualify-410-witness.mosb" \
+  && chmod 600 "$H2/memory-os-backups/qualify-410-witness.mosb" || fail "témoin de sauvegarde"
+if [ ! -s "$H2/.config/memory-os/backup.key" ]; then
+  print -r -- "qualify-410 witness key $RUN_TAG $COMMIT $EPOCHREALTIME" > "$H2/.config/memory-os/backup.key" \
+    && chmod 600 "$H2/.config/memory-os/backup.key" || fail "témoin de clé"
+  WITNESS_KEY=true
+fi
+print -r -- "{\"backup\": \"memory-os-backups/qualify-410-witness.mosb\", \"key\": \".config/memory-os/backup.key\", \"key_written_as_witness\": $WITNESS_KEY}" > "$D2/witness.json"
 helper inventory --root "$H2" --output "$D2/data_before.json" || fail "inventaire"
 tenv "$H2" "$VENV/bin/python" -I "$HELPER" store-logical --store "$H2/.local/share/memory-os/store" --output "$D2/store_before.json" || fail "store (avant)"
 helper inventory --root "$H2" --output "$D2/inv_uninstall_before.json" || fail "inventaire"
 tenv "$H2" "$VENV/bin/memory-os-admin" uninstall > "$D2/uninstall_preview.json"; rcfile "$D2/uninstall_preview_rc.json" $?
 helper inventory --root "$H2" --output "$D2/inv_uninstall_after.json" || fail "inventaire"
 helper same-inventory "$D2/inv_uninstall_before.json" "$D2/inv_uninstall_after.json" --output "$D2/uninstall_preview_inventory.json" || fail "l'aperçu de désinstallation a écrit dans HOME"
+cp -R "$H2/.local/state/memory-os" "$D2/state_before" || fail "copie des journaux (avant)"   # contrôle champ par champ
 tenv "$H2" "$VENV/bin/memory-os-admin" uninstall --apply > "$D2/uninstall.json"; rcfile "$D2/uninstall_rc.json" $?
 sleep 2
 absent "$D2/uninstall_state.json"; SERVICE_OURS=0
 # Conservation des données, vérifiée après arrêt : identité et contenu logique du store, fichiers immuables, journaux.
 helper inventory --root "$H2" --output "$D2/data_after.json" || fail "inventaire"
+cp -R "$H2/.local/state/memory-os" "$D2/state_after" || fail "copie des journaux (après)"
 tenv "$H2" "$VENV/bin/python" -I "$HELPER" store-logical --store "$H2/.local/share/memory-os/store" --output "$D2/store_after.json" || fail "store (après)"
-helper client-state --home "$H2" --output "$D2/clients_after_uninstall.json" || fail "état client"
+clients_state "$H2" "$D2/clients_after_uninstall.json" || fail "état client"
 absent "$D2/post_state.json"
 
 step "8. Production et vraies configurations inchangées ; rapport"
