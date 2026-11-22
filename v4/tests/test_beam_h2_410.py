@@ -20,13 +20,10 @@ import pytest
 
 from bench import evaluation_manifest
 from bench.e2e import beam_h2
-from bench.e2e.beam import CATEGORIES
 from bench.e2e.beam_campaign import summarize
 from bench.e2e.client import offline_env
 
 V4 = Path(__file__).resolve().parents[1]
-TOPICS = ['harbour lighthouse', 'saffron risotto', 'violin recital', 'glacier trek', 'pottery kiln',
-          'telescope mirror']
 DRIVER = r"""
 import asyncio, json, sys
 from pathlib import Path
@@ -40,26 +37,6 @@ if arm == 'lexical':
     sys.meta_path.insert(0, block)
 asyncio.run(beam_h2.run_arm(plan, arm, output, block=block, config_patch=json.loads(patch) or None))
 """
-
-
-def conversation(index):
-    turns = [{'content': f'Conversation {index}: we discussed the {topic} plan number {index}{position}.',
-              'role': 'user' if position % 2 == 0 else 'assistant', 'id': position, 'index': 'SECRET',
-              'question_type': 'SECRET', 'time_anchor': None} for position, topic in enumerate(TOPICS)]
-    probes = {}
-    for position, category in enumerate(CATEGORIES):
-        key = {'abstention': 'ideal_response', 'contradiction_resolution': 'ideal_answer',
-               'instruction_following': 'expected_compliance', 'preference_following': 'expected_compliance',
-               'summarization': 'ideal_summary'}.get(category, 'answer')
-        topic = TOPICS[position % len(TOPICS)]
-        probe = {'question': f'What was said about the {topic} ({category})?', key: 'SCORER_SECRET',
-                 'rubric': ['SCORER_RUBRIC_SECRET']}
-        if category != 'abstention':  # one explicit empty annotation per conversation, as in BEAM
-            probe['source_chat_ids'] = [] if category == 'summarization' else [position % len(TOPICS)]
-        probes[category] = [probe]
-    return {'conversation_id': f'conv-{index}', 'conversation_seed': 'SECRET', 'narratives': 'SECRET',
-            'user_profile': 'SECRET', 'conversation_plan': 'SECRET', 'user_questions': 'SECRET',
-            'chat': [turns[:3], turns[3:]], 'probing_questions': repr(probes)}
 
 
 class FakeHost(beam_h2.Host):
@@ -102,22 +79,18 @@ def run_worker(directory, arm, patch):
     env = offline_env()
     env['PYTHONPATH'] = os.pathsep.join([str(V4), str(V4 / 'src')])
     output = directory / 'retrieval' / arm
-    command = [sys.executable, '-B', str(script), arm, str(directory / 'plan.json'), str(output), json.dumps(patch)]
+    command = [sys.executable, '-B', str(script), arm, str(directory / 'plan.json'), str(output),
+               json.dumps(patch)]
     done = subprocess.run(command, env=env, cwd=output, capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stderr[-3000:]
 
 
 @pytest.fixture
 def frozen_plan(tmp_path):
-    corpus = tmp_path / 'corpus'
-    corpus.mkdir()
-    data = corpus / 'beam.jsonl'
-    data.write_text(''.join(json.dumps(conversation(index)) + '\n' for index in range(4)))
-    digest = hashlib.sha256(data.read_bytes()).hexdigest()
-    spec = beam_h2.Spec(dataset_sha256=digest, conversations=4, messages=24, questions=40, scored=32,
-                        minimum_clusters=4, model_cache=None, synthetic=True)
-    (corpus / 'PROVENANCE.json').write_text(json.dumps({
-        'revision': spec.revision, 'license': 'cc-by-sa-4.0', 'derived_jsonl': {'sha256': digest}}))
+    data, spec = beam_h2.selfcheck_corpus(tmp_path / 'corpus', model_cache=None)
+    assert spec == beam_h2.Spec(dataset_sha256=hashlib.sha256(data.read_bytes()).hexdigest(), conversations=4,
+                                messages=24, questions=40, scored=32, minimum_clusters=4, model_cache=None,
+                                synthetic=True)
     host = FakeHost(tmp_path)
     directory = tmp_path / 'plan'
     done = beam_h2.prepare(directory, data, host.head, spec=spec, host=host)
@@ -264,8 +237,8 @@ def test_real_source_attestation_refuses_an_unknown_commit():
         beam_h2.Host().attest('0' * 40)
 
 
-def test_real_launcher_refuses_a_plan_that_is_not_the_frozen_h2_specification(frozen_plan):
-    """The real worker process re-attests the freeze itself: a synthetic plan stops before any engine."""
+def test_real_worker_process_reattests_the_freeze_before_any_engine(frozen_plan):
+    """The fixture's commit is unknown to Git: the real worker stops on the source attestation."""
     directory, data, spec, host, fingerprint = frozen_plan
     plan = json.loads((directory / 'plan.json').read_text())
     (directory / 'retrieval/lexical').mkdir(parents=True)
@@ -273,6 +246,25 @@ def test_real_launcher_refuses_a_plan_that_is_not_the_frozen_h2_specification(fr
         beam_h2.Host().launch(plan, directory, 'lexical', fingerprint, time.monotonic() + 120)
     assert 'STOP: ' in (directory / 'retrieval/lexical/worker.log').read_text()
     assert sorted(path.name for path in (directory / 'retrieval/lexical').iterdir()) == ['worker.log']
+    # Without the self-check flag a synthetic plan is refused as "not the frozen H2 specification".
+    assert beam_h2.main(['_worker', '--plan-dir', str(directory), '--arm', 'semantic', '--manifest-sha256',
+                         fingerprint]) == 2
+    with pytest.raises(ValueError, match='both arms'):
+        beam_h2.retrieve(directory, fingerprint, arms=('lexical',))
+
+
+def test_selfcheck_runs_the_same_pipeline_on_invented_rows_and_says_so(tmp_path):
+    host = FakeHost(tmp_path)
+    result = beam_h2.selfcheck(tmp_path / 'check', host.head, host=host, model_cache=None)
+    assert result['synthetic'] is True and result['complete'] is True
+    assert host.launched == ['lexical', 'semantic']
+    assert 'BEAM' not in (tmp_path / 'check/corpus/synthetic.jsonl').read_text()
+    with pytest.raises(ValueError, match='new self-check directory'):
+        beam_h2.selfcheck(tmp_path / 'check', host.head, host=host, model_cache=None)
+    partial = beam_h2.selfcheck(tmp_path / 'lexical-only', host.head, host=host, model_cache=None,
+                                arms=('lexical',))
+    assert partial['complete'] is False and partial['recall_at_10'] is None
+    assert partial['arms']['lexical']['ml_free'] is True and partial['arms']['semantic'] is None
 
 
 def test_cli_requires_its_frozen_arguments(tmp_path, capsys):

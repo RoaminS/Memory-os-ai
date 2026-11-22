@@ -194,7 +194,8 @@ class Host:
         env.update(plan['arm_env'][arm])
         env['PYTHONPATH'] = os.pathsep.join([str(self.clone / 'v4'), str(self.clone / 'v4/src')])
         command = [sys.executable, '-B', '-m', 'bench.e2e.beam_h2', '_worker', '--plan-dir', str(directory),
-                   '--arm', arm, '--manifest-sha256', manifest_sha256]
+                   '--arm', arm, '--manifest-sha256', manifest_sha256,
+                   *(['--synthetic'] if plan['spec']['synthetic'] else [])]
         progress_time, last = time.monotonic(), None
         with (output / 'worker.log').open('x') as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, cwd=output,
@@ -439,12 +440,12 @@ async def run_arm(plan: dict, arm: str, output: Path, *, block: MLBlock | None =
     offline = (os.environ.get('HF_HUB_OFFLINE'), os.environ.get('TRANSFORMERS_OFFLINE'))
     if not config_patch and offline != ('1', '1'):
         raise RuntimeError('Offline environment required (HF_HUB_OFFLINE=1, TRANSFORMERS_OFFLINE=1)')
+    import memory_os_v4  # first: the package pins single-threaded BLAS before any ML library loads
+    from memory_os_v4 import Config, MemoryV4, server
+    from memory_os_v4.config import LEXICAL_MARKER
     if not lexical and not config_patch:
         from .usage import install
         install(output / 'usage.json', plan['arms'][arm]['embed_model'])
-    import memory_os_v4
-    from memory_os_v4 import Config, MemoryV4, server
-    from memory_os_v4.config import LEXICAL_MARKER
     stages['import'] = ml_loaded()
     stores = output / 'stores'
     stores.mkdir()
@@ -663,7 +664,11 @@ def assemble(plan: dict, directory: Path, stopped: str | None, spec: Spec) -> di
     return result
 
 
-def retrieve(directory: Path, manifest_sha256: str, *, spec: Spec = SPEC, host: Host | None = None) -> dict:
+def retrieve(directory: Path, manifest_sha256: str, *, spec: Spec = SPEC, host: Host | None = None,
+             arms: tuple = ARMS) -> dict:
+    """``arms`` is narrowed by the synthetic self-check only; H2 always runs both, in order."""
+    if tuple(arms) != ARMS and not spec.synthetic:
+        raise ValueError('H2 runs both arms')
     host = host or Host()
     directory = directory.resolve()
     plan = frozen(directory, manifest_sha256, spec=spec, host=host)
@@ -671,7 +676,7 @@ def retrieve(directory: Path, manifest_sha256: str, *, spec: Spec = SPEC, host: 
     output = directory / 'retrieval'
     output.mkdir(mode=0o700, exist_ok=False)  # one attempt per frozen manifest, never a restart
     deadline, stopped = time.monotonic() + plan['budgets']['retrieval_seconds'], None
-    for arm in ARMS:
+    for arm in arms:
         (output / arm).mkdir(mode=0o700)
         try:
             frozen(directory, manifest_sha256, spec=spec, host=host)
@@ -686,23 +691,84 @@ def retrieve(directory: Path, manifest_sha256: str, *, spec: Spec = SPEC, host: 
     return result
 
 
-def worker(directory: Path, arm: str, manifest_sha256: str) -> None:
+SELFCHECK_TOPICS = ('harbour lighthouse', 'saffron risotto', 'violin recital', 'glacier trek', 'pottery kiln',
+                    'telescope mirror')
+SELFCHECK_COUNTS = {'conversations': 4, 'messages': 24, 'questions': 40, 'scored': 32, 'minimum_clusters': 4}
+
+
+def selfcheck_rows(count: int = 4) -> list[dict]:
+    """Tiny invented corpus in the BEAM row schema; it shares nothing with BEAM."""
+    from .beam import CATEGORIES
+    rows = []
+    for index in range(count):
+        turns = [{'content': f'Conversation {index}: we discussed the {topic} plan number {index}{position}.',
+                  'role': 'user' if position % 2 == 0 else 'assistant', 'id': position, 'index': 'SECRET',
+                  'question_type': 'SECRET', 'time_anchor': None}
+                 for position, topic in enumerate(SELFCHECK_TOPICS)]
+        probes = {}
+        for position, category in enumerate(CATEGORIES):
+            key = {'abstention': 'ideal_response', 'contradiction_resolution': 'ideal_answer',
+                   'instruction_following': 'expected_compliance',
+                   'preference_following': 'expected_compliance',
+                   'summarization': 'ideal_summary'}.get(category, 'answer')
+            topic = SELFCHECK_TOPICS[position % len(SELFCHECK_TOPICS)]
+            probe = {'question': f'What was said about the {topic} ({category})?', key: 'SCORER_SECRET',
+                     'rubric': ['SCORER_RUBRIC_SECRET']}
+            if category != 'abstention':  # one explicit empty annotation per conversation, as in BEAM
+                probe['source_chat_ids'] = ([] if category == 'summarization'
+                                            else [position % len(SELFCHECK_TOPICS)])
+            probes[category] = [probe]
+        rows.append({'conversation_id': f'conv-{index}', 'conversation_seed': 'SECRET',
+                     'narratives': 'SECRET', 'user_profile': 'SECRET', 'conversation_plan': 'SECRET', 'user_questions': 'SECRET',
+                     'chat': [turns[:3], turns[3:]], 'probing_questions': repr(probes)})
+    return rows
+
+
+def selfcheck_corpus(directory: Path, model_cache: str | None = str(GRANITE_CACHE)) -> tuple[Path, Spec]:
+    directory.mkdir(parents=True)
+    data = directory / 'synthetic.jsonl'
+    data.write_text(''.join(json.dumps(row) + '\n' for row in selfcheck_rows()))
+    spec = Spec(dataset_sha256=sha256(data), model_cache=model_cache, synthetic=True, **SELFCHECK_COUNTS)
+    write_json(directory / 'PROVENANCE.json', {'revision': spec.revision, 'license': 'cc-by-sa-4.0',
+                                               'derived_jsonl': {'sha256': spec.dataset_sha256},
+                                               'note': 'invented self-check rows, not BEAM'})
+    return data, spec
+
+
+def selfcheck(directory: Path, revision: str, *, arms: tuple = ARMS, host: Host | None = None,
+              model_cache: str | None = str(GRANITE_CACHE)) -> dict:
+    """Same freeze, launcher, workers and scorer on invented rows: proves the tooling, observes no BEAM."""
+    directory = directory.resolve()
+    if directory.exists():
+        raise ValueError('A new self-check directory is required')
+    data, spec = selfcheck_corpus(directory / 'corpus', model_cache)
+    done = prepare(directory / 'plan', data, revision, spec=spec, host=host)
+    return retrieve(directory / 'plan', done['manifest_sha256'], spec=spec, host=host, arms=arms)
+
+
+def worker(directory: Path, arm: str, manifest_sha256: str, synthetic: bool = False) -> None:
     block = None
     if arm == 'lexical':
         block = MLBlock()
         sys.meta_path.insert(0, block)
-    plan = frozen(directory, manifest_sha256)
+    spec = SPEC
+    if synthetic:  # self-check only: the plan must declare itself synthetic, and its result says so
+        spec = Spec(**json.loads((directory / 'plan.json').read_text())['spec'])
+        if not spec.synthetic:
+            raise ValueError('The frozen H2 plan is never run as a synthetic self-check')
+    plan = frozen(directory, manifest_sha256, spec=spec)
     asyncio.run(run_arm(plan, arm, directory.resolve() / 'retrieval' / arm, block=block))
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=['prepare', 'retrieve', '_worker'])
+    parser.add_argument('operation', choices=['prepare', 'retrieve', 'selfcheck', '_worker'])
     parser.add_argument('--plan-dir', type=Path, required=True)
     parser.add_argument('--data', type=Path, help='prepare: path of beam_100k.jsonl (read-only)')
     parser.add_argument('--source-commit', help='prepare: exact commit of the delivered harness')
     parser.add_argument('--manifest-sha256', help='retrieve: SHA-256 of the reviewed frozen manifest.json')
-    parser.add_argument('--arm', choices=ARMS)
+    parser.add_argument('--arm', choices=ARMS, help='selfcheck: run this arm only')
+    parser.add_argument('--synthetic', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
         if args.operation == 'prepare':
@@ -714,12 +780,20 @@ def main(argv=None) -> int:
                               'audit': {key: done['plan']['audit'][key] for key in (
                                   'conversations', 'messages', 'questions', 'scored')}}))
             return 0
+        if args.operation == 'selfcheck':
+            if not args.source_commit:
+                parser.error('--source-commit required')
+            result = selfcheck(args.plan_dir, args.source_commit, arms=(args.arm,) if args.arm else ARMS)
+            print(json.dumps({'result': str(args.plan_dir.resolve() / 'plan/retrieval/result.json'),
+                              'synthetic': result['synthetic'], 'complete': result['complete'],
+                              'invalid_reasons': result['invalid_reasons']}))
+            return 0 if result['complete'] or args.arm else 1
         if not args.manifest_sha256:
             parser.error('--manifest-sha256 required')
         if args.operation == '_worker':
             if not args.arm:
                 parser.error('--arm required')
-            worker(args.plan_dir, args.arm, args.manifest_sha256)
+            worker(args.plan_dir, args.arm, args.manifest_sha256, args.synthetic)
             return 0
         result = retrieve(args.plan_dir, args.manifest_sha256)
         print(json.dumps({'result': str(args.plan_dir.resolve() / 'retrieval/result.json'),
