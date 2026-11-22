@@ -226,20 +226,35 @@ def _claude_project_entries(path: Path) -> list:
     """``memory-os-ai`` entries of the per-project scopes kept in ``~/.claude.json`` (``projects.*.mcpServers``).
 
     The user-scope entry is the only one we write or remove, but a project-scope entry depends
-    on the service just as much. Project ``.mcp.json`` files live in the projects themselves and
-    cannot be enumerated from here: a declared limit (next_steps says so).
+    on the service just as much. An ABSENT structure holds no entry; a structure that is PRESENT
+    but not of the expected shape (``projects`` not an object, a project that is not an object, a
+    ``mcpServers`` that is not an object, a server value that is not an object) is returned as
+    ``None``: nothing proves there is no entry, hence ``indeterminate``. Project ``.mcp.json``
+    files live in the projects themselves and cannot be enumerated from here: a declared limit.
     """
     try:
-        projects = strict_loads(path.read_bytes().decode("utf-8")).get("projects")
+        document = strict_loads(path.read_bytes().decode("utf-8"))
     except FileNotFoundError:
         return []
-    except (OSError, ValueError, AttributeError, RecursionError):
+    except (OSError, ValueError, RecursionError):
         return [None]  # not readable strictly (duplicate keys included): an entry may be there
+    if not isinstance(document, dict):
+        return [None]
+    if "projects" not in document:
+        return []
+    projects = document["projects"]
+    if not isinstance(projects, dict):
+        return [None]
     found = []
-    for project in projects.values() if isinstance(projects, dict) else ():
-        servers = project.get("mcpServers") if isinstance(project, dict) else None
-        if isinstance(servers, dict) and SERVER in servers:
-            found.append(servers[SERVER])
+    for project in projects.values():
+        if not isinstance(project, dict):
+            found.append(None)
+        elif "mcpServers" in project:
+            servers = project["mcpServers"]
+            if not isinstance(servers, dict):
+                found.append(None)
+            elif SERVER in servers:
+                found.append(servers[SERVER])  # a non-object value is judged indeterminate by _dependency
     return found
 
 

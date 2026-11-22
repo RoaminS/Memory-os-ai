@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (688 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (735 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 688 tests verts** (clients 263, cycle de vie 228, profil 62, reprise 50, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 159 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.10). Le reste de
+**État après implémentation : 735 tests verts** (clients 263, cycle de vie 275, profil 62, reprise 50, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 206 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.11). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1286,8 +1286,27 @@ sont définies là où ils vivent.
 | chargement / arrêt du service | `launchctl bootstrap` / `bootout` | §4, §6 : état `launchd`, aucune écriture de fichier par nous au-delà du plist |
 | store, log `server.err`, journaux du relais | le **processus serveur** et le relais, une fois lancés | moteur (`LEXICAL_PROFILE_4_1_0.md`, contrat du store) ; `quickstart` n'ouvre jamais le store ; le log brut est une source conservée (§8) |
 | sonde du relais (`_relay_probe`, `demo=False`) | relais stdio → serveur | lectures seules (`memory_status`, `memory_task_list` sur un projet de contrôle unique) |
-| démonstration (`--demo`, sur demande) | relais → serveur : **une** écriture `memory_chat_save` puis une recherche, dans un projet unique `memory-os-demo-<uuid>` | jamais rejouée (identifiant de requête unique, échec = « never replay »), aucune suppression ; `QUICKSTART_CONTRACT_v1.md` Q6 |
+| démonstration (`--demo`, sur demande) | relais → serveur : **une** écriture `memory_chat_save` puis une recherche, dans un projet unique `memory-os-demo-<uuid>` | jamais rejouée (identifiant de requête unique, échec = « never replay »), aucune suppression ; défini par `quickstart._relay_probe` (`v4/src/memory_os_v4/ops/quickstart.py`, branche `demo`) et par l'en-tête de ce module (amendement Q6, repris de `v4/docs/DISTRIBUTION_D1a_v1.md` §1 ; le document `QUICKSTART_CONTRACT_v1.md` cité auparavant n'est pas dans le dépôt) |
 | contrôles `doctor` | lecture seule | `ops/doctor.py` |
+
+### 23.11 Revue d'implémentation Codex n° 8 (`codex_verdict_setup_impl_v8.md`, sur `3894f00`) : une structure présente mais invalide n'est jamais une absence
+
+`_claude_project_entries` ignorait un `mcpServers` de portée projet présent mais non-objet
+(`{"projects": {"/w": {"mcpServers": ["memory-os-ai"]}}}`) : aucune dépendance, service arrêtable. Règle,
+appliquée à tous les balayages : **structure absente → aucune entrée ; structure présente mais pas de la
+forme attendue → `indeterminate`, service conservé** (désinstallation et `undo --with-service`).
+
+| Balayage | Structures présentes-invalides | Résultat | Constat du passage en revue |
+|---|---|---|---|
+| Claude Code, portée projet (`uninstall._claude_project_entries`) | document non-objet ; `projects` non-objet ; projet non-objet (`null` compris) ; `mcpServers` de projet non-objet ; valeur de serveur non-objet | `indeterminate` | **corrigé ici** (les quatre premiers cas étaient lus comme une absence) |
+| JSON, portée utilisateur — Claude Code, Claude Desktop, Cursor, Antigravity, Gemini CLI, Devin, Windsurf (`mcpServers`), VS Code (`servers`), Zed (`context_servers`) : `clients.read_entry` | document non-objet ; table non-objet (`null` compris) ; valeur de serveur non-objet (`null` compris) ; clés dupliquées | `unreadable` → `indeterminate` | déjà conforme depuis le §23.10 ; contrôle du document non-objet rendu explicite |
+| TOML — Codex, Grok (`clients._toml_entry`) | `mcp_servers` non-table (`[]`, `false`, `""`, chaîne, tableau de tables) ; `mcp` non-table ; `mcp.servers` non-table ; valeur de serveur non-table | `unreadable` → `indeterminate` | **corrigé ici** : une valeur « fausse » (`[]`, `false`, `""`, `0`) de `mcp_servers` retombait sur l'autre table puis sur « aucune entrée » |
+| TOML, les deux tables présentes avec notre nom | — | `ambiguous` → `indeterminate` | §23.4 |
+
+Tests : `test_a_present_but_invalid_server_structure_keeps_the_service` (21 structures × désinstallation et
+`undo --with-service` = 42 cas, chacun vérifiant l'absence de `bootout`, le plist en place et le fichier
+intact) ; `test_an_absent_structure_is_still_no_dependency` (5 : l'autre face de la règle, sans quoi le
+service ne pourrait jamais être arrêté) ; l'exclusion `continue` du test du §23.10 est retirée.
 
 ### 23.3 Limites résiduelles
 

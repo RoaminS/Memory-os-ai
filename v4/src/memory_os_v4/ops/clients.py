@@ -90,7 +90,20 @@ def _toml_entry(text: str) -> dict | None:
     except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
         return None
     data = tomllib.loads(text)
-    servers = data.get("mcp_servers") or data.get("mcp", {}).get("servers") or {}
+    # A table that is PRESENT but is not a table is not "no entry": it is unreadable for us (TypeError,
+    # mapped to ``unreadable`` by read_entry), never an absence.
+    tables = []
+    if "mcp_servers" in data:
+        tables.append(data["mcp_servers"])
+    if "mcp" in data:
+        nested = data["mcp"]
+        if not isinstance(nested, dict):
+            raise TypeError("mcp is not a table")
+        if "servers" in nested:
+            tables.append(nested["servers"])
+    if any(not isinstance(table, dict) for table in tables):
+        raise TypeError("server table is not a table")
+    servers = next((table for table in tables if table), {})
     return servers.get(SERVER)
 
 
@@ -106,7 +119,9 @@ def read_entry(client: Client, home: Path) -> tuple[str, dict | None]:
         else:
             data = _jsonc(raw) if client.fmt == "zed" else strict_loads(raw)
             key = {"vscode": "servers", "zed": "context_servers"}.get(client.fmt, "mcpServers")
-            servers = data.get(key, {})
+            if not isinstance(data, dict):
+                return "unreadable", None
+            servers = data.get(key, {})  # absent table: no entry; present table that is not an object: unreadable
             if not isinstance(servers, dict):
                 return "unreadable", None
             if SERVER in servers and servers[SERVER] is None:

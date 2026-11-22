@@ -979,8 +979,6 @@ def test_a_masked_or_null_entry_is_never_read_as_no_dependency(c, variant):
         text = '{"mcpServers": ' + table + '}\n'
         project = '{"projects": {"/w": {"mcpServers": ' + table + '}}}\n'
     for client, content in (("antigravity", text), ("claude-code", project)):
-        if client == "claude-code" and variant == "table-not-an-object":
-            continue  # a project table that is not an object holds no named server at all
         path = c.home / PATHS[client]
         original = path.read_text()
         path.write_text(content)
@@ -1006,6 +1004,66 @@ def test_quickstart_never_creates_over_a_null_or_masked_entry(c, key, variant, a
     plan = prepare(c, profile="lexical", clients=(key,), which=claude_on_path)
     assert plan["clients"][0]["action"] == action and plan["ok"] is False
     assert "client_config_manual" in plan["blocker_codes"] and tree(c.root) == before
+
+
+# Codex implementation review n° 8: a structure that is PRESENT but invalid is never "no entry".
+INVALID_STRUCTURES = {
+    ("claude-code", "project-table-is-a-list"): '{"projects": {"/w": {"mcpServers": ["memory-os-ai"]}}}',
+    ("claude-code", "project-table-is-a-string"): '{"projects": {"/w": {"mcpServers": "memory-os-ai"}}}',
+    ("claude-code", "project-is-not-an-object"): '{"projects": {"/w": ["memory-os-ai"]}}',
+    ("claude-code", "project-is-null"): '{"projects": {"/w": null}}',
+    ("claude-code", "projects-is-a-list"): '{"projects": [{"mcpServers": {"memory-os-ai": {}}}]}',
+    ("claude-code", "project-server-is-a-string"): '{"projects": {"/w": {"mcpServers": {"memory-os-ai": "x"}}}}',
+    ("claude-code", "user-table-is-a-list"): '{"mcpServers": ["memory-os-ai"]}',
+    ("claude-code", "document-is-a-list"): '["memory-os-ai"]',
+    ("claude-desktop", "table-is-a-list"): '{"mcpServers": ["memory-os-ai"]}',
+    ("cursor-like", "table-is-a-string"): '{"mcpServers": "memory-os-ai"}',
+    ("vscode", "table-is-a-list"): '{"servers": ["memory-os-ai"]}',
+    ("vscode", "server-is-a-string"): '{"servers": {"memory-os-ai": "x"}}',
+    ("antigravity", "table-is-null"): '{"mcpServers": null}',
+    ("antigravity", "document-is-a-string"): '"memory-os-ai"',
+    ("codex", "table-is-an-empty-array"): 'mcp_servers = []\n',
+    ("codex", "table-is-a-string"): 'mcp_servers = "memory-os-ai"\n',
+    ("codex", "table-is-false"): 'mcp_servers = false\n',
+    ("codex", "array-of-tables"): '[[mcp_servers]]\nname = "memory-os-ai"\n',
+    ("codex", "nested-is-a-string"): 'mcp = "memory-os-ai"\n',
+    ("codex", "nested-table-is-an-array"): '[mcp]\nservers = ["memory-os-ai"]\n',
+    ("codex", "server-is-a-string"): '[mcp_servers]\nmemory-os-ai = "x"\n',
+}
+
+
+@pytest.mark.parametrize("case", sorted(INVALID_STRUCTURES), ids="-".join)
+@pytest.mark.parametrize("operation", ["uninstall", "undo-with-service"])
+def test_a_present_but_invalid_server_structure_keeps_the_service(c, case, operation):
+    client = "windsurf" if case[0] == "cursor-like" else case[0]
+    result = installed(c, clients=("cursor",))
+    path = c.home / (PATHS.get(client) or ".codeium/windsurf/mcp_config.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(INVALID_STRUCTURES[case])
+    assert uninstaller().remaining_dependencies(c.home, c.settings.port, removed={"cursor"}) == {client: "indeterminate"}
+    if operation == "uninstall":
+        plan = uninstall_plan(c)
+        assert plan["service"]["action"] == "keep-clients-remaining"
+        assert plan["service"]["remaining_dependencies"] == {client: "indeterminate"}
+        out = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+        assert out["service"]["outcome"] == "kept-clients-remaining"
+    else:
+        out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+        assert out["service"]["undo"] == "kept-clients-remaining"
+        assert out["service"]["remaining_dependencies"] == {client: "indeterminate"}
+    assert "bootout" not in c.system.verbs() and (c.home / PLIST).exists() and c.system.loaded is True
+    assert path.read_text() == INVALID_STRUCTURES[case]
+
+
+@pytest.mark.parametrize("text", ['{"numStartups": 1}', '{"projects": {}}', '{"projects": {"/w": {}}}',
+                                  '{"projects": {"/w": {"mcpServers": {}}}}',
+                                  '{"projects": {"/w": {"mcpServers": {"other": {"command": "x"}}}}}'])
+def test_an_absent_structure_is_still_no_dependency(c, text):
+    """The other side of the rule: absence stays absence, or the service could never be stopped."""
+    installed(c, clients=("cursor",))
+    (c.home / PATHS["claude-code"]).write_text(text)
+    plan = uninstall_plan(c)
+    assert plan["service"]["action"] == "stop" and plan["service"]["remaining_dependencies"] == {}
 
 
 def test_uninstall_says_what_it_cannot_inspect_before_it_stops_the_service(c):
