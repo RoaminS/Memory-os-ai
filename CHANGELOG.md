@@ -26,7 +26,11 @@
   entrée cliente existante jamais écrasée en silence (`--replace-existing`), diagnostics structurés sans queue de
   log, `quickstart --undo --with-service`, `memory-os-admin uninstall` (données jamais supprimées), localisateur
   `memory-os-constraints` et portes de résolution par profil. `doctor` accepte un déploiement lexical.
-- Non fait : preuve du wheel lexical installé, copie de store qualifiée, mesure H2, preuve d'installation réelle et
+- Mesure H2 (`h2-lexical-parity-v1`, rétrospective, BEAM 100K gelé, 400 questions par bras dont 355 scorées,
+  20 conversations) : Recall@10 lexical 44,089 % / sémantique 45,764 %, écart −1,675 point, IC95 bootstrap par
+  conversation [−3,747 ; +0,404] ; seuil conjoint non atteint → le sémantique reste recommandé, lexical = profil
+  « léger ». Ni test indépendant, ni supériorité, ni conclusion sur les réponses générées ou les tâches d'agent.
+- Non fait : preuve du wheel lexical installé, copie de store qualifiée, preuve d'installation réelle et
   mesure de la clause D1 pour le profil lexical. Contrat moteur : `v4/docs/LEXICAL_PROFILE_4_1_0.md`.
 
 ## 4.0.9 — candidate à chaîne finale (2026-11-21) ; état à la préparation : non publiée / non déployée
