@@ -86,6 +86,82 @@ def read_text(path):
     return refuse_forbidden(path).read_text()
 
 
+def read_fd(fd):
+    """(mode, bytes) of the REGULAR file behind an open descriptor, ``None`` otherwise: type and content
+    come from the same descriptor. Whole content in memory: only for the log copies compared byte for byte
+    (a few kilobytes); inventories go through ``fingerprint``, which hashes block by block."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    blocks = []
+    while True:
+        block = os.read(fd, 1 << 20)
+        if not block:
+            return info.st_mode & 0o7777, b"".join(blocks)
+        blocks.append(block)
+
+
+def fingerprint(path):
+    """(mode, bytes, sha256) of a regular file from ONE open and ONE read, never through a link.
+
+    A file that grows while it is inventoried still gets a size and a digest of the same bytes.
+    """
+    path = refuse_forbidden(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Unobservable("entry changed type while inventoried: %s" % path)
+        # Hashed block by block: a model of some 200 MB is never held in memory. The size is the count of
+        # the bytes actually hashed, not st_size.
+        digest, size = hashlib.sha256(), 0
+        while True:
+            block = os.read(fd, 1 << 20)
+            if not block:
+                return info.st_mode & 0o7777, size, digest.hexdigest()
+            digest.update(block)
+            size += len(block)
+    finally:
+        os.close(fd)
+
+
+def log_copies(base, folder):
+    """Entries of ``<base>/<folder>/logs`` (a copy of the state folder): ``{home-relative path: bytes | type}``.
+
+    Flat listing. Every component below ``base`` is opened in turn without following a link (a linked
+    parent refuses the whole reading); a regular file gives its bytes, anything else a word that is not bytes.
+    """
+    base = refuse_forbidden(base)
+    refuse_forbidden(base / folder / "logs")
+    fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in (folder, "logs"):
+            try:
+                below = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return {}
+            except OSError:
+                raise ValueError("%s/logs of the state copy is not reached through real folders" % folder) from None
+            os.close(fd)
+            fd = below
+        rows = {}
+        for name in sorted(os.listdir(fd)):
+            refuse_forbidden(base / folder / "logs" / name)
+            try:
+                entry = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            except OSError:
+                rows[LOG_PREFIX + name] = "link or unreadable"
+                continue
+            try:
+                found = read_fd(entry)
+            finally:
+                os.close(entry)
+            rows[LOG_PREFIX + name] = found[1] if found else "not a regular file"
+        return rows
+    finally:
+        os.close(fd)
+
+
 def guarded_walk(root):
     """``os.walk`` that checks every entry BEFORE any descent, never follows links, and never hides an error.
 
@@ -299,8 +375,10 @@ def inventory(root):
             elif path.is_dir():
                 rows[rel] = {"type": "dir", "mode": info.st_mode & 0o7777}
             elif path.is_file():
-                rows[rel] = {"type": "file", "mode": info.st_mode & 0o7777, "bytes": info.st_size,
-                             "sha256": sha256_file(path)}
+                # Mode, size and digest from the same descriptor and the same bytes (rev. 11): a log that
+                # grows during the inventory never gets the size of one moment and the digest of another.
+                mode, size, sha = fingerprint(path)
+                rows[rel] = {"type": "file", "mode": mode, "bytes": size, "sha256": sha}
             else:
                 rows[rel] = {"type": "other"}  # sockets, fifos: recorded, never read
     return rows
@@ -787,6 +865,10 @@ STORE_PREFIX = ".local/share/memory-os/store/"
 STATE_PREFIX = ".local/state/memory-os/"
 QUICKSTART_PREFIX = ".local/state/memory-os/quickstart/"
 UNINSTALL_PREFIX = ".local/state/memory-os/uninstall/"
+# Log folder of the product service (rev. 11): launchd StandardErrorPath = <ops_dir>/logs/server.err
+# (memory_os_v4/ops/quickstart.py, _plist(..., log=settings.ops_dir / "logs/server.err")); no StandardOutPath.
+LOG_PREFIX = STATE_PREFIX + "logs/"
+SERVICE_LOGS = (LOG_PREFIX + "server.err",)  # the only file the product writes there; the only one that may grow
 WITNESS_BACKUP = "memory-os-backups/qualify-410-witness.mosb"
 
 
@@ -824,11 +906,74 @@ def revocation_only(before_text, after_text, stamp):
     return revoked > 0
 
 
-def data_conservation(before, after, store_before, store_after, label, created_clients, *, stamp, text_before, text_after):
+def _file_row(row):
+    size = row.get("bytes") if isinstance(row, dict) else None
+    return isinstance(row, dict) and row.get("type") == "file" and isinstance(size, int) \
+        and not isinstance(size, bool) and size >= 0 and isinstance(row.get("sha256"), str)
+
+
+def log_step(rel, old, new, copy_before, copy_after):
+    """One entry of the log folder across the four observations -> ``(proof row or None, refusal or None)``.
+
+    ``old`` / ``new``: inventory rows before / after (``None`` when absent); ``copy_before`` / ``copy_after``:
+    bytes of the state copies (``None`` when absent, a word when not a regular file). Every step must be an
+    append, compared on bytes: inventory before <= copy before <= copy after, and copy after == inventory after.
+    """
+    if any(row is not None and not _file_row(row) for row in (old, new)):
+        return None, "not a regular file in an inventory"
+    if any(content is not None and not isinstance(content, bytes) for content in (copy_before, copy_after)):
+        return None, "not a regular file in a state copy"
+    if new is None or copy_after is None:
+        return None, "absent after uninstall"
+    if len(copy_after) != new["bytes"] or hashlib.sha256(copy_after).hexdigest() != new["sha256"]:
+        return None, "the copy after is not the inventoried file"
+    size = 0
+    if old is not None:
+        size = old["bytes"]
+        if copy_before is None:
+            return None, "absent from the copy before"
+        if old.get("mode") != new.get("mode"):
+            return None, "mode changed"
+        if len(copy_before) < size or hashlib.sha256(copy_before[:size]).hexdigest() != old["sha256"]:
+            return None, "shortened or rewritten between the inventory and the copy before"
+    if copy_before is not None and not copy_after.startswith(copy_before):
+        return None, "shortened or rewritten by uninstall"
+    if old is not None and len(copy_after) == size:
+        return None, None  # the very same bytes in the four observations
+    if rel not in SERVICE_LOGS:
+        return None, "not a log of the service"
+    return {"path": rel, "bytes_before": size, "bytes_after": len(copy_after), "appended_bytes": len(copy_after) - size,
+            "appended_sha256": hashlib.sha256(copy_after[size:]).hexdigest()}, None
+
+
+def service_logs(before, after, copies_before, copies_after):
+    """Rev. 11: EVERY entry of the log folder seen in ANY observation, not only the inventory delta.
+
+    Returns ``(appended, checked, refused)``: proof rows of the logs that grew (sizes and SHA-256, never the
+    content), paths verified, and refusals. The release rules rebuild the same thing from the sealed pieces.
+    """
+    names = sorted({rel for rows in (before, after, copies_before, copies_after) for rel in rows
+                    if isinstance(rel, str) and rel.startswith(LOG_PREFIX)})
+    appended, checked, refused = [], [], []
+    for rel in names:
+        proof, why = log_step(rel, before.get(rel), after.get(rel), copies_before.get(rel), copies_after.get(rel))
+        if why:
+            refused.append({"path": rel, "why": why})
+        else:
+            checked.append(rel)
+            if proof:
+                appended.append(proof)
+    return appended, checked, refused
+
+
+def data_conservation(before, after, store_before, store_after, label, created_clients, *, stamp, text_before, text_after,
+                      logs_before=None, logs_after=None):
     """Only the expected, inventoried mutations of the uninstall protocol are admitted.
 
     ``text_before`` / ``text_after`` give the content of a state file (copies taken by the script) so a
-    journal change is checked field by field. Anything not recognised refuses the gate.
+    journal change is checked field by field; ``logs_before`` / ``logs_after`` are the entries of the log
+    folder in the same copies (``log_copies``), so every log is checked as an append on bytes (rev. 11).
+    Anything not recognised refuses the gate.
     """
     delta = diff(before, after)
     plist = "Library/LaunchAgents/%s.plist" % label
@@ -842,18 +987,21 @@ def data_conservation(before, after, store_before, store_after, label, created_c
         for rel in paths:
             kind = kind_of(rel)
             old, new = before.get(rel) or {}, after.get(rel) or {}
-            is_dir = (new or old).get("type") == "dir"
-            is_log = rel.endswith(".log") or ("/" + rel).startswith("/Library/Logs/")
+            # A folder stays a folder: a file or a link turned into a folder (or the reverse) is never "metadata".
+            is_dir = new.get("type") == "dir" and (change == "added" or old.get("type") == "dir")
             if kind:
                 immutable_changed.append(rel)
                 note(unexpected, rel, change, "immutable " + kind)
+            elif rel.startswith(LOG_PREFIX):
+                pass  # judged below on the four observations, whatever its type, and before any folder rule
             elif change == "removed" and rel == plist:
                 note(expected, rel, change, "plist moved out of its active place")
             elif change == "added" and rel.startswith(UNINSTALL_PREFIX):
                 note(expected, rel, change, "new uninstall journal")
             elif is_dir and change in ("changed", "added") and (change == "changed" or rel.startswith(STATE_PREFIX)):
                 note(expected, rel, change, "directory metadata")
-            elif change == "changed" and rel.startswith(QUICKSTART_PREFIX) and rel.endswith("/journal.json") \
+            elif change == "changed" and old.get("type") == new.get("type") == "file" \
+                    and rel.startswith(QUICKSTART_PREFIX) and rel.endswith("/journal.json") \
                     and revocation_only(text_before(rel), text_after(rel), stamp):
                 note(expected, rel, change, "proof revocation, field by field")
             elif rel in created_clients and change in ("changed", "removed"):
@@ -861,16 +1009,20 @@ def data_conservation(before, after, store_before, store_after, label, created_c
             elif rel.startswith(STORE_PREFIX) and rel[len(STORE_PREFIX):] in ("store.sqlite3", "store.sqlite3-wal",
                                                                              "store.sqlite3-shm"):
                 note(expected, rel, change, "SQLite close transition (logical content compared)")
-            elif is_log and change == "changed" and new.get("bytes", -1) >= old.get("bytes", 0):
-                note(expected, rel, change, "log still present, not shortened")
-            elif is_log and change == "added":
-                note(expected, rel, change, "new log")
-            else:
+            else:  # a log elsewhere has no byte copy: its size alone never admits a change (rev. 11)
                 note(unexpected, rel, change, "not part of the uninstall protocol")
+    appended_logs, logs_checked, refused = service_logs(before, after, logs_before or {}, logs_after or {})
+    change_of = {rel: change for change, paths in delta.items() for rel in paths}
+    for row in refused:  # also a log the two inventories show identical (truncated back, copy missing ...)
+        note(unexpected, row["path"], change_of.get(row["path"], "observed"), "log not append-only: " + row["why"])
+    for row in appended_logs:
+        change = change_of.get(row["path"], "observed")
+        note(expected, row["path"], change, "new log" if change == "added" else "log appended only (bytes compared)")
     kinds = {kind: sorted(rel for rel in before if kind_of(rel) == kind and before[rel].get("type") == "file"
                           and before[rel].get("bytes", 0) > 0) for kind in IMMUTABLE}
     journals_before = [rel for rel in before if rel.startswith(QUICKSTART_PREFIX)]
-    logs_before = [rel for rel in before if rel.endswith(".log") and before[rel].get("type") == "file"]
+    logs_before = [rel for rel in before if (rel.endswith(".log") or rel.startswith(LOG_PREFIX))
+                   and before[rel].get("type") == "file"]
     original = (before.get(plist) or {}).get("sha256")
     copies = [rel for rel, row in after.items() if rel.startswith(UNINSTALL_PREFIX) and row.get("type") == "file"
               and original and row.get("sha256") == original]
@@ -886,12 +1038,15 @@ def data_conservation(before, after, store_before, store_after, label, created_c
         # and both observations are kept so the release rules recompute the comparison themselves.
         **store_compare(store_before, store_after),
         "store_before": store_before, "store_after": store_after,
-        "journals_present": bool(journals_before) and all(rel in after for rel in journals_before)
-        and all(rel in after for rel in logs_before),
+        # Present AND of the same kind: a journal or a log replaced by a folder or a link is not "present".
+        "journals_present": bool(journals_before) and all(
+            (after.get(rel) or {}).get("type") == before[rel].get("type") for rel in journals_before + logs_before),
         "plist_removed_from_active": plist in before and plist not in after,
         "plist_journal_copy_kept": bool(copies),  # a copy with exactly the bytes of the original plist
         "plist_journal_copies": copies,
         "expected_mutations": expected,
+        "appended_logs": appended_logs,  # rev. 11: sizes and SHA-256 of what was appended, never the content
+        "service_logs_checked": logs_checked,  # every entry of the log folder, changed or not
         "unexpected_changes": unexpected,
     }
 
@@ -1305,10 +1460,14 @@ def assemble(d):
                 return content
             return read
 
+        copies = {folder: log_copies(d2, folder) for folder in ("state_before", "state_after")}
+        compared.extend("install2/%s/%s" % (folder, rel[len(STATE_PREFIX):]) for folder, rows in copies.items()
+                        for rel, content in rows.items() if isinstance(content, bytes))
         data = data_conservation(load(d2 / "data_before.json")["rows"], load(d2 / "data_after.json")["rows"],
                                  load(d2 / "store_before.json"), load(d2 / "store_after.json"), meta["label"], created,
                                  stamp=uninstall.get("stamp"), text_before=text("state_before"),
-                                 text_after=text("state_after"))
+                                 text_after=text("state_after"), logs_before=copies["state_before"],
+                                 logs_after=copies["state_after"])
         data["checked_after_stop"] = state["label_state"] == "absent" and state["port_state"] == "free"
         data["compared_documents"] = sorted(set(compared))
         data["witness"] = load(d2 / "witness.json")

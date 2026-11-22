@@ -1,4 +1,4 @@
-"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 10). Fail closed.
+"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 11). Fail closed.
 
 Invariants of §1, gate states, admissible decisions, commit/artifact binding. No recording
 command raises ``release_ready``: only the final verification (G15) does, after the exit
@@ -540,6 +540,59 @@ def _store_preserved(data):
             and data.get("store_identity_unchanged") is True, "User data not preserved by uninstall")
 
 
+def _logs_appended(data):
+    """G8 logs (rev. 11): shape of the append proofs the report states, and their match with its mutations.
+
+    Coherence of the report only. The set of logs and their bytes are REBUILT from the sealed pieces by
+    ``replay_service_logs`` (``check_pieces``): nothing here is taken on the word of these lists.
+    """
+    import qualify_install_410_helper as helper
+
+    def count(value):
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+    logs, checked = data.get("appended_logs", []), data.get("service_logs_checked", [])
+    changed = sorted(row.get("path") for row in data.get("expected_mutations") or []
+                     if isinstance(row, dict) and isinstance(row.get("path"), str) and row["path"].startswith(helper.LOG_PREFIX))
+    require(isinstance(logs, list) and isinstance(checked, list) and all(isinstance(rel, str) for rel in checked)
+            and all(isinstance(row, dict) and isinstance(row.get("path"), str) for row in logs)
+            and [row["path"] for row in logs] == changed and set(changed) <= set(checked)
+            and set(changed) <= set(helper.SERVICE_LOGS), "User data not preserved by uninstall")
+    for row in logs:
+        require(set(row) == {"path", "bytes_before", "bytes_after", "appended_bytes", "appended_sha256"}
+                and all(count(row[key]) for key in ("bytes_before", "bytes_after", "appended_bytes"))
+                and row["bytes_after"] == row["bytes_before"] + row["appended_bytes"] and is_sha(row["appended_sha256"])
+                and (row["appended_bytes"] > 0 or row["bytes_before"] == 0), "User data not preserved by uninstall")
+
+
+def replay_service_logs(report, origin):
+    """G8 logs (rev. 11), REBUILT from the sealed pieces, whatever the report declares.
+
+    Both inventories and both copies of the state folder give the set of log entries and their bytes; the
+    report must state exactly what this finds. Removing a mutation and its proof row from a report changes
+    nothing here: an entry the pieces show is judged, declared or not.
+    """
+    import qualify_install_410_helper as helper
+
+    data = report["install_2"]["data_conservation"]
+    origin = refuse_forbidden(origin)
+    before, after = (json.loads(read_text(origin / "install2" / name)).get("rows") for name in ("data_before.json",
+                                                                                               "data_after.json"))
+    require(isinstance(before, dict) and isinstance(after, dict), "Sealed inventories unreadable")
+    try:
+        copies = {folder: helper.log_copies(origin / "install2", folder) for folder in ("state_before", "state_after")}
+    except (OSError, ValueError) as exc:
+        raise ValueError("Sealed copies of the log folder unreadable: " + type(exc).__name__) from None
+    appended, checked, refused = helper.service_logs(before, after, copies["state_before"], copies["state_after"])
+    used = {"install2/%s/%s" % (folder, rel[len(helper.STATE_PREFIX):]) for folder, rows in copies.items()
+            for rel, content in rows.items() if isinstance(content, bytes)}
+    require(not refused, "Sealed log copies do not show append-only service logs")
+    require(data.get("appended_logs", []) == appended and data.get("service_logs_checked", []) == checked,
+            "Report does not state what the sealed log copies show")
+    require(used <= set(report["evidence_sha256"]) and used <= set(data.get("compared_documents") or []),
+            "Log copies of the G8 comparison are not sealed")
+
+
 def validate_install(p, m, profile):
     require(p.get("format") == "qualify-410-install-v1" and p.get("ok") is True and p.get("profile") == profile,
             "Install proof failed or for another profile")
@@ -619,6 +672,7 @@ def validate_install(p, m, profile):
             and data.get("journals_present") is True and data.get("unexpected_changes") == [],
             "User data not preserved by uninstall")
     _store_preserved(data)
+    _logs_appended(data)
     require(p.get("safety_net_fired") is False, "The safety net fired: a rollback failure is never a success")
     prod = p["production"]
     require(all(prod.get(key) is True for key in PRODUCTION_FLAGS), "Protected real files changed or not observed")
@@ -1209,6 +1263,8 @@ def check_pieces(name, report, origin):
     verify_pieces(report, origin, required_pieces(name, report))
     for rel, sha in piece_bindings(name, report).items():
         require(is_sha(sha) and report["evidence_sha256"].get(rel) == sha, "Sealed archive differs from the report: " + rel)
+    if name.startswith("install_"):
+        replay_service_logs(report, origin)
 
 
 def verify_pieces(report, origin, required):

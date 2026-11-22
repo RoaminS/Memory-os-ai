@@ -1366,7 +1366,9 @@ def release(tmp_path, monkeypatch):
         for rel in gate.required_pieces(name, report):  # sub-folders, archives and compared documents included
             piece = origin / rel
             piece.parent.mkdir(parents=True, exist_ok=True)
-            piece.write_text("piece " + rel)
+            # The two home inventories are re-read by the release rules (rev. 11: logs rebuilt from the pieces).
+            piece.write_text('{"rows": {}}' if rel in ("install2/data_before.json", "install2/data_after.json")
+                             else "piece " + rel)
             inventory[rel] = gate.digest(piece)
         report["evidence_sha256"] = inventory
         if name == "copy":  # the sealed common archive carries the SHA-256 the report states
@@ -2155,7 +2157,7 @@ def uninstalled(rows, f):
         ".local/state/memory-os/uninstall/U1/uninstall.json": f("u"),
         PLIST_COPY: f("p"),  # exactly the bytes of the original plist
         JOURNAL: f("j-revoked"),
-        "Library/Logs/memory-os/server.log": {**f("l2"), "bytes": 9}, ".codex/config.toml": f("x2"), ".cursor/mcp.json": f("y2"),
+        ".codex/config.toml": f("x2"), ".cursor/mcp.json": f("y2"),
     })
     return after
 
@@ -2254,6 +2256,8 @@ def test_blocker2_absent_key_or_backups_do_not_prove_their_preservation():
     lambda a, f: a.pop("memory-os-backups/qualify-410-witness.mosb"),
     lambda a, f: a.update({".local/state/memory-os/quickstart/S2/journal.json": f("n")}),   # a journal appearing
     lambda a, f: a.update({"Library/Logs/memory-os/server.log": {**f("short"), "bytes": 1}}),  # a log shortened
+    lambda a, f: a.update({"Library/Logs/memory-os/server.log": {**f("l2"), "bytes": 9}}),  # grown, but no byte copy (rev. 11)
+    lambda a, f: a.update({"Library/Logs/memory-os/new.log": f("n")}),          # a new log outside the product folder
     lambda a, f: a.update({".local/state/memory-os/health.jsonl": f("n")}),
     lambda a, f: a.pop(".config/memory-os/backup.key"),
     lambda a, f: a.pop(".local/state/memory-os/quickstart/S1/install.json"),   # a journal must stay
@@ -3984,3 +3988,401 @@ def test_rev10_replay_on_the_real_evidence_of_run_v6(tmp_path):
     assert helper.store_compare(before, forged)["store_logical_unchanged"] is False
     # What v6 recorded (digests and counts only) is refused, as it was.
     assert helper.store_compare(recorded_before, recorded_after)["store_logical_unchanged"] is False
+
+
+# ---------- rev. 11 (run v7): service logs may only gain bytes at their end (server.err at the stop) ----------
+
+SERVER_ERR = ".local/state/memory-os/logs/server.err"
+LOGS_DIR = ".local/state/memory-os/logs"
+# The exact 301 bytes the semantic server wrote to server.err while stopping (run v7, Python warning at shutdown).
+V7_TAIL = (b"/opt/homebrew/Cellar/python@3.11/3.11.14_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/"
+           b"multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked "
+           b"semaphore objects to clean up at shutdown\n  warnings.warn('resource_tracker: There appear to be %d '\n")
+V7_TAIL_SHA = "1fdd195ea1b84c85093327c4004f9472ac9767e50ae937dbcfcd1fbc58e974a1"
+# The account's real home (the test session may run with a throwaway HOME); read-only, skipped where absent.
+V7_COPIES = Path(__import__("pwd").getpwuid(os.getuid()).pw_dir) / "memory-os-local/backups/20261122-410-v7-stop/semantic/install2"
+LOG_OLD = b"INFO: Started server process\nINFO: Uvicorn running on http://127.0.0.1:18765\n"
+LOG_NEW = LOG_OLD + V7_TAIL
+SAME_SIZE = LOG_OLD[:-5] + b"XXXX\n"
+AS_INVENTORIED = object()
+
+
+def log_row(content, mode=0o644):
+    return {"type": "file", "mode": mode, "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+
+
+def log_conservation(old, new, *, path=SERVER_ERR, copy_before=AS_INVENTORIED, copy_after=AS_INVENTORIED, mutate=None):
+    """Uninstall around a log. ``old`` / ``new``: bytes the two inventories saw (``None``: no such file);
+    the state copies hold the same bytes unless ``copy_before`` / ``copy_after`` say otherwise (``None``: absent)."""
+    before, f = home_inventory({} if old is None else {path: log_row(old)})
+    after = uninstalled(before, f)
+    if new is None:
+        after.pop(path, None)
+    else:
+        after[path] = log_row(new)
+    copies = [{path: value} if value is not None else {} for value in (
+        old if copy_before is AS_INVENTORIED else copy_before, new if copy_after is AS_INVENTORIED else copy_after)]
+    if mutate:
+        mutate(before, after, copies)
+    return helper.data_conservation(
+        before, after, STORE, dict(STORE), helper.TEST_LABEL, CLIENTS, stamp="U1",
+        text_before={JOURNAL: json.dumps(RECORDS)}.get, text_after={JOURNAL: json.dumps(revoked())}.get,
+        logs_before=copies[0], logs_after=copies[1])
+
+
+def test_rev11_the_product_log_folder_is_the_one_of_the_generated_plist():
+    """The service plist writes stderr to <ops_dir>/logs/server.err and declares no stdout file."""
+    quickstart = (ROOT / "v4/src/memory_os_v4/ops/quickstart.py").read_text()
+    cli = (ROOT / "v4/src/memory_os_v4/ops/cli.py").read_text()
+    assert 'log=settings.ops_dir / "logs/server.err"' in quickstart
+    assert "StandardErrorPath" in cli and "StandardOutPath" not in cli and "StandardOutPath" not in quickstart
+    assert helper.LOG_PREFIX == LOGS_DIR + "/" and helper.SERVICE_LOGS == (SERVER_ERR,)
+
+
+def test_rev11_a_service_log_that_only_grew_is_admitted_with_its_append_proof():
+    row = log_conservation(LOG_OLD, LOG_NEW)
+    assert row["unexpected_changes"] == [] and row["journals_present"] is True
+    assert row["appended_logs"] == [{"path": SERVER_ERR, "bytes_before": len(LOG_OLD), "bytes_after": len(LOG_OLD) + 301,
+                                     "appended_bytes": 301, "appended_sha256": V7_TAIL_SHA}]
+    assert row["service_logs_checked"] == [SERVER_ERR]
+    assert {m["path"]: m["why"] for m in row["expected_mutations"]}[SERVER_ERR] == "log appended only (bytes compared)"
+    assert V7_TAIL.decode() not in json.dumps(row)  # the content never enters the proof
+    # The service still runs between the inventory and the copy: a copy "before" that already grew is still a prefix.
+    row = log_conservation(LOG_OLD, LOG_OLD + b"late\n" + V7_TAIL, copy_before=LOG_OLD + b"late\n")
+    assert row["unexpected_changes"] == [] and row["appended_logs"][0]["appended_bytes"] == 306
+    # server.err created after the inventory (first line of the service), or after the copy: new log, recorded whole.
+    for copy_before in (None, V7_TAIL[:10]):
+        row = log_conservation(None, V7_TAIL, copy_before=copy_before)
+        assert row["unexpected_changes"] == [] and row["appended_logs"][0]["bytes_before"] == 0
+        assert row["appended_logs"][0]["appended_sha256"] == V7_TAIL_SHA
+        assert {m["path"]: m["why"] for m in row["expected_mutations"]}[SERVER_ERR] == "new log"
+    # Untouched logs (server.err or any other file there): checked, no proof row.
+    row = log_conservation(LOG_OLD, LOG_OLD)
+    assert row["unexpected_changes"] == [] and row["appended_logs"] == [] and row["service_logs_checked"] == [SERVER_ERR]
+    row = log_conservation(LOG_OLD, LOG_OLD, path=LOGS_DIR + "/notes.txt")
+    assert row["unexpected_changes"] == [] and row["service_logs_checked"] == [LOGS_DIR + "/notes.txt"]
+
+
+def test_rev11_the_real_v7_server_err_copies_are_an_append_of_301_bytes(tmp_path):
+    """The very files of run v7 (read-only copies kept outside the repository), copied to tmp."""
+    if not (V7_COPIES / "server.err.before").is_file() or not (V7_COPIES / "server.err.after").is_file():
+        pytest.skip("run v7 copies not on this machine")
+    for folder, name in (("state_before", "server.err.before"), ("state_after", "server.err.after")):
+        (tmp_path / folder / "logs").mkdir(parents=True)
+        (tmp_path / folder / "logs/server.err").write_bytes((V7_COPIES / name).read_bytes())
+    copies = [helper.log_copies(tmp_path, folder) for folder in ("state_before", "state_after")]
+    old, new = copies[0][SERVER_ERR], copies[1][SERVER_ERR]
+    row = log_conservation(old, new)
+    assert row["unexpected_changes"] == []
+    assert row["appended_logs"] == [{"path": SERVER_ERR, "bytes_before": 18635, "bytes_after": 18936,
+                                     "appended_bytes": 301, "appended_sha256": V7_TAIL_SHA}]
+    assert new[len(old):] == V7_TAIL
+    # What the run v7 tooling had (inventories only, no byte copies): refused, a size is never enough.
+    assert [c["path"] for c in log_conservation(old, new, copy_before=None, copy_after=None)["unexpected_changes"]] == [SERVER_ERR]
+
+
+@pytest.mark.parametrize("case", [
+    dict(old=LOG_OLD, new=b"X" + LOG_OLD[1:] + V7_TAIL),                               # prefix rewritten, file longer
+    dict(old=LOG_OLD, new=LOG_OLD[:-1]),                                               # shortened
+    dict(old=LOG_OLD, new=b""),                                                        # truncated
+    dict(old=LOG_OLD, new=SAME_SIZE),                                                  # replaced, same size
+    dict(old=LOG_OLD, new=V7_TAIL + LOG_OLD),                                          # rotated: old bytes moved to the end
+    dict(old=LOG_OLD, new=None),                                                       # log removed
+    dict(old=LOG_OLD, new=None, copy_after=LOG_OLD),                                   # gone from the HOME, still in a copy
+    dict(old=LOG_OLD, new=LOG_NEW, copy_before=None),                                  # no copy "before": size is not enough
+    dict(old=LOG_OLD, new=LOG_NEW, copy_after=None),                                   # no copy "after"
+    dict(old=LOG_OLD, new=LOG_NEW, copy_before=b"other bytes of some size\n" * 3),     # copy is not the inventoried file
+    dict(old=LOG_OLD, new=LOG_NEW, copy_before=LOG_OLD[:-1]),                          # copy "before" shorter than the inventory
+    dict(old=LOG_OLD, new=LOG_NEW, copy_after=LOG_NEW + b"x"),                         # copy "after" is not the inventoried file
+    dict(old=LOG_OLD, new=LOG_NEW, copy_before=LOG_OLD + b"gone\n"),                   # bytes seen before, absent after
+    dict(old=LOG_OLD, new=LOG_NEW, copy_before="text"),                                # copy "before" is not a regular file
+    dict(old=LOG_OLD, new=LOG_NEW, copy_after="not a regular file"),
+    dict(old=LOG_OLD, new=LOG_NEW, mutate=lambda b, a, c: a[SERVER_ERR].update(mode=0o600)),   # mode changed
+    # Codex 2: the service appends B after the inventory, uninstall truncates back to A: both inventories identical.
+    dict(old=LOG_OLD, new=LOG_OLD, copy_before=LOG_OLD + b"B\n"),
+    dict(old=LOG_OLD, new=LOG_OLD, copy_before=None),                                  # identical inventories, copy missing
+    dict(old=LOG_OLD, new=LOG_OLD, copy_after=None),
+    # Codex 2: a file that appeared after the inventory is not "new": its copy "before" must be a prefix too.
+    dict(old=None, new=V7_TAIL, copy_before=b"first lines, later rewritten\n"),
+    dict(old=None, new=None, copy_before=V7_TAIL, copy_after=None),                    # appeared, then removed by uninstall
+    dict(old=None, new=None, copy_before=None, copy_after=V7_TAIL),                    # in a copy, in no inventory
+    # Only server.err may grow or appear in the log folder (the product writes nothing else there).
+    dict(old=LOG_OLD, new=LOG_NEW, path=LOGS_DIR + "/server.out"),
+    dict(old=None, new=V7_TAIL, path=LOGS_DIR + "/notes.txt"),
+    dict(old=LOG_OLD, new=SAME_SIZE, path=LOGS_DIR + "/server.out"),
+    dict(old=LOG_OLD, new=LOG_NEW, path=LOGS_DIR + "/sub/server.err"),                 # nested: the copies are read flat
+])
+def test_rev11_any_log_change_that_is_not_an_append_refuses_the_gate(case):
+    path = case.get("path", SERVER_ERR)
+    row = log_conservation(**case)
+    assert [c["path"] for c in row["unexpected_changes"]] == [path] and row["appended_logs"] == []
+    assert row["service_logs_checked"] == [] and row["unexpected_changes"][0]["why"].startswith("log not append-only")
+    if case["old"] is not None and case["new"] is None:
+        assert row["journals_present"] is False  # server.err is a journal that must stay, though not named *.log
+
+
+@pytest.mark.parametrize("entry", [{"type": "dir", "mode": 0o700}, {"type": "link", "target": "/dev/null"},
+                                   {"type": "other"}])
+def test_rev11_a_log_replaced_by_a_folder_or_a_link_is_refused(entry):
+    """Codex 1: server.err replaced by an (empty) folder was admitted as "directory metadata", and still "present"."""
+    row = log_conservation(LOG_OLD, LOG_NEW, mutate=lambda b, a, c: a.update({SERVER_ERR: dict(entry)}))
+    assert [c["path"] for c in row["unexpected_changes"]] == [SERVER_ERR] and row["appended_logs"] == []
+    assert row["journals_present"] is False
+    assert all(m["path"] != SERVER_ERR for m in row["expected_mutations"])
+    # The reverse (a folder or a link that becomes a file), and a folder that stays one: refused in the log folder.
+    for mutate in (lambda b, a, c: b.update({SERVER_ERR: dict(entry)}),
+                   lambda b, a, c: (b.update({SERVER_ERR: dict(entry)}), a.update({SERVER_ERR: dict(entry)}))):
+        row = log_conservation(LOG_OLD, LOG_NEW, mutate=mutate)
+        assert [c["path"] for c in row["unexpected_changes"]] == [SERVER_ERR]
+    # In the copies alone (the inventories being honest).
+    row = log_conservation(LOG_OLD, LOG_NEW, copy_after="not a regular file")
+    assert [c["path"] for c in row["unexpected_changes"]] == [SERVER_ERR]
+
+
+def test_rev11_a_file_turned_into_a_folder_is_never_directory_metadata_anywhere():
+    """General form of Codex 1: the folder rule needs a folder on both sides."""
+    for path in ("Documents/notes.txt", ".local/state/memory-os/health.jsonl", JOURNAL, INSTALL_JSON, LOGS_DIR):
+        before, f = home_inventory()
+        before.setdefault(path, f("d"))
+        after = uninstalled(before, f)
+        after[path] = {"type": "dir", "mode": 0o700}
+        row = conservation(before, after)
+        assert path in [c["path"] for c in row["unexpected_changes"]], path
+        if path in (JOURNAL, INSTALL_JSON):
+            assert row["journals_present"] is False
+    # A folder whose metadata changed, and a new folder of the state folder, stay admitted.
+    before, f = home_inventory({LOGS_DIR: {"type": "dir", "mode": 0o700}})
+    after = uninstalled(before, f)
+    after.update({LOGS_DIR: {"type": "dir", "mode": 0o755}, ".local/state/memory-os/uninstall": {"type": "dir", "mode": 0o700}})
+    assert conservation(before, after)["unexpected_changes"] == []
+
+
+@pytest.mark.parametrize("path", [
+    ".local/state/memory-os/health.jsonl",                 # another file of the state folder
+    ".local/state/memory-os/relay/state.json",
+    ".local/state/memory-os/relay/relay.log",              # a *.log of the state folder is not a service log
+    ".local/state/memory-os/logs.err",                     # beside the log folder, not in it
+    ".local/state/memory-os/logsx/server.err",
+    "Library/Logs/memory-os/server.err",                   # a "log" outside the product log folder
+    "Library/Logs/memory-os/server.log",
+    ".local/share/memory-os/store/server.log",
+    ".local/share/memory-os/logs/server.err",
+    "logs/server.err",
+])
+def test_rev11_only_the_product_log_folder_gets_the_append_rule(path):
+    """A pure append is refused everywhere else, even with honest byte copies."""
+    row = log_conservation(LOG_OLD, LOG_NEW, path=path)
+    assert [c["path"] for c in row["unexpected_changes"]] == [path] and row["appended_logs"] == []
+    assert row["unexpected_changes"][0]["why"] == "not part of the uninstall protocol"
+
+
+def test_rev11_inventory_takes_size_and_digest_from_the_same_bytes(tmp_path, monkeypatch):
+    """Codex 3: lstat saw 1 byte ("A"), the service appended "B", the digest was SHA-256("AB"): (1, sha(AB))."""
+    home = tmp_path / "home"
+    (home / "logs").mkdir(parents=True)
+    log = home / "logs/server.err"
+    log.write_bytes(b"A")
+    real_lstat = Path.lstat
+
+    def lstat_then_append(self, *args, **kw):  # the service writes right after the size was looked at
+        info = real_lstat(self, *args, **kw)
+        if self == log and log.read_bytes() == b"A":
+            with log.open("ab") as stream:
+                stream.write(b"B")
+        return info
+
+    monkeypatch.setattr(Path, "lstat", lstat_then_append)
+    row = helper.inventory(home)["logs/server.err"]
+    monkeypatch.undo()
+    assert log.read_bytes() == b"AB"
+    assert row == {"type": "file", "mode": log.stat().st_mode & 0o7777, "bytes": 2, "sha256": hashlib.sha256(b"AB").hexdigest()}
+    # Same format as before for every other use of the inventory (G7, previews, production): four keys, same digest.
+    assert helper.fingerprint(log) == (row["mode"], 2, helper.sha256_file(log))
+    assert helper.inventory_digest(helper.inventory(home)) == helper.inventory_digest(helper.inventory(home))
+    # One open, never through a link, and the type is the one of the descriptor that is read.
+    (home / "link").symlink_to(log)
+    with pytest.raises(OSError):
+        helper.fingerprint(home / "link")
+    with pytest.raises(helper.Unobservable):
+        helper.fingerprint(home / "logs")
+    assert helper.inventory(home)["link"] == {"type": "link", "target": str(log)}
+
+
+def test_rev11_fingerprint_hashes_a_large_file_block_by_block_with_the_same_result(tmp_path, monkeypatch):
+    """Same (size, sha) as reading the whole file at once, without ever holding more than one block."""
+    big = tmp_path / "model.bin"
+    content = hashlib.sha256(b"seed").digest() * 100_000 + b"tail-not-on-a-block-boundary"  # 3.2 MB, 3 blocks + rest
+    big.write_bytes(content)
+    big.chmod(0o640)
+    whole = (0o640, len(content), hashlib.sha256(content).hexdigest())  # the former method: all bytes, then one digest
+    reads = []
+    real_read = os.read
+
+    def read(fd, count):
+        block = real_read(fd, count)
+        reads.append(len(block))
+        return block
+
+    monkeypatch.setattr(helper.os, "read", read)
+    assert helper.fingerprint(big) == whole
+    monkeypatch.undo()
+    assert len(content) == 3_200_028 and max(reads) <= 1 << 20 and len(reads) >= 5 and sum(reads) == len(content)
+    assert helper.inventory(tmp_path)["model.bin"] == {"type": "file", "mode": 0o640, "bytes": len(content), "sha256": whole[2]}
+    assert whole[2] == helper.sha256_file(big)
+    empty = tmp_path / "empty"
+    empty.write_bytes(b"")
+    assert helper.fingerprint(empty)[1:] == (0, hashlib.sha256(b"").hexdigest())
+    exact = tmp_path / "exact"
+    exact.write_bytes(b"x" * (1 << 20))  # exactly one block
+    assert helper.fingerprint(exact)[1:] == (1 << 20, hashlib.sha256(b"x" * (1 << 20)).hexdigest())
+
+
+def install_tree_with_log(d, old=LOG_OLD, new=LOG_NEW, copy_before=None):
+    write_install_tree(d, "semantic")
+    before, f = home_inventory({SERVER_ERR: log_row(old)})
+    after = uninstalled(before, f)
+    after[SERVER_ERR] = log_row(new)
+    (d / "install2/data_before.json").write_text(json.dumps({"rows": before}))
+    (d / "install2/data_after.json").write_text(json.dumps({"rows": after}))
+    for folder, content in (("state_before", old if copy_before is None else copy_before), ("state_after", new)):
+        (d / "install2" / folder / "logs").mkdir(parents=True)
+        (d / "install2" / folder / "logs/server.err").write_bytes(content)
+
+
+LOG_COPIES = ["install2/state_after/logs/server.err", "install2/state_before/logs/server.err"]
+
+
+def test_rev11_assembled_report_carries_the_append_proof_and_the_release_rules_rebuild_it(tmp_path):
+    install_tree_with_log(tmp_path)
+    report = helper.assemble(tmp_path)
+    assert report["ok"] is True and "error" not in report, report.get("error")
+    data = report["install_2"]["data_conservation"]
+    assert data["unexpected_changes"] == [] and data["service_logs_checked"] == [SERVER_ERR] and data["appended_logs"] == [
+        {"path": SERVER_ERR, "bytes_before": len(LOG_OLD), "bytes_after": len(LOG_OLD) + 301, "appended_bytes": 301,
+         "appended_sha256": V7_TAIL_SHA}]
+    assert set(LOG_COPIES) <= set(data["compared_documents"]) <= set(report["evidence_sha256"])
+    gate.validate_install(report, manifest(), "semantic")
+    gate.check_pieces("install_semantic", report, tmp_path)
+    assert set(LOG_COPIES) <= set(gate.required_pieces("install_semantic", report))
+    # The report-level rules refuse incoherent proof rows ...
+    for change in (lambda d: d["appended_logs"].clear(), lambda d: d["appended_logs"][0].update(appended_bytes=300),
+                   lambda d: d["appended_logs"][0].update(appended_bytes=0, bytes_after=len(LOG_OLD)),
+                   lambda d: d["appended_logs"][0].update(appended_sha256="x"),
+                   lambda d: d["appended_logs"][0].update(content="x"),
+                   lambda d: d["appended_logs"][0].update(bytes_before=True),
+                   lambda d: d["service_logs_checked"].clear(),
+                   lambda d: d["appended_logs"].append({**d["appended_logs"][0], "path": LOGS_DIR + "/other.err"})):
+        forged = copy.deepcopy(report)
+        change(forged["install_2"]["data_conservation"])
+        refused(gate.validate_install, forged, manifest(), "semantic")
+    # ... and whatever stays coherent on paper is confronted with what the sealed pieces show.
+    for change in (lambda d: d["appended_logs"][0].update(appended_sha256=SHA),
+                   lambda d: d["compared_documents"].remove(LOG_COPIES[1]),
+                   lambda d: d["service_logs_checked"].append(LOGS_DIR + "/other.err")):
+        forged = copy.deepcopy(report)
+        change(forged["install_2"]["data_conservation"])
+        gate.validate_install(forged, manifest(), "semantic")
+        refused(gate.check_pieces, "install_semantic", forged, tmp_path)
+    forged = copy.deepcopy(report)
+    del forged["evidence_sha256"][LOG_COPIES[0]]
+    refused(gate.check_pieces, "install_semantic", forged, tmp_path)
+
+
+def test_rev11_the_replay_cannot_be_silenced_by_omitting_the_mutation_and_its_proof(tmp_path):
+    """Codex 4: a log REWRITTEN in the sealed pieces, and a report that declares no log mutation at all."""
+    install_tree_with_log(tmp_path)
+    honest = helper.assemble(tmp_path)
+
+    def silent(report):
+        data = report["install_2"]["data_conservation"]
+        data["expected_mutations"] = [m for m in data["expected_mutations"] if m["path"] != SERVER_ERR]
+        data["appended_logs"], data["unexpected_changes"] = [], []
+        return report
+
+    # Omission alone, on honest pieces: the report no longer states what the pieces show.
+    forged = silent(copy.deepcopy(honest))
+    gate.validate_install(forged, manifest(), "semantic")  # coherent on paper
+    refused(gate.check_pieces, "install_semantic", forged, tmp_path)
+    for key in ("appended_logs", "service_logs_checked"):
+        forged = silent(copy.deepcopy(honest))
+        del forged["install_2"]["data_conservation"][key]
+        refused(gate.check_pieces, "install_semantic", forged, tmp_path)
+    # The counterexample itself: pieces rewritten and re-sealed, nothing declared.
+    rewritten = b"X" + LOG_NEW[1:]
+    (tmp_path / LOG_COPIES[0]).write_bytes(rewritten)
+    after = json.loads((tmp_path / "install2/data_after.json").read_text())
+    after["rows"][SERVER_ERR] = log_row(rewritten)
+    (tmp_path / "install2/data_after.json").write_text(json.dumps(after))
+    forged = silent(copy.deepcopy(honest))
+    for rel in (LOG_COPIES[0], "install2/data_after.json"):
+        forged["evidence_sha256"][rel] = hashlib.sha256((tmp_path / rel).read_bytes()).hexdigest()
+    gate.validate_install(forged, manifest(), "semantic")
+    gate.verify_pieces(forged, tmp_path, gate.required_pieces("install_semantic", forged))  # seals are consistent
+    refused(gate.check_pieces, "install_semantic", forged, tmp_path)
+    # A log file slipped into a sealed copy after the fact, declared nowhere.
+    (tmp_path / "install2/state_after/logs/extra.err").write_bytes(b"x")
+    refused(gate.check_pieces, "install_semantic", honest, tmp_path)
+
+
+@pytest.mark.parametrize("new, copy_before", [
+    (b"X" + LOG_OLD[1:] + V7_TAIL, None), (LOG_OLD[:-1], None), (SAME_SIZE, None),
+    (LOG_OLD, LOG_OLD + b"B\n"),                       # Codex 2 through the real copies: truncated back, no delta
+])
+def test_rev11_assembled_report_refuses_a_rewritten_or_truncated_log(tmp_path, new, copy_before):
+    install_tree_with_log(tmp_path, new=new, copy_before=copy_before)
+    report = helper.assemble(tmp_path)
+    data = report["install_2"]["data_conservation"]
+    assert [c["path"] for c in data["unexpected_changes"]] == [SERVER_ERR] and data["appended_logs"] == []
+    refused(gate.validate_install, report, manifest(), "semantic")
+    forged = copy.deepcopy(report)
+    forged["install_2"]["data_conservation"]["unexpected_changes"] = []
+    refused(gate.check_pieces, "install_semantic", forged, tmp_path)
+
+
+def test_rev11_log_copies_are_read_without_following_any_link(tmp_path):
+    """Codex reserve: a linked PARENT, a linked file, a folder in place of the log; type and bytes from one descriptor."""
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "logs").mkdir(parents=True)
+    (elsewhere / "logs/server.err").write_bytes(LOG_NEW)
+    assert helper.log_copies(tmp_path, "elsewhere") == {SERVER_ERR: LOG_NEW}
+    assert helper.log_copies(tmp_path, "absent") == {}
+    (tmp_path / "empty").mkdir()
+    assert helper.log_copies(tmp_path, "empty") == {}
+    # The copy folder itself, or its logs folder, is a link to honest content: refused, never followed.
+    (tmp_path / "linked_copy").symlink_to(elsewhere)
+    (tmp_path / "copy").mkdir()
+    (tmp_path / "copy/logs").symlink_to(elsewhere / "logs")
+    (tmp_path / "file_copy").mkdir()
+    (tmp_path / "file_copy/logs").write_text("not a folder")
+    for folder in ("linked_copy", "copy", "file_copy"):
+        with pytest.raises(ValueError):
+            helper.log_copies(tmp_path, folder)
+    # Entries: a link to the honest file, a folder, a fifo-free "other" entry are never bytes.
+    real = tmp_path / "real/logs"
+    real.mkdir(parents=True)
+    (real / "server.err").symlink_to(elsewhere / "logs/server.err")
+    (real / "folder.err").mkdir()
+    (real / "plain.txt").write_bytes(b"p")
+    rows = helper.log_copies(tmp_path, "real")
+    assert rows[LOGS_DIR + "/plain.txt"] == b"p"
+    assert not isinstance(rows[SERVER_ERR], bytes) and not isinstance(rows[LOGS_DIR + "/folder.err"], bytes)
+    # Through the whole chain: a linked logs folder in a sealed copy refuses the report and the release rules.
+    proof = tmp_path / "proof"
+    install_tree_with_log(proof)
+    report = helper.assemble(proof)
+    assert report["ok"] is True
+    moved = proof / "install2/state_after/moved"
+    (proof / "install2/state_after/logs").rename(moved)
+    (proof / "install2/state_after/logs").symlink_to(moved)
+    assert "error" in helper.assemble(proof) and helper.assemble(proof)["ok"] is not True
+    refused(gate.check_pieces, "install_semantic", report, proof)
+
+
+def test_rev11_contract_and_script_state_the_append_rule():
+    contract = (ROOT / "v4/docs/QUALIFY_4_1_0.md").read_text()
+    assert "Révision 11" in contract and "appended_logs" in contract and "resource_tracker" in contract
+    assert "4.1.1" in contract and ".local/state/memory-os/logs/" in contract and "service_logs_checked" in contract
+    script = (SCRIPTS / "qualify_install_410.sh").read_text()
+    # The byte copies of the state folder surround uninstall --apply; the second one is taken after the stop.
+    first, apply_, stop = script.index('"$D2/state_before"'), script.index("uninstall --apply"), script.index('"$D2/state_after"')
+    assert first < apply_ < script.index('absent_after_stop "$D2/uninstall_state.json"') < stop

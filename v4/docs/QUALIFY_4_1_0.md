@@ -1,6 +1,25 @@
 # Qualification 4.1.0 — contrat court (avant tout script)
 
 22 novembre 2026 — rédigé comme **contrat seulement** (rien exécuté, rien construit, rien téléchargé à la rédaction) ; les runs v1 à v3 ont depuis été exécutés et arrêtés (rév. 7).
+Révision 11 (outillage seulement, aucun changement du produit ; défaut constaté au run v7), porte G8 : « les journaux
+restent présents » couvre le dossier de journaux du service, `.local/state/memory-os/logs/`. Le produit n'y écrit que
+`server.err` (sortie d'erreur launchd, seule déclarée par le plist généré) : seul ce fichier peut grandir ou apparaître.
+La règle est l'**ajout seul**, vérifié sur les octets et jamais sur la taille seule, pour **toute** entrée de ce dossier
+vue dans l'une des quatre observations (inventaire avant, copie `state_before`, copie `state_after`, inventaire après),
+qu'elle figure ou non dans l'écart des inventaires : inventaire avant ⊑ copie avant ⊑ copie après, et copie après =
+inventaire après ; un fichier apparu entre l'inventaire et la copie avant doit lui aussi se retrouver en préfixe.
+Chaque entrée reste un fichier régulier (ni dossier, ni lien, y compris dans un composant parent des copies), de même
+mode. L'inventaire prend taille et empreinte sur les mêmes octets, lus une seule fois. La preuve consigne les entrées
+vérifiées (`service_logs_checked`) et, pour chaque journal qui a grandi, chemin, tailles, nombre et SHA-256 des octets
+ajoutés (`appended_logs`), jamais le contenu ; les règles de publication **reconstruisent** l'ensemble depuis les pièces
+scellées et exigent que le rapport dise exactement cela. Raccourcissement, réécriture du début, remplacement,
+suppression, changement de type, autre fichier du dossier modifié ou nouveau, journal hors de ce dossier : la porte
+refuse. Un dossier n'est « métadonnée de dossier » que s'il était déjà un dossier. Limites déclarées : la preuve lie des
+contenus observés, pas l'historique des écritures (un fichier remplacé par les mêmes octets suivis d'un suffixe est
+indiscernable d'un ajout ; aucun inode n'est consigné) ; l'aperçu de désinstallation reste à « zéro écriture » stricte,
+donc une ligne écrite spontanément par le service dans `server.err` entre ses deux inventaires fait échouer l'étape
+(à rejouer). L'avertissement Python `resource_tracker` (« leaked semaphore ») écrit dans `server.err` à l'arrêt du
+serveur sémantique est un point du produit, reporté à 4.1.1.
 Révision 10 (outillage seulement, aucun changement du produit ; deux défauts constatés au run v6), porte G8 :
 (a) « entrées client restaurées » admet, pour un fichier client **absent avant l'installation**, un fichier **neutre**
 créé par l'installation et laissé par `--undo` : aucune entrée (relais ou autre) et aucun réglage, établi par lecture
