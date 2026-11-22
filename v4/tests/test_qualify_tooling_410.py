@@ -15,6 +15,7 @@ from pathlib import Path
 import plistlib
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 import pytest
@@ -1602,7 +1603,17 @@ def test_verifier_dispatches_4_1_0_and_plain_check_never_raises_the_guard(releas
 
 # ---------- tooling inventory ----------
 
-def test_tool_inventory_exists_and_seals_the_external_chain_and_supervisor(tmp_path):
+@pytest.fixture
+def outside_repo():
+    """A directory outside this checkout: pytest's ``--basetemp`` (hence ``tmp_path``) may live inside it."""
+    with tempfile.TemporaryDirectory() as name:
+        directory, root = Path(os.path.realpath(name)), Path(os.path.realpath(ROOT))
+        assert directory != root and root not in directory.parents, (
+            f"the temporary directory {directory} is inside the repository {root}: point TMPDIR elsewhere")
+        yield directory
+
+
+def test_tool_inventory_exists_and_seals_the_external_chain_and_supervisor(outside_repo):
     assert all((SCRIPTS / name).is_file() for name in maker.TOOLS) and len(set(maker.TOOLS)) == len(maker.TOOLS)
     for name in ("release_410_checks.py", "make_release_410.py", "source_release_checks_410.py",
                  "check_brief_perimeter_410.py", "prepare_release_410_envs.py", "qualify_install_410.sh",
@@ -1613,13 +1624,13 @@ def test_tool_inventory_exists_and_seals_the_external_chain_and_supervisor(tmp_p
         assert name in maker.TOOLS
     # Excluded from this chain: never sealed, never called.
     assert not {"score_release_410_gate.py", "record_release_410_gate.py", "run_integrity_v5_validation.py"} & set(maker.TOOLS)
-    chain = tmp_path / gate.CHAIN_NAME
+    chain = outside_repo / gate.CHAIN_NAME  # external tooling lives outside the repository
     chain.write_text("#!/bin/zsh\n")
     assert maker.external_tool(chain, gate.CHAIN_NAME)["sha256"] == gate.digest(chain)
     refused(maker.external_tool, chain, gate.SUPERVISOR_NAME)
     refused(maker.external_tool, Path(gate.CHAIN_NAME), gate.CHAIN_NAME)
     refused(maker.external_tool, SCRIPTS / "make_release_410.py", "make_release_410.py")  # must live outside the repo
-    link = tmp_path / "link" / gate.CHAIN_NAME
+    link = outside_repo / "link" / gate.CHAIN_NAME
     link.parent.mkdir()
     link.symlink_to(chain)
     refused(maker.external_tool, link, gate.CHAIN_NAME)

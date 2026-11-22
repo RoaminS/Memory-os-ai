@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
@@ -947,10 +948,20 @@ def test_a_divergent_bytecode_cache_is_executed_without_the_prefix_and_never_wit
     assert list(prefix.iterdir()) == []  # -B: nothing written, the prefix stays empty
 
 
-def test_bytecode_isolation_is_verified_not_assumed(tmp_path, monkeypatch):
-    clone = tmp_path / 'clone'
+@pytest.fixture
+def outside_repo():
+    """A directory outside this checkout: pytest's ``--basetemp`` (hence ``tmp_path``) may live inside it."""
+    with tempfile.TemporaryDirectory() as name:
+        directory, root = Path(os.path.realpath(name)), Path(os.path.realpath(V4.parent))
+        assert directory != root and root not in directory.parents, (
+            f'the temporary directory {directory} is inside the repository {root}: point TMPDIR elsewhere')
+        yield directory
+
+
+def test_bytecode_isolation_is_verified_not_assumed(outside_repo, monkeypatch):
+    clone = outside_repo / 'clone'
     clone.mkdir()
-    prefix = tmp_path / 'prefix'
+    prefix = outside_repo / 'prefix'  # outside the checkout (an import root under the harness); not proven outside every sys.path entry
     prefix.mkdir()
     flags = type('Flags', (), {'safe_path': True})()
     monkeypatch.setattr(sys, 'pycache_prefix', str(prefix))
