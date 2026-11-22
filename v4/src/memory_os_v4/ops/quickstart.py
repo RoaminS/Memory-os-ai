@@ -198,6 +198,12 @@ def journal_trusted(directory: Path) -> bool:
 
 def _trusted_journals(journal_root: Path):
     """(path of journal.json, document) for every trusted client journal, in path order."""
+    for path, document, _ in _trusted_journal_files(journal_root):
+        yield path, document
+
+
+def _trusted_journal_files(journal_root: Path):
+    """(path, document, SHA-256 of the bytes read) for every trusted client journal, in path order."""
     try:
         directories = sorted(p for p in journal_root.iterdir())
     except OSError:
@@ -209,11 +215,12 @@ def _trusted_journals(journal_root: Path):
         if not journal_trusted(directory) or not path.is_file():
             continue
         try:
-            document = json.loads(_read(path))
+            data = path.read_bytes()
+            document = json.loads(data.decode("utf-8"))
         except (OSError, ValueError, RecursionError):
             continue
         if isinstance(document, dict) and isinstance(document.get("records"), list):
-            yield path, document
+            yield path, document, hashlib.sha256(data).hexdigest()
 
 
 def _record_digest(record: dict) -> str | None:
@@ -252,7 +259,7 @@ def revoke_proofs(journal_root: Path, client_key: str, digest: str, by: str, *, 
     (they are never undone) and are counted in ``progress``.
     """
     done = progress if progress is not None else []
-    for path, document in _trusted_journals(journal_root):
+    for path, document, read_sha256 in _trusted_journal_files(journal_root):
         changed = False
         for record in document["records"]:
             if (isinstance(record, dict) and record.get("client") == client_key
@@ -260,7 +267,9 @@ def revoke_proofs(journal_root: Path, client_key: str, digest: str, by: str, *, 
                 record.update(revoked=True, revoked_by=by)
                 changed = True
         if changed:
-            _atomic_write(path, json.dumps(document, indent=1, ensure_ascii=False))
+            # The journal must still be the bytes this rewrite was built from (another run of the tool).
+            with _expecting(path, read_sha256):
+                _atomic_write(path, json.dumps(document, indent=1, ensure_ascii=False))
             done.append(str(path))
     return len(done)
 
@@ -428,11 +437,47 @@ def _is_jsonc(raw: str) -> bool:
 
 # ---------- client writes ----------
 
+_ANY = object()  # no expectation on the target (our own fresh journal files)
+_EXPECTED: dict[str, object] = {}
+
+
+class EntryChanged(QuickstartError):
+    """The target is no longer the one the caller was authorised to change; nothing was written."""
+
+    def __init__(self, message: str = "The memory-os-ai entry changed; it is not removed"):
+        super().__init__(message, code="client_entry_changed")
+
+
+class _expecting:
+    """``with _expecting(path, sha256): _atomic_write(path, text)``.
+
+    Declares the digest the target must STILL have at the last moment (None: it must not exist).
+    Out of band on purpose: every write keeps going through the two-argument ``_atomic_write``.
+    """
+
+    def __init__(self, path: Path, sha256):
+        self.key, self.sha256 = str(path), sha256
+
+    def __enter__(self):
+        _EXPECTED[self.key] = self.sha256
+
+    def __exit__(self, *exc):
+        _EXPECTED.pop(self.key, None)
+
+
 def _atomic_write(path: Path, text: str) -> None:
+    """Prepare first, verify last, then replace.
+
+    The temporary file is fully prepared (write, flush, fsync, close, chmod) BEFORE the target is
+    looked at one last time; when a digest is expected (``_expecting``), it is re-read and compared
+    as the very last step, with nothing but ``os.replace`` after it. A mismatch unlinks the
+    temporary file and raises ``EntryChanged``: another writer's content is never replaced.
+    """
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise QuickstartError("Unsafe write target")
     mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    expected = _EXPECTED.get(str(path), _ANY)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
@@ -440,6 +485,8 @@ def _atomic_write(path: Path, text: str) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, mode)
+        if expected is not _ANY and _sha(path) != expected:
+            raise EntryChanged("The target changed while the write was prepared; nothing written")
         os.replace(tmp, path)
         fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -460,72 +507,79 @@ def _claude(argv: list[str], home: Path, *, run) -> int | None:
         return None
 
 
-class EntryChanged(QuickstartError):
-    """The entry in place is no longer the one the caller was authorised to remove."""
-
-    def __init__(self, message: str = "The memory-os-ai entry changed; it is not removed"):
-        super().__init__(message, code="client_entry_changed")
-
-
-_ANY = object()  # no expectation on the file (callers that restore a previous entry after their own checks)
-
-
 def _still(path: Path, expected_file_sha256) -> None:
     if expected_file_sha256 is not _ANY and _sha(path) != expected_file_sha256:
         raise EntryChanged("The client file changed since the preview; nothing written")
 
 
+def _claude_add(client: Client, home: Path, entry: dict, *, run) -> int | None:
+    """``claude mcp add`` of ``entry``, revalidated immediately before the command: our name must be
+    ABSENT from the file at that moment (an entry written by someone else is never replaced)."""
+    state, current = read_entry(client, home)
+    if state not in {"ok", "missing-config"} or current is not None:
+        raise EntryChanged("A memory-os-ai entry appeared before claude mcp add; nothing written")
+    flags = [x for k, v in entry.get("env", {}).items() for x in ("--env", f"{k}={v}")]
+    return _claude(["mcp", "add", "--scope", "user", "--transport", "stdio", *flags, SERVER, "--",
+                    entry["command"], *entry["args"]], home, run=run)
+
+
 def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run,
                   expected_file_sha256=_ANY) -> str:
-    """Write OUR entry. ``expected_file_sha256`` (None: the file must not exist) is the digest of the
-    file the preview showed: it is compared with the bytes this write is built from, and once more
-    right before the atomic replace (Claude Code: right before the CLI runs). A file changed
-    meanwhile, even during the revocation of a replace, raises ``EntryChanged``: nothing is written.
+    """Write OUR entry; the target is verified immediately before each mutation.
+
+    JSON / TOML: the candidate is built from the bytes read here, whose digest must be
+    ``expected_file_sha256`` when one is given (None: no file); the temporary file is prepared,
+    and the target must still have the digest of those bytes at the last moment before
+    ``os.replace`` (``_atomic_write``). Claude Code: the file digest is revalidated immediately
+    before ``claude mcp remove``, and our name must be absent immediately before every
+    ``claude mcp add`` (the add after a remove, and the best-effort return to a previous entry).
+    Any mismatch raises ``EntryChanged``: nothing more is written.
     """
     path = client.config_path(home)
     _safe_path(path, home)
     if client.fmt == "claude-user":
-        command, args = entry["command"], entry["args"]
-        flags = [x for k, v in entry.get("env", {}).items() for x in ("--env", f"{k}={v}")]
-        _still(path, expected_file_sha256)
         _, existing = read_entry(client, home)
         if existing is not None:
+            _still(path, expected_file_sha256)  # immediately before the remove
+            if expected_file_sha256 is _ANY:
+                _expect(read_entry(client, home)[1], _entry_hash(existing))
             if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
                 raise QuickstartError("claude mcp remove refused; previous entry retained")
-        code = _claude(["mcp", "add", "--scope", "user", "--transport", "stdio", *flags, SERVER, "--", command, *args],
-                       home, run=run)
+        else:
+            _still(path, expected_file_sha256)  # immediately before the add
+        code = _claude_add(client, home, entry, run=run)
         if code != 0:
             if existing is not None and relay_form(existing) and existing != entry:
                 # Best effort: put back a previous entry of OUR strict form (no secret, plain shape).
                 # Any other previous entry stays in the private backup only: the CLI cannot express it.
-                old = [x for k, v in existing.get("env", {}).items() for x in ("--env", f"{k}={v}")]
-                _claude(["mcp", "add", "--scope", "user", "--transport", "stdio", *old, SERVER, "--",
-                         existing["command"], *existing["args"]], home, run=run)
+                try:
+                    _claude_add(client, home, existing, run=run)
+                except EntryChanged:
+                    pass  # someone wrote an entry meanwhile: theirs stays
             raise QuickstartError(f"claude mcp add failed ({code})")
         return "claude-cli"
     try:
         data_bytes = path.read_bytes()
     except FileNotFoundError:
         data_bytes = None
-    if expected_file_sha256 is not _ANY:
-        found = None if data_bytes is None else hashlib.sha256(data_bytes).hexdigest()
-        if found != expected_file_sha256:
-            raise EntryChanged("The client file changed since the preview; nothing written")
+    built_from = None if data_bytes is None else hashlib.sha256(data_bytes).hexdigest()
+    if expected_file_sha256 is not _ANY and built_from != expected_file_sha256:
+        raise EntryChanged("The client file changed since the preview; nothing written")
     raw = None if data_bytes is None else data_bytes.decode("utf-8")
     if client.fmt.endswith("toml"):
         candidate = _toml_candidate(client, raw or "", entry)
         if candidate is None:
             raise QuickstartError("TOML structure cannot be extended safely; apply the snippet by hand")
-        _still(path, expected_file_sha256)
-        _atomic_write(path, candidate[0])
+        with _expecting(path, built_from):
+            _atomic_write(path, candidate[0])
         return "toml-append"
     if raw is not None and _json_has_duplicate_keys(raw):
         raise QuickstartError("JSON config with duplicate keys; edit it by hand")
     data = json.loads(raw or "{}") if raw is not None else {}
     data.setdefault(_json_key(client), {})[SERVER] = entry
     text = _dump_json(data, raw)
-    _still(path, expected_file_sha256)
-    _atomic_write(path, text)
+    with _expecting(path, built_from):
+        _atomic_write(path, text)
     return "json-merge"
 
 
@@ -624,15 +678,18 @@ def remove_client_entry(client: Client, home: Path, *, run=subprocess.run, previ
     original, candidate = _removal(client, home, previous=previous, toml_appended=toml_appended,
                                    expected_sha256=expected_sha256)
     if client.fmt == "claude-user":
+        # ``_removal`` has just re-read the entry: that check is immediately before the remove.
         if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
             raise QuickstartError("claude mcp remove failed; entry retained")
         if previous:
-            _write_client(client, home, previous, run=run)
+            # Revalidated immediately before the restoring add: our name must be absent.
+            if _claude_add(client, home, previous, run=run) != 0:
+                raise QuickstartError("claude mcp add failed; previous entry kept in the private backup")
         return
     path = client.config_path(home)
-    if _read(path) != original:  # last look before the replace: the file moved under us
-        raise EntryChanged("The client file changed while the removal was prepared; nothing written")
-    _atomic_write(path, candidate)
+    # Prepare first, verify last: the target must still be the bytes the candidate was built from.
+    with _expecting(path, hashlib.sha256(original.encode("utf-8")).hexdigest()):
+        _atomic_write(path, candidate)
 
 
 def backup_client_file(path: Path, backup: Path) -> str:

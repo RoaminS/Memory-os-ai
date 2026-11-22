@@ -1074,6 +1074,31 @@ def test_claude_code_entry_changed_during_its_revocation_is_not_removed_through_
     assert result["partial"] is True and result["service"]["outcome"] == "kept-clients-incomplete"
 
 
+@pytest.mark.parametrize("key", ["cursor", "codex"])
+def test_uninstall_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared(c, monkeypatch, key):
+    """Codex implementation review n° 3: prepare the temporary file first, verify the target last."""
+    installed(c, clients=(key,))
+    plan = uninstall_plan(c)
+    real = qs.tempfile.mkstemp
+    path = c.home / PATHS[key]
+    seen = []
+
+    def mkstemp(*args, **kwargs):
+        made = real(*args, **kwargs)
+        if kwargs.get("prefix") == f".{path.name}." and not seen:
+            seen.append(1)
+            path.write_text(path.read_text().replace(c.python, "/someone/else/bin/tool"))
+        return made
+    monkeypatch.setattr(qs.tempfile, "mkstemp", mkstemp)
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    item, = [entry for entry in result["clients"] if entry["client"] == key]
+    assert seen and item["status"] == "conflict-file-changed-since-preview"
+    assert servers(c.home, key)["memory-os-ai"]["command"] == "/someone/else/bin/tool"
+    assert result["partial"] is True and result["service"]["outcome"] == "kept-clients-incomplete"
+    assert "bootout" not in c.system.verbs()
+    assert not [p.name for p in path.parent.iterdir() if p.name.startswith("." + path.name + ".")]
+
+
 def test_a_service_announced_as_kept_is_not_stopped_when_the_other_client_vanishes_after_the_preview(c):
     """The fate of the service and the dependencies outside the selection are part of the revalidated plan."""
     installed(c, clients=("cursor", "vscode"))

@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (598 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (608 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 598 tests verts** (clients 191, cycle de vie 214, profil 62, reprise 46, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 69 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4, §23.5). Le reste de
+**État après implémentation : 608 tests verts** (clients 199, cycle de vie 216, profil 62, reprise 46, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 79 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.6). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1106,8 +1106,35 @@ Les cinq points du §23.4 sont levés ; un P1 restait.
 | **P1** — entrée étrangère écrasée pendant la révocation d'un **remplacement** (E1 prouvée → aperçu « replace » par E2 → un autre écrivain pose F pendant la révocation → F écrasée par E2, la sauvegarde ne contenant que E1) | l'écriture elle-même compare puis écrit : `_write_client(expected_file_sha256=…)` exige que le fichier soit, octet pour octet, celui de l'aperçu **sur les octets dont l'écriture est construite**, puis le revérifie juste avant le remplacement atomique ; Claude Code : fichier revérifié juste avant la CLI (ni `remove` ni `add`). Écart → `conflict-file-changed-since-preview` pour ce client, entrée de l'autre écrivain conservée, résultat partiel, autres clients traités. Vaut pour les créations comme pour les remplacements, JSON, TOML et Claude Code | `test_a_replace_never_overwrites_an_entry_written_during_its_own_revocation` (Cursor, Claude Desktop, VS Code, Claude Code), `test_a_create_never_overwrites_an_entry_written_after_the_last_check` (Cursor, Codex TOML, Claude Code ; TOML n'a pas de remplacement : la création est le seul chemin d'écriture) |
 | Test suggéré : E1 → E2 → `undo` → nouveau remplacement | consentement nommé exigé (limite acceptée du §23.3) | `test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent` |
 
-Limite de la garantie : entre la dernière relecture et `os.replace`, ou entre la relecture et l'exécution de la
-CLI `claude`, il reste une fenêtre de quelques instructions qu'aucun verrou partagé avec les clients ne ferme.
+Limite de la garantie : précisée et réduite au §23.6.
+
+### 23.6 Revue d'implémentation Codex n° 3 (`codex_verdict_setup_impl_v3.md`, sur `2a24fc8`) : l'empreinte de la cible est vérifiée immédiatement avant chaque mutation
+
+Discipline unique, **« préparer d'abord, vérifier en dernier, puis remplacer »** : `_atomic_write` écrit,
+vide, synchronise (`fsync`), ferme et règle le mode du fichier temporaire **avant** de relire la cible ; la
+comparaison de son empreinte à celle des octets dont l'écriture a été construite est la **dernière** étape,
+suivie du seul `os.replace`. Écart → temporaire supprimé, `EntryChanged`, rien n'est remplacé. L'empreinte
+attendue est déclarée par `_expecting(path, sha)` autour de l'appel, pour que toute écriture continue de
+passer par `quickstart._atomic_write(path, text)`.
+
+| Chemin de mutation | Vérification au dernier moment | Test |
+|---|---|---|
+| `quickstart` — création JSON, création TOML (`_write_client`) | empreinte des octets lus (égale à celle de l'aperçu), revérifiée juste avant `os.replace` | `test_a_create_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (Cursor, VS Code, Codex) |
+| `quickstart` — remplacement JSON | idem, après la révocation | `test_a_replace_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (2), et pendant la révocation : `…_written_during_its_own_revocation` (4) |
+| `undo` — retrait ou rétablissement JSON, retrait TOML (`remove_client_entry`) | empreinte de l'entrée attendue sur les octets lus, puis empreinte de ces octets juste avant `os.replace` | `test_undo_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (Cursor, Codex) |
+| `uninstall` — retrait JSON, TOML | même fonction | `test_uninstall_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared` (Cursor, Codex) |
+| Claude Code — `claude mcp remove` (remplacement, retour arrière, désinstallation) | fichier (empreinte de l'aperçu) ou entrée attendue relus immédiatement avant la commande | `test_claude_code_create_is_revalidated_immediately_before_the_cli`, `test_claude_code_entry_changed_during_its_revocation…` |
+| Claude Code — `claude mcp add` (création, ajout après `remove`, rétablissement de l'entrée précédente, retour au mieux après échec) | notre nom doit être **absent** du fichier immédiatement avant chaque `add` (`_claude_add`) | `test_claude_code_replace_is_revalidated_between_remove_and_add`, `test_claude_code_undo_is_revalidated_before_it_restores_the_previous_entry` |
+| Révocation — réécriture d'un journal de confiance (`revoke_proofs`) | empreinte des octets lus du journal, juste avant `os.replace` ; écart → révocation en échec, client intact | `test_a_journal_changed_while_its_revocation_is_prepared_is_not_overwritten` |
+| Journaux propres à l'exécution (`journal.json`, `install.json`, `uninstall.json` d'un dossier neuf 0700 créé par cette exécution) | sans objet : aucun autre écrivain n'a ce chemin ; pas d'empreinte attendue | — |
+| Jeton, plist | création exclusive (`O_EXCL`), jamais d'écrasement (inchangé) ; plist déplacé seulement après arrêt confirmé et empreinte revérifiée (§6) | tests du §6 |
+
+**Fenêtres restantes, déclarées.** (1) *Chez nous, réduite au minimum* : entre la relecture finale de la
+cible et `os.replace` — une lecture puis un renommage, sans autre E/S ; aucun verrou partagé avec les
+clients ne peut la fermer. (2) *Interne à la CLI `claude`* : entre notre relecture et la lecture-écriture
+que la CLI fait elle-même de `~/.claude.json`, et pendant celle-ci ; son atomicité est celle de la CLI (§4).
+Entre nos deux commandes d'un remplacement (`remove` puis `add`), la fenêtre évitable est fermée par la
+revalidation avant `add`.
 
 ### 23.3 Limites résiduelles
 

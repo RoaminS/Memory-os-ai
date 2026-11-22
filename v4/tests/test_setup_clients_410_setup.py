@@ -567,17 +567,142 @@ def test_a_replace_never_overwrites_an_entry_written_during_its_own_revocation(h
     assert result["records"][0]["revoked_journals"] == 1 and system.calls == []  # not even a CLI call
 
 
-@pytest.mark.parametrize("key", ["cursor", "codex", "claude-code"])
-def test_a_create_never_overwrites_an_entry_written_after_the_last_check(home, tmp_path, monkeypatch, key):
-    """Same guarantee without a revocation: the file changes right after the write-ahead journal record."""
+def inject_during_preparation(monkeypatch, home, key):
+    """Another writer changes the TARGET while our temporary file is being prepared (after every
+    earlier check passed): only the last-moment check, right before ``os.replace``, can see it."""
+    real = qs.tempfile.mkstemp
+    name = Path(PATHS[key]).name
+    seen = []
+
+    def mkstemp(*args, **kwargs):
+        made = real(*args, **kwargs)
+        if kwargs.get("prefix") == f".{name}." and not seen:
+            seen.append(made[1])
+            write_foreign(home, key)
+        return made
+    monkeypatch.setattr(qs.tempfile, "mkstemp", mkstemp)
+    return seen
+
+
+def foreign_entry(home, key):
+    return {"command": "/someone/else/bin/tool"} if key == "codex" else FOREIGN_NOW
+
+
+def no_temporary_left(home, key):
+    directory = (home / PATHS[key]).parent
+    return not [path.name for path in directory.iterdir() if path.name.startswith("." + Path(PATHS[key]).name + ".")]
+
+
+@pytest.mark.parametrize("key", ["cursor", "vscode", "codex"])
+def test_a_create_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared(home, tmp_path, monkeypatch, key):
+    """Prepare first, verify last, then replace: F written during write/fsync/chmod is kept."""
     plan = qs.preview(home=home, python=PY, env=ENV, clients=(key,))
     assert plan["clients"][0]["action"] == "create"
-    seen = inject(monkeypatch, home, key, '"status": "pending"')
+    seen = inject_during_preparation(monkeypatch, home, key)
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal")
+    assert seen and status(result) == {key: "conflict-file-changed-since-preview"}
+    assert servers(home, key)["memory-os-ai"] == foreign_entry(home, key) and no_temporary_left(home, key)
+
+
+@pytest.mark.parametrize("key", ["cursor", "claude-desktop"])
+def test_a_replace_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared(home, tmp_path, monkeypatch, key):
+    install_from(home, tmp_path, key)
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=(key,), journal_root=tmp_path / "journal")
+    assert plan["clients"][0]["action"] == "replace"
+    seen = inject_during_preparation(monkeypatch, home, key)
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal")
+    assert seen and status(result) == {key: "conflict-file-changed-since-preview"}
+    assert servers(home, key)["memory-os-ai"] == FOREIGN_NOW and no_temporary_left(home, key)
+
+
+@pytest.mark.parametrize("key", ["cursor", "codex"])
+def test_undo_never_overwrites_an_entry_written_while_the_temporary_file_is_prepared(home, tmp_path, monkeypatch, key):
+    _, result = apply(home, tmp_path, (key,))
+    seen = inject_during_preparation(monkeypatch, home, key)
+    if key == "codex":  # TOML: the other writer edits OUR table in place
+        def write_toml(home, key):
+            path = home / PATHS["codex"]
+            path.write_text(path.read_text().replace(PY, "/someone/else/bin/tool"))
+        monkeypatch.setitem(globals(), "write_foreign", write_toml)
+    out = qs.undo(result["stamp"], home=home, journal_root=tmp_path / "journal")
+    assert seen and out["results"] == [{"client": key, "undo": "refused-entry-changed-since-apply"}]
+    assert servers(home, key)["memory-os-ai"]["command"] == "/someone/else/bin/tool" and no_temporary_left(home, key)
+
+
+def test_claude_code_create_is_revalidated_immediately_before_the_cli(home, tmp_path, monkeypatch):
+    """The file changes after every check of ``apply_clients`` passed: no ``claude`` command runs."""
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",))
+    real, calls = qs._safe_path, []
+
+    def safe_path(path, root):
+        real(path, root)
+        if Path(path).name == ".claude.json":
+            calls.append(1)
+            if len(calls) == 2:  # the call opening ``_write_client``, after the checks of apply_clients
+                set_entry(home, "claude-code", FOREIGN_NOW)
+    monkeypatch.setattr(qs, "_safe_path", safe_path)
     system = FakeSystem(home)
     result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
-    assert seen and status(result) == {key: "conflict-file-changed-since-preview"} and system.calls == []
-    written = servers(home, key)["memory-os-ai"]
-    assert written == ({"command": "/someone/else/bin/tool"} if key == "codex" else FOREIGN_NOW)
+    assert len(calls) >= 2 and status(result) == {"claude-code": "conflict-file-changed-since-preview"}
+    assert system.calls == [] and servers(home, "claude-code")["memory-os-ai"] == FOREIGN_NOW
+
+
+class WriterAfterRemove(FakeSystem):
+    """A ``claude`` CLI after whose ``remove`` another writer puts its own entry in the file."""
+
+    def __call__(self, argv, **kwargs):
+        done = super().__call__(argv, **kwargs)
+        if [str(a) for a in argv][:3] == ["claude", "mcp", "remove"]:
+            set_entry(self.home, "claude-code", FOREIGN_NOW)
+        return done
+
+
+def test_claude_code_replace_is_revalidated_between_remove_and_add(home, tmp_path):
+    """F written between our ``remove`` and our ``add``: the add never runs, F stays."""
+    install_from(home, tmp_path, "claude-code")
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
+    assert plan["clients"][0]["action"] == "replace"
+    system = WriterAfterRemove(home)
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
+    assert [argv[2] for argv in system.calls] == ["remove"]
+    assert status(result) == {"claude-code": "conflict-file-changed-since-preview"}
+    assert servers(home, "claude-code")["memory-os-ai"] == FOREIGN_NOW
+
+
+def test_claude_code_undo_is_revalidated_before_it_restores_the_previous_entry(home, tmp_path):
+    """E1 -> E2, undo: F written between the ``remove`` of E2 and the ``add`` restoring E1 is kept."""
+    install_from(home, tmp_path, "claude-code")  # E1, our strict form: restorable through the CLI
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
+    replaced = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal",
+                                run=FakeSystem(home))
+    assert status(replaced) == {"claude-code": "applied"}
+    system = WriterAfterRemove(home)
+    out = qs.undo(replaced["stamp"], home=home, journal_root=tmp_path / "journal", run=system)
+    assert [argv[2] for argv in system.calls] == ["remove"]
+    assert out["results"] == [{"client": "claude-code", "undo": "refused-entry-changed-since-apply"}]
+    assert servers(home, "claude-code")["memory-os-ai"] == FOREIGN_NOW
+
+
+def test_a_journal_changed_while_its_revocation_is_prepared_is_not_overwritten(home, tmp_path, monkeypatch):
+    """Revocation rewrites follow the same discipline: another run of the tool touched the journal."""
+    first = install_from(home, tmp_path, "cursor")
+    journal = Path(first["journal"])
+    real = qs.tempfile.mkstemp
+    seen = []
+
+    def mkstemp(*args, **kwargs):
+        made = real(*args, **kwargs)
+        if kwargs.get("prefix") == ".journal.json." and Path(kwargs["dir"]) == journal.parent and not seen:
+            seen.append(1)
+            journal.write_text(journal.read_text() + "\n")
+            journal.chmod(0o600)
+        return made
+    monkeypatch.setattr(qs.tempfile, "mkstemp", mkstemp)
+    entry = servers(home, "cursor")["memory-os-ai"]
+    out = qs.undo(first["stamp"], home=home, journal_root=tmp_path / "journal")
+    assert seen and out["results"] == [{"client": "cursor", "undo": "revocation-failed-entry-untouched"}]
+    assert servers(home, "cursor")["memory-os-ai"] == entry
+    assert not any(record.get("revoked") for record in json.loads(journal.read_text())["records"])
 
 
 def test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent(home, tmp_path):
