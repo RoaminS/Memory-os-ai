@@ -719,7 +719,8 @@ def selfcheck_rows(count: int = 4) -> list[dict]:
                                             else [position % len(SELFCHECK_TOPICS)])
             probes[category] = [probe]
         rows.append({'conversation_id': f'conv-{index}', 'conversation_seed': 'SECRET',
-                     'narratives': 'SECRET', 'user_profile': 'SECRET', 'conversation_plan': 'SECRET', 'user_questions': 'SECRET',
+                     'narratives': 'SECRET', 'user_profile': 'SECRET', 'conversation_plan': 'SECRET',
+                     'user_questions': 'SECRET',
                      'chat': [turns[:3], turns[3:]], 'probing_questions': repr(probes)})
     return rows
 
