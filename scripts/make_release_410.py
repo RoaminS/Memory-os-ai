@@ -45,7 +45,7 @@ TOOLS = [
     "installed_relay_e2e.py",
     "installed_relay_case.py",
     PYTEST_PINS,
-    # reused without change
+    # reused without change (qualify_distribution_d1a.py: one minimal change, contract rev. 7 §8)
     "qualify_405_test_isolation.py",
     "qualify_distribution_d1a.py",
     "qualify_runtime_resolution.py",

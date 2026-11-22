@@ -1,7 +1,8 @@
 # Qualification 4.1.0 — contrat court (avant tout script)
 
-22 novembre 2026 — **contrat seulement** : rien exécuté, rien construit, rien téléchargé.
-Révision 6 : applique les textes du verdict Codex « outillage n° 3 » (sur `577c1b2`) : exception
+22 novembre 2026 — rédigé comme **contrat seulement** (rien exécuté, rien construit, rien téléchargé à la rédaction) ; les runs v1 à v3 ont depuis été exécutés et arrêtés (rév. 7).
+Révision 7 : `qualify_distribution_d1a.py` passe `--profile lexical` à l'aperçu `quickstart` (refus
+`setup_profile_required` de 4.1.0 constaté au run v3). La révision 6 appliquait les textes du verdict Codex « outillage n° 3 » (sur `577c1b2`) : exception
 `none_short_command` de M3 et relais d'exécution M3 au §3. La révision 5 appliquait les sept textes
 d'amendement du verdict Codex « outillage n° 2 » (sur `54bee95`) ; la révision 4 appliquait les verdicts Codex « NON VALIDÉ » sur `7109491` puis `f85a0b6`. L'outillage
 du §8 est désormais écrit et en cours de revue ; ces amendements ne le valident pas et ne
@@ -266,7 +267,7 @@ Desktop ; `memory_consolidate` / `memory_compact` ; Linux, Intel, Python ≠ 3.1
 compte réellement vierge ; installation depuis le sdist en profil lexical ; tout rejeu P-A ou P-B
 par un agent ; qualification séparée de 4.0.9 ; compte macOS dédié ou nouveau confinement.
 
-## 8. Scripts à écrire ensuite (noms, rôle, entrées → sorties) — aucun n'existe
+## 8. Scripts à écrire ensuite (noms, rôle, entrées → sorties) — rédigés depuis la rév. 6 (liste d’origine)
 
 Dans `scripts/` (versionnés, hachés dans l'inventaire d'outillage du manifeste) :
 
@@ -283,8 +284,10 @@ Dans `scripts/` (versionnés, hachés dans l'inventaire d'outillage du manifeste
 | `verify_release_manifest.py` (modification) | branche `4.1.0` ; `--record-resolution-proof`, `--record-install-proof`, `--record-lexical-proof`, `--record-perimeter-report` (G13), `--record-external-proof` (P-B fournie par Romain), `--record-decision` ; aucun enregistrement ne lève `release_ready` | preuve ou décision → manifeste |
 | `installed_relay_e2e.py`, `installed_relay_case.py` (modifications) et leur vérificateur | G14 : matrice de trois cas, profil explicite, cas lexical SQLite sans `MEMORY_V4_EMBED_MODEL=hash`, version `4.1.0` | manifeste, environnements → preuve à trois cas |
 
-Réutilisés sans changement : `qualify_405_test_isolation.py`, `qualify_distribution_d1a.py`,
-`qualify_runtime_resolution.py`, `check_runtime_resolution.py`. **Exclus de cette chaîne** :
+Réutilisés sans changement : `qualify_405_test_isolation.py`,
+`qualify_runtime_resolution.py`, `check_runtime_resolution.py`. Réutilisé avec une modification
+minimale : `qualify_distribution_d1a.py` (l'aperçu `quickstart` installé reçoit `--profile lexical` ;
+assertions inchangées). **Exclus de cette chaîne** :
 `score_release_410_gate.py` et `record_release_410_gate.py` (non écrits) et le script historique
 `run_integrity_v5_validation.py` (conservé dans le dépôt, non supprimé, jamais appelé : la chaîne
 ne lance pas P-B). Hors dépôt : `~/memory-os-local/ops/qualify_410_v1_chain.sh` (§3, avec

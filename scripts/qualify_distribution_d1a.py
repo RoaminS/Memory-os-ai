@@ -189,7 +189,7 @@ env = {**os.environ, 'MEMORY_V4_URL': f'http://127.0.0.1:{port}/mcp/',
        'MEMORY_V4_SERVICE_LABEL': 'local.memory-os-preview-' + uuid.uuid4().hex}
 before = snapshot()
 run = subprocess.run([str(pathlib.Path(sys.executable).parent/'memory-os-admin'), 'quickstart',
- '--clients', 'cursor', '--report'], env=env, capture_output=True, text=True, timeout=30)
+ '--clients', 'cursor', '--profile', 'lexical', '--report'], env=env, capture_output=True, text=True, timeout=30)
 assert snapshot() == before, 'Installed preview wrote to HOME'
 assert run.returncode == 0, run.stdout + run.stderr
 info = json.loads(run.stdout)

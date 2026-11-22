@@ -1,4 +1,4 @@
-"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 6). Fail closed.
+"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 7). Fail closed.
 
 Invariants of §1, gate states, admissible decisions, commit/artifact binding. No recording
 command raises ``release_ready``: only the final verification (G15) does, after the exit
