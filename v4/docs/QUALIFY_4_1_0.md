@@ -1,8 +1,8 @@
 # Qualification 4.1.0 — contrat court (avant tout script)
 
 22 novembre 2026 — **contrat seulement** : aucun script écrit, rien exécuté, rien construit, rien
-téléchargé. Révision 3 : applique le verdict Codex « NON VALIDÉ » sur `7109491` (8 points
-bloquants, réserves mineures). Candidat : branche `feature/4.1.0-qual`, base `453a893` (le commit
+téléchargé. Révision 4 : applique les verdicts Codex « NON VALIDÉ » sur `7109491` puis `f85a0b6`.
+Candidat : branche `feature/4.1.0-qual`, base `453a893` (le commit
 final sera celui qui porte ce contrat et l'outillage relu ; tout autre HEAD refuse). **La
 qualification ne produit que des preuves et `release_ready` vrai/faux : ni publication PyPI, ni
 push, ni bascule de production.** Chacune exige un GO distinct de Romain. Exécution par Claude
@@ -95,10 +95,17 @@ chaîne). La **chaîne**, elle, change. Écarts par rapport à `qualify_409_v9_c
 
 **Service launchd de test** (son parent est `launchd` : il échappe au relevé des descendants).
 Libellé `local.memory-os-v4.qual410`, port 18765 ; jamais un libellé commençant par
-`com.romain.memory-os-v4`, jamais 8765. Avant installation, après chaque installation et à toute
-sortie contrôlée, la chaîne vérifie le domaine `gui/<uid>`, le libellé de test et le port. Seule
-une absence explicitement reconnue vaut absence ; observation impossible, service présent ou port
-occupé ⇒ arrêt et verrou conservé. Le nettoyage normal ne peut viser qu'un service créé par ce run
+`com.romain.memory-os-v4`, jamais 8765.
+
+Avant chaque installation, le libellé de test doit être explicitement reconnu absent dans
+`gui/<uid>` et le port doit être libre. Après `quickstart --apply --demo`, G7 exige au contraire
+un service présent, attesté comme appartenant au run, utilisant le plist du HOME concerné et son
+interpréteur, avec le profil et la disponibilité attendus. Après chaque retour arrière ou
+désinstallation, à la fin de chaque étape G7/G8 et à toute sortie contrôlée de la chaîne, le
+libellé doit être absent et le port libre. Une observation impossible ou un état contraire à
+celui attendu entraîne un arrêt avec verrou conservé. Aucun service préexistant n'est déchargé.
+
+Le nettoyage normal ne peut viser qu'un service créé par ce run
 et ré-attesté immédiatement avant son arrêt (plist sous le `HOME` jetable du run, programme = venv
 du run) ; **un libellé préexistant n'est jamais déchargé**. Le filet de sécurité ne transforme
 jamais un échec de retour arrière en succès. Conséquence pour le script d'installation : le `trap`
@@ -121,8 +128,13 @@ et aux mêmes artefacts, ainsi que les contrôles de sortie réussis. Un manifes
 succès sans `CHAIN_RESULT=PASS` concordant. Le manifeste porte : SHA complet du candidat, profils,
 artefacts, état de chaque porte, décisions de Romain et leurs empreintes, rapport G13, preuve P-B
 externe, outillage du dépôt ET hors dépôt (chaîne, superviseur). Admissible pour `release_ready` :
-`pass` partout, sauf G12 et G13 où `transfer_accepted` / `waived_by_romain` sont admis si la
-décision enregistrée l'autorise expressément.
+`pass` partout, sauf deux exceptions, chacune seulement si la décision enregistrée l'autorise
+expressément : G13 admet `transfer_accepted` ou `waived_by_romain` ; G12 admet uniquement `pass`
+(preuve externe conforme, liée au candidat) ou `waived_by_romain` — `transfer_accepted` n'existe
+pas pour G12 et ne contourne jamais ses exigences. G15 contrôle aussi les décisions
+administratives requises (§10, dont la re-signature de la clause D1). Les contrôles de sortie
+conditionnant `release_ready` sont terminés avant sa mise à vrai. `CHAIN_RESULT=PASS` est écrit
+ensuite ; son absence ou son invalidation interdit de considérer le run comme réussi.
 
 | # | Porte | Origine | Profil |
 |---|---|---|---|
@@ -133,43 +145,47 @@ décision enregistrée l'autorise expressément.
 | G5 | **Résolution par profil** : `qualify_runtime_resolution.py --profile lexical` puis `semantic` ; aucun écart, aucun paquet inattendu ; lexical : `ml_packages == []` ; URL et SHA-256 des distributions résolues consignés. Prouve une résolution, pas une installation | **nouvelle** | les deux |
 | G6 | **Wheel lexical installé sans ML** (`LEXICAL_PROFILE §11.2`) : tests exécutés hors dépôt, sans `PYTHONPATH` ; `memory_os_v4.__file__` sous `site-packages` ; `find_spec` de `torch`, `sentence_transformers`, `transformers`, `faiss` = `None` | **nouvelle** | lexical |
 | G7 | **Installation réelle** dans un `HOME` jetable (`env -i`), venv vierge, `pip --no-deps` puis `pip -c <contraintes>`, roues seulement : localisateur sous `site-packages` ; versions = verrous ; aucun paquet hors liste (exceptions de bootstrap : `pip`, `setuptools`, `wheel` s'il est fourni par le venv) ; **aperçu sans écriture** prouvé par un inventaire incluant les SHA-256 de contenu (noms, tailles et dates ne suffisent pas) ; `--apply --demo` `ok: true` ; profil attesté par le serveur ; `doctor` 0 FAIL ; lexical : aucune bibliothèque ML ouverte par le serveur | **nouvelle** | les deux |
-| G8 | **Retour arrière** : `quickstart --undo <stamp> --with-service` (libellé déchargé, port libre, plist retiré, entrées client restaurées). **Désinstallation**, dans un second `HOME` jetable : `uninstall` (aperçu sans écriture, même inventaire à empreintes) puis `uninstall --apply`. La désinstallation conserve les données utilisateur. Les fichiers immuables — jeton, ressources, sauvegardes et clé — gardent leurs empreintes. Le store conserve son identité et son contenu logique, vérifiés après arrêt ; les transitions SQLite normales liées à la fermeture sont distinguées des modifications de données. Les journaux restent présents ; seules les mutations attendues et inventoriées du protocole de désinstallation sont admises, notamment les révocations, le nouveau journal et le déplacement du plist. Toute autre modification refuse la porte | **nouvelle** | les deux |
+| G8 | **Retour arrière** : `quickstart --undo <stamp> --with-service` (libellé déchargé, port libre, plist retiré, entrées client restaurées). **Désinstallation** dans un second HOME jetable, après une seconde installation réussie et attestée : `uninstall` en aperçu sans écriture (même inventaire à empreintes), puis `uninstall --apply`. Le scénario contient les entrées client créées et attestées par cette installation. La porte exige un résultat `ok=true`, `partial=false`, le retrait effectif de toutes ces entrées, l'absence du libellé chargé, un port libre et le retrait du plist de son emplacement actif, avec conservation de sa copie journalisée. Un résultat conservant le service ou une entrée attendue ne satisfait pas G8. Le champ `complete=false`, qui signale les périmètres non inspectés, n'est pas à lui seul un échec. Les contrôles de conservation des données décrits ci-dessous restent obligatoires. La désinstallation conserve les données utilisateur. Les fichiers immuables — jeton, ressources, sauvegardes et clé — gardent leurs empreintes. Le store conserve son identité et son contenu logique, vérifiés après arrêt ; les transitions SQLite normales liées à la fermeture sont distinguées des modifications de données. Les journaux restent présents ; seules les mutations attendues et inventoriées du protocole de désinstallation sont admises, notamment les révocations, le nouveau journal et le déplacement du plist. Toute autre modification refuse la porte | **nouvelle** | les deux |
 | G9 | **Copie installée du store de production**, schéma 8→8 : coupe par l'API de sauvegarde du candidat, source en lecture seule, workers baseline 4.0.7 / wheel / sdist 4.1.0 et réouvertures, comparaison exhaustive, instance et autorité identiques, journal inchangé, aucune migration, dix recherches figées, MPS/natif, `doctor` lecture seule 0 FAIL ; **ajout** : ouverture lexicale de la copie refusée sans aucune écriture | 4.0.9 + ajout | sémantique |
 | G10 | **Sauvegarde + exercice de restauration** (S4 ×2, même archive, deux artefacts) sur la copie | 4.0.9 | sémantique |
 | G11 | **Store lexical neuf** via le wheel installé, sur des données et requêtes FIXES (littéraux versionnés dans le script) : écriture, recherche, fermeture, réouverture, sauvegarde, restauration ; classements identiques aux trois moments ; marqueur `retrieval_profile` présent ; ouverture par le profil opposé (sémantique) refusée sans mutation (inventaire à empreintes inchangé) | **nouvelle** | lexical |
 | G12 | **P-B (intégrité)** : la chaîne ne lance pas P-B et ne lit pas ses scellés. G12 reçoit uniquement une preuve externe fournie par Romain hors des répertoires interdits (liée au SHA final : empreintes des entrées, du scorer et du rejeu, six résultats, 40/40), enregistrée telle quelle, ou une dérogation explicite (`waived_by_romain`, qui ne revendique pas ce résultat). Sinon `pending` : blocage | 4.0.9, externalisée | sémantique |
 | G13 | **P-A (brief) : jamais de rejeu.** G13 calcule, exclusivement depuis Git, l'union des fermetures statiques aux commits comparés, y compris les fichiers retirés de la fermeture. Le rapport distingue le commit de la preuve P-A (`ceedb5c`), la référence intermédiaire (`9e41ea4`) et le candidat final. Il inventorie séparément les changements des appelants `server.py` et `memory.py`, ainsi que les dépendances et ressources pertinentes. L'identité de la seule fermeture statique ne suffit pas à établir un transfert fonctionnel. **En l'état, G13 est non transférable automatiquement ; une décision motivée de Romain est requise, sans aucun rejeu P-A** | 4.0.7 | sémantique |
 | G14 | **Relais installés : exactement trois cas** — wheel sémantique, sdist sémantique, wheel lexical. Le profil est transmis explicitement et attesté dans chaque résultat. Le cas lexical utilise SQLite, retire les options d'encodeur incompatibles et s'exécute dans l'environnement sans ML. Les preuves portent sur les mêmes contrôles de connexion, panne, absence de rejeu et reconnexion (plus statut local pendant panne, handshake 4.1.0) | 4.0.9, adaptée | les deux |
-| G15 | Vérification finale du manifeste, rejouée en dernier, jamais sautée ; elle seule lève `release_ready` ; `CHAIN_RESULT=PASS` après elle | 4.0.9, corrigée | — |
+| G15 | Vérification finale du manifeste, rejouée en dernier, jamais sautée ; contrôle aussi les décisions administratives requises ; elle seule lève `release_ready`, contrôles de sortie terminés ; `CHAIN_RESULT=PASS` après elle | 4.0.9, corrigée | — |
 
 **Constat G13 à `453a893`, depuis Git seulement.** Fermeture des imports relatifs statiques de
-`brief*.py` : 23 fichiers au candidat, 22 à `9e41ea4` (`config.py` la rejoint), moins encore à
-`ceedb5c`. Liste au candidat : `brief.py`, `brief_coverage.py`, `brief_selection.py`,
+`brief*.py`. La fermeture comprend 14 fichiers à `ceedb5c`, 22 à `9e41ea4` et 23 à `453a893`.
+Entre les deux premières références, huit fichiers rejoignent la fermeture ; parmi les fichiers
+communs, `models.py`, `sqlite_store.py` et `store.py` changent. `config.py` la rejoint au
+candidat. Liste au candidat : `brief.py`, `brief_coverage.py`, `brief_selection.py`,
 `brief_tokens.py`, `brief_value.py` ; `models.py`, `projects.py`, `qualification.py`,
 `temporal.py`, `text.py`, `work_state.py` ; `blocks.py`, `changes.py`, `compensation.py`,
 `config.py`, `corrections.py`, `entities.py`, `extract.py`, `fact_updates.py`,
 `identity_policy.py`, `llm.py`, `sqlite_store.py`, `store.py`. `9e41ea4` → `453a893` : `config.py`,
 `models.py`, `sqlite_store.py` diffèrent ; les cinq `brief*.py` sont identiques. `ceedb5c` →
-`9e41ea4` : `models.py`, `sqlite_store.py`, `store.py` et d'autres changent déjà : le 40/40 reste
+`9e41ea4` : voir ci-dessus ; le 40/40 reste
 attribué à `ceedb5c`, et le lien historique vers 4.0.7 n'est pas une identité à l'octet. Les
 appelants `server.py` et `memory.py` ont changé en 4.1.0. La fermeture est un filtre conservateur,
 pas une démonstration d'équivalence. Une empreinte historique fournie par Romain est enregistrée
 comme telle, sans prétendre qu'elle démontre l'équivalence.
 
-**Mesurés et rapportés, PAS des portes** (la présence d'une mesure exploitable est exigée ; sa
-valeur n'est jamais un seuil implicite) :
+**Mesurés et rapportés, PAS des portes** (M1 et M3 exigent des mesures exploitables ; M2 peut
+être non mesuré ; M4 est une référence historique ; aucune valeur n'est un seuil implicite) :
 
 - **M1 — durée d'installation (clause D1 de `SETUP §10`)**, par profil, sur la première
   installation : T0 = lancement de `python3.11 -m venv`, T1 = retour de `quickstart … --apply
-  --demo` avec `ok: true`. Les préparations locales (copie du wheel, pré-placement du modèle et
-  des tables, inventaires, empreintes) sont HORS T0–T1 et chronométrées à part. Rapportés : total,
+  --demo` avec `ok: true`. Les préparations réalisables en amont (copie du wheel, pré-placement
+  du modèle et des tables) sont effectuées avant T0. Le total brut vaut T1−T0. Les contrôles et
+  préparations effectués dans cet intervalle sont chronométrés séparément ; toute durée nette les
+  excluant est présentée distinctement du total brut. Rapportés : total,
   durée de `pip` à part, `install.json["timing"]`, « temps hors modèle » ; les **octets
   téléchargés par `pip`** (N3/N5) sont distingués de `timing.download_bytes` (ressources de
   `quickstart` : N6 seulement). Écarts au protocole écrits dans la preuve : machine non vierge
   (`HOME` jetable + `env -i`), wheel local (4.1.0 n'est pas sur PyPI), modèle pré-placé ; en
   variante `.pth`, la durée est libellée « variante à dépendances réutilisées ».
-- M2 — P-B en profil lexical : décision indépendante de Romain ; la chaîne ne la produit pas ;
-  sans preuve externe : « non mesuré ». Aucune mesure P-A, dans aucun profil.
+- M2 — P-B en profil lexical : décision indépendante de Romain (§10) ; aucun agent ni script ne
+  la produit ; sans preuve externe : « non mesuré », sans effet sur `release_ready`. Aucune mesure P-A, dans aucun profil.
 - M3 — durées mesurées par la chaîne, minimum d'espace libre observé et maximum de swap observé,
   à partir d'échantillons horodatés conservés (avant, pendant et après chaque étape). Ce sont des
   extrema échantillonnés, non des pics garantis. L'instrumentation est extérieure au superviseur,
@@ -188,8 +204,9 @@ caches pip, roues, modèles pré-placés, stores et preuves. Une réutilisation 
 explicitement et ne suppose aucune suppression des preuves. F (DB + WAL + SHM du store source)
 valait 157,9 Mo le 22/11 (78 Mo en 4.0.9) ; **F est remesuré immédiatement avant la copie ; le
 départ exige au moins 9 200 000 000 octets et le budget dynamique calculé, en retenant le plus
-élevé.** Un venv par profil, réutilisé nommément par les deux `HOME` jetables de ce profil
-(installation 1 : G7 + undo + M1 ; installation 2 : uninstall). Modèle pré-placé :
+élevé.** Un venv d'installation par profil pour G7/G8 ; les environnements wheel/sdist de G9/G14 restent
+distincts. Ce venv est réutilisé nommément par les deux `HOME` jetables du profil (installation 1 :
+G7 + undo + M1 ; installation 2 : uninstall, après arrêt du premier service). Modèle pré-placé :
 **220 227 876 octets par `HOME` sémantique**, soit deux exemplaires conservés.
 
 | Étape (portes) | Place en plus (estimée) | Durée (estimée) | Départ exigé |
@@ -215,8 +232,9 @@ commande de copie, comme en 4.0.9.
 (Nommées N pour ne pas les confondre avec la clause D1 de `SETUP §10`.) Chaque GO identifie le
 run, l'opération, les sources autorisées et les acquisitions couvertes. Aucun nouvel essai réseau
 ou élargissement n'est implicitement autorisé. Les installations utilisent uniquement des roues
-(`--only-binary=:all:`, aucune distribution source, aucune dépendance de construction
-téléchargée) ; les octets installés sont reliés aux URL et SHA-256 consignés. Les environnements
+(`--only-binary=:all:`, aucune dépendance tierce acquise sous forme source, aucune
+dépendance de construction téléchargée ; le sdist local du candidat reste construit hors ligne
+pour G3/G9/G14) ; les octets installés sont reliés aux URL et SHA-256 consignés. Les environnements
 supplémentaires réutilisent les acquisitions locales vérifiées, ou exigent un GO distinct. Sans GO,
 l'étape ne démarre pas et sa porte reste `pending`. Sources PyPI autorisées : `pypi.org` (index,
 métadonnées) et `files.pythonhosted.org` (roues). Tailles N1–N5 : estimations non vérifiées.
@@ -226,7 +244,7 @@ métadonnées) et `files.pythonhosted.org` (roues). Tailles N1–N5 : estimation
 | N1 | Résolution lexicale (`pip install --dry-run`, rien d'installé) | PyPI | estimation < 50 Mo | 36 verrous ; URL et SHA-256 de chaque distribution résolue ; rapport pip haché |
 | N2 | Résolution sémantique (idem) | PyPI | **pas seulement des métadonnées** : plusieurs roues complètes possibles, estimation jusqu'à 0,3 Go | 65 verrous ; mêmes relevés |
 | N3 | Dépendances lexicales installées dans **UN** venv (cache pip du run conservé ; les deux `HOME` lexicaux et G6 réutilisent ce venv, aucune autre installation) | PyPI | estimation 30–60 Mo | `pip check`, versions `==` verrous, aucun paquet hors liste hors bootstrap ; SHA-256 de chaque roue relevé (les contraintes n'épinglent pas d'empreinte) |
-| N4 | `pytest` et sa fermeture pour G6, versions exactes épinglées dans un fichier relu avant le GO, installés après le gel de G7/G8 **sous les contraintes lexicales maintenues** (les dépendances communes ne bougent pas) | PyPI | estimation < 5 Mo | versions et SHA-256 relevés ; `pip check` ; runtime qualifié re-contrôlé après |
+| N4 | `pytest` et sa fermeture pour G6, versions exactes épinglées dans un fichier figé dans l'outillage relu, référencé par son SHA-256 dans N4 et au manifeste (aucun choix de version pendant le run), installés après le gel de G7/G8 **sous les contraintes lexicales maintenues** (les dépendances communes ne bougent pas) | PyPI | estimation < 5 Mo | versions et SHA-256 relevés ; `pip check` ; runtime qualifié re-contrôlé après |
 | N5 | Dépendances sémantiques installées dans **UN** venv autonome : fermeture complète des 65 verrous, aucune dépendance réutilisée par `.pth` ; réutilisé par les deux `HOME` sémantiques | PyPI | estimation 200–300 Mo | comme N3 |
 | N6 | **Table cl100k par `--download-approved`**, exercée UNE fois, dans la première installation lexicale (aucune pré-copie) | `https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken` | **1 681 126 octets** | SHA-256 `223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7` vérifié par `provision` ; `timing.download_bytes == 1681126` |
 
@@ -268,9 +286,10 @@ Dans `scripts/` (versionnés, hachés dans l'inventaire d'outillage du manifeste
 | `installed_relay_e2e.py`, `installed_relay_case.py` (modifications) et leur vérificateur | G14 : matrice de trois cas, profil explicite, cas lexical SQLite sans `MEMORY_V4_EMBED_MODEL=hash`, version `4.1.0` | manifeste, environnements → preuve à trois cas |
 
 Réutilisés sans changement : `qualify_405_test_isolation.py`, `qualify_distribution_d1a.py`,
-`qualify_runtime_resolution.py`, `check_runtime_resolution.py`. **Abandonnés** :
-`score_release_410_gate.py`, `record_release_410_gate.py`, `run_integrity_v5_validation.py` (la
-chaîne ne lance pas P-B). Hors dépôt : `~/memory-os-local/ops/qualify_410_v1_chain.sh` (§3, avec
+`qualify_runtime_resolution.py`, `check_runtime_resolution.py`. **Exclus de cette chaîne** :
+`score_release_410_gate.py` et `record_release_410_gate.py` (non écrits) et le script historique
+`run_integrity_v5_validation.py` (conservé dans le dépôt, non supprimé, jamais appelé : la chaîne
+ne lance pas P-B). Hors dépôt : `~/memory-os-local/ops/qualify_410_v1_chain.sh` (§3, avec
 l'échantillonnage M3) ; superviseur 4.0.9 inchangé.
 
 ## 9. Préconditions vérifiées par la chaîne avant toute étape (tout écart = ARRÊT)
@@ -290,29 +309,45 @@ l'échantillonnage M3) ; superviseur 4.0.9 inchangé.
 
 ## 10. Décisions de Romain
 
-Rien ci-dessous n'est tranché par la chaîne ni par un agent. Chaque décision est enregistrée au
-manifeste avec le SHA final.
+Chaque proposition ci-dessous reçoit une réponse explicite oui/non, liée au SHA final et,
+lorsqu'elle concerne une exécution, au RUN_TAG. Une absence de réponse n'est jamais un accord. Les
+preuves, rapports et dossiers d'acquisition mentionnés sont identifiés par leur empreinte. Les
+décisions préalables à une opération sont acquises avant son lancement ; la re-signature D1
+intervient après M1 et avant G15.
 
-1. **P-A (G13) : accepter ou refuser une qualification avec transfert non démontré.** Formulation
-   proposée : « Pour le candidat `<SHA final>`, j'accepte que la qualification avance avec G13 en
-   dérogation motivée, sans transfert automatique de P-A et sans rejeu. Le résultat 40/40 reste
-   attribué à `ceedb5c`. J'accepte les limites documentées du lien historique, des dépendances et
-   des appelants modifiés. Cette décision peut satisfaire l'exigence administrative G13 pour
-   `release_ready`, sans présenter P-A comme réussie sur 4.1.0. » En cas de refus,
-   `release_ready` reste faux.
-2. **P-B (G12) : preuve externe ou dérogation, sinon blocage.** Formulation proposée : « Je
-   fournis hors des répertoires interdits une preuve P-B liée au candidat `<SHA final>`, avec les
-   empreintes des entrées, du scorer et du rejeu, les six résultats et le score 40/40. Les agents
-   et la chaîne ne consultent pas les scellés. » Une dispense porte un autre statut
-   (`waived_by_romain`) et ne revendique pas ce résultat. M2 (P-B lexical) est une décision
-   indépendante.
-3. **N5 : installation sémantique complète ou variante `.pth`**, avec acceptation explicite de la
-   couverture réduite et du libellé de durée correspondant.
-4. **GO N1 à N6**, un par un, pour un run nommé ; sans GO requis, la porte concernée reste en
-   attente.
-5. **Re-signature de la clause D1 pour le profil lexical**, sur les durées observées (M1) et les
-   écarts au protocole vierge.
-6. **Portée de `nice 15` pour le service launchd de test** : maintenir l'exigence implique une
-   solution explicite à faire relire ; une exception doit être nommée. Le `nice` du harnais ne la
-   satisfait pas.
-7. GO de lancement de la chaîne elle-même ; publication et bascule restent hors de ce contrat.
+1. **P-A (G13) — Oui/non :** « Pour le candidat `<SHA final>`, j'accepte que la qualification
+   avance avec G13 en dérogation motivée, sans transfert automatique de P-A et sans rejeu. Le
+   résultat 40/40 reste attribué à `ceedb5c`. J'accepte les limites documentées du lien
+   historique, des dépendances et des appelants modifiés. Cette décision peut satisfaire
+   l'exigence administrative G13 pour `release_ready`, sans présenter P-A comme réussie sur
+   4.1.0. » En cas de refus, `release_ready` reste faux.
+2. **P-B, preuve externe — oui/non :** « Pour `<SHA final>`, je fournis la preuve externe
+   `<référence, SHA-256>` répondant aux exigences G12, hors des répertoires interdits. » Une
+   réponse oui ne remplace pas la fourniture et le contrôle de conformité de la preuve. Une preuve
+   conforme donne `pass`.
+3. **P-B, dispense — oui/non, en l'absence de preuve conforme :** « Pour `<SHA final>`, j'accepte
+   la dispense G12 pour `<motif>`, avec le statut `waived_by_romain`, et j'autorise cette décision
+   à satisfaire G12 pour `release_ready`, sans revendiquer un résultat P-B sur ce candidat. » Sans
+   preuve conforme ni dispense acceptée, G12 bloque.
+4. **Variante sémantique — oui/non :** « Pour `<RUN_TAG>`, j'accepte la variante `.pth` de G7, sa
+   couverture réduite et son libellé M1 de durée avec dépendances réutilisées. » Non impose
+   l'installation autonome sous GO N5 ; sans ce GO, l'étape ne démarre pas. Le refus de N5 ne
+   sélectionne jamais automatiquement `.pth`.
+5. **Acquisitions N1–N6 — une réponse oui/non par acquisition applicable :** « J'autorise
+   l'acquisition Nn décrite par `<dossier, SHA-256>` pour `<RUN_TAG>`, avec les opérations,
+   sources et acquisitions qui y sont énumérées. » Aucun nouvel essai ni élargissement n'est
+   couvert implicitement.
+6. **M2 lexical — oui/non :** « Je souhaite fournir une preuve P-B lexicale externe pour
+   `<SHA final>`. » Sans preuve fournie, M2 est enregistré « non mesuré » et ne bloque pas
+   `release_ready`. Aucun agent ni script ne produit cette preuve.
+7. **Clause D1 lexicale — oui/non, après M1 :** « Je re-signe la clause D1 pour `<SHA final>` sur
+   la mesure `<référence, SHA-256>` et les écarts au protocole vierge qui y sont consignés. »
+   Cette acceptation administrative est requise avant G15 ; elle n'introduit aucun seuil
+   automatique de durée.
+8. **Service launchd et nice — oui/non :** « Pour `<RUN_TAG>`, j'accepte une exception à `nice 15`
+   limitée au service launchd de test ; les processus lancés directement par la chaîne restent
+   soumis à cette règle. » Non interdit le lancement des installations jusqu'à définition et
+   relecture d'une solution assurant cette priorité.
+9. **Lancement — oui/non :** « J'autorise le lancement de la chaîne relue `<SHA-256>` pour
+   `<SHA final>` et `<RUN_TAG>`, sous les décisions préalables applicables. Ce GO ne remplace
+   aucun GO réseau et n'autorise ni publication, ni push, ni bascule de production. »
