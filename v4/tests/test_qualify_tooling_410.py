@@ -442,7 +442,8 @@ def install_proof(profile="lexical", variant="autonomous"):
     one = install_block(profile, "/p/home1", gate.CL100K_BYTES if profile == "lexical" else 0)
     one["preview"] = zero_write()
     one["undo"] = {"ok": True, "returncode": 0, "with_service": True, "label_absent": True, "port_free": True,
-                   "plist_removed": True, "client_entries_restored": True}
+                   "plist_removed": True, "client_entries_restored": True, "clients_before_apply": client_rows(False),
+                   "clients_after_undo": client_rows(False), "client_entries_neutral_files": []}
     two = install_block(profile, "/p/home2", 0)
     two.update(client_entries_created=[".codex/config.toml", ".cursor/mcp.json"], uninstall_preview=zero_write(),
                uninstall={"ok": True, "partial": False, "complete": False, "returncode": 0, "data_deleted": False,
@@ -454,6 +455,8 @@ def install_proof(profile="lexical", variant="autonomous"):
                                   "immutable_witnessed": True,
                                   "immutable_files": {"token": 1, "resources": 1, "backups": 1, "key": 1},
                                   "store_identity_unchanged": True, "store_logical_unchanged": True,
+                                  "store_raw_hash_identical": True, "store_tolerated_engine_receipts": [],
+                                  "store_comparison_refusal": None, "store_before": dict(STORE), "store_after": dict(STORE),
                                   "checked_after_stop": True, "journals_present": True, "unexpected_changes": []})
     timing = {"clock": "monotonic", "download_bytes": one["apply"]["download_bytes"], "profile": profile}
     deviations = ["non_blank_machine", "local_wheel"] + (["model_pre_placed"] if profile == "semantic" else [])
@@ -2418,6 +2421,7 @@ def write_install_tree(d, profile="lexical"):
     put("install1/undo_state.json", absent)
     put("install1/clients_before_apply.json", client_rows(False))
     put("install1/clients_after_undo.json", client_rows(False))
+    put("install1/client_files_after_undo.json", helper.client_files(d / "home1"))  # nothing there: same as before
     put("install2/uninstall_preview.json", {"ok": True})
     put("install2/uninstall_preview_rc.json", {"returncode": 0})
     put("install2/uninstall_preview_inventory.json", inv)
@@ -3473,3 +3477,510 @@ def test_round4_a_foreign_process_reusing_the_pid_is_never_credited():
     refused(m3, [short[0], {**short[1], "command_identity": foreign}, short[-1]])
     overlap = m3_rows("lint1", 100.0, observation="overlap_only", command_seconds=0.1)
     refused(m3, [overlap[0], {**overlap[1], "command_identity": foreign}, overlap[-1]])
+
+
+# ---------- rev. 10 (run v6): neutral client files left by undo, engine flush receipt written at the stop ----------
+
+V6_CODEX = b""                                    # .codex/config.toml after undo in run v6: 0 byte
+V6_CURSOR = b'{\n  "mcpServers": {}\n}\n'         # .cursor/mcp.json after undo in run v6: 23 bytes
+V6_CODEX_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+V6_CURSOR_SHA = "d8e397af03b5b032f21d0aa967086f0c78b33c87b76f2e9898ae0a144df7de02"
+V6_BEFORE_APPLY = {
+    "codex": {"entry_present": False, "file_sha256": None, "kind": None, "path": ".codex/config.toml",
+              "state": "missing-config"},
+    "cursor": {"entry_present": False, "file_sha256": None, "kind": None, "path": ".cursor/mcp.json",
+               "state": "missing-config"}}
+V6_AFTER_UNDO = {
+    "codex": {"entry_present": False, "file_sha256": V6_CODEX_SHA, "kind": None, "path": ".codex/config.toml",
+              "state": "ok"},
+    "cursor": {"entry_present": False, "file_sha256": V6_CURSOR_SHA, "kind": None, "path": ".cursor/mcp.json",
+               "state": "ok"}}
+# Real account folder (the test session may run with a substituted HOME); read only, optional.
+V6_RUN = Path(__import__("pwd").getpwuid(os.getuid()).pw_dir) / "memory-os-local/qual-envs/410-install-lexical-claude-v6"
+
+
+def neutral_home(home, codex=V6_CODEX, cursor=V6_CURSOR):
+    for rel, data in ((".codex/config.toml", codex), (".cursor/mcp.json", cursor)):
+        if data is not None:
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_bytes(data)
+    return helper.client_files(home)
+
+
+def after_undo(files):
+    """The state the installed product reports for these files (no entry), bound to their bytes."""
+    return {client: {**V6_AFTER_UNDO[client], "file_sha256": files[client]["sha256"]} for client in V6_AFTER_UNDO}
+
+
+def test_rev10_the_v6_neutral_client_files_are_an_attested_rollback(tmp_path):
+    files = neutral_home(tmp_path)
+    assert (files["codex"]["sha256"], files["codex"]["bytes"]) == (V6_CODEX_SHA, 0)
+    assert (files["cursor"]["sha256"], files["cursor"]["bytes"]) == (V6_CURSOR_SHA, 23)
+    assert files["codex"]["neutral"] is True and files["cursor"]["neutral"] is True
+    restored, neutral = helper.clients_restored(V6_BEFORE_APPLY, V6_AFTER_UNDO, files, strict=True)
+    assert restored is True and [row["client"] for row in neutral] == ["codex", "cursor"]
+    assert [(row["path"], row["sha256"], row["bytes"]) for row in neutral] == [
+        (".codex/config.toml", V6_CODEX_SHA, 0), (".cursor/mcp.json", V6_CURSOR_SHA, 23)]
+    # Case (i) is unchanged: identical states need no attestation and list nothing.
+    assert helper.clients_restored(V6_BEFORE_APPLY, V6_BEFORE_APPLY, None) == (True, [])
+    assert helper.clients_restored(V6_AFTER_UNDO, V6_AFTER_UNDO, None) == (True, [])
+
+
+@pytest.mark.parametrize("codex,cursor", [
+    (b"# left by the installation\n\n   \n", V6_CURSOR),  # blanks and comments only: no key, no table
+    (V6_CODEX, b"{}"), (b"\n", b'{"mcpServers":{}}'),
+])
+def test_rev10_other_strictly_neutral_contents_are_accepted(tmp_path, codex, cursor):
+    files = neutral_home(tmp_path, codex, cursor)
+    restored, neutral = helper.clients_restored(V6_BEFORE_APPLY, after_undo(files), files, strict=True)
+    assert restored is True and len(neutral) == 2
+
+
+@pytest.mark.parametrize("codex,cursor", [
+    (b'[mcp_servers.other]\ncommand = "x"\n', V6_CURSOR),   # a foreign entry is not neutral
+    (b"[mcp_servers]\n", V6_CURSOR),                         # an empty table is still a table
+    (b"model = 'x'\n", V6_CURSOR),                           # any key
+    (b"# comment\n[broken", V6_CURSOR),                      # unreadable TOML is never "empty"
+    (b"\xff\xfe", V6_CURSOR),                                # not UTF-8
+    (b" " * (helper.NEUTRAL_MAX_BYTES + 1), V6_CURSOR),      # too big to be a file created empty
+    (V6_CODEX, b'{"mcpServers": {"other": {"command": "x"}}}'),
+    (V6_CODEX, b'{"mcpServers": {}, "other": 1}'), (V6_CODEX, b'{"other": {}}'),
+    (V6_CODEX, b'{"mcpServers": []}'), (V6_CODEX, b'{"mcpServers": null}'), (V6_CODEX, b"[]"), (V6_CODEX, b""),
+    (V6_CODEX, b'{"mcpServers": {"x": 1}, "mcpServers": {}}'),  # duplicate key hiding an entry
+    (V6_CODEX, b'{\n  // comment\n  "mcpServers": {}\n}\n'),    # strict JSON only
+    (None, V6_CURSOR), (V6_CODEX, None),                         # state says "ok" but no such file was observed
+])
+def test_rev10_any_other_content_left_by_undo_is_a_failed_rollback(tmp_path, codex, cursor):
+    files = neutral_home(tmp_path, codex, cursor)
+    assert helper.clients_restored(V6_BEFORE_APPLY, after_undo(files), files, strict=True) == (False, [])
+    assert helper.clients_restored(V6_BEFORE_APPLY, after_undo(files), files) == (False, [])
+
+
+def test_rev10_entries_preexisting_files_and_unbound_bytes_are_a_failed_rollback(tmp_path):
+    files = neutral_home(tmp_path)
+    ok = lambda before, after, observed=files: helper.clients_restored(before, after, observed, strict=True)[0]  # noqa: E731
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO) is True
+    change = lambda rows, client, **fields: {**rows, client: {**rows[client], **fields}}  # noqa: E731
+    # A relay entry left behind, or a foreign entry: never a neutral file.
+    assert ok(V6_BEFORE_APPLY, change(V6_AFTER_UNDO, "codex", entry_present=True, kind="relay")) is False
+    assert ok(V6_BEFORE_APPLY, change(V6_AFTER_UNDO, "cursor", entry_present=True, kind="foreign")) is False
+    assert ok(V6_AFTER_UNDO, change(V6_AFTER_UNDO, "cursor", entry_present=True, kind="relay")) is False
+    assert ok(V6_BEFORE_APPLY, change(V6_AFTER_UNDO, "codex", state="invalid-config")) is False
+    # A file that existed before apply must come back identical: emptied, it is a failure.
+    existing = change(V6_BEFORE_APPLY, "codex", state="ok", file_sha256=SHA)
+    assert ok(existing, V6_AFTER_UNDO) is False and ok(existing, existing) is True
+    # The parsed bytes must be the bytes the product observed (SHA-256), with their true size.
+    assert ok(V6_BEFORE_APPLY, change(V6_AFTER_UNDO, "cursor", file_sha256=SHA)) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, change(files, "cursor", bytes=22)) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, change(files, "cursor", sha256=SHA)) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, change(files, "codex", neutral=False)) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, change(files, "codex", format="json")) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, change(files, "codex", regular_file=False)) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, change(files, "codex", content_b64=None)) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, {"codex": files["codex"]}) is False
+    assert ok(V6_BEFORE_APPLY, V6_AFTER_UNDO, None) is False
+    # Exactly the two requested clients, each at its own path.
+    assert ok({"codex": V6_BEFORE_APPLY["codex"]}, {"codex": V6_AFTER_UNDO["codex"]}) is False
+    assert ok(V6_BEFORE_APPLY, change(V6_AFTER_UNDO, "codex", path=".cursor/mcp.json")) is False
+
+
+def test_rev10_a_symlinked_client_file_is_not_a_regular_neutral_file(tmp_path):
+    files = neutral_home(tmp_path)
+    target = tmp_path / "elsewhere.json"
+    target.write_bytes(V6_CURSOR)
+    (tmp_path / ".cursor/mcp.json").unlink()
+    (tmp_path / ".cursor/mcp.json").symlink_to(target)
+    linked = helper.client_files(tmp_path)
+    assert linked["cursor"]["regular_file"] is False and linked["cursor"]["content_b64"] is None
+    assert helper.clients_restored(V6_BEFORE_APPLY, V6_AFTER_UNDO, linked, strict=True) == (False, [])
+    assert helper.clients_restored(V6_BEFORE_APPLY, V6_AFTER_UNDO, files, strict=True)[0] is True
+
+
+def test_rev10_without_a_toml_parser_the_recorded_verdict_is_used_but_never_by_the_release_rules(tmp_path, monkeypatch):
+    """/usr/bin/python3 (3.9) assembles the report without tomllib; the release rules (3.11) always re-parse."""
+    files = neutral_home(tmp_path)
+    monkeypatch.setitem(sys.modules, "tomllib", None)  # import tomllib -> ImportError
+    assert helper.neutral_content(b"", "toml") is None and helper.neutral_content(V6_CURSOR, "json") is True
+    assert helper.clients_restored(V6_BEFORE_APPLY, V6_AFTER_UNDO, files)[0] is True
+    assert helper.clients_restored(V6_BEFORE_APPLY, V6_AFTER_UNDO, files, strict=True) == (False, [])
+    assert helper.client_files(tmp_path)["codex"]["neutral"] is None  # nothing recorded as neutral without a parser
+    blind = helper.client_files(tmp_path)
+    assert helper.clients_restored(V6_BEFORE_APPLY, V6_AFTER_UNDO, blind) == (False, [])
+
+
+# -- the store: exact schema of the two tables concerned, and the receipts of run v6
+
+V6_STORE_ID = "5cc565041d164f22bbd494fc6fcdd768"
+V6_PROJECT = '["project", "memory-os-demo-b0a22cbbea8843c09198e5957814fd3c"]'
+V6_FLUSH = ('{"committed_at":1795380306.112706,"explicit":false,"fingerprint":'
+            '"3f7ed8844aa1b978a4258e79b619dd235a5a358d00b525e76cb83c5fe7fd58d8","operation":"flush",'
+            '"request_id":"16e4bf367558445186eca7e3f6419bef","scope":"__engine_internal__","sequence":5,"state":"complete"}')
+V6_FLUSH_SHA = "111ca8c5319eaf58cfaf99354f2b3c860a8714ae3300a7038b00a1277b14a1d9"
+
+
+def record_text(sequence, scope, operation, *, explicit=False, request_id=None, drop=(), **extra):
+    """A record as the engine writes it (canonical JSON); an explicit request carries its result."""
+    value = {"committed_at": 1795380300.0 + sequence, "explicit": explicit,
+             "fingerprint": helper.ENGINE_FLUSH_FINGERPRINT if operation == "flush" else "f" * 64,
+             "operation": operation, "request_id": request_id or "%032x" % sequence, "scope": scope,
+             "sequence": sequence, "state": "complete", **({"result": {"ok": True}} if explicit else {}), **extra}
+    return json.dumps({k: v for k, v in value.items() if k not in drop}, sort_keys=True, separators=(",", ":"))
+
+
+def receipt(connection, sequence, scope, text, *, request_id=None, sha=None):
+    request_id = json.loads(text)["request_id"] if request_id is None else request_id
+    connection.execute("INSERT INTO request_receipts VALUES(?,?,?,?,?)", (
+        sequence, scope, request_id, text, hashlib.sha256(text.encode()).hexdigest() if sha is None else sha))
+
+
+def receipt_store(folder):
+    """A store as the stopped test service leaves it before uninstall: 4 receipts, counter at 4 (run v6)."""
+    import sqlite3
+
+    folder.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(folder / "store.sqlite3")
+    con.execute("CREATE TABLE store_metadata(key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("CREATE TABLE items(id TEXT, text TEXT)")
+    con.execute("CREATE TABLE request_receipts(sequence INTEGER PRIMARY KEY, scope TEXT NOT NULL, request_id TEXT NOT NULL,"
+                " record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL, UNIQUE(scope,request_id))")
+    con.execute("CREATE TABLE receipt_counter(id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL)")
+    con.execute("CREATE TABLE legacy_pending_requests(scope TEXT NOT NULL, request_id TEXT NOT NULL,"
+                " record_json TEXT NOT NULL, record_sha256 TEXT NOT NULL, PRIMARY KEY(scope,request_id))")
+    con.execute("INSERT INTO store_metadata VALUES('metadata', ?)", (json.dumps({"store_instance_id": V6_STORE_ID}),))
+    con.execute("INSERT INTO items VALUES('1', 'alpha')")
+    for sequence, scope, operation in ((1, '["project", "*"]', "memory_status"), (2, '["project", "*"]', "memory_status"),
+                                       (3, V6_PROJECT, "memory_chat_save"), (4, V6_PROJECT, "memory_search")):
+        receipt(con, sequence, scope, record_text(sequence, scope, operation, explicit=sequence == 3))
+    con.execute("INSERT INTO receipt_counter VALUES(1, 4)")
+    con.execute("PRAGMA user_version=8")
+    con.commit()
+    return con
+
+
+def v6_flush(con):
+    """Exactly what the engine wrote at the clean stop of run v6: receipt 5, counter 4 -> 5."""
+    receipt(con, 5, "__engine_internal__", V6_FLUSH)
+    con.execute("UPDATE receipt_counter SET value=5")
+
+
+def around_stop(tmp_path, change):
+    con = receipt_store(tmp_path / "s")
+    before = helper.store_logical(tmp_path / "s")
+    change(con)
+    con.commit()
+    con.close()
+    return before, helper.store_logical(tmp_path / "s")
+
+
+def test_rev10_the_v6_engine_flush_receipt_is_the_only_tolerated_store_difference(tmp_path):
+    before, after = around_stop(tmp_path, v6_flush)
+    assert before["tables"]["request_receipts"] == 4 and after["tables"]["request_receipts"] == 5
+    assert before["logical_sha256"] != after["logical_sha256"] and before["user_version"] == 8
+    assert json.loads(V6_FLUSH)["fingerprint"] == helper.ENGINE_FLUSH_FINGERPRINT   # deterministic: no argument
+    assert after["product_receipts"] == {"checked": True, "valid": True, "detail": "5 receipts read"}
+    assert after["request_receipts"][4]["record"]["committed_at"] == 1795380306.112706
+    row = helper.store_compare(before, after)
+    assert row == {"store_logical_unchanged": True, "store_raw_hash_identical": False, "store_comparison_refusal": None,
+                   "store_tolerated_engine_receipts": [{"sequence": 5, "request_id": "16e4bf367558445186eca7e3f6419bef",
+                                                        "operation": "flush", "record_sha256": V6_FLUSH_SHA}]}
+    # Nothing to tolerate when nothing changed: the raw digests are equal and no line is listed.
+    assert helper.store_compare(before, before) == {
+        "store_logical_unchanged": True, "store_raw_hash_identical": True, "store_comparison_refusal": None,
+        "store_tolerated_engine_receipts": []}
+    # Two stops (two flushes) are the same pattern, twice.
+    two = around_stop(tmp_path / "two", lambda con: (v6_flush(con), receipt(
+        con, 6, "__engine_internal__", record_text(6, "__engine_internal__", "flush", committed_at=1795380307.5)),
+        con.execute("UPDATE receipt_counter SET value=6")))
+    assert [r["sequence"] for r in helper.store_compare(*two)["store_tolerated_engine_receipts"]] == [5, 6]
+
+
+def internal(sequence=5, operation="flush", scope="__engine_internal__", column_scope=None, **kw):
+    def change(con):
+        column = scope if column_scope is None else column_scope
+        text_kw = {k: v for k, v in kw.items() if k not in ("sha", "counter", "column_request_id", "text")}
+        text_kw.setdefault("fingerprint", helper.ENGINE_FLUSH_FINGERPRINT)   # one cause of refusal per case
+        text = kw["text"] if "text" in kw else record_text(sequence, scope, operation, **text_kw)
+        receipt(con, sequence, column, text, sha=kw.get("sha"), request_id=kw.get("column_request_id"))
+        con.execute("UPDATE receipt_counter SET value=?", (kw.get("counter", sequence),))
+    return change
+
+
+def and_then(*changes):
+    return lambda con: [change(con) if callable(change) else con.execute(change) for change in changes]
+
+
+@pytest.mark.parametrize("change", [
+    # -- Codex counterexample: the v6 receipt with ``fingerprint: null`` and a correct record_sha256 (the
+    #    product then refuses to reopen the store), and every other value the product or the engine fixes
+    internal(text=V6_FLUSH.replace('"3f7ed8844aa1b978a4258e79b619dd235a5a358d00b525e76cb83c5fe7fd58d8"', "null")),
+    internal(fingerprint=None), internal(fingerprint=5), internal(fingerprint=["x"]), internal(drop=("fingerprint",)),
+    internal(fingerprint="f" * 64),                              # a string, but not the fingerprint of a flush
+    internal(fingerprint=hashlib.sha256(b'{"operation":"flush","payload":{"args":[1],"kwargs":{}}}').hexdigest()),
+    internal(drop=("committed_at",)), internal(committed_at=None), internal(committed_at="1795380306.1"),
+    internal(committed_at=True), internal(committed_at=float("nan")), internal(committed_at=float("inf")),
+    internal(committed_at=1.0),                                  # before the last receipt of before
+    internal(committed_at=1795380303.9),
+    internal(raw_args_sha256="a" * 64), internal(raw_args_sha256=None),   # an attested tool call, not the engine
+    internal(store_instance_id=V6_STORE_ID),
+    internal(text=V6_FLUSH.replace('"state":"complete"}', '"state":"complete","state":"complete"}')),   # duplicate key
+    internal(text=V6_FLUSH.replace('{"committed_at"', '{"fingerprint":null,"committed_at"')),
+    internal(text=V6_FLUSH.replace('"explicit":false', '"explicit":true,"explicit":false')),
+    internal(text=V6_FLUSH.replace(",", ", ")),                  # same content, not the text the engine writes
+    internal(request_id="flush-at-stop"), internal(request_id="A" * 32),   # not uuid4().hex
+    internal(operation="memory_search"),                         # an internal line of another operation
+    internal(operation="consolidate"),
+    internal(explicit=True),                                     # an explicit request is user activity
+    internal(scope=V6_PROJECT),                                  # a non-internal line appended
+    internal(scope='["project", "*"]'),
+    internal(column_scope=V6_PROJECT),                           # column and record disagree
+    internal(scope=V6_PROJECT, column_scope="__engine_internal__"),
+    internal(column_request_id="another-request"),
+    internal(sha="0" * 64),                                      # record_sha256 is not the digest of the record
+    internal(result={"ok": True}),                               # not the shape of the engine's implicit receipt
+    internal(state="pending"),
+    internal(sequence=7),                                        # a gap: not the next sequence
+    internal(counter=4),                                         # the counter did not advance with the receipt
+    internal(counter=9),
+    and_then(v6_flush, "UPDATE items SET text='beta'"),          # a flush never excuses another table
+    and_then(v6_flush, "INSERT INTO items VALUES('2', 'gamma')"),
+    and_then(v6_flush, "DELETE FROM items"),
+    and_then(v6_flush, "UPDATE store_metadata SET value='{}' WHERE key='other'", "INSERT INTO store_metadata VALUES('x','y')"),
+    and_then(v6_flush, "UPDATE request_receipts SET record_json=replace(record_json,'memory_search','memory_forget') "
+                       "WHERE sequence=4"),                       # an earlier line changed
+    and_then(v6_flush, "DELETE FROM request_receipts WHERE sequence=2"),   # an earlier line removed
+    and_then(v6_flush, "DELETE FROM request_receipts WHERE sequence=4"),
+    and_then(v6_flush, "CREATE TABLE extra(id INTEGER)"),        # a new table
+    and_then(v6_flush, "PRAGMA user_version=9"),
+    and_then("DELETE FROM request_receipts WHERE sequence=4", "UPDATE receipt_counter SET value=3"),  # only a removal
+    and_then("UPDATE receipt_counter SET value=5"),              # the counter alone
+    and_then(v6_flush, internal(sequence=6, operation="memory_chat_save", scope=V6_PROJECT, explicit=True)),
+])
+def test_rev10_any_other_store_difference_is_a_data_modification(tmp_path, change):
+    before, after = around_stop(tmp_path, change)
+    row = helper.store_compare(before, after)
+    assert row["store_logical_unchanged"] is False and row["store_raw_hash_identical"] is False
+    assert row["store_tolerated_engine_receipts"] == [] and row["store_comparison_refusal"]
+
+
+def test_rev10_codex_counterexample_a_receipt_the_product_refuses_is_never_tolerated(tmp_path):
+    """fingerprint null + recomputed record_sha256 + counter 4 -> 5: the product cannot reopen this store."""
+    text = V6_FLUSH.replace('"3f7ed8844aa1b978a4258e79b619dd235a5a358d00b525e76cb83c5fe7fd58d8"', "null")
+    assert json.loads(text)["fingerprint"] is None and sorted(json.loads(text)) == helper.ENGINE_FLUSH_KEYS
+    before, after = around_stop(tmp_path, internal(text=text))
+    assert after["request_receipts"][4]["record_sha256_valid"] is True and after["receipt_counter"] == 5
+    assert after["product_receipts"] == {"checked": True, "valid": False,
+                                         "detail": "RuntimeError: Invalid SQLite completed receipt"}
+    assert helper.store_compare(before, after)["store_logical_unchanged"] is False
+    # Each defence alone refuses it: the product's verdict removed, the value check still does; and conversely.
+    assert helper.store_compare(before, {**after, "product_receipts": {"checked": True, "valid": True}})[
+        "store_logical_unchanged"] is False
+    good_before, good_after = around_stop(tmp_path / "good", v6_flush)
+    assert helper.store_compare(good_before, good_after)["store_logical_unchanged"] is True
+    for reader in ({"checked": False, "valid": None, "detail": "ModuleNotFoundError"}, None, {"checked": True},
+                   {"checked": True, "valid": False, "detail": "x"}, {"checked": "yes", "valid": 1}):
+        assert helper.store_compare(good_before, {**good_after, "product_receipts": reader})[
+            "store_logical_unchanged"] is False
+
+
+def test_rev10_without_the_installed_product_nothing_is_claimed_about_its_reader(tmp_path, monkeypatch):
+    con = receipt_store(tmp_path)
+    con.close()
+    monkeypatch.setitem(sys.modules, "memory_os_v4.sqlite_engine", None)   # as under /usr/bin/python3 -I
+    assert helper.store_logical(tmp_path)["product_receipts"] == {"checked": False, "valid": None,
+                                                                    "detail": "ModuleNotFoundError"}
+
+
+def test_rev10_the_tolerance_needs_the_per_table_evidence_and_an_internal_line_cannot_be_dropped(tmp_path):
+    before, after = around_stop(tmp_path, v6_flush)
+    legacy = lambda row: {k: row[k] for k in ("store_instance_id", "logical_sha256", "tables", "user_version")}  # noqa: E731
+    assert helper.store_compare(legacy(before), legacy(after))["store_logical_unchanged"] is False   # the v6 evidence itself
+    assert helper.store_compare(before, legacy(after))["store_logical_unchanged"] is False
+    assert helper.store_compare(after, before)["store_logical_unchanged"] is False   # an internal line removed
+    assert helper.store_compare(None, after)["store_logical_unchanged"] is False
+    lying = {**after, "request_receipts": after["request_receipts"][:4]}             # list and count disagree
+    assert helper.store_compare(before, lying)["store_logical_unchanged"] is False
+
+
+def v6_install_tree(d):
+    """The tree of a run whose undo left the neutral files of v6 and whose stop wrote the flush receipt of v6."""
+    write_install_tree(d)
+    files = neutral_home(d / "home1")
+    for name, value in (("install1/clients_before_apply.json", V6_BEFORE_APPLY),
+                        ("install1/clients_after_undo.json", V6_AFTER_UNDO),
+                        ("install1/client_files_after_undo.json", files)):
+        put_json(d / name, value)
+    before, after = around_stop(d / "tmp", v6_flush)   # "tmp" is never sealed
+    put_json(d / "install2/store_before.json", before)
+    put_json(d / "install2/store_after.json", after)
+    return helper.assemble(d)
+
+
+def test_rev10_the_assembled_v6_report_is_accepted_with_both_tolerances_written_in_it(tmp_path):
+    report = v6_install_tree(tmp_path)
+    assert report["ok"] is True and "error" not in report, report.get("error")
+    undo, data = report["install_1"]["undo"], report["install_2"]["data_conservation"]
+    assert undo["client_entries_restored"] is True
+    assert [(r["client"], r["path"], r["sha256"], r["bytes"]) for r in undo["client_entries_neutral_files"]] == [
+        ("codex", ".codex/config.toml", V6_CODEX_SHA, 0), ("cursor", ".cursor/mcp.json", V6_CURSOR_SHA, 23)]
+    assert data["store_logical_unchanged"] is True and data["store_raw_hash_identical"] is False
+    assert data["store_tolerated_engine_receipts"] == [{"sequence": 5, "request_id": "16e4bf367558445186eca7e3f6419bef",
+                                                        "operation": "flush", "record_sha256": V6_FLUSH_SHA}]
+    assert "install1/client_files_after_undo.json" in report["evidence_sha256"]
+    gate.validate_install(report, manifest(), "lexical")
+    gate.check_pieces("install_lexical", report, tmp_path)
+
+
+def b64(data):
+    import base64
+
+    return base64.b64encode(data).decode()
+
+
+@pytest.mark.parametrize("damage", [
+    # -- rollback: the flag alone is never believed
+    lambda r: r["install_1"]["undo"].update(client_entries_neutral_files=[]),
+    lambda r: r["install_1"]["undo"].pop("client_entries_neutral_files"),
+    lambda r: r["install_1"]["undo"].pop("clients_after_undo"),
+    lambda r: r["install_1"]["undo"].pop("clients_before_apply"),
+    lambda r: r["install_1"]["undo"]["client_entries_neutral_files"].pop(),
+    lambda r: r["install_1"]["undo"]["client_entries_neutral_files"].append(
+        dict(r["install_1"]["undo"]["client_entries_neutral_files"][0])),
+    lambda r: r["install_1"]["undo"]["client_entries_neutral_files"][1].update(
+        content_b64=b64(b'{"mcpServers": {"other": {}}}')),                      # bytes that are not the attested ones
+    lambda r: (r["install_1"]["undo"]["client_entries_neutral_files"][1].update(   # coherent, but not neutral
+        content_b64=b64(b'{"other": 1}'), bytes=12, sha256=hashlib.sha256(b'{"other": 1}').hexdigest()),
+        r["install_1"]["undo"]["clients_after_undo"]["cursor"].update(
+            file_sha256=hashlib.sha256(b'{"other": 1}').hexdigest())),
+    lambda r: (r["install_1"]["undo"]["client_entries_neutral_files"][0].update(
+        content_b64=b64(b"[mcp_servers.x]\n"), bytes=16, sha256=hashlib.sha256(b"[mcp_servers.x]\n").hexdigest()),
+        r["install_1"]["undo"]["clients_after_undo"]["codex"].update(
+            file_sha256=hashlib.sha256(b"[mcp_servers.x]\n").hexdigest())),
+    lambda r: r["install_1"]["undo"]["clients_after_undo"]["codex"].update(entry_present=True, kind="foreign"),
+    lambda r: r["install_1"]["undo"]["clients_after_undo"]["cursor"].update(entry_present=True, kind="relay"),
+    lambda r: r["install_1"]["undo"]["clients_before_apply"]["codex"].update(state="ok", file_sha256=SHA),
+    lambda r: r["install_1"]["undo"]["client_entries_neutral_files"][0].update(bytes=1),
+    lambda r: r["install_1"]["undo"]["client_entries_neutral_files"][0].update(path=".grok/config.toml"),
+    # -- store: the verdict is recomputed from the two observations
+    lambda r: r["install_2"]["data_conservation"].update(store_tolerated_engine_receipts=[]),
+    lambda r: r["install_2"]["data_conservation"].update(store_raw_hash_identical=True),
+    lambda r: r["install_2"]["data_conservation"].pop("store_raw_hash_identical"),
+    lambda r: r["install_2"]["data_conservation"].pop("store_before"),
+    lambda r: r["install_2"]["data_conservation"].pop("store_after"),
+    lambda r: r["install_2"]["data_conservation"]["store_tolerated_engine_receipts"][0].update(sequence=6),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4]["record"].update(
+        operation="memory_forget"),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4]["record"].update(explicit=True),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4]["record"].update(fingerprint=None),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4]["record"].update(fingerprint="f" * 64),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4]["record"].update(committed_at=None),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4]["record"].update(committed_at=1.0),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4]["record"].pop("committed_at"),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4].update(record_canonical=False),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4].update(
+        record_keys=helper.ENGINE_FLUSH_KEYS + ["raw_args_sha256"]),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["product_receipts"].update(valid=False),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["product_receipts"].update(checked=False),
+    lambda r: r["install_2"]["data_conservation"]["store_after"].pop("product_receipts"),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][4].update(scope=V6_PROJECT),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["request_receipts"][3].update(row_sha256=SHA),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["table_sha256"].update(items=SHA),
+    lambda r: r["install_2"]["data_conservation"]["store_after"]["tables"].update(items=2),
+    lambda r: r["install_2"]["data_conservation"]["store_after"].update(receipt_counter=4),
+    lambda r: r["install_2"]["data_conservation"]["store_after"].update(user_version=9),
+    lambda r: r["install_2"]["data_conservation"]["store_after"].update(store_instance_id="other"),
+    lambda r: r["install_2"]["data_conservation"]["store_before"]["request_receipts"].pop(),
+])
+def test_rev10_the_release_rules_recompute_both_tolerances_and_refuse_anything_else(tmp_path, damage):
+    report = v6_install_tree(tmp_path)
+    gate.validate_install(report, manifest(), "lexical")
+    damage(report)
+    refused(gate.validate_install, report, manifest(), "lexical")
+
+
+@pytest.mark.parametrize("damage", [
+    lambda d: neutral_home(d / "home1", cursor=b'{"mcpServers": {"other": {}}}') and put_json(
+        d / "install1/client_files_after_undo.json", helper.client_files(d / "home1")),
+    lambda d: (d / "install1/client_files_after_undo.json").unlink(),
+    lambda d: put_json(d / "install1/clients_after_undo.json", {
+        **V6_AFTER_UNDO, "codex": {**V6_AFTER_UNDO["codex"], "file_sha256": SHA}}),
+    lambda d: put_json(d / "install2/store_after.json", {
+        **json.loads((d / "install2/store_after.json").read_text()), "receipt_counter": 4}),
+])
+def test_rev10_the_assembled_v6_report_fails_closed(tmp_path, damage):
+    v6_install_tree(tmp_path)
+    (tmp_path / "report.json").unlink(missing_ok=True)
+    damage(tmp_path)
+    report = helper.assemble(tmp_path)
+    assert report["ok"] is False or pytest.raises(ValueError, gate.validate_install, report, manifest(), "lexical")
+
+
+def test_rev10_client_files_command_writes_the_evidence_once(tmp_path):
+    neutral_home(tmp_path / "home")
+    output = tmp_path / "client_files.json"
+    assert helper.main(["client-files", "--home", str(tmp_path / "home"), "--output", str(output)]) == 0
+    assert json.loads(output.read_text())["cursor"]["sha256"] == V6_CURSOR_SHA
+    with pytest.raises(FileExistsError):
+        helper.main(["client-files", "--home", str(tmp_path / "home"), "--output", str(output)])
+    assert 'client-files --home "$H1" --output "$D1/client_files_after_undo.json"' in INSTALL
+    assert '"$VENV/bin/python" -I "$HELPER" client-files' in INSTALL  # Python 3.11 of the run: tomllib
+
+
+@pytest.mark.skipif(not (V6_RUN / "report.json").is_file(), reason="evidence of run v6 not on this machine")
+def test_rev10_replay_on_the_real_evidence_of_run_v6(tmp_path):
+    """Read-only replay on the true files of run v6, copied into a tmp dir (the run folder is never written)."""
+    import shutil
+    import sqlite3
+
+    assert json.loads((V6_RUN / "install1/clients_before_apply.json").read_text()) == V6_BEFORE_APPLY
+    state = json.loads((V6_RUN / "install1/clients_after_undo.json").read_text())
+    assert state == V6_AFTER_UNDO
+    home = tmp_path / "home1"
+    for rel in helper.TEST_CLIENT_FILES:
+        (home / rel).parent.mkdir(parents=True)
+        shutil.copyfile(V6_RUN / "home1" / rel, home / rel)
+    restored, neutral = helper.clients_restored(V6_BEFORE_APPLY, state, helper.client_files(home), strict=True)
+    assert restored is True and [(r["sha256"], r["bytes"]) for r in neutral] == [(V6_CODEX_SHA, 0), (V6_CURSOR_SHA, 23)]
+    # The old rule, on the same evidence: this is the "Rollback incomplete" of v6.
+    assert V6_BEFORE_APPLY != state and not helper.relay_entries(state)
+
+    recorded_before = json.loads((V6_RUN / "install2/store_before.json").read_text())
+    recorded_after = json.loads((V6_RUN / "install2/store_after.json").read_text())
+    for name in ("after", "before"):
+        (tmp_path / name).mkdir()
+        # immutable=1: no lock, no -shm access; the -wal of the stopped store is empty (else the digest below differs).
+        source = sqlite3.connect("file:%s?mode=ro&immutable=1" % (
+            V6_RUN / "home2/.local/share/memory-os/store/store.sqlite3"), uri=True)
+        target = sqlite3.connect(tmp_path / name / "store.sqlite3")
+        source.backup(target)
+        source.close()
+        target.close()
+    after = helper.store_logical(tmp_path / "after")
+    assert after["logical_sha256"] == recorded_after["logical_sha256"] and after["tables"] == recorded_after["tables"]
+    # The state of before uninstall is rebuilt by removing the stop's receipt; its digest IS the recorded one.
+    con = sqlite3.connect(tmp_path / "before" / "store.sqlite3")
+    con.execute("DELETE FROM request_receipts WHERE sequence=5")
+    con.execute("UPDATE receipt_counter SET value=4")
+    con.commit()
+    con.close()
+    before = helper.store_logical(tmp_path / "before")
+    assert before["logical_sha256"] == recorded_before["logical_sha256"] and before["tables"] == recorded_before["tables"]
+    row = helper.store_compare(before, after)
+    assert row["store_logical_unchanged"] is True and row["store_raw_hash_identical"] is False
+    assert row["store_tolerated_engine_receipts"] == [{"sequence": 5, "request_id": "16e4bf367558445186eca7e3f6419bef",
+                                                       "operation": "flush", "record_sha256": V6_FLUSH_SHA}]
+    assert after["request_receipts"][4]["scope"] == "__engine_internal__" and after["receipt_counter"] == 5
+    assert after["request_receipts"][4]["record"]["fingerprint"] == helper.ENGINE_FLUSH_FINGERPRINT
+    assert after["product_receipts"] == {"checked": True, "valid": True, "detail": "5 receipts read"}
+    # Codex counterexample on the copy of the real store: receipt 5 rewritten with ``fingerprint: null``.
+    (tmp_path / "forged").mkdir()
+    shutil.copyfile(tmp_path / "before" / "store.sqlite3", tmp_path / "forged" / "store.sqlite3")
+    con = sqlite3.connect(tmp_path / "forged" / "store.sqlite3")
+    receipt(con, 5, "__engine_internal__", V6_FLUSH.replace('"%s"' % helper.ENGINE_FLUSH_FINGERPRINT, "null"))
+    con.execute("UPDATE receipt_counter SET value=5")
+    con.commit()
+    con.close()
+    forged = helper.store_logical(tmp_path / "forged")
+    assert forged["product_receipts"]["valid"] is False and forged["tables"] == after["tables"]
+    assert helper.store_compare(before, forged)["store_logical_unchanged"] is False
+    # What v6 recorded (digests and counts only) is refused, as it was.
+    assert helper.store_compare(recorded_before, recorded_after)["store_logical_unchanged"] is False

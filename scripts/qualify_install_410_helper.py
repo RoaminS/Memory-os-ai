@@ -3,14 +3,18 @@
 
 Observation only: this file never loads, unloads or signals anything. ``launchctl print`` and a
 local ``bind`` are its only probes. An observation that cannot be made is a refusal (exit 3),
-never "absent". Runs under ``python3 -I`` (3.9+), imports nothing from the repository.
+never "absent". Runs under ``python3 -I`` (3.9+), imports nothing from the repository. One exception, read
+only: ``store-logical``, run by the Python of the run's venv, submits the receipts of the store to the
+installed product's own reader when it is importable (``product_receipts``); elsewhere it says "not checked".
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import errno
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import plistlib
@@ -575,21 +579,202 @@ def store_logical(store_dir):
         tables = [row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' "
             "AND sql NOT LIKE 'CREATE VIRTUAL%' ORDER BY name")]
-        counts = {}
+        counts, table_digests, receipts, counter_rows = {}, {}, None, []
         for table in tables:
             digest.update(table.encode())
             counts[table] = 0
-            for row in connection.execute('SELECT * FROM "%s" ORDER BY rowid' % table.replace('"', '""')):
-                digest.update(repr(row).encode())
+            own = hashlib.sha256()
+            cursor = connection.execute('SELECT * FROM "%s" ORDER BY rowid' % table.replace('"', '""'))
+            names = [column[0] for column in cursor.description]
+            if table == RECEIPTS_TABLE:
+                receipts = []
+            for row in cursor:
+                raw = repr(row).encode()
+                digest.update(raw)
+                own.update(raw)
                 counts[table] += 1
+                if table == RECEIPTS_TABLE:
+                    receipts.append(receipt_row(dict(zip(names, row)), raw))
+                elif table == COUNTER_TABLE:
+                    counter_rows.append(dict(zip(names, row)))
+            table_digests[table] = own.hexdigest()
         identity = None
         for row in connection.execute("SELECT * FROM store_metadata"):
             if row and row[0] == "metadata":
                 identity = json.loads(row[1]).get("store_instance_id")
+        counter = counter_rows[0].get("value") if len(counter_rows) == 1 and counter_rows[0].get("id") == 1 else None
+        # ``logical_sha256`` is the raw digest of every row of every table (unchanged definition). The
+        # per-table digests and the receipt lines let ``store_compare`` tell WHICH rows differ.
         return {"store_instance_id": identity, "logical_sha256": digest.hexdigest(), "tables": counts,
-                "user_version": connection.execute("PRAGMA user_version").fetchone()[0]}
+                "user_version": connection.execute("PRAGMA user_version").fetchone()[0],
+                "table_sha256": table_digests, "request_receipts": receipts, "receipt_counter": counter,
+                "product_receipts": product_receipts(connection)}
     finally:
         connection.close()
+
+
+RECEIPTS_TABLE, COUNTER_TABLE = "request_receipts", "receipt_counter"
+ENGINE_SCOPE = "__engine_internal__"  # scope of the engine's own implicit receipts (plain text, not a JSON list)
+# Exactly the keys of the implicit receipt the engine writes for its own flush: no result, no attestation
+# (``raw_args_sha256`` belongs to attested tool calls only) -- memory_os_v4/sqlite_engine.py, ``complete``.
+ENGINE_FLUSH_KEYS = ["committed_at", "explicit", "fingerprint", "operation", "request_id", "scope", "sequence", "state"]
+# ``fingerprint("flush", {"args": [], "kwargs": {}})`` of the product (sqlite_engine.py ``fingerprint``, canonical
+# JSON of sqlite_store.py ``_json``): a flush takes no argument, so this value is the same in every store.
+ENGINE_FLUSH_FINGERPRINT = hashlib.sha256(
+    b'{"operation":"flush","payload":{"args":[],"kwargs":{}}}').hexdigest()
+IMPLICIT_REQUEST_ID = re.compile(r"[0-9a-f]{32}\Z")  # ``uuid.uuid4().hex`` (memory.py, ``_sql_mutation``)
+RECORD_FIELDS = ("scope", "request_id", "sequence", "operation", "explicit", "state", "fingerprint", "committed_at")
+
+
+def _unique_keys(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def canonical_json(value):
+    """``_json`` of the product (sqlite_store.py): the only text the engine writes for a record."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def receipt_row(row, raw):
+    """One ``request_receipts`` line: its columns, and its record READ AS JSON (never searched as text).
+
+    The VALUES of the fields the comparison judges are kept (never the result of a request). A record with
+    a duplicate key, or that is not the canonical text the engine writes, is flagged: its shape is not exact.
+    """
+    text = row.get("record_json")
+    try:
+        record = json.loads(text, object_pairs_hook=_unique_keys)
+        canonical = isinstance(record, dict) and canonical_json(record) == text
+    except (TypeError, ValueError, RecursionError):
+        record, canonical = None, False
+    record = record if isinstance(record, dict) else {}
+    return {"sequence": row.get("sequence"), "scope": row.get("scope"), "request_id": row.get("request_id"),
+            "record_sha256": row.get("record_sha256"), "row_sha256": hashlib.sha256(raw).hexdigest(),
+            "record_sha256_valid": isinstance(text, str)
+            and hashlib.sha256(text.encode()).hexdigest() == row.get("record_sha256"),
+            "record_canonical": canonical,
+            "record": {key: record.get(key) for key in RECORD_FIELDS},
+            "record_keys": sorted(record)}
+
+
+def product_receipts(connection):
+    """End to end: the product's OWN reader of receipts, the one every reopening runs, on this store (read only).
+
+    ``SQLiteRequests.load`` only SELECTs on the connection it is given. Not importable (``/usr/bin/python3``,
+    no product installed): ``checked`` is false and nothing is claimed.
+    """
+    try:
+        from memory_os_v4.sqlite_engine import SQLiteRequests
+    except Exception as exc:  # absent or unusable product: an observation not made, said as such
+        return {"checked": False, "valid": None, "detail": type(exc).__name__}
+    reader = SQLiteRequests.__new__(SQLiteRequests)
+
+    class Store:
+        _connection, db_path, _poisoned = connection, None, False
+
+    reader.store = Store()
+    try:
+        reader.load()
+    except Exception as exc:
+        return {"checked": True, "valid": False, "detail": "%s: %s" % (type(exc).__name__, exc)}
+    return {"checked": True, "valid": True, "detail": "%d receipts read" % len(reader.records)}
+
+
+def _number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _integer(value):
+    return type(value) is int
+
+
+def engine_flush_receipts(before, after):
+    """The ONLY store difference admitted across the stop of the service: ``(rows, None)`` or ``([], reason)``.
+
+    On a clean stop the engine flushes and writes ONE implicit receipt of its own (``flush``, scope
+    ``__engine_internal__``, ``explicit: false``), which also advances ``receipt_counter``. Admitted: such
+    lines APPENDED to ``request_receipts`` (sequences right after the counter of before, above every earlier
+    sequence), every earlier line unchanged and in the same order, the counter advanced by exactly that
+    number, every other table identical row for row. Anything else is a data modification.
+    """
+    for side in (before, after):
+        if not (isinstance(side.get("tables"), dict) and isinstance(side.get("table_sha256"), dict)
+                and isinstance(side.get("request_receipts"), list) and _integer(side.get("receipt_counter"))
+                and set(side["tables"]) == set(side["table_sha256"])
+                and side["tables"].get(RECEIPTS_TABLE) == len(side["request_receipts"])
+                and side["tables"].get(COUNTER_TABLE) == 1
+                and all(isinstance(row, dict) and _integer(row.get("sequence")) for row in side["request_receipts"])):
+            return [], "per-table evidence missing or inconsistent"
+    if set(before["tables"]) != set(after["tables"]):
+        return [], "set of tables changed"
+    for table in sorted(before["tables"]):
+        if table not in (RECEIPTS_TABLE, COUNTER_TABLE) and (
+                before["tables"][table] != after["tables"][table]
+                or before["table_sha256"][table] != after["table_sha256"][table]):
+            return [], "table changed: " + table
+    old, new = before["request_receipts"], after["request_receipts"]
+    if new[:len(old)] != old:
+        return [], "an earlier receipt was changed, removed or reordered"
+    added = new[len(old):]
+    if not added:
+        return [], "no appended receipt explains the difference"
+    reader = after.get("product_receipts")
+    if not (isinstance(reader, dict) and reader.get("checked") is True and reader.get("valid") is True):
+        return [], "the receipts of the stopped store were not accepted by the product's own reader"
+    highest = max([row["sequence"] for row in old] + [before["receipt_counter"]])
+    # ``committed_at`` is ``time.time()`` at the commit (not monotonic): requiring it never before the last receipt
+    # of before is a qualification requirement, stricter than the product's own reader.
+    latest = max([(row.get("record") or {}).get("committed_at") for row in old
+                  if _number((row.get("record") or {}).get("committed_at"))] + [0])
+    rows = []
+    for offset, row in enumerate(added, 1):
+        record = row.get("record") or {}
+        if not (record.get("fingerprint") == ENGINE_FLUSH_FINGERPRINT and _number(record.get("committed_at"))
+                and record["committed_at"] >= latest and row.get("record_canonical") is True
+                and isinstance(row.get("request_id"), str) and IMPLICIT_REQUEST_ID.match(row["request_id"])):
+            return [], "appended receipt %r is not an internal engine flush" % (row.get("sequence"),)
+        latest = record["committed_at"]
+        if not (row["sequence"] == before["receipt_counter"] + offset and row["sequence"] > highest
+                and row.get("scope") == ENGINE_SCOPE and record.get("scope") == ENGINE_SCOPE
+                and record.get("operation") == "flush" and record.get("explicit") is False
+                and record.get("state") == "complete" and _integer(record.get("sequence"))
+                and record["sequence"] == row["sequence"]
+                and isinstance(row.get("request_id"), str) and row["request_id"]
+                and record.get("request_id") == row["request_id"]
+                and row.get("record_keys") == ENGINE_FLUSH_KEYS and row.get("record_sha256_valid") is True
+                and isinstance(row.get("record_sha256"), str)):
+            return [], "appended receipt %r is not an internal engine flush" % (row.get("sequence"),)
+        rows.append({"sequence": row["sequence"], "request_id": row["request_id"], "operation": "flush",
+                     "record_sha256": row["record_sha256"]})
+    if after["receipt_counter"] != before["receipt_counter"] + len(added):
+        return [], "receipt counter does not match the appended receipts"
+    return rows, None
+
+
+def store_compare(before, after):
+    """Logical comparison of the store around uninstall; the raw digest verdict is kept apart (transparency).
+
+    ``store_logical_unchanged`` is true when the raw digests are equal, or when the only difference is the
+    engine's own flush receipt(s) of the stop (``engine_flush_receipts``), listed in
+    ``store_tolerated_engine_receipts``. ``user_version`` must be equal in both cases.
+    """
+    row = {"store_logical_unchanged": False, "store_raw_hash_identical": False,
+           "store_tolerated_engine_receipts": [], "store_comparison_refusal": None}
+    if not (isinstance(before, dict) and isinstance(after, dict)):
+        return {**row, "store_comparison_refusal": "store observation missing"}
+    row["store_raw_hash_identical"] = bool(before.get("logical_sha256")) \
+        and before.get("logical_sha256") == after.get("logical_sha256") \
+        and isinstance(before.get("tables"), dict) and before.get("tables") == after.get("tables")
+    if before.get("user_version") != after.get("user_version"):
+        return {**row, "store_comparison_refusal": "user_version changed"}
+    if row["store_raw_hash_identical"]:
+        return {**row, "store_logical_unchanged": True}
+    tolerated, reason = engine_flush_receipts(before, after)
+    return {**row, "store_logical_unchanged": reason is None, "store_tolerated_engine_receipts": tolerated,
+            "store_comparison_refusal": reason}
 
 
 IMMUTABLE = {
@@ -697,8 +882,10 @@ def data_conservation(before, after, store_before, store_after, label, created_c
         "immutable_unchanged": not immutable_changed and all(kinds[kind] for kind in IMMUTABLE),
         "store_identity_unchanged": bool(store_before["store_instance_id"])
         and store_before["store_instance_id"] == store_after["store_instance_id"],
-        "store_logical_unchanged": store_before["logical_sha256"] == store_after["logical_sha256"]
-        and store_before["tables"] == store_after["tables"],
+        # Tolerant verdict (internal flush receipts of the stop only); the raw digest verdict stays visible,
+        # and both observations are kept so the release rules recompute the comparison themselves.
+        **store_compare(store_before, store_after),
+        "store_before": store_before, "store_after": store_after,
         "journals_present": bool(journals_before) and all(rel in after for rel in journals_before)
         and all(rel in after for rel in logs_before),
         "plist_removed_from_active": plist in before and plist not in after,
@@ -809,6 +996,9 @@ def main(argv=None):
     s = sub.add_parser("store-logical")
     s.add_argument("--store", required=True)
     s.add_argument("--output", required=True)
+    s = sub.add_parser("client-files")
+    s.add_argument("--home", required=True)
+    s.add_argument("--output", required=True)
     s = sub.add_parser("tree-bytes")
     s.add_argument("--root", required=True)
     s.add_argument("--output", required=True)
@@ -879,6 +1069,9 @@ def main(argv=None):
         if args.command == "store-logical":
             out(store_logical(args.store), args.output)
             return 0
+        if args.command == "client-files":
+            out(client_files(args.home), args.output)
+            return 0
         if args.command == "tree-bytes":
             out({"root": args.root, "bytes": tree_bytes(args.root)}, args.output)
             return 0
@@ -910,7 +1103,7 @@ REQUIRED_EVIDENCE = (
         "pre_state.json", "post_state.json", "apply.json", "apply_rc.json", "install.json", "service.json",
         "doctor.json", "doctor_rc.json", "clients_after_apply.json")),
     "install1/preview.json", "install1/preview_inventory.json", "install1/undo.json", "install1/undo_state.json",
-    "install1/clients_before_apply.json", "install1/clients_after_undo.json",
+    "install1/clients_before_apply.json", "install1/clients_after_undo.json", "install1/client_files_after_undo.json",
     "install2/uninstall_preview.json", "install2/uninstall_preview_inventory.json", "install2/uninstall.json",
     "install2/uninstall_state.json", "install2/clients_after_uninstall.json", "install2/data_before.json",
     "install2/data_after.json", "install2/store_before.json", "install2/store_after.json", "install2/witness.json",
@@ -923,6 +1116,108 @@ def doctor_summary(checks, returncode):
             "fail": sum(1 for c in checks if c.get("status") == "FAIL"),
             "statuses": {c.get("area"): c.get("status") for c in checks if c.get("area") in REQUIRED_DOCTOR_AREAS},
             "missing_areas": sorted(set(REQUIRED_DOCTOR_AREAS) - set(areas))}
+
+
+CLIENT_FORMATS = {"codex": "toml", "cursor": "json"}  # read with the parser of the format, never as text
+NEUTRAL_MAX_BYTES = 4096  # a file created empty by an installation is tiny; a bigger one is never "neutral"
+MISSING_CLIENT = {"entry_present": False, "file_sha256": None, "kind": None, "state": "missing-config"}
+
+
+def neutral_content(data, fmt):
+    """Is this client file EMPTY of any setting? Structured reading only; ``None`` = this Python cannot tell.
+
+    TOML: the parsed document has no key and no table (blanks and comments only). JSON: the document is
+    the object ``{}`` or ``{"mcpServers": {}}``. Anything else, unreadable bytes included, is not neutral.
+    """
+    try:
+        text = data.decode("utf-8")
+        if fmt == "json":
+            document = json.loads(text, object_pairs_hook=_unique_keys)
+            return type(document) is dict and (document == {} or (
+                list(document) == ["mcpServers"] and type(document["mcpServers"]) is dict and not document["mcpServers"]))
+        if fmt == "toml":
+            try:
+                import tomllib  # Python 3.11+: the run's venv and the release rules; absent from /usr/bin/python3
+            except ImportError:
+                return None
+            return tomllib.loads(text) == {}
+    except (ValueError, RecursionError):  # UnicodeDecodeError, JSONDecodeError and TOMLDecodeError are ValueErrors
+        return False
+    return False
+
+
+def client_files(home):
+    """The two requested client files as they are on disk: SHA-256, size, and whether their content is neutral.
+
+    The content itself is kept (base64) only when it is neutral: such a file holds no setting at all.
+    """
+    rows = {}
+    for client, rel in TEST_CLIENTS.items():
+        path = refuse_forbidden(Path(home) / rel)
+        row = {"client": client, "path": rel, "format": CLIENT_FORMATS[client], "regular_file": False,
+               "sha256": None, "bytes": None, "neutral": False, "content_b64": None}
+        try:
+            regular = stat.S_ISREG(os.lstat(path).st_mode)
+        except FileNotFoundError:
+            regular = False
+        except OSError as exc:
+            raise Unobservable("client file %s: %s" % (rel, exc.strerror or exc))
+        if regular:
+            data = path.read_bytes()
+            neutral = neutral_content(data, row["format"]) if len(data) <= NEUTRAL_MAX_BYTES else False
+            row.update(regular_file=True, sha256=hashlib.sha256(data).hexdigest(), bytes=len(data), neutral=neutral,
+                       content_b64=base64.b64encode(data).decode() if neutral is True else None)
+        rows[client] = row
+    return rows
+
+
+def neutral_file(client, old, new, observed, strict):
+    """Case (ii) of ``clients_restored`` for one client: the attested row, or ``None``."""
+    rel, fmt = TEST_CLIENTS[client], CLIENT_FORMATS[client]
+    if old != {**MISSING_CLIENT, "path": rel}:
+        return None  # the file existed before the installation: it had to come back identical
+    if not (set(new) == set(old) and new.get("state") == "ok" and new.get("entry_present") is False
+            and new.get("kind") is None and isinstance(observed, dict)
+            and set(observed) == {"client", "path", "format", "regular_file", "sha256", "bytes", "neutral", "content_b64"}):
+        return None
+    try:
+        data = base64.b64decode(observed["content_b64"], validate=True)
+    except (TypeError, ValueError):
+        return None
+    verdict = neutral_content(data, fmt)
+    if not (observed["client"] == client and observed["path"] == rel and observed["format"] == fmt
+            and observed["regular_file"] is True and observed["neutral"] is True
+            and type(observed["bytes"]) is int and observed["bytes"] == len(data) <= NEUTRAL_MAX_BYTES
+            and observed["sha256"] == hashlib.sha256(data).hexdigest() == new.get("file_sha256")
+            and (verdict is True or (verdict is None and not strict))):
+        return None
+    return dict(observed)
+
+
+def clients_restored(before, after, files, *, strict=False):
+    """Rollback of the client entries: ``(restored, neutral_files)``.
+
+    For each requested client, either (i) the state after undo is the state before apply, or (ii) the file
+    did not exist before apply and what is left is a NEUTRAL file created by the installation: no entry at
+    all, and a content without any setting, parsed (``neutral_content``) from the very bytes whose SHA-256
+    the installed product observed after undo. A relay entry left behind, a foreign entry, any other
+    content, or a pre-existing file that changed, is a failure. ``strict`` (release rules) also refuses a
+    content this interpreter cannot parse; without it the verdict recorded by ``client_files`` (written by
+    the run's Python 3.11) is used, bound by the SHA-256.
+    """
+    if not (isinstance(before, dict) and isinstance(after, dict) and set(before) == set(after) == set(TEST_CLIENTS)
+            and all(isinstance(side[client], dict) and side[client].get("path") == TEST_CLIENTS[client]
+                    for side in (before, after) for client in TEST_CLIENTS)) or relay_entries(after):
+        return False, []
+    neutral = []
+    for client in sorted(TEST_CLIENTS):
+        if before[client] == after[client]:
+            continue
+        row = neutral_file(client, before[client], after[client], (files or {}).get(client), strict)
+        if row is None:
+            return False, []
+        neutral.append(row)
+    return True, neutral
 
 
 def relay_entries(state):
@@ -984,8 +1279,12 @@ def assemble(d):
                        "with_service": True, "label_absent": after_undo["label_state"] == "absent",
                        "port_free": after_undo["port_state"] == "free",
                        "plist_removed": not (Path(one["home"]) / "Library/LaunchAgents" / (meta["label"] + ".plist")).exists(),
-                       "client_entries_restored": load(d1 / "clients_before_apply.json") == load(d1 / "clients_after_undo.json")
-                       and not relay_entries(load(d1 / "clients_after_undo.json"))}
+                       "clients_before_apply": load(d1 / "clients_before_apply.json"),
+                       "clients_after_undo": load(d1 / "clients_after_undo.json")}
+        restored, neutral = clients_restored(one["undo"]["clients_before_apply"], one["undo"]["clients_after_undo"],
+                                             load(d1 / "client_files_after_undo.json"))
+        # Files the installation created and undo left EMPTY of any setting: listed, never silently accepted.
+        one["undo"].update(client_entries_restored=restored, client_entries_neutral_files=neutral)
         two, d2 = report["install_2"], d / "install2"
         created = two["client_entries_created"]
         after_uninstall = load(d2 / "clients_after_uninstall.json")

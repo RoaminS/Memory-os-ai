@@ -1,4 +1,4 @@
-"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 8). Fail closed.
+"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 10). Fail closed.
 
 Invariants of §1, gate states, admissible decisions, commit/artifact binding. No recording
 command raises ``release_ready``: only the final verification (G15) does, after the exit
@@ -507,6 +507,39 @@ def _doctor(row, where):
             "doctor did not run its expected checks: " + where)
 
 
+def _clients_restored(undo):
+    """G8 rollback (rev. 10), recomputed here from the client states the report carries, never taken on its flag.
+
+    Per requested client: the state of before apply came back, or the file did not exist before apply and
+    undo left a NEUTRAL file created by the installation, attested by its bytes (SHA-256 bound to the state
+    the installed product observed) and re-parsed here with the parser of its format. See the helper.
+    """
+    import qualify_install_410_helper as helper
+
+    listed = undo.get("client_entries_neutral_files")
+    require(isinstance(listed, list) and all(isinstance(row, dict) for row in listed)
+            and len({row.get("client") for row in listed}) == len(listed), "Rollback incomplete")
+    restored, neutral = helper.clients_restored(undo.get("clients_before_apply"), undo.get("clients_after_undo"),
+                                                {row.get("client"): row for row in listed}, strict=True)
+    require(restored is True and neutral == sorted(listed, key=lambda row: str(row.get("client")))
+            and undo.get("client_entries_restored") is True, "Rollback incomplete")
+
+
+def _store_preserved(data):
+    """G8 store conservation (rev. 10), recomputed from the two store observations the report carries.
+
+    Identical raw digests, or ONLY the engine's own flush receipt(s) written at the stop of the service;
+    the report must state exactly what this comparison finds (verdict, raw verdict, tolerated lines).
+    """
+    import qualify_install_410_helper as helper
+
+    before, after = data.get("store_before"), data.get("store_after")
+    verdict = helper.store_compare(before, after)
+    require(verdict["store_logical_unchanged"] is True and all(data.get(key) == value for key, value in verdict.items())
+            and bool(before.get("store_instance_id")) and before.get("store_instance_id") == after.get("store_instance_id")
+            and data.get("store_identity_unchanged") is True, "User data not preserved by uninstall")
+
+
 def validate_install(p, m, profile):
     require(p.get("format") == "qualify-410-install-v1" and p.get("ok") is True and p.get("profile") == profile,
             "Install proof failed or for another profile")
@@ -564,6 +597,7 @@ def validate_install(p, m, profile):
     require(undo.get("ok") is True and undo.get("returncode") == 0 and undo.get("with_service") is True
             and undo.get("label_absent") is True and undo.get("port_free") is True and undo.get("plist_removed") is True
             and undo.get("client_entries_restored") is True, "Rollback incomplete")
+    _clients_restored(undo)
     _zero_write(two["uninstall_preview"], "uninstall preview")
     un = two["uninstall"]
     created = two.get("client_entries_created", [])
@@ -584,6 +618,7 @@ def validate_install(p, m, profile):
             and data.get("store_logical_unchanged") is True and data.get("checked_after_stop") is True
             and data.get("journals_present") is True and data.get("unexpected_changes") == [],
             "User data not preserved by uninstall")
+    _store_preserved(data)
     require(p.get("safety_net_fired") is False, "The safety net fired: a rollback failure is never a success")
     prod = p["production"]
     require(all(prod.get(key) is True for key in PRODUCTION_FLAGS), "Protected real files changed or not observed")

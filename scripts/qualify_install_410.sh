@@ -264,6 +264,9 @@ step "5. Installation 1 : retour arrière (--undo STAMP --with-service)"
 tenv "$H1" "$VENV/bin/memory-os-admin" quickstart --undo "$(cat "$D1/stamp.txt")" --with-service > "$D1/undo.json"; rcfile "$D1/undo_rc.json" $?
 absent_after_stop "$D1/undo_state.json"; SERVICE_OURS=0   # libellé reconnu absent, port libre : le filet est désarmé
 clients_state "$H1" "$D1/clients_after_undo.json" || fail "état client"
+# Rév. 10 : un fichier client créé par l'installation et laissé NEUTRE par undo est lu de façon structurée
+# (tomllib / json du Python 3.11 du venv) et consigné avec son empreinte ; assemble le lie à l'état ci-dessus.
+tenv "$H1" "$VENV/bin/python" -I "$HELPER" client-files --home "$H1" --output "$D1/client_files_after_undo.json" || fail "fichiers client (après undo)"
 [ ! -e "$H1/Library/LaunchAgents/$LABEL.plist" ] || fail "plist de test encore en place après undo"
 absent "$D1/post_state.json"
 
@@ -285,7 +288,7 @@ if [ ! -s "$H2/.config/memory-os/backup.key" ]; then
 fi
 print -r -- "{\"backup\": \"memory-os-backups/qualify-410-witness.mosb\", \"key\": \".config/memory-os/backup.key\", \"key_written_as_witness\": $WITNESS_KEY}" > "$D2/witness.json"
 helper inventory --root "$H2" --output "$D2/data_before.json" || fail "inventaire"
-tenv "$H2" "$VENV/bin/python" -I "$HELPER" store-logical --store "$H2/.local/share/memory-os/store" --output "$D2/store_before.json" || fail "store (avant)"
+tenv "$H2" "$VENV/bin/python" -I -B "$HELPER" store-logical --store "$H2/.local/share/memory-os/store" --output "$D2/store_before.json" || fail "store (avant)"
 helper inventory --root "$H2" --output "$D2/inv_uninstall_before.json" || fail "inventaire"
 tenv "$H2" "$VENV/bin/memory-os-admin" uninstall > "$D2/uninstall_preview.json"; rcfile "$D2/uninstall_preview_rc.json" $?
 helper inventory --root "$H2" --output "$D2/inv_uninstall_after.json" || fail "inventaire"
@@ -296,7 +299,7 @@ absent_after_stop "$D2/uninstall_state.json"; SERVICE_OURS=0
 # Conservation des données, vérifiée après arrêt : identité et contenu logique du store, fichiers immuables, journaux.
 helper inventory --root "$H2" --output "$D2/data_after.json" || fail "inventaire"
 cp -R "$H2/.local/state/memory-os" "$D2/state_after" || fail "copie des journaux (après)"
-tenv "$H2" "$VENV/bin/python" -I "$HELPER" store-logical --store "$H2/.local/share/memory-os/store" --output "$D2/store_after.json" || fail "store (après)"
+tenv "$H2" "$VENV/bin/python" -I -B "$HELPER" store-logical --store "$H2/.local/share/memory-os/store" --output "$D2/store_after.json" || fail "store (après)"
 clients_state "$H2" "$D2/clients_after_uninstall.json" || fail "état client"
 absent "$D2/post_state.json"
 
