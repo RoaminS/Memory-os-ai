@@ -1024,12 +1024,23 @@ def test_a_client_file_that_did_not_exist_is_not_created_over_a_dangling_link(ho
 # ---- Codex implementation review n° 6: the pre-command check of Claude Code never follows links ----
 
 OBJECTS = ["dangling-symlink", "symlink-to-a-valid-file", "hardlink", "fifo", "directory"]
+# Codex implementation review n° 7: our name present with a null value, or masked by a duplicated key.
+MASKED = {
+    "json-null": '{"mcpServers": {"other": {"command": "x"}, "memory-os-ai": null}}\n',
+    "json-duplicate-table": '{"mcpServers": {"memory-os-ai": {"command": "/theirs"}}, "mcpServers": {}}\n',
+    "json-duplicate-name": '{"mcpServers": {"memory-os-ai": {"command": "/theirs"}, "memory-os-ai": null}}\n',
+    "json-nested-duplicate": '{"mcpServers": {"other": {"env": {"A": "1", "A": "2"}}}}\n',
+    "json-table-not-an-object": '{"mcpServers": ["memory-os-ai"]}\n',
+}
 
 
 def substitute(home, tmp_path, kind):
     """Another writer replaces ``~/.claude.json`` by another object (our name absent behind it)."""
     path = home / PATHS["claude-code"]
     content = path.read_bytes()
+    if kind in MASKED:
+        path.write_text(MASKED[kind])
+        return
     if kind == "hardlink":
         os.link(path, tmp_path / "second-name.json")
         return
@@ -1049,6 +1060,8 @@ def object_kept(home, tmp_path, kind):
     import stat as modes
     path = home / PATHS["claude-code"]
     info = os.lstat(path)
+    if kind in MASKED:
+        return path.read_text() == MASKED[kind]
     if kind == "hardlink":
         return modes.S_ISREG(info.st_mode) and info.st_nlink == 2
     if kind == "dangling-symlink":
@@ -1079,7 +1092,7 @@ class Substituting(FakeSystem):
         return result
 
 
-@pytest.mark.parametrize("kind", OBJECTS)
+@pytest.mark.parametrize("kind", [*OBJECTS, *MASKED])
 def test_claude_code_replace_runs_no_add_over_an_object_substituted_after_the_remove(home, tmp_path, kind):
     install_from(home, tmp_path, "claude-code")
     plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
@@ -1091,7 +1104,7 @@ def test_claude_code_replace_runs_no_add_over_an_object_substituted_after_the_re
     assert object_kept(home, tmp_path, kind)
 
 
-@pytest.mark.parametrize("kind", OBJECTS)
+@pytest.mark.parametrize("kind", [*OBJECTS, *MASKED])
 def test_claude_code_undo_runs_no_restoring_add_over_an_object_substituted_after_the_remove(home, tmp_path, kind):
     install_from(home, tmp_path, "claude-code")  # E1, restorable through the CLI
     plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
@@ -1104,7 +1117,7 @@ def test_claude_code_undo_runs_no_restoring_add_over_an_object_substituted_after
     assert out["ok"] is False and object_kept(home, tmp_path, kind)
 
 
-@pytest.mark.parametrize("kind", OBJECTS)
+@pytest.mark.parametrize("kind", [*OBJECTS, *MASKED])
 def test_claude_code_best_effort_return_runs_no_add_over_an_object_substituted_after_the_failure(home, tmp_path, kind):
     install_from(home, tmp_path, "claude-code")
     plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
@@ -1149,6 +1162,17 @@ def test_claude_code_runs_no_command_at_all_over_an_object_substituted_before_th
     assert seen and system.calls == []
     path = home / PATHS["claude-code"]
     assert (os.lstat(path).st_nlink == 2) if kind == "hardlink" else path.is_symlink()
+
+
+@pytest.mark.parametrize("variant", ["json-null", "json-duplicate-table", "json-duplicate-name", "json-table-not-an-object"])
+def test_a_json_client_write_refuses_a_null_or_masked_entry_found_at_write_time(home, tmp_path, variant):
+    """The JSON-file path uses the same strict reading on the bytes its write is built from."""
+    client = next(c for c in CLIENTS if c.key == "cursor")
+    path = home / PATHS["cursor"]
+    path.write_text(MASKED[variant])
+    with pytest.raises(qs.QuickstartError):
+        qs._write_client(client, home, qs.desired_entry(client, PY, ENV))
+    assert path.read_text() == MASKED[variant] and no_temporary_left(home, "cursor")
 
 
 def test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent(home, tmp_path):

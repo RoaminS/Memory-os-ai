@@ -964,6 +964,50 @@ def test_a_project_scope_entry_of_claude_code_keeps_the_service(c):
     assert json.loads(path.read_text())["projects"] == data["projects"]  # never touched
 
 
+@pytest.mark.parametrize("variant", ["null", "duplicate-name", "duplicate-table", "table-not-an-object"])
+def test_a_masked_or_null_entry_is_never_read_as_no_dependency(c, variant):
+    """Key membership and strict parsing in the plan and the dependency scan (user scope and project scope)."""
+    installed(c, clients=("cursor",))
+    wired = json.dumps({"type": "http", "url": c.settings.url})
+    table = {"null": '{"memory-os-ai": null}',
+             "duplicate-name": '{"memory-os-ai": ' + wired + ', "memory-os-ai": {"command": "/x"}}',
+             "duplicate-table": None, "table-not-an-object": '["memory-os-ai"]'}[variant]
+    if variant == "duplicate-table":
+        text = '{"mcpServers": {"memory-os-ai": ' + wired + '}, "mcpServers": {}}\n'
+        project = '{"projects": {"/w": {"mcpServers": {"memory-os-ai": ' + wired + '}, "mcpServers": {}}}}\n'
+    else:
+        text = '{"mcpServers": ' + table + '}\n'
+        project = '{"projects": {"/w": {"mcpServers": ' + table + '}}}\n'
+    for client, content in (("antigravity", text), ("claude-code", project)):
+        if client == "claude-code" and variant == "table-not-an-object":
+            continue  # a project table that is not an object holds no named server at all
+        path = c.home / PATHS[client]
+        original = path.read_text()
+        path.write_text(content)
+        plan = uninstall_plan(c)
+        assert plan["service"]["action"] == "keep-clients-remaining", (client, variant)
+        assert plan["service"]["remaining_dependencies"] == {client: "indeterminate"}
+        path.write_text(original)
+
+
+@pytest.mark.parametrize("variant,action", [("null", "refuse-unreadable"),
+                                            ("duplicate-name", "refuse-json-duplicate-keys"),
+                                            ("duplicate-table", "refuse-json-duplicate-keys"),
+                                            ("nested-duplicate", "refuse-json-duplicate-keys")])
+@pytest.mark.parametrize("key", ["cursor", "claude-code"])
+def test_quickstart_never_creates_over_a_null_or_masked_entry(c, key, variant, action):
+    table = "servers" if key == "vscode" else "mcpServers"
+    text = {"null": '{"%s": {"memory-os-ai": null}}',
+            "duplicate-name": '{"%s": {"memory-os-ai": {"command": "/x"}, "memory-os-ai": null}}',
+            "duplicate-table": '{"%s": {"memory-os-ai": {"command": "/x"}}, "%s": {}}',
+            "nested-duplicate": '{"%s": {"other": {"env": {"A": "1", "A": "2"}}}}'}[variant]
+    (c.home / PATHS[key]).write_text(text.replace("%s", table) + "\n")
+    before = tree(c.root)
+    plan = prepare(c, profile="lexical", clients=(key,), which=claude_on_path)
+    assert plan["clients"][0]["action"] == action and plan["ok"] is False
+    assert "client_config_manual" in plan["blocker_codes"] and tree(c.root) == before
+
+
 def test_uninstall_says_what_it_cannot_inspect_before_it_stops_the_service(c):
     installed(c, clients=("cursor",))
     plan = uninstall_plan(c)
@@ -976,10 +1020,18 @@ def test_removal_refuses_a_json_file_with_duplicate_keys_and_keeps_the_proof(c):
     path = c.home / PATHS["cursor"]
     text = path.read_text().rstrip()[:-1].rstrip() + ',\n\t"theme": "dark",\n\t"theme": "light"\n}\n'
     path.write_text(text)
-    result = uninstaller().apply(uninstall_plan(c, clients=("cursor",)), c.settings, home=c.home, run=c.system)
-    assert result["clients"][0]["status"] == "refused-removal-manual" and path.read_text() == text
-    assert result["ok"] is False and result["partial"] is True and result["service"]["outcome"] == "kept-clients-incomplete"
+    plan = uninstall_plan(c, clients=("cursor",))
+    item, = plan["clients"]
+    # Refused from the plan on (strict reading, §23.10): a duplicate could mask an entry.
+    assert (item["action"], item["dependency"]) == ("keep-unreadable", "indeterminate")
+    result = uninstaller().apply(plan, c.settings, home=c.home, run=c.system)
+    assert result["clients"][0]["status"] == "kept-unreadable" and path.read_text() == text
+    assert result["service"]["outcome"] == "kept-clients-remaining"
+    assert result["service"]["remaining_dependencies"]["cursor"] == "indeterminate" and "bootout" not in c.system.verbs()
     assert not any(record.get("revoked") for record in journal_records(c, "cursor"))
+    with pytest.raises(qs.QuickstartError, match="duplicate keys"):  # and the removal itself refuses it too
+        from memory_os_v4.ops.clients import CLIENTS
+        qs.removal_text(next(x for x in CLIENTS if x.key == "cursor"), c.home)
 
 
 def test_toml_removal_is_parsed_before_it_is_written(c):

@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from . import quickstart as qs
-from .clients import CLIENTS, SERVER, classify, read_entry
+from .clients import CLIENTS, SERVER, classify, read_entry, strict_loads
 
 JOURNAL_SUBDIR = ".local/state/memory-os/uninstall"  # below the selected HOME
 URL_FIELDS = ("url", "serverUrl", "httpUrl")
@@ -230,9 +230,11 @@ def _claude_project_entries(path: Path) -> list:
     cannot be enumerated from here: a declared limit (next_steps says so).
     """
     try:
-        projects = json.loads(path.read_bytes().decode("utf-8")).get("projects")
-    except (OSError, ValueError, AttributeError, RecursionError):
+        projects = strict_loads(path.read_bytes().decode("utf-8")).get("projects")
+    except FileNotFoundError:
         return []
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return [None]  # not readable strictly (duplicate keys included): an entry may be there
     found = []
     for project in projects.values() if isinstance(projects, dict) else ():
         servers = project.get("mcpServers") if isinstance(project, dict) else None

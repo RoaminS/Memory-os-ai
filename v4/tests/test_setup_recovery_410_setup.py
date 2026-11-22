@@ -280,6 +280,43 @@ def test_the_plist_is_not_moved_when_it_became_a_link_while_the_service_stopped(
     assert plist.is_symlink() if kind != "hardlink" else os.lstat(plist).st_nlink == 2
 
 
+def test_the_plist_check_is_the_last_step_before_the_move(c, monkeypatch):
+    """Codex implementation review n° 7: the destination is chosen first; a swap during that choice is seen."""
+    result = install(c, profile="lexical")
+    plist = c.home / PLIST
+    content = plist.read_bytes()
+    real = qs._free_name
+    order = []
+
+    def free_name(directory, name):
+        target = real(directory, name)
+        order.append("destination")
+        (c.root / "same.plist").write_bytes(content)  # same bytes, behind a link, AFTER the destination is known
+        plist.unlink()
+        plist.symlink_to(c.root / "same.plist")
+        return target
+    real_check = qs._plist_is
+    monkeypatch.setattr(qs, "_free_name", free_name)
+    monkeypatch.setattr(qs, "_plist_is", lambda *a: order.append("check") or real_check(*a))
+    monkeypatch.setattr(qs.os, "rename", lambda *a: order.append("rename"))
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert order[-2:] == ["destination", "check"] and "rename" not in order
+    assert out["service"]["undo"] == "refused-changed-since-install" and plist.is_symlink()
+    assert not list((c.home / STATE).rglob("*.plist"))
+
+
+def test_the_plist_move_is_a_rename_right_after_its_check(c, monkeypatch):
+    result = install(c, profile="lexical")
+    order = []
+    real_check, real_rename, real_name = qs._plist_is, qs.os.rename, qs._free_name
+    monkeypatch.setattr(qs, "_free_name", lambda *a: order.append("destination") or real_name(*a))
+    monkeypatch.setattr(qs, "_plist_is", lambda *a: order.append("check") or real_check(*a))
+    monkeypatch.setattr(qs.os, "rename", lambda *a: order.append("rename") or real_rename(*a))
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert order[-3:] == ["destination", "check", "rename"] and out["service"]["undo"] == "stopped-and-plist-moved"
+    assert Path(out["service"]["plist_moved_to"]).is_file() and not (c.home / PLIST).exists()
+
+
 # ---- interrupted install ----
 
 def interrupted(c, clients=("cursor",)):

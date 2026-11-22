@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (655 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (688 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 655 tests verts** (clients 244, cycle de vie 216, profil 62, reprise 48, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 126 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.9). Le reste de
+**État après implémentation : 688 tests verts** (clients 263, cycle de vie 228, profil 62, reprise 50, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 159 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.10). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1231,13 +1231,18 @@ descripteur `O_NOFOLLOW | O_NONBLOCK`, identité vérifiée avant et après), ut
 Les cinq objets : lien pendant, lien vers un fichier valide, lien physique, FIFO, dossier. Chaque test
 vérifie le refus, l'objet conservé et **qu'aucune commande `claude` ultérieure n'a été lancée**.
 
+**Périmètre de cet inventaire** : les mutations faites **directement** par `quickstart.py`, `uninstall.py` et
+`sqlite_runtime.py` sur les fichiers clients, les journaux, le plist et le jeton. Il ne couvre pas les effets
+**délégués**, listés à part au §23.10 (ressources par `provision.apply`, écritures mémoire de la
+démonstration, état `launchd`, fichiers du serveur et du relais).
+
 **C — recherche de toute autre mutation du système de fichiers** dans `quickstart.py`, `uninstall.py`,
 `sqlite_runtime.py` (`grep` de `os.replace`, `shutil.`, `unlink`, `rename`, `write_`, `chmod`, `mkdir`,
 `os.link`, `symlink`, `write_secret_file`) — aucune ne touche un fichier client hors des familles A et B :
 
 | Mutation | Cible | Garde |
 |---|---|---|
-| `shutil.move` du plist (`_move_plist`) | plist de **notre** service → journal | ajouté ici : `_plist_is` (même `_read_verified`) immédiatement avant le déplacement, en plus des contrôles du §6 · `test_the_plist_is_not_moved_when_it_became_a_link_while_the_service_stopped` (2) |
+| renommage du plist (`_move_plist`, `os.rename`) | plist de **notre** service → journal | destination choisie d'abord (dossier privé, nom libre, `lstat`), puis `_plist_is` (même `_read_verified`) en **dernière** étape, puis le renommage (§23.10) · `test_the_plist_is_not_moved_when_it_became_a_link_while_the_service_stopped` (2), `test_the_plist_check_is_the_last_step_before_the_move`, `test_the_plist_move_is_a_rename_right_after_its_check` |
 | `write_secret_file` (jeton, plist) | création | exclusive (`O_EXCL | O_NOFOLLOW`), jamais d'écrasement |
 | `shutil.copy2` + `chmod` (`backup_client_file`) | nouveau `*.bak` dans le dossier neuf de l'exécution | lecture seule du fichier client |
 | `mkdir` / `chmod` (`new_journal`, dossiers store et logs d'une installation neuve) | dossiers à nous | création ; racine sans lien symbolique |
@@ -1245,6 +1250,44 @@ vérifie le refus, l'objet conservé et **qu'aucune commande `claude` ultérieur
 | `unlink` du temporaire (`_atomic_write`) ; fichiers de la sonde WAL (`sqlite_runtime.wal_probe`) | fichiers créés par l'appel lui-même | — |
 
 Aucune autre mutation trouvée.
+
+### 23.10 Revue d'implémentation Codex n° 7 (`codex_verdict_setup_impl_v7.md`, sur `9ca88f7`)
+
+**1. Présence par appartenance de clé, clés dupliquées refusées partout.** `{"mcpServers": {"memory-os-ai":
+null}}` passait pour une absence, et `json.loads` laissait une table ou un nom dupliqué masquer une entrée
+derrière la dernière valeur. Règle unique, appliquée à **toute lecture JSON qui fonde une décision** :
+
+- `clients.strict_loads` refuse une clé dupliquée **à tout niveau** ;
+- notre nom est « présent » dès que la **clé** existe (`SERVER in servers`), valeur `null` comprise ; une
+  table de serveurs qui n'est pas un objet est refusée.
+
+| Lecture | Effet d'une clé dupliquée, d'une valeur `null`, d'une table non-objet | Test |
+|---|---|---|
+| `clients.read_entry` (aperçu `quickstart`, plan `uninstall`, balayage des dépendances, `doctor`, `undo`) | état `unreadable` : `refuse-unreadable` / `keep-unreadable`, dépendance `indeterminate` | `test_a_masked_or_null_entry_is_never_read_as_no_dependency` (7), `test_quickstart_never_creates_over_a_null_or_masked_entry` (8) |
+| aperçu `quickstart`, clés dupliquées à tout niveau (§5.3) | `refuse-json-duplicate-keys`, avant tout autre motif | même test ; `test_json_with_duplicate_keys_is_refused_not_silently_deduplicated` |
+| portée projet de Claude Code (`uninstall._claude_project_entries`) | lecture stricte ; non lisible ou `null` → `indeterminate` | premier test (cas `claude-code`) |
+| `_claude_guard`, avant chaque commande `claude` | `EntryChanged`, aucune commande | les trois tests d'injection du §23.9, étendus aux cinq variantes JSON (`null`, table dupliquée, nom dupliqué, doublon imbriqué, table non-objet) : avant `add`, avant l'`add` de rétablissement, avant l'`add` de retour au mieux (15 cas) |
+| écriture et retrait JSON (`_write_client`, `removal_text`), lecture de la sauvegarde (`_entry_in_text`) | refus, rien n'est écrit | `test_a_json_client_write_refuses_a_null_or_masked_entry_found_at_write_time` (4), `test_removal_refuses_a_json_file_with_duplicate_keys_and_keeps_the_proof` (adapté : le refus vient désormais dès le plan, `keep-unreadable`) |
+
+TOML : `tomllib` refuse déjà les clés dupliquées et n'a pas de `null`.
+
+**2. Plist : le contrôle est la dernière E/S avant le déplacement.** `_move_plist` choisit d'abord la
+destination (dossier de journal privé, nom libre trouvé par `lstat`), puis `_plist_is`, puis `os.rename`,
+sans autre E/S entre les deux. Un renommage impossible (autre volume) laisse la définition en place :
+`refused-changed-since-install`, jamais une copie.
+
+**3. Effets délégués, hors de l'inventaire du §23.9.** Ils ne sont pas réimplémentés ici ; leurs garanties
+sont définies là où ils vivent.
+
+| Effet | Par qui, où | Garantie, et où elle est définie |
+|---|---|---|
+| téléchargement et pose des ressources (Granite, table `cl100k`) | `provision.apply` : cache Hugging Face et chemin de la table, sous un dossier de transit `.memory-os-provision-*` | seulement avec `--download-approved` ; plan revalidé (`preview != expected` → refus), verrou du cache, taille et SHA-256 épinglés de chaque fichier, garde disque/swap ; aucun fichier client, jeton ni service (`ops/provision.py`, `DISTRIBUTION_D1a_v1.md`) ; inchangé par cette phase (§15) |
+| création du jeton | `auth.create_token` → `write_secret_file` | création exclusive 0600, jamais d'écrasement (`ops/auth.py`) |
+| chargement / arrêt du service | `launchctl bootstrap` / `bootout` | §4, §6 : état `launchd`, aucune écriture de fichier par nous au-delà du plist |
+| store, log `server.err`, journaux du relais | le **processus serveur** et le relais, une fois lancés | moteur (`LEXICAL_PROFILE_4_1_0.md`, contrat du store) ; `quickstart` n'ouvre jamais le store ; le log brut est une source conservée (§8) |
+| sonde du relais (`_relay_probe`, `demo=False`) | relais stdio → serveur | lectures seules (`memory_status`, `memory_task_list` sur un projet de contrôle unique) |
+| démonstration (`--demo`, sur demande) | relais → serveur : **une** écriture `memory_chat_save` puis une recherche, dans un projet unique `memory-os-demo-<uuid>` | jamais rejouée (identifiant de requête unique, échec = « never replay »), aucune suppression ; `QUICKSTART_CONTRACT_v1.md` Q6 |
+| contrôles `doctor` | lecture seule | `ops/doctor.py` |
 
 ### 23.3 Limites résiduelles
 

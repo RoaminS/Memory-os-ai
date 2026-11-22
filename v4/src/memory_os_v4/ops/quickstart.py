@@ -31,7 +31,7 @@ import platform
 from pathlib import Path
 
 from . import sqlite_runtime
-from .clients import CLIENTS, SERVER, Client, classify, read_entry, relay_command
+from .clients import CLIENTS, SERVER, Client, classify, read_entry, relay_command, strict_loads
 
 DEFAULT_CLIENTS = ("claude-code", "codex")
 JOURNAL_ROOT = Path("~/.local/state/memory-os/quickstart")
@@ -344,7 +344,7 @@ def _json_key(client: Client) -> str:
 def _entry_in_text(client: Client, text: str) -> dict | None:
     """Our server entry inside a copy of a JSON client file (used to read a private backup)."""
     from .clients import _jsonc
-    data = _jsonc(text) if client.fmt == "zed" else json.loads(text or "{}")
+    data = _jsonc(text) if client.fmt == "zed" else strict_loads(text or "{}")
     servers = data.get(_json_key(client), {}) if isinstance(data, dict) else {}
     entry = servers.get(SERVER) if isinstance(servers, dict) else None
     return entry if isinstance(entry, dict) else None
@@ -385,9 +385,14 @@ def preview(*, home: Path, python: str, env: dict[str, str], clients: tuple[str,
         current_identity = entry_identity(current)
         proven = bool(current) and bool(proof_of_ownership(journal_root, c.key, current, identity))
         raw = None
-        if path.exists() and state != "unreadable":
-            raw = _read(path)
-        if state == "unreadable":
+        if path.exists():
+            try:
+                raw = _read(path)
+            except (OSError, ValueError):
+                raw = None
+        if raw is not None and not c.fmt.endswith("toml") and c.fmt != "zed" and _json_has_duplicate_keys(raw):
+            action = "refuse-json-duplicate-keys"  # at any level: a duplicate could mask an entry
+        elif state == "unreadable":
             action = "refuse-unreadable"
         elif _same(current, want):
             action = "unchanged"
@@ -541,15 +546,22 @@ def _claude_guard(client: Client, home: Path, *, file_sha256=_UNSET, entry_sha25
     entry = None
     if data is not None and data.strip():
         try:
-            document = json.loads(data.decode("utf-8"))
+            # Strict: a duplicated key at ANY level is refused (a second ``mcpServers`` table or a second
+            # ``memory-os-ai`` key could mask an entry behind the last value).
+            document = strict_loads(data.decode("utf-8"))
             servers = document.get(_json_key(client), {}) if isinstance(document, dict) else None
             if not isinstance(servers, dict):
                 raise ValueError("unexpected server table")
+            present = SERVER in servers  # KEY MEMBERSHIP: a null value is a present name, not an absence
             entry = servers.get(SERVER)
         except (ValueError, RecursionError):
             raise EntryChanged("The client file is no longer readable; nothing written") from None
-    if name_absent and entry is not None:
+    else:
+        present = False
+    if name_absent and present:
         raise EntryChanged("A memory-os-ai entry appeared before the claude command; nothing written")
+    if present and not isinstance(entry, dict):
+        raise EntryChanged("The memory-os-ai entry is not an object; nothing written")
     if entry_sha256 is not _UNSET and (not isinstance(entry, dict) or _entry_hash(entry) != entry_sha256):
         raise EntryChanged()
     return entry
@@ -674,8 +686,11 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
         return "toml-append"
     if raw is not None and _json_has_duplicate_keys(raw):
         raise QuickstartError("JSON config with duplicate keys; edit it by hand")
-    data = json.loads(raw or "{}") if raw is not None else {}
-    data.setdefault(_json_key(client), {})[SERVER] = entry
+    data = strict_loads(raw or "{}") if raw is not None else {}
+    servers = data.setdefault(_json_key(client), {}) if isinstance(data, dict) else None
+    if not isinstance(servers, dict) or (SERVER in servers and not isinstance(servers[SERVER], dict)):
+        raise QuickstartError("Unexpected server table or entry; edit the file by hand")
+    servers[SERVER] = entry
     text = _dump_json(data, raw)
     _atomic_write(path, text, expected=_expected_of(built_from))
     return "json-merge"
@@ -751,8 +766,8 @@ def _removal(client: Client, home: Path, *, previous: dict | None = None, toml_a
         return text, candidate
     if _json_has_duplicate_keys(text):
         raise QuickstartError("JSON config with duplicate keys; edit it by hand")
-    data_cfg = json.loads(text or "{}")
-    servers = data_cfg.setdefault(_json_key(client), {})
+    data_cfg = strict_loads(text or "{}")
+    servers = data_cfg.setdefault(_json_key(client), {}) if isinstance(data_cfg, dict) else None
     if not isinstance(servers, dict):
         raise QuickstartError("Unexpected server table; edit the file by hand")
     _expect(servers.get(SERVER), expected_sha256)
@@ -915,14 +930,34 @@ STOP_CODES = {"stop-failed": "service_stop_failed", "stop-timeout": "service_sto
               "refused-job-not-attested": "service_changed_since_install"}
 
 
-def _move_plist(plist: Path, journal_dir: Path) -> str:
-    """The definition is MOVED into the private journal, never deleted."""
-    target = journal_dir / plist.name
-    index = 1
-    while target.exists() or target.is_symlink():
-        target = journal_dir / f"{plist.name}.{index}"
+def _free_name(journal_dir: Path, name: str) -> Path:
+    """An unused name inside the private journal directory (``lstat`` only)."""
+    index, target = 0, journal_dir / name
+    while True:
+        try:
+            os.lstat(target)
+        except FileNotFoundError:
+            return target
         index += 1
-    shutil.move(str(plist), str(target))
+        target = journal_dir / f"{name}.{index}"
+
+
+def _move_plist(plist: Path, journal_dir: Path, sha256: str) -> str | None:
+    """The definition is MOVED into the private journal, never deleted; None when it is no longer ours.
+
+    Order: the destination is chosen FIRST (private directory, unused name); the check of the
+    definition (``_plist_is``: plain single-link file with the journaled digest, never following
+    a link) is the LAST step; then the rename, with no other I/O in between.
+    """
+    if journal_dir.is_symlink() or not _private(journal_dir, 0o700, directory=True):
+        return None
+    target = _free_name(journal_dir, plist.name)
+    if not _plist_is(plist, sha256):
+        return None
+    try:
+        os.rename(plist, target)
+    except OSError:
+        return None  # e.g. another volume: the definition stays where it is, reported as not moved
     return str(target)
 
 
@@ -955,9 +990,10 @@ def stop_owned_service(service: dict, plist_sha256: str | None, journal_dir: Pat
         return refused("refused-changed-since-install")
     state = _job_state(service, run=run)
     if state == "absent":  # never loaded (interrupted install): nothing to stop
-        if not _plist_is(plist, plist_sha256):  # immediately before the move
+        moved = _move_plist(plist, journal_dir, plist_sha256)
+        if moved is None:
             return refused("refused-changed-since-install")
-        return {"outcome": "plist-moved-job-was-absent", "plist_moved_to": _move_plist(plist, journal_dir)}
+        return {"outcome": "plist-moved-job-was-absent", "plist_moved_to": moved}
     if state != "loaded":
         return refused("refused-job-not-attested")
     stop = _bootout(service, run=run)
@@ -975,9 +1011,10 @@ def stop_owned_service(service: dict, plist_sha256: str | None, journal_dir: Pat
         waited += pause
     if state != "absent":
         return refused("stop-unconfirmed", observation="indeterminate" if state == "unknown" else "loaded")
-    if not _plist_is(plist, plist_sha256):
+    moved = _move_plist(plist, journal_dir, plist_sha256)
+    if moved is None:
         return refused("refused-changed-since-install")
-    return {"outcome": "stopped-and-plist-moved", "plist_moved_to": _move_plist(plist, journal_dir)}
+    return {"outcome": "stopped-and-plist-moved", "plist_moved_to": moved}
 
 
 def _created_service(installed) -> bool:

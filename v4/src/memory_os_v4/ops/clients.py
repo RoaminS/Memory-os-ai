@@ -64,6 +64,26 @@ def classify(entry: dict | None) -> str:
     return "other"
 
 
+class DuplicateKey(ValueError):
+    """A JSON object holding the same key twice: which value a client uses is not ours to guess."""
+
+
+def _no_duplicates(pairs):
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise DuplicateKey("duplicate key")
+    return dict(pairs)
+
+
+def strict_loads(text: str):
+    """``json.loads`` that REFUSES duplicate keys at every level (``DuplicateKey``, a ``ValueError``).
+
+    Used for every JSON read a decision is taken on: a duplicated table or a duplicated server
+    name could otherwise mask an entry behind the last value.
+    """
+    return json.loads(text, object_pairs_hook=_no_duplicates)
+
+
 def _toml_entry(text: str) -> dict | None:
     try:
         import tomllib
@@ -84,11 +104,13 @@ def read_entry(client: Client, home: Path) -> tuple[str, dict | None]:
         if client.fmt.endswith("toml"):
             entry = _toml_entry(raw)
         else:
-            data = _jsonc(raw) if client.fmt == "zed" else json.loads(raw)
+            data = _jsonc(raw) if client.fmt == "zed" else strict_loads(raw)
             key = {"vscode": "servers", "zed": "context_servers"}.get(client.fmt, "mcpServers")
             servers = data.get(key, {})
             if not isinstance(servers, dict):
                 return "unreadable", None
+            if SERVER in servers and servers[SERVER] is None:
+                return "unreadable", None  # our name IS there (key membership), with a null value: not "absent"
             entry = servers.get(SERVER)
         if entry is not None and not isinstance(entry, dict):
             return "unreadable", None
@@ -135,4 +157,4 @@ def _jsonc(text: str):
     token = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/')
     clean = token.sub(lambda m: m.group() if m.group().startswith('"') else ' ', text)
     token = re.compile(r'"(?:\\.|[^"\\])*"|,\s*(?=[}\]])')
-    return json.loads(token.sub(lambda m: m.group() if m.group().startswith('"') else '', clean))
+    return strict_loads(token.sub(lambda m: m.group() if m.group().startswith('"') else '', clean))
