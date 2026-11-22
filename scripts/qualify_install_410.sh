@@ -77,6 +77,7 @@ helper() { "$SYS_PY" -I "$HELPER" "$@"; }
 step() { echo; echo "=== $* ($(date '+%H:%M:%S'))"; }
 rcfile() { print -r -- "{\"returncode\": $2}" > "$1"; }
 VERDICT=1; SERVICE_OURS=0; SERVICE_HOME=""; SAFETY_NET=0
+STOP_WAIT_S=60; STOP_POLL_S=2   # attente bornée après un arrêt du service de test (contrat §3, rév. 9)
 finish() {   # verdict final, écrit une seule fois ; une preuve absente ou tronquée vaut échec
   local ok=false; [ "$VERDICT" = 0 ] && [ "$SAFETY_NET" = 0 ] && ok=true
   [ -e "$P/safety_net.json" ] || print -r -- "{\"fired\": $([ "$SAFETY_NET" = 1 ] && echo true || echo false)}" > "$P/safety_net.json"
@@ -102,6 +103,12 @@ cleanup() {
   finish
   # Rapport de diagnostic même en échec (ok=false) ; son absence vaut de toute façon échec.
   [ -e "$P/report.json" ] || helper assemble --proof-dir "$P" > /dev/null 2>&1 || true
+  # Après un arrêt par le filet : même attente bornée avant de rendre la main (observation seulement, preuve
+  # conservée). Son résultat ne change rien au verdict, déjà en échec ; l'appelant refait son propre contrôle.
+  if [ "$SAFETY_NET" = 1 ]; then
+    helper wait-absent --timeout "$STOP_WAIT_S" --interval "$STOP_POLL_S" --output-prefix "$P/safety_net_stop.$EPOCHSECONDS"
+    echo "filet de sécurité : attente de l'arrêt, rc=$? (0 = libellé absent et port libre avant l'échéance)"
+  fi
   echo "safety_net_fired=$SAFETY_NET exit=$rc"
   [ "$SAFETY_NET" = 1 ] && [ "$rc" = 0 ] && exit 1
 }
@@ -112,6 +119,16 @@ span() { local name=$1 t0=$EPOCHREALTIME rc; shift; "$@"; rc=$?; print -r -- "$n
 absent() {   # $1 = fichier de sortie ; libellé explicitement reconnu absent ET port libre, sinon arrêt
   helper service-state --expect absent --output "$1"; local rc=$?
   [ $rc -eq 0 ] || state_fail "libellé/port de test : rc=$rc ($1)"
+}
+absent_after_stop() {   # $1 = fichier de sortie ; après un arrêt du service de test (retour arrière, désinstallation)
+  # Attente BORNÉE, faite par le helper (horloge monotone, sondages coupés au temps restant, chaque observation
+  # conservée : <sortie>.waitN.json et <sortie>.wait.json). Seule une observation favorable achevée AVANT
+  # l'échéance autorise la suite ; l'échéance atteinte (rc=1) ou une observation impossible (rc=3) est un échec
+  # acquis, sans nouvelle observation. La preuve finale reste celle de absent(), dans $1 : contraire ou
+  # inobservable, c'est encore un arrêt — jamais de succès par défaut.
+  helper wait-absent --timeout "$STOP_WAIT_S" --interval "$STOP_POLL_S" --output-prefix "${1:r}"; local rc=$?
+  [ $rc -eq 0 ] || state_fail "service de test non reconnu arrêté en $STOP_WAIT_S s (échéance ou inobservable) : rc=$rc (${1:r}.wait.json)"
+  absent "$1"
 }
 tenv() {   # $1 = HOME jetable ; environnement vide, hors ligne sauf pip sous GO
   local home=$1; shift
@@ -245,8 +262,7 @@ fi
 
 step "5. Installation 1 : retour arrière (--undo STAMP --with-service)"
 tenv "$H1" "$VENV/bin/memory-os-admin" quickstart --undo "$(cat "$D1/stamp.txt")" --with-service > "$D1/undo.json"; rcfile "$D1/undo_rc.json" $?
-sleep 2
-absent "$D1/undo_state.json"; SERVICE_OURS=0   # libellé reconnu absent, port libre : le filet est désarmé
+absent_after_stop "$D1/undo_state.json"; SERVICE_OURS=0   # libellé reconnu absent, port libre : le filet est désarmé
 clients_state "$H1" "$D1/clients_after_undo.json" || fail "état client"
 [ ! -e "$H1/Library/LaunchAgents/$LABEL.plist" ] || fail "plist de test encore en place après undo"
 absent "$D1/post_state.json"
@@ -276,8 +292,7 @@ helper inventory --root "$H2" --output "$D2/inv_uninstall_after.json" || fail "i
 helper same-inventory "$D2/inv_uninstall_before.json" "$D2/inv_uninstall_after.json" --output "$D2/uninstall_preview_inventory.json" || fail "l'aperçu de désinstallation a écrit dans HOME"
 cp -R "$H2/.local/state/memory-os" "$D2/state_before" || fail "copie des journaux (avant)"   # contrôle champ par champ
 tenv "$H2" "$VENV/bin/memory-os-admin" uninstall --apply > "$D2/uninstall.json"; rcfile "$D2/uninstall_rc.json" $?
-sleep 2
-absent "$D2/uninstall_state.json"; SERVICE_OURS=0
+absent_after_stop "$D2/uninstall_state.json"; SERVICE_OURS=0
 # Conservation des données, vérifiée après arrêt : identité et contenu logique du store, fichiers immuables, journaux.
 helper inventory --root "$H2" --output "$D2/data_after.json" || fail "inventaire"
 cp -R "$H2/.local/state/memory-os" "$D2/state_after" || fail "copie des journaux (après)"

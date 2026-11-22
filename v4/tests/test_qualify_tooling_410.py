@@ -1906,6 +1906,106 @@ def test_port_is_free_busy_or_unobservable():
     assert row["label_state"] == "absent" and row["port_state"] == "free" and row["label_absent"] is True
 
 
+def test_port_probe_sets_reuseaddr_never_reuseport_and_tries_the_wildcard_too(monkeypatch):
+    seen = {"options": [], "binds": [], "other": []}
+
+    class Sock:
+        def __init__(self, *args):
+            assert args == (helper.socket.AF_INET, helper.socket.SOCK_STREAM)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def setsockopt(self, *args):
+            seen["options"].append(args)
+
+        def bind(self, address):
+            seen["binds"].append(address)
+
+        def __getattr__(self, name):  # listen, connect, accept...: the probe must do nothing else
+            seen["other"].append(name)
+            raise AssertionError(name)
+
+    monkeypatch.setattr(helper.socket, "socket", Sock)
+    assert helper.port_state(helper.TEST_PORT) == "free"
+    assert seen["binds"] == [("127.0.0.1", helper.TEST_PORT), ("0.0.0.0", helper.TEST_PORT)] and not seen["other"]
+    assert seen["options"] == [(helper.socket.SOL_SOCKET, helper.socket.SO_REUSEADDR, 1)] * 2
+    assert helper.socket.SO_REUSEPORT != helper.socket.SO_REUSEADDR
+    source = Path(helper.__file__).read_text()
+    code = source[source.index("    def default_bind(number):"):source.index("def service_state(")]
+    assert "SO_REUSEPORT" not in code and "listen" not in code and "connect" not in code
+
+
+def test_port_probe_on_real_ephemeral_ports_listening_is_busy_and_time_wait_is_free():
+    """Real sockets, loopback only, ports chosen by the kernel (never the test port, never production)."""
+    import socket
+    import time
+
+    def plain_bind_refused(port):  # what the probe did before: no SO_REUSEADDR
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError as exc:
+                return exc.errno == errno.EADDRINUSE
+        return False
+
+    for address, server_reuse in (("127.0.0.1", False), ("127.0.0.1", True), ("0.0.0.0", True)):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if server_reuse:  # what a real server sets: the probe's own SO_REUSEADDR must not let it through
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((address, 0))
+            port = server.getsockname()[1]
+            assert port not in (helper.TEST_PORT, helper.PRODUCTION_PORT)
+            assert helper.port_state(port) == "busy", (address, "bound, not yet listening")
+            server.listen(5)
+            assert helper.port_state(port) == "busy", (address, "listening")
+            client = socket.create_connection(("127.0.0.1", port), timeout=5)
+            accepted, _ = server.accept()
+            assert helper.port_state(port) == "busy", (address, "listening, one connection")
+            # The server stops first (listener, then its side of the connection): that side enters TIME_WAIT.
+            server.close()
+            accepted.close()
+            assert client.recv(1) == b""  # the server's FIN has arrived
+            client.close()
+            time.sleep(0.3)
+            if sys.platform == "darwin":  # the defect of run v5: a plain bind is refused although nothing listens
+                assert plain_bind_refused(port), (address, "no TIME_WAIT connection: the scenario proves nothing")
+            assert helper.port_state(port) == "free", (address, "TIME_WAIT only")
+        finally:
+            server.close()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:  # a port nobody holds any more
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    assert helper.port_state(port) == "free"
+
+
+def test_port_probe_sees_a_dual_stack_ipv6_listener():
+    import socket
+
+    server = None
+    try:
+        server = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        server.bind(("::", 0))
+        server.listen(5)
+    except OSError as exc:
+        if server is not None:
+            server.close()
+        pytest.skip("no dual-stack IPv6 socket here: %s" % exc)
+    try:
+        port = server.getsockname()[1]
+        assert port not in (helper.TEST_PORT, helper.PRODUCTION_PORT)
+        assert helper.port_state(port) == "busy"  # [::] with V6ONLY off also serves IPv4: seen by the wildcard bind
+    finally:
+        server.close()
+    assert helper.port_state(port) == "free"
+
+
 def test_test_identity_is_never_the_production_label_or_port():
     helper.check_test_identity(helper.TEST_LABEL, helper.TEST_PORT)
     for label, port in ((helper.PRODUCTION_LABEL, 18765), (helper.PRODUCTION_LABEL + ".qual", 18765),
@@ -2414,6 +2514,217 @@ def test_install_script_parses_and_targets_only_the_test_label_and_port():
     assert commands == ['launchctl bootout "gui/$UID_N/$LABEL" || true']  # the only launchctl command, test label only
     assert "kickstart" not in INSTALL and "launchctl load" not in INSTALL and "pkill" not in INSTALL
     assert "--only-binary=:all:" in INSTALL and "env -i" in INSTALL and "--download-approved" in INSTALL
+
+
+WAIT_HARNESS = r"""
+RCS=(${=1}); N=0; OUT=$PWD/d/undo_state.json; mkdir d
+helper() { N=$((N + 1)); print -r -- "$*" >> calls; return ${RCS[$N]:-0}; }
+state_fail() { print -r -- "STATE_FAIL $*"; exit 40; }
+STOP_WAIT_S=60; STOP_POLL_S=2
+%s
+absent_after_stop "$OUT"; print -r -- "PASSED"
+"""
+
+
+def wait_after_stop(tmp_path, answers):
+    """``absent`` and ``absent_after_stop`` extracted from the script, run alone against a fake helper."""
+    functions = INSTALL[INSTALL.index("absent() {"):INSTALL.index("tenv() {")]
+    assert "absent_after_stop() {" in functions and "STOP_WAIT_S=60; STOP_POLL_S=2 " in INSTALL
+    tmp_path.mkdir()
+    done = subprocess.run(["/bin/zsh", "-f", "-c", WAIT_HARNESS % functions, "harness", answers],
+                          capture_output=True, text=True, cwd=tmp_path, timeout=60,
+                          env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+    return done, (tmp_path / "calls").read_text().splitlines()
+
+
+def test_script_wait_after_a_stop_never_observes_again_after_a_failed_wait(tmp_path):
+    wait = "wait-absent --timeout 60 --interval 2 --output-prefix %s/d/undo_state"
+    final = "service-state --expect absent --output %s/d/undo_state.json"
+    # Favourable before the deadline (helper: 0): the final proof of absent() is still made, in the usual file.
+    done, calls = wait_after_stop(tmp_path / "a", "0 0")
+    assert done.returncode == 0 and "PASSED" in done.stdout
+    assert calls == [wait % (tmp_path / "a").resolve(), final % (tmp_path / "a").resolve()]
+    # Deadline reached (1) or impossible observation (3, or anything else): exit 40 and NO further observation,
+    # although the fake final observation would have been favourable (state flipping right after the deadline).
+    for name, answers in (("b", "1 0"), ("c", "3 0"), ("e", "2 0"), ("f", "137 0")):
+        done, calls = wait_after_stop(tmp_path / name, answers)
+        assert done.returncode == 40 and "PASSED" not in done.stdout and "STATE_FAIL" in done.stdout, answers
+        assert calls == [wait % (tmp_path / name).resolve()], answers
+    # The wait never decides alone: a contrary or unobservable final proof is a failure too.
+    for name, answers in (("g", "0 1"), ("h", "0 3"), ("i", "0 2")):
+        done, calls = wait_after_stop(tmp_path / name, answers)
+        assert done.returncode == 40 and "PASSED" not in done.stdout and len(calls) == 2, answers
+
+
+class Clock:
+    """A fake monotonic clock: pauses and probes advance it, nothing really sleeps."""
+
+    def __init__(self):
+        self.now, self.pauses, self.probes = 1000.0, [], []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.pauses.append(seconds)
+        self.now += seconds
+
+
+def waiting(tmp_path, states, cost=0.5, timeout=60, interval=2):
+    """Run ``wait_absent`` against scripted observations; ``states(clock)`` gives (label_state, port_state)."""
+    clock, deadline = Clock(), 1000.0 + timeout
+
+    def observe(label, port, timeout):
+        assert (label, port) == (helper.TEST_LABEL, helper.TEST_PORT)
+        assert clock.now < deadline and 0 < timeout <= min(helper.PROBE_TIMEOUT, deadline - clock.now) + 1e-9
+        clock.probes.append((clock.now, timeout))
+        spent = cost(clock) if callable(cost) else cost
+        clock.now += min(spent, timeout)  # a probe never outlives the time it was given
+        if spent > timeout:
+            raise helper.Unobservable("launchctl print failed: TimeoutExpired")
+        answer = states(clock)
+        if isinstance(answer, Exception):
+            raise answer
+        return {"label": label, "port": port, "label_state": answer[0], "port_state": answer[1],
+                "label_absent": answer[0] == "absent"}
+
+    code = helper.wait_absent(helper.TEST_LABEL, helper.TEST_PORT, str(tmp_path / "undo_state"), timeout, interval,
+                              clock=clock, sleep=clock.sleep, observe=observe)
+    files = sorted(p.name for p in tmp_path.iterdir())
+    summary = json.loads((tmp_path / "undo_state.wait.json").read_text())
+    assert summary["clock"] == "monotonic" and summary["timeout_seconds"] == timeout
+    assert summary["observations"] == len(clock.probes) and summary["elapsed_seconds"] <= timeout + 1e-6
+    assert clock.now <= deadline + 1e-6  # the ceiling is strict: pauses and probes included
+    return code, clock, summary, files
+
+
+def test_wait_absent_succeeds_only_on_a_favourable_observation_before_the_deadline(tmp_path):
+    busy, free = ("absent", "busy"), ("absent", "free")
+    # TIME_WAIT-like: contrary for about 30 s, then free.
+    (tmp_path / "a").mkdir()
+    code, clock, summary, files = waiting(tmp_path / "a", lambda c: free if c.now >= 1030 else busy)
+    assert code == 0 and summary["outcome"] == "absent" and clock.pauses[0] == 2  # first look after the interval
+    assert files == sorted(["undo_state.wait.json"] + ["undo_state.wait%d.json" % n for n in range(1, len(clock.probes) + 1)])
+    last = json.loads((tmp_path / "a" / ("undo_state.wait%d.json" % len(clock.probes))).read_text())
+    assert last["port_state"] == "free" and last["before_deadline"] is True and last["elapsed_seconds"] < 60
+    # The label still loaded is a contrary state as well.
+    (tmp_path / "b").mkdir()
+    code, clock, summary, _ = waiting(tmp_path / "b", lambda c: free if c.now >= 1010 else ("present", "free"))
+    assert code == 0 and len(clock.probes) == 4
+
+
+def test_wait_absent_fails_at_the_deadline_even_if_the_state_turns_favourable_right_after(tmp_path):
+    busy, free = ("absent", "busy"), ("absent", "free")
+    # Codex's counter-example: contrary until 60 s, favourable from 60 s on -> failure, nothing observed after.
+    (tmp_path / "a").mkdir()
+    code, clock, summary, _ = waiting(tmp_path / "a", lambda c: free if c.now >= 1060 else busy)
+    assert code == 1 and summary["outcome"] == "deadline" and all(start < 1060 for start, _ in clock.probes)
+    # Never favourable: the same failure, after a bounded number of observations.
+    (tmp_path / "b").mkdir()
+    code, clock, summary, _ = waiting(tmp_path / "b", lambda c: busy)
+    assert code == 1 and 20 <= len(clock.probes) <= 30
+    # A favourable observation that ENDS exactly at the deadline does not count either.
+    (tmp_path / "c").mkdir()
+    code, clock, summary, files = waiting(tmp_path / "c", lambda c: free, cost=8.0, timeout=10)
+    assert code == 1 and len(clock.probes) == 1 and clock.now == 1010 and summary["outcome"] == "deadline"
+    assert json.loads((tmp_path / "c/undo_state.wait1.json").read_text())["before_deadline"] is False
+
+
+def test_wait_absent_slow_probes_are_cut_to_the_time_left_and_never_pass_the_ceiling(tmp_path):
+    busy, free = ("absent", "busy"), ("absent", "free")
+    # 19 s probes, contrary: the third one is given only the 16 s left, is cut there, and that is a failure.
+    (tmp_path / "a").mkdir()
+    code, clock, summary, _ = waiting(tmp_path / "a", lambda c: busy, cost=19.0)
+    assert code == helper.EXIT_UNOBSERVABLE and [round(limit, 3) for _, limit in clock.probes] == [20, 20, 16.0]
+    assert clock.now == 1060
+    # 18 s probes, the third one turning favourable but ending exactly at the deadline: failure by deadline.
+    (tmp_path / "a2").mkdir()
+    code, clock, summary, _ = waiting(tmp_path / "a2", lambda c: free if c.now >= 1060 else busy, cost=18.0)
+    assert code == 1 and [round(limit, 3) for _, limit in clock.probes] == [20, 20, 18.0] and clock.now == 1060
+    # A probe that needs more than the time left is cut: an impossible observation, exit 3, not a success.
+    (tmp_path / "b").mkdir()
+    code, clock, summary, _ = waiting(tmp_path / "b", lambda c: free if c.now > 1060 else busy, cost=19.5)
+    assert code == helper.EXIT_UNOBSERVABLE and summary["outcome"] == "unobservable" and clock.now <= 1060
+    # Slow but in time: favourable before the deadline is a success.
+    (tmp_path / "c").mkdir()
+    code, clock, summary, _ = waiting(tmp_path / "c", lambda c: free if c.now >= 1040 else busy, cost=19.0)
+    assert code == 0 and clock.now < 1060
+    # An impossible observation stops at once, whatever would follow.
+    (tmp_path / "e").mkdir()
+    code, clock, summary, files = waiting(tmp_path / "e", lambda c: helper.Unobservable("x") if len(c.probes) == 2 else busy)
+    assert code == helper.EXIT_UNOBSERVABLE and len(clock.probes) == 2 and summary["error"] == "x"
+    assert files == ["undo_state.wait.json", "undo_state.wait1.json"]
+
+
+def test_wait_absent_real_clock_and_command_line(tmp_path, monkeypatch):
+    import time
+
+    # Real monotonic clock, fake observation: bounded for real, and evidence is never overwritten.
+    started = time.monotonic()
+    code = helper.wait_absent(helper.TEST_LABEL, helper.TEST_PORT, str(tmp_path / "s"), 0.4, 0.1,
+                              observe=lambda label, port, timeout: {"label_state": "absent", "port_state": "busy"})
+    assert code == 1 and 0.4 <= time.monotonic() - started < 2
+    with pytest.raises(FileExistsError):
+        helper.wait_absent(helper.TEST_LABEL, helper.TEST_PORT, str(tmp_path / "s"), 0.2, 0.1,
+                           observe=lambda label, port, timeout: {"label_state": "absent", "port_state": "busy"})
+    # The probe's time limit reaches launchctl.
+    limits = []
+
+    def run(argv, **kw):
+        limits.append(kw["timeout"])
+        return ABSENT
+
+    helper.service_state(helper.TEST_LABEL, helper.TEST_PORT, uid=501, run=run, bind=lambda port: None, timeout=3.5)
+    helper.service_state(helper.TEST_LABEL, helper.TEST_PORT, uid=501, run=run, bind=lambda port: None)
+    assert limits == [3.5, helper.PROBE_TIMEOUT] and helper.PROBE_TIMEOUT == 20
+    # Command line: test label and port only, sane bounds, exit code of the wait.
+    seen = []
+    monkeypatch.setattr(helper, "wait_absent", lambda *args: seen.append(args) or 1)
+    prefix = str(tmp_path / "undo_state")
+    assert helper.main(["wait-absent", "--timeout", "60", "--interval", "2", "--output-prefix", prefix]) == 1
+    assert seen == [(helper.TEST_LABEL, helper.TEST_PORT, prefix, 60.0, 2.0)]
+    for bad in (["--timeout", "0", "--interval", "2"], ["--timeout", "60", "--interval", "0"],
+                ["--timeout", "2", "--interval", "3"], ["--timeout", "601", "--interval", "2"],
+                ["--timeout", "60", "--interval", "2", "--port", "8765"],
+                ["--timeout", "60", "--interval", "2", "--label", "com.romain.memory-os-v4"]):
+        with pytest.raises(SystemExit):
+            helper.main(["wait-absent", "--output-prefix", prefix, *bad])
+    with pytest.raises(SystemExit):
+        helper.main(["wait-absent", "--timeout", "60", "--interval", "2", "--output-prefix",
+                     str(tmp_path / "brief_v5_val" / "x")])
+    assert len(seen) == 1
+
+
+def test_safety_net_waits_for_the_stop_without_changing_the_verdict():
+    cleanup = INSTALL[INSTALL.index("cleanup() {"):INSTALL.index("trap cleanup EXIT")]
+    wait = 'helper wait-absent --timeout "$STOP_WAIT_S" --interval "$STOP_POLL_S" --output-prefix "$P/safety_net_stop.$EPOCHSECONDS"'
+    assert cleanup.count("wait-absent") == 1 and wait in cleanup
+    lines = cleanup.splitlines()
+    at = next(i for i, line in enumerate(lines) if "wait-absent" in line)
+    assert lines[at - 1].strip() == 'if [ "$SAFETY_NET" = 1 ]; then'  # only after a stop made by the net
+    # After the stop, the verdict files and the diagnostic report; before the final exit code. Observation only.
+    assert cleanup.index("launchctl bootout") < cleanup.index("finish\n") < cleanup.index("helper assemble") < cleanup.index(wait)
+    assert cleanup.index(wait) < cleanup.index('[ "$SAFETY_NET" = 1 ] && [ "$rc" = 0 ] && exit 1')
+    assert "VERDICT=0" not in cleanup and "SAFETY_NET=0" not in cleanup
+    assert INSTALL.index("STOP_WAIT_S=60; STOP_POLL_S=2 ") < INSTALL.index("cleanup() {")
+
+
+def test_both_stops_wait_in_the_same_code_for_both_profiles():
+    assert "sleep 2" not in INSTALL
+    code = [line for line in INSTALL.splitlines() if not line.lstrip().startswith("#")]
+    calls = [line for line in code if line.startswith("absent_after_stop ")]
+    assert calls == ['absent_after_stop "$D1/undo_state.json"; SERVICE_OURS=0   # libellé reconnu absent, port libre : le filet est désarmé',
+                     'absent_after_stop "$D2/uninstall_state.json"; SERVICE_OURS=0']
+    after = {code[i - 1].split(">")[0].split('"$VENV/bin/memory-os-admin" ')[1].strip(): line for i, line in enumerate(code)
+             if line.startswith("absent_after_stop ")}
+    assert list(after) == ['quickstart --undo "$(cat "$D1/stamp.txt")" --with-service', "uninstall --apply"]
+    # Steps 5 to 7 hold no profile branch: lexical and semantic run the very same lines.
+    tail = INSTALL[INSTALL.index('step "5. Installation 1'):INSTALL.index('step "8. Production')]
+    assert "PROFILE" not in tail and "VARIANT" not in tail
+    # absent() itself is unchanged: one observation, stop unless the helper returns 0.
+    assert ('absent() {   # $1 = fichier de sortie ; libellé explicitement reconnu absent ET port libre, sinon arrêt\n'
+            '  helper service-state --expect absent --output "$1"; local rc=$?\n'
+            '  [ $rc -eq 0 ] || state_fail "libellé/port de test : rc=$rc ($1)"\n}\n') in INSTALL
 
 
 def test_safety_net_is_armed_only_after_the_proven_creation_of_the_service():

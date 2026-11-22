@@ -1,6 +1,9 @@
 # Qualification 4.1.0 — contrat court (avant tout script)
 
 22 novembre 2026 — rédigé comme **contrat seulement** (rien exécuté, rien construit, rien téléchargé à la rédaction) ; les runs v1 à v3 ont depuis été exécutés et arrêtés (rév. 7).
+Révision 9 (outillage seulement, aucun changement du produit ; défaut constaté au run v5) : définition de
+« port libre » et attente bornée après un arrêt du service de test, au §3. Le contrôle prenait pour un port occupé
+les connexions en `TIME_WAIT` laissées par le serveur qui venait d'être arrêté.
 Révision 8 (outillage seulement, aucun changement du produit) : G7 accepte, pour le seul aperçu d'installation, un inventaire vide
 explicitement attesté (le premier `HOME` lexical est créé vide) ; l'ouverture opposée de G11 est exécutée par
 l'environnement sémantique wheel installé, donc après l'étape `envs` (le moteur contrôle la fermeture ML avant le
@@ -113,6 +116,25 @@ interpréteur, avec le profil et la disponibilité attendus. Après chaque retou
 désinstallation, à la fin de chaque étape G7/G8 et à toute sortie contrôlée de la chaîne, le
 libellé doit être absent et le port libre. Une observation impossible ou un état contraire à
 celui attendu entraîne un arrêt avec verrou conservé. Aucun service préexistant n'est déchargé.
+
+« Port libre » (rév. 9) : un `bind` d'essai réussit sur le port, en `127.0.0.1` puis en adresse joker, avec
+`SO_REUSEADDR`, jamais `SO_REUSEPORT`, sans écoute ni connexion. Une socket en écoute ou seulement liée sur ces
+adresses (y compris `[::]` en double pile) est une occupation ; les connexions en `TIME_WAIT` d'un serveur arrêté
+n'en sont pas une. Limite : une connexion encore ouverte sur 18765 sans écouteur, détenue par un processus
+extérieur ou antérieur, n'est pas détectée par le test de bind. Le libellé launchd et le balayage protègent
+seulement les processus identifiables du run.
+
+Attente bornée (rév. 9) : après `quickstart --undo --with-service` et après `uninstall --apply`, l'état est
+observé avec une pause de 2 secondes entre sondages, chaque observation étant conservée, jusqu'à une échéance
+stricte de 60 secondes mesurée sur une horloge monotone ; pauses et sondages sont coupés au temps restant. Les
+60 secondes bornent l'admissibilité des observations, pas le retour complet du processus (écritures et surcoûts
+système en sus). Seule une observation
+favorable achevée avant l'échéance autorise la preuve finale, observation distincte dans le fichier habituel.
+Échéance atteinte, observation impossible, ou preuve finale contraire ou impossible : échec (code 40). Un échec
+acquis à l'échéance le reste, même si l'état devient favorable ensuite. Les autres contrôles restent une
+observation unique. Après un arrêt par le filet de sécurité, la même attente est faite avant de rendre la main ;
+elle ne change pas le verdict, déjà en échec. Limite connue (préexistante) : le script ne gère pas TERM ; un arrêt du
+superviseur par TERM ne déclenche pas ce nettoyage (verrou conservé par la chaîne, intervention humaine).
 
 Le nettoyage normal ne peut viser qu'un service créé par ce run
 et ré-attesté immédiatement avant son arrêt (plist sous le `HOME` jetable du run, programme = venv

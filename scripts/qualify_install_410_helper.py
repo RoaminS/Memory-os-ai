@@ -20,6 +20,7 @@ import stat
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.request
 
 TEST_LABEL = "local.memory-os-v4.qual410"
@@ -108,11 +109,15 @@ def check_test_identity(label, port):
 
 # ---------- launchd and port observation ----------
 
-def label_state(label, uid=None, run=subprocess.run):
+PROBE_TIMEOUT = 20
+
+
+def label_state(label, uid=None, run=subprocess.run, timeout=PROBE_TIMEOUT):
     """'absent' only when launchctl explicitly says the service does not exist; else 'present' or a refusal."""
     uid = os.getuid() if uid is None else uid
     try:
-        done = run(["/bin/launchctl", "print", "gui/%d/%s" % (uid, label)], capture_output=True, text=True, timeout=20)
+        done = run(["/bin/launchctl", "print", "gui/%d/%s" % (uid, label)], capture_output=True, text=True,
+                   timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Unobservable("launchctl print failed: " + type(exc).__name__)
     text = (done.stdout or "") + (done.stderr or "")
@@ -123,11 +128,27 @@ def label_state(label, uid=None, run=subprocess.run):
     raise Unobservable("launchctl print: unexpected answer (rc=%d)" % done.returncode)
 
 
+PROBE_ADDRESSES = ("127.0.0.1", "0.0.0.0")
+
+
 def port_state(port, bind=None):
-    """'free' when 127.0.0.1:port can be bound right now, 'busy' on EADDRINUSE, otherwise a refusal."""
+    """'free' when nothing listens on or holds 127.0.0.1:port right now, 'busy' on EADDRINUSE, otherwise a refusal.
+
+    The trial binds set SO_REUSEADDR and never SO_REUSEPORT. On macOS/BSD, SO_REUSEADDR lets a bind ignore
+    the connections a stopped server leaves in TIME_WAIT (about 30 s, during which a plain bind answers
+    EADDRINUSE although nothing listens), but still refuses an address that another socket holds, bound or
+    listening, whatever the options of that socket. It also allows a specific address next to a wildcard
+    one, so the wildcard is tried too: a listener on 0.0.0.0 or on a dual-stack [::] is "busy" as before.
+    LIMIT, not detected by a bind: a connection still open on the port without any listener (the same kernel
+    state as TIME_WAIT for a bind), held by a process outside or older than the run. The launchd label check
+    and the chain's process sweep only cover the identifiable processes of the run. Nothing is ever listened
+    on or connected to; the wildcard bind is closed at once.
+    """
     def default_bind(number):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", number))
+        for address in PROBE_ADDRESSES:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((address, number))
 
     try:
         (bind or default_bind)(int(port))
@@ -139,9 +160,54 @@ def port_state(port, bind=None):
 
 
 def service_state(label, port, **kw):
-    state, _ = label_state(label, uid=kw.get("uid"), run=kw.get("run", subprocess.run))
+    state, _ = label_state(label, uid=kw.get("uid"), run=kw.get("run", subprocess.run),
+                           timeout=kw.get("timeout", PROBE_TIMEOUT))
     return {"label": label, "port": int(port), "label_state": state, "port_state": port_state(port, kw.get("bind")),
             "label_absent": state == "absent"}
+
+
+def wait_absent(label, port, prefix, timeout, interval, *, clock=time.monotonic, sleep=time.sleep,
+                observe=service_state, write=None):
+    """Bounded wait after a stop of the test service: 0 only when an observation COMPLETED BEFORE the deadline
+    says label absent and port free; 1 when the deadline is reached first; 3 when an observation is impossible.
+
+    The deadline is on a monotonic clock and is strict: every pause and every probe is cut to the time left,
+    no probe starts at or after it, and an observation that ends at or after it never counts, favourable or
+    not. A failure at the deadline is final: nothing is observed again here. Every observation is kept
+    (<prefix>.waitN.json) with a summary (<prefix>.wait.json). This never decides alone: the caller still
+    makes its own final observation.
+    """
+    write = write or out
+    start = clock()
+    deadline = start + float(timeout)
+    count, outcome, error = 0, "deadline", None
+    while True:
+        left = deadline - clock()
+        if left <= 0:
+            break
+        sleep(min(float(interval), left))
+        left = deadline - clock()
+        if left <= 0:
+            break
+        count += 1
+        try:
+            row = observe(label, port, timeout=min(PROBE_TIMEOUT, left))
+        except Unobservable as exc:
+            outcome, error = "unobservable", str(exc)
+            break
+        ended = clock()
+        in_time = ended < deadline
+        write(dict(row, elapsed_seconds=round(ended - start, 3), before_deadline=in_time),
+              "%s.wait%d.json" % (prefix, count))
+        if not in_time:
+            break
+        if row["label_state"] == "absent" and row["port_state"] == "free":
+            outcome = "absent"
+            break
+    write({"label": label, "port": int(port), "outcome": outcome, "observations": count, "error": error,
+           "timeout_seconds": float(timeout), "interval_seconds": float(interval), "clock": "monotonic",
+           "elapsed_seconds": round(clock() - start, 3)}, "%s.wait.json" % prefix)
+    return {"absent": 0, "deadline": 1, "unobservable": EXIT_UNOBSERVABLE}[outcome]
 
 
 def parse_print(text):
@@ -710,6 +776,12 @@ def main(argv=None):
     s.add_argument("--port", type=int, default=TEST_PORT)
     s.add_argument("--expect", choices=("absent",), required=True)
     s.add_argument("--output")
+    s = sub.add_parser("wait-absent")
+    s.add_argument("--label", default=TEST_LABEL)
+    s.add_argument("--port", type=int, default=TEST_PORT)
+    s.add_argument("--timeout", type=float, required=True)
+    s.add_argument("--interval", type=float, required=True)
+    s.add_argument("--output-prefix", required=True)
     s = sub.add_parser("attest-service")
     for name in ("--home", "--venv", "--profile", "--output"):
         s.add_argument(name, required=True)
@@ -752,7 +824,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     # One gate for every path received from outside, before any read or traversal.
     for name in ("root", "home", "venv", "cache", "catalog", "store", "proof_dir", "constraints", "freeze", "input",
-                 "wheel", "before", "after", "real_home", "output"):
+                 "wheel", "before", "after", "real_home", "output", "output_prefix"):
         if getattr(args, name, None):
             refuse_forbidden(getattr(args, name))
     for value in getattr(args, "paths", []):
@@ -763,6 +835,11 @@ def main(argv=None):
             row = service_state(args.label, args.port)
             out(row, args.output)
             return 0 if row["label_state"] == "absent" and row["port_state"] == "free" else 1
+        if args.command == "wait-absent":
+            check_test_identity(args.label, args.port)
+            if not (0 < args.timeout <= 600 and 0 < args.interval <= args.timeout):
+                raise SystemExit("REFUS: 0 < interval <= timeout <= 600")
+            return wait_absent(args.label, args.port, args.output_prefix, args.timeout, args.interval)
         if args.command == "attest-service":
             row = attest_service(TEST_LABEL, TEST_PORT, args.home, args.venv, args.profile)
             out(row, args.output)
