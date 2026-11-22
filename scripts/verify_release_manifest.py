@@ -10,6 +10,8 @@ import re
 REQUIRED_CHECKS = {'a6_review', 'adversarial_probe', 'v3', 'v4', 'lint', 'twine_strict',
                    'wheel_install', 'sdist_install', 'wheel_smoke', 'sdist_smoke'}
 EXPECTED = {'memory_os_ai-4.0.1-py3-none-any.whl', 'memory_os_ai-4.0.1.tar.gz'}
+NEW_410_OPTIONS = ('record_resolution_proof', 'record_install_proof', 'record_lexical_proof',
+                   'record_perimeter_report', 'record_external_proof', 'record_decision', 'finalize', 'check_final')
 CASE_CHECKS = ('installed', 'ready', 'roundtrip', 'failure_reported', 'reconnected', 'no_replay', 'clean_shutdown')
 
 
@@ -102,6 +104,9 @@ def validate_brief(proof, manifest):
 
 
 def validate_local(manifest, directory, *, require_source=True, require_copy=True, require_brief=True):
+    if manifest.get('version') == '4.1.0':
+        from release_410_checks import validate_local as validate_rc
+        return validate_rc(manifest, directory, require_copy=require_copy, require_source=require_source)
     if manifest.get('version') == '4.0.9':
         from release_409_checks import validate_local as validate_rc
         return validate_rc(manifest, directory, require_copy=require_copy, require_source=require_source)
@@ -152,6 +157,9 @@ def validate_local(manifest, directory, *, require_source=True, require_copy=Tru
 
 
 def validate_relay(proof, manifest):
+    if manifest.get('version') == '4.1.0':
+        from release_410_checks import validate_relay as validate_three_cases
+        return validate_three_cases(proof, manifest)
     if proof.get('ok') is not True or proof.get('source_commit') != manifest['source_commit']:
         raise ValueError('preuve relais absente, en échec ou provenant d’une autre source')
     expected_scripts = manifest.get('installed_relay_scripts_sha256', {})
@@ -190,9 +198,25 @@ def main(argv=None) -> int:
     parser.add_argument('--copy-review', type=Path, help='Revue Claude liée au SHA du rapport original si les classements changent')
     parser.add_argument('--record-brief-source', type=Path)
     parser.add_argument('--record-brief-exact', type=Path)
+    # 4.1.0 (QUALIFY_4_1_0 §8). No recording raises release_ready; only --finalize (G15) does.
+    parser.add_argument('--record-resolution-proof', type=Path, help='4.1.0 G5: report.json of one profile')
+    parser.add_argument('--record-install-proof', type=Path, help='4.1.0 G7/G8/M1: report.json of one profile')
+    parser.add_argument('--record-lexical-proof', type=Path, help='4.1.0 G6 (wheel) or G11 (new lexical store)')
+    parser.add_argument('--record-perimeter-report', type=Path, help='4.1.0 G13: inventory only, never a transfer')
+    parser.add_argument('--record-external-proof', type=Path, help='4.1.0 G12: P-B proof supplied by Romain')
+    parser.add_argument('--record-decision', type=Path, help='4.1.0 §10: one explicit yes/no of Romain')
+    parser.add_argument('--finalize', type=Path, metavar='EXIT_CHECKS',
+                        help='4.1.0 G15: final verification after the exit checks; alone raises release_ready')
+    parser.add_argument('--check-final', type=Path, metavar='CHAIN_RESULT',
+                        help='4.1.0: a finalised manifest is a success only with a matching CHAIN_RESULT=PASS')
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(args.manifest.read_text())
+        if manifest.get('version') == '4.1.0':
+            from release_410_checks import main as verify_rc
+            return verify_rc(args)
+        if any(getattr(args, name) for name in NEW_410_OPTIONS):
+            raise ValueError('option réservée à la branche 4.1.0')
         if manifest.get('version') == '4.0.9':
             from release_409_checks import main as verify_rc
             return verify_rc(args)

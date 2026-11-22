@@ -1,0 +1,8 @@
+# QUALIFY_4_1_0 §6, N4 : pytest et sa fermeture pour G6, versions exactes, figées dans l'outillage relu.
+# Aucun choix de version pendant le run ; ce fichier est référencé par son SHA-256 dans N4 et au manifeste.
+# Installé après le gel de G7/G8, SOUS les contraintes lexicales maintenues : `packaging` (dépendance commune)
+# reste au verrou lexical 26.3 et n'est donc pas listé ici. Roues seulement.
+pytest==9.0.2
+iniconfig==2.3.0
+pluggy==1.6.0
+pygments==2.19.2
