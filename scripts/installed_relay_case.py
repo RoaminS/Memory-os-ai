@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.metadata
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,21 @@ from mcp.client.stdio import stdio_client
 
 # Versions whose relay exposes the compact brief and memory_request_status during an outage.
 # 4.0.8/4.0.9 keep both (4.0.9 adds no relay change); the 4.0.8 qualification ran from another checkout.
-COMPACT_BRIEF_AND_LOCAL_STATUS_VERSIONS = frozenset({'4.0.4', '4.0.5', '4.0.6', '4.0.7rc1', '4.0.7', '4.0.8', '4.0.9'})
+# 4.1.0 keeps both and adds an explicit retrieval profile, attested in every case (QUALIFY_4_1_0 G14).
+COMPACT_BRIEF_AND_LOCAL_STATUS_VERSIONS = frozenset({'4.0.4', '4.0.5', '4.0.6', '4.0.7rc1', '4.0.7', '4.0.8', '4.0.9',
+                                                     '4.1.0'})
+ML_MODULES = ('torch', 'sentence_transformers', 'transformers', 'faiss')
+
+
+def profile_environment(env, profile):
+    """Explicit profile for the synthetic server. Lexical: SQLite, and no encoder option at all."""
+    if profile is None:
+        return env, None
+    env = {**env, 'MEMORY_V4_RETRIEVAL_PROFILE': profile}
+    if profile == 'lexical':
+        env.pop('MEMORY_V4_EMBED_MODEL', None)  # incompatible with the lexical profile: removed, never 'hash'
+        env['MEMORY_V4_STORE_BACKEND'] = 'sqlite_s1'
+    return env, 'MEMORY_V4_EMBED_MODEL' not in env
 
 
 def main() -> int:
@@ -32,10 +47,21 @@ def main() -> int:
     parser.add_argument('--source-commit', required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--kind', choices=['wheel', 'sdist'], required=True)
+    parser.add_argument('--profile', choices=['semantic', 'lexical'],
+                        help='4.1.0: explicit retrieval profile, attested in the result')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     report = {'kind': args.kind, 'artifact_sha256': args.sha256, 'source_commit': args.source_commit, 'ok': False}
+    if args.profile:
+        report['profile'] = args.profile
     try:
+        if (args.version == '4.1.0') != (args.profile is not None):
+            raise ValueError('explicit --profile is required for 4.1.0, and only for 4.1.0')
+        if args.profile == 'lexical':
+            # The lexical case runs in the environment without ML.
+            report['find_spec'] = {name: (None if importlib.util.find_spec(name) is None else 'present')
+                                   for name in ML_MODULES}
+            assert not any(report['find_spec'].values()), 'ML package present in the lexical environment'
         import memory_os_v4
         from memory_os_v4.ops.auth import create_token, read_token
 
@@ -62,6 +88,9 @@ def main() -> int:
                    'MEMORY_V4_URL': f'http://127.0.0.1:{port}/mcp/', 'MEMORY_V4_BUILD_COMMIT': args.source_commit,
                    'MEMORY_V4_OPS_DIR': str(root / 'ops'), 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
                    'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONNOUSERSITE': '1', 'PYTHONPATH': '', 'PYTHONOPTIMIZE': '0'}
+            env, removed = profile_environment(env, args.profile)
+            if args.profile == 'lexical':
+                report['embed_model_option_removed'] = removed
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
             def get(path, authenticated=True):
@@ -96,6 +125,13 @@ def main() -> int:
                         if status == 200:
                             assert body['version'] == args.version and body['commit'] == args.source_commit
                             assert get('/health', authenticated=False)[0] == 401
+                            if args.profile:
+                                caps = body['capabilities']
+                                marker = caps['retrieval_profile']
+                                assert marker['name'] == args.profile, 'server attests another profile'
+                                report['profile_attested'] = marker
+                                report['store_backend'] = caps['store']['backend']
+                                assert args.profile != 'lexical' or report['store_backend'] == 'sqlite_s1'
                             report['ready'] = True
                             return process
                     except (OSError, ValueError):
@@ -167,7 +203,14 @@ def main() -> int:
                 stop(holder['server'])
                 server_log.close()
                 relay_log.close()
-            rows = [json.loads(line) for line in (root / 'store/items.jsonl').read_text().splitlines()]
+            if args.profile == 'lexical':
+                # SQLite store: read back through the installed engine, read-only, server stopped.
+                from memory_os_v4 import Config, MemoryV4
+                with MemoryV4(config=Config.lexical(data_dir=str(root / 'store'), write_mode='read_only')) as engine:
+                    rows = [{'id': item.id, 'text': item.text, 'deleted': bool(item.deleted)}
+                            for item in engine.store.items.values() if item.kind == 'fact']
+            else:
+                rows = [json.loads(line) for line in (root / 'store/items.jsonl').read_text().splitlines()]
             latest = {row['id']: row for row in rows}
             live = {key: value for key, value in latest.items() if not value.get('deleted')}
             assert set(live) == expected_ids and {row['text'] for row in live.values()} == {first_text, after_text}
