@@ -525,6 +525,77 @@ def test_unproven_or_foreign_relay_is_replaced_only_with_named_consent(home, tmp
     assert Path(result["records"][0]["backup"]).read_bytes() == original
 
 
+# ---- Codex implementation review n° 2: the write itself is compare-then-write ----
+
+FOREIGN_NOW = {"command": "/someone/else/bin/tool", "args": ["serve"], "env": {"WRITTEN": "by-another-writer"}}
+
+
+def write_foreign(home, key):
+    if key == "codex":
+        path = home / PATHS["codex"]
+        path.write_text(path.read_text() + '\n[mcp_servers.memory-os-ai]\ncommand = "/someone/else/bin/tool"\n')
+    else:
+        set_entry(home, key, FOREIGN_NOW)
+
+
+def inject(monkeypatch, home, key, marker):
+    """Another writer changes the client file right after OUR journal write holding ``marker``."""
+    real = qs._atomic_write
+    seen = []
+
+    def hooked(path, text):
+        real(path, text)
+        if Path(path).name == "journal.json" and marker in text and not seen:
+            seen.append(str(path))
+            write_foreign(home, key)
+    monkeypatch.setattr(qs, "_atomic_write", hooked)
+    return seen
+
+
+@pytest.mark.parametrize("key", ["cursor", "claude-desktop", "vscode", "claude-code"])
+def test_a_replace_never_overwrites_an_entry_written_during_its_own_revocation(home, tmp_path, monkeypatch, key):
+    """E1 proven -> preview 'replace' by E2 -> another writer puts F during the revocation: F stays."""
+    install_from(home, tmp_path, key)  # E1, proven by the journal
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=(key,), journal_root=tmp_path / "journal")
+    assert (plan["clients"][0]["action"], plan["clients"][0]["ownership"]) == ("replace", "journal")
+    seen = inject(monkeypatch, home, key, '"revoked": true')
+    system = FakeSystem(home)
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
+    assert seen, "the other writer must act during the revocation of this very replace"
+    assert servers(home, key)["memory-os-ai"] == FOREIGN_NOW  # neither removed nor overwritten
+    assert status(result) == {key: "conflict-file-changed-since-preview"}
+    assert result["records"][0]["revoked_journals"] == 1 and system.calls == []  # not even a CLI call
+
+
+@pytest.mark.parametrize("key", ["cursor", "codex", "claude-code"])
+def test_a_create_never_overwrites_an_entry_written_after_the_last_check(home, tmp_path, monkeypatch, key):
+    """Same guarantee without a revocation: the file changes right after the write-ahead journal record."""
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=(key,))
+    assert plan["clients"][0]["action"] == "create"
+    seen = inject(monkeypatch, home, key, '"status": "pending"')
+    system = FakeSystem(home)
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
+    assert seen and status(result) == {key: "conflict-file-changed-since-preview"} and system.calls == []
+    written = servers(home, key)["memory-os-ai"]
+    assert written == ({"command": "/someone/else/bin/tool"} if key == "codex" else FOREIGN_NOW)
+
+
+def test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent(home, tmp_path):
+    """E1 -> E2 (proven replace) -> undo puts E1 back from the backup, but its proof was consumed."""
+    install_from(home, tmp_path, "cursor")  # E1
+    first = servers(home, "cursor")["memory-os-ai"]
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("cursor",), journal_root=tmp_path / "journal")
+    replaced = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal",
+                                run=FakeSystem(home))  # E2
+    assert status(replaced) == {"cursor": "applied"}
+    out = qs.undo(replaced["stamp"], home=home, journal_root=tmp_path / "journal")
+    assert out["results"] == [{"client": "cursor", "undo": "restored"}]
+    assert servers(home, "cursor")["memory-os-ai"] == first  # E1 is back
+    item = preview_one(home, tmp_path, "cursor")
+    assert (item["action"], item["ownership"]) == ("refuse-existing-relay-unproven", "unproven")
+    assert preview_one(home, tmp_path, "cursor", replace_existing=("cursor",))["action"] == "replace"
+
+
 def test_a_4_0_9_journal_is_accepted_as_proof_when_it_holds_the_exact_entry(home, tmp_path):
     """Journals written before this contract have ``applied_entry`` but no digest: still a binding."""
     client = next(c for c in CLIENTS if c.key == "cursor")

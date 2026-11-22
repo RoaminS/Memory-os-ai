@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (590 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (598 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 590 tests verts** (clients 183, cycle de vie 214, profil 62, reprise 46, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 61 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4). Le reste de
+**État après implémentation : 598 tests verts** (clients 191, cycle de vie 214, profil 62, reprise 46, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 69 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4, §23.5). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1097,6 +1097,18 @@ Règles du contrat corrigées ou précisées pendant l'implémentation, avec leu
 | **P1** — preuve de E1 survivant au remplacement E1 → E2 | un remplacement **consomme** la preuve de l'entrée remplacée : `apply_clients` révoque (même client, même empreinte, tous les journaux de confiance) avant d'écrire ; révocation impossible → `revocation-failed-entry-untouched`, aucune écriture | `test_a_replace_consumes_the_proof_of_the_entry_it_replaces` (séquence exacte) |
 | Ambiguïté détectable (TOML) | un fichier TOML portant **les deux** tables (`mcp_servers` et `mcp.servers`) avec notre nom dans l'une : `keep-ambiguous`, dépendance `indeterminate`, jamais une preuve d'absence | `test_a_toml_file_with_both_server_tables_is_ambiguous_never_a_proof_of_no_dependency` |
 
+### 23.5 Revue d'implémentation Codex n° 2 (`codex_verdict_setup_impl_v2.md`, sur `344c5ad`)
+
+Les cinq points du §23.4 sont levés ; un P1 restait.
+
+| Point | Correction | Tests |
+|---|---|---|
+| **P1** — entrée étrangère écrasée pendant la révocation d'un **remplacement** (E1 prouvée → aperçu « replace » par E2 → un autre écrivain pose F pendant la révocation → F écrasée par E2, la sauvegarde ne contenant que E1) | l'écriture elle-même compare puis écrit : `_write_client(expected_file_sha256=…)` exige que le fichier soit, octet pour octet, celui de l'aperçu **sur les octets dont l'écriture est construite**, puis le revérifie juste avant le remplacement atomique ; Claude Code : fichier revérifié juste avant la CLI (ni `remove` ni `add`). Écart → `conflict-file-changed-since-preview` pour ce client, entrée de l'autre écrivain conservée, résultat partiel, autres clients traités. Vaut pour les créations comme pour les remplacements, JSON, TOML et Claude Code | `test_a_replace_never_overwrites_an_entry_written_during_its_own_revocation` (Cursor, Claude Desktop, VS Code, Claude Code), `test_a_create_never_overwrites_an_entry_written_after_the_last_check` (Cursor, Codex TOML, Claude Code ; TOML n'a pas de remplacement : la création est le seul chemin d'écriture) |
+| Test suggéré : E1 → E2 → `undo` → nouveau remplacement | consentement nommé exigé (limite acceptée du §23.3) | `test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent` |
+
+Limite de la garantie : entre la dernière relecture et `os.replace`, ou entre la relecture et l'exécution de la
+CLI `claude`, il reste une fenêtre de quelques instructions qu'aucun verrou partagé avec les clients ne ferme.
+
 ### 23.3 Limites résiduelles
 
 - Les `.mcp.json` de projet ne sont pas inspectés (ci-dessus).
@@ -1108,7 +1120,8 @@ Règles du contrat corrigées ou précisées pendant l'implémentation, avec leu
   entrée identique recréée à la main : limite de compatibilité historique seulement (toute opération 4.1
   révoque, remplacement compris, §23.4).
 - Après un remplacement prouvé E1 → E2, `undo` remet E1 depuis la sauvegarde, mais E1 n'est plus prouvée
-  (sa preuve a été consommée par le remplacement) : une mise à jour ultérieure demandera un consentement nommé.
+  (sa preuve a été consommée par le remplacement) : une mise à jour ultérieure demandera un consentement nommé
+  (`test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent`).
 - Le descripteur de construction atteste les deux paquets, pas le module de premier niveau
   `memory_os_constraints.py` (couvert par l'inventaire source du sdist seulement).
 - Preuve du localisateur : wheel construit hors ligne depuis le commit scellé et inspecté (module, deux

@@ -460,12 +460,34 @@ def _claude(argv: list[str], home: Path, *, run) -> int | None:
         return None
 
 
-def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run) -> str:
+class EntryChanged(QuickstartError):
+    """The entry in place is no longer the one the caller was authorised to remove."""
+
+    def __init__(self, message: str = "The memory-os-ai entry changed; it is not removed"):
+        super().__init__(message, code="client_entry_changed")
+
+
+_ANY = object()  # no expectation on the file (callers that restore a previous entry after their own checks)
+
+
+def _still(path: Path, expected_file_sha256) -> None:
+    if expected_file_sha256 is not _ANY and _sha(path) != expected_file_sha256:
+        raise EntryChanged("The client file changed since the preview; nothing written")
+
+
+def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run,
+                  expected_file_sha256=_ANY) -> str:
+    """Write OUR entry. ``expected_file_sha256`` (None: the file must not exist) is the digest of the
+    file the preview showed: it is compared with the bytes this write is built from, and once more
+    right before the atomic replace (Claude Code: right before the CLI runs). A file changed
+    meanwhile, even during the revocation of a replace, raises ``EntryChanged``: nothing is written.
+    """
     path = client.config_path(home)
     _safe_path(path, home)
     if client.fmt == "claude-user":
         command, args = entry["command"], entry["args"]
         flags = [x for k, v in entry.get("env", {}).items() for x in ("--env", f"{k}={v}")]
+        _still(path, expected_file_sha256)
         _, existing = read_entry(client, home)
         if existing is not None:
             if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
@@ -481,27 +503,30 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
                          existing["command"], *existing["args"]], home, run=run)
             raise QuickstartError(f"claude mcp add failed ({code})")
         return "claude-cli"
+    try:
+        data_bytes = path.read_bytes()
+    except FileNotFoundError:
+        data_bytes = None
+    if expected_file_sha256 is not _ANY:
+        found = None if data_bytes is None else hashlib.sha256(data_bytes).hexdigest()
+        if found != expected_file_sha256:
+            raise EntryChanged("The client file changed since the preview; nothing written")
+    raw = None if data_bytes is None else data_bytes.decode("utf-8")
     if client.fmt.endswith("toml"):
-        prior = _read(path) if path.exists() else ""
-        candidate = _toml_candidate(client, prior, entry)
+        candidate = _toml_candidate(client, raw or "", entry)
         if candidate is None:
             raise QuickstartError("TOML structure cannot be extended safely; apply the snippet by hand")
+        _still(path, expected_file_sha256)
         _atomic_write(path, candidate[0])
         return "toml-append"
-    raw = _read(path) if path.exists() else None
     if raw is not None and _json_has_duplicate_keys(raw):
         raise QuickstartError("JSON config with duplicate keys; edit it by hand")
     data = json.loads(raw or "{}") if raw is not None else {}
     data.setdefault(_json_key(client), {})[SERVER] = entry
-    _atomic_write(path, _dump_json(data, raw))
+    text = _dump_json(data, raw)
+    _still(path, expected_file_sha256)
+    _atomic_write(path, text)
     return "json-merge"
-
-
-class EntryChanged(QuickstartError):
-    """The entry in place is no longer the one the caller was authorised to remove."""
-
-    def __init__(self, message: str = "The memory-os-ai entry changed; it is not removed"):
-        super().__init__(message, code="client_entry_changed")
 
 
 def _expect(entry, expected_sha256: str | None) -> None:
@@ -695,9 +720,16 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
                 persist()
                 continue
         try:
-            rec["method"] = _write_client(client, home, want, run=run)
+            # The file must still be the one the preview showed, on the bytes the write is built from:
+            # a writer that slipped in since the last check (during the revocation of a replace
+            # included) keeps its entry; this client is a conflict, the others are still handled.
+            rec["method"] = _write_client(client, home, want, run=run, expected_file_sha256=item["file_sha256"])
             state, after = read_entry(client, home)
             rec["status"] = "applied" if state == "ok" and _same(after, want) else f"verify-failed:{state}"
+        except EntryChanged:
+            rec["status"] = "conflict-file-changed-since-preview"
+            persist()
+            continue
         except (OSError, ValueError, QuickstartError, subprocess.SubprocessError):
             rec["status"] = "failed-or-partial"
             persist()
