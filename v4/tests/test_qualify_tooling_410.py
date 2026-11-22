@@ -1030,7 +1030,8 @@ def m3_rows(name, start, *, observation="during", command_seconds=3.0, probe_rc=
     cmd_start = start + 0.4          # the supervisor's own checks come first
     end = cmd_start + command_seconds + 0.5
     rows = [{**base, "phase": "before", "t": 1e9 + start, "mono": start}]
-    probe = {**base, "command_pid": pid, "command_start_mono": cmd_start}
+    probe = {**base, "command_pid": pid, "command_start_mono": cmd_start, "detection": "ok",
+             "post_exec_at_probe_start": observation != "none_short_command"}
     if observation == "during":
         rows.append({**probe, "phase": "during", "t": 1e9 + cmd_start + 1, "mono": cmd_start + 1.1,
                      "probe_start_mono": cmd_start + 1.0, "probe_end_mono": cmd_start + 1.1,
@@ -2803,3 +2804,162 @@ def test_round2_blocker1_the_dispatcher_refuses_a_manifest_or_proof_leading_insi
     source = (SCRIPTS / "verify_release_manifest.py").read_text()
     main = source[source.index("def main("):]
     assert main.index("refuse_forbidden(value)") < main.index("json.loads(args.manifest.read_text())")
+
+
+# ---------- round 3 ----------
+
+def test_round3_blocker3_a_masked_detection_failure_is_never_a_short_command_exception():
+    """Round 3 counterexample: ps failing made the probe report "process absent" and exit 0; with an upper
+    bound of 2.6 s the summary accepted none_short_command (first check) or overlap_only (second check)."""
+    def step(observation):
+        rows = m3_rows("lint1", 100.0, observation=observation, command_seconds=2.1)   # upper bound 2.6 s
+        assert rows[-1]["mono"] - rows[-1]["command"]["start_mono"] == pytest.approx(2.6)
+        return rows
+
+    for observation in ("none_short_command", "overlap_only"):
+        rows = step(observation)
+        assert m3(rows)["observation"] == {"lint1": observation}          # a real, detected case is admitted
+        blind = {k: v for k, v in rows[1].items() if k != "detection"}     # what the old probe wrote on a ps failure
+        refused(m3, [rows[0], blind, rows[-1]])
+        refused(m3, [rows[0], {**rows[1], "detection": "impossible"}, rows[-1]])
+        refused(m3, [rows[0], rows[1], {**rows[-1], "probe_rc": 1}])       # the probe now fails: never an exception
+    assert gate.SHORT_COMMAND_MAX_S == 10.0
+    refused(m3, m3_rows("lint1", 100.0, observation="none_short_command", command_seconds=9.6))   # 10.1 s upper bound
+    assert m3(m3_rows("lint1", 100.0, observation="none_short_command", command_seconds=9.4))["observation"]
+
+
+def test_round3_blocker3_a_probe_that_only_saw_the_relay_before_exec_is_never_credited():
+    """Round 3 counterexample (scheduling): marker written at 100.4, relay descheduled before exec; the probe
+    runs entirely on the live relay (101.0-101.2); exec at 101.3; command over at 101.4; "after" at 103.0."""
+    base = {"step": "full", "free_bytes": 10**10, "swap_bytes": 1}
+    before = {**base, "phase": "before", "t": 1.0, "mono": 100.0}
+    after = {**base, "phase": "after", "t": 4.0, "mono": 103.0, "probe_rc": 0, "supervisor_rc": 0,
+             "command": {"started": True, "pid": 4242, "start_mono": 100.4, "start_t": 1.4}}
+    on_relay = {**base, "phase": "during", "t": 2.2, "mono": 101.2, "detection": "ok", "command_pid": 4242,
+                "command_start_mono": 100.4, "probe_start_mono": 101.0, "probe_end_mono": 101.2,
+                "alive_at_probe_start": True, "alive_at_probe_end": True}
+    # As the previous probe wrote it (no notion of exec): the pid was alive at both ends, yet it was the relay.
+    refused(m3, [before, on_relay, after])
+    refused(m3, [before, {**on_relay, "post_exec_at_probe_start": False}, after])
+    # What the corrected probe writes for this schedule: no credit, an explicit flagged exception.
+    missed = {**on_relay, "phase": "missed", "reason": "command_ended_before_first_probe", "probe_start_mono": 101.5,
+              "probe_end_mono": 101.6, "mono": 101.6, "post_exec_at_probe_start": False, "alive_at_probe_start": False,
+              "alive_at_probe_end": False}
+    summary = m3([before, missed, after])
+    assert summary["observation"] == {"full": "none_short_command"} and summary["during_samples"] == {"full": 0}
+    assert summary["command_seconds_upper_bound"]["full"] == pytest.approx(2.6)  # an upper bound, published apart
+    assert m3([before, {**on_relay, "post_exec_at_probe_start": True}, after])["observation"] == {"full": "during"}
+
+
+def granite_cache(tmp_path, record):
+    hub = tmp_path / "hub"
+    model = hub / ("models--" + record["model_id"].replace("/", "--"))
+    snapshot = model / "snapshots" / record["revision"]
+    snapshot.mkdir(parents=True)
+    (model / "refs").mkdir()
+    (model / "refs" / "main").write_text(record["revision"])
+    return hub, model, snapshot
+
+
+def test_round3_blocker1_granite_precondition_guards_every_path_before_provision_reads(tmp_path):
+    """Round 3 counterexample: ``refs`` of an allowed cache is a link to a sealed folder holding an ordinary
+    ``main`` (the engine only checks the final file for being a link), or a snapshot file links to a sealed
+    target of the expected size (the engine would open it to hash it)."""
+    from memory_os_v4.ops import provision
+
+    record = provision.catalog()
+    sealed = tmp_path / "sealed" / "brief_v5_val"
+    sealed.mkdir(parents=True)
+    (sealed / "main").write_text(record["revision"])
+    smallest = min(record["files"], key=lambda item: item["bytes"])
+    (sealed / "target.bin").write_bytes(b"x" * smallest["bytes"])  # the expected size: the engine would hash it
+
+    called = []
+
+    class Spy:  # the real engine, observed: plan must not even be entered
+        catalog = staticmethod(provision.catalog)
+
+        @staticmethod
+        def plan(**kwargs):
+            called.append(kwargs)
+            return provision.plan(**kwargs)
+
+    # (1) the parent folder ``refs`` is the link
+    hub, model, snapshot = granite_cache(tmp_path / "a", record)
+    (model / "refs" / "main").unlink()
+    (model / "refs").rmdir()
+    (model / "refs").symlink_to(sealed)
+    with Watch(sealed) as seen:
+        refused(gate.guarded_plan, Spy, resources=("granite",), cache_dir=hub)
+    assert seen.events == [] and called == []
+    # (2) a snapshot file links to a sealed target
+    hub, model, snapshot = granite_cache(tmp_path / "b", record)
+    target = snapshot / smallest["path"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.symlink_to(sealed / "target.bin")
+    with Watch(sealed) as seen:
+        refused(gate.guarded_plan, Spy, resources=("granite",), cache_dir=hub)
+    assert seen.events == [] and called == []
+    # (3) the snapshot folder itself, or the table, leads inside
+    hub, model, snapshot = granite_cache(tmp_path / "c", record)
+    snapshot.rmdir()
+    snapshot.symlink_to(sealed)
+    with Watch(sealed) as seen:
+        refused(gate.guarded_plan, Spy, resources=("granite",), cache_dir=hub)
+        refused(gate.guarded_plan, Spy, resources=("cl100k",), table_path=sealed / "cl100k_base.tiktoken")
+        alias = tmp_path / "alias"
+        alias.symlink_to(sealed)
+        refused(gate.guarded_plan, Spy, resources=("cl100k",), table_path=alias / "cl100k_base.tiktoken")
+    assert seen.events == [] and called == []
+    # A clean (incomplete) cache reaches the unchanged engine, which answers "not ready".
+    hub, model, snapshot = granite_cache(tmp_path / "d", record)
+    assert gate.guarded_plan(Spy, resources=("granite",), cache_dir=hub)["ready"] is False and len(called) == 1
+    refused(gate.guarded_plan, Spy, resources=("granite",))          # no implicit cache location
+    paths = gate.provision_paths(record, resources=("granite",), cache_dir=hub)
+    assert model / "refs" in paths and model / "refs" / "main" in paths
+    assert all(snapshot / item["path"] in paths for item in record["files"])
+    source = (SCRIPTS / "release_410_checks.py").read_text()
+    assert source.count("provision.plan(") == 1 and "return provision.plan(**kwargs)" in source  # one guarded call site
+    assert source.count("= guarded_plan(provision,") == 2
+
+
+def test_round3_blocker2_an_inaccessible_configuration_is_unobservable_never_absent(tmp_path, monkeypatch):
+    """Round 3 counterexample: os.path.lexists turns a PermissionError into False, so observe() answered
+    "absent" and two identical observations gave real_client_configs_unchanged = True."""
+    home = real_home(tmp_path)
+    before = snapshot(home)
+    target = str(home / ".codex/config.toml")
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if os.fspath(path) == target:
+            raise PermissionError(13, "Permission denied", target)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    with pytest.raises(helper.Unobservable):
+        helper.observe(target)
+    with pytest.raises(helper.Unobservable):   # the snapshot is refused: nothing can be declared unchanged
+        snapshot(home)
+    for error in (OSError(1, "Operation not permitted"), OSError(5, "Input/output error")):
+        monkeypatch.setattr(os, "lstat", lambda path, *a, _e=error, **k: (_ for _ in ()).throw(_e))
+        with pytest.raises(helper.Unobservable):
+            helper.lstat_state(target)
+    monkeypatch.setattr(os, "lstat", real_lstat)
+    # Established absence: no such entry, or a parent that is not a folder.
+    assert helper.observe(target) == {"state": "absent"}
+    assert helper.observe(home / ".cursor/mcp.json/child") == {"state": "absent"}  # ENOTDIR
+    assert all(helper.production_unchanged(before, snapshot(home)).values())
+    # The same with a real inaccessible parent.
+    (home / ".grok").mkdir()
+    os.chmod(home / ".grok", 0o000)
+    try:
+        with pytest.raises(helper.Unobservable):
+            helper.observe(home / ".grok/config.toml")
+        with pytest.raises(helper.Unobservable):
+            snapshot(home)
+    finally:
+        os.chmod(home / ".grok", 0o700)
+    source = (SCRIPTS / "qualify_install_410_helper.py").read_text()
+    body = source[source.index("def observe("):source.index("def production_snapshot(")]
+    assert "lexists" not in body and "os.path.isdir" not in body and "lstat_state(path)" in body
