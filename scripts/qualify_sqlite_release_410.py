@@ -46,6 +46,24 @@ def hashed_inventory(directory):
     return rows, hashlib.sha256(text).hexdigest()
 
 
+def sealed_pieces(root):
+    """SHA-256 of the logs and JSON pieces a harness leaves at the top of its folder (re-verified at G15)."""
+    return {path.name: digest(path) for path in sorted(Path(root).iterdir())
+            if path.is_file() and not path.is_symlink() and path.suffix in (".json", ".log") and path.name != "report.json"}
+
+
+COMMON_DRILL = """import json, os, sys; from contextlib import closing; from pathlib import Path
+from memory_os_v4.ops.settings import OpsSettings
+from memory_os_v4.ops import sqlite_backup as s4
+from memory_os_v4.sqlite_store import SQLiteStore
+s=OpsSettings.from_env()
+with closing(SQLiteStore(Path(os.environ['MEMORY_V4_DIR']))):
+    d=s4.restore_drill(s,archive=Path(sys.argv[1]),apply=True,start_server=True,reconcile=True)
+print(json.dumps({'drill':d}))
+if not d.get('ok'): raise RuntimeError(d)
+"""
+
+
 def footprint(source):
     return sum(path.stat().st_size for path in Path(source).glob("store.sqlite3*") if path.is_file())
 
@@ -58,9 +76,10 @@ def start_disk_budget(source, free, *, policy=None):
     if size <= 0:
         raise ValueError("Source store footprint unreadable")
     selected, reserve, work = policy(size)
-    # 4.0.9 budget, plus one more private copy of the cut (lexical refusal store).
+    # 4.0.9 budget, plus one more private copy of the cut (lexical refusal store) and one more
+    # restoration of the common sealed archive by the second artifact (restored copy + its work area).
     dynamic = (max(7_000_000_000, 5_000_000_000 + 20 * size) if selected == "legacy5gb"
-               else reserve + work + 4 * size + 256 * 1024**2) + size
+               else reserve + work + 4 * size + 256 * 1024**2) + 3 * size
     return {"source_footprint_bytes": size, "dynamic_budget_bytes": dynamic,
             "required_start_free_bytes": max(MIN_COPY_START, dynamic), "observed_start_free_bytes": free,
             "s4_not_reused": True, "storage_policy": selected}
@@ -150,6 +169,8 @@ def lexical_store(a, manifest):
                                            "inventory_after_sha256": after,
                                            "inventory_entries": len(before_rows),
                                            "files_created": sorted(set(after_rows) - set(before_rows))}
+        report["added"] = row["added"]
+        report["evidence_sha256"] = sealed_pieces(root)
         report["seconds"] = time.monotonic() - started
         report["ok"] = True
         validate_lexical_store(report, manifest)
@@ -169,7 +190,7 @@ def copy(a, manifest):
     from qualify_sqlite_activation import profile_environment
     from release_copy_worker import QUERIES
     from search_qualification import SEARCH_CRITERION, search_hit_counts
-    from release_410_checks import validate_copy
+    from release_410_checks import artifact, validate_copy
     from memory_os_v4.ops.provision import guard, min_free_bytes
 
     SOURCE = manifest["source_commit"]
@@ -372,6 +393,35 @@ if not d.get('ok'): raise RuntimeError(d)
             command([str(interpreters[kind]), "-B", "-c", code], root, s4env, s4root / "s4.log", monitor)
             lines = (s4root / "s4.log").read_text().splitlines()
             report["s4"][kind] = json.loads(next(line for line in reversed(lines) if line.startswith("{")))
+        # G10 "same archive, two artifacts": the archive sealed by the wheel exercise is restored by the
+        # sdist artifact too (same key, same backup folder, its own work area). Both S4 exercises above stay.
+        sealed = report["s4"]["wheel"]["backup"]
+        archive = root / "s4-wheel" / "backups" / sealed["archive"]
+        common = {"archive": sealed["archive"], "archive_sha256": digest(archive),
+                  "drills": {"wheel": {**report["s4"]["wheel"]["drill"], "artifact_sha256": artifact(manifest, ".whl")["sha256"]}}}
+        if common["archive_sha256"] != sealed["archive_sha256"]:
+            raise ValueError("Common sealed archive changed after its backup")
+        common_root = root / "s4-common-sdist"
+        common_root.mkdir(mode=0o700)
+        common_env = {
+            **env,
+            "MEMORY_V4_BUILD_COMMIT": SOURCE,
+            "MEMORY_V4_DIR": str(root / "wheel-store"),
+            "MEMORY_V4_OPS_DIR": str(common_root / "ops"),
+            "MEMORY_V4_BACKUP_DIR": str(root / "s4-wheel" / "backups"),
+            "MEMORY_V4_BACKUP_KEY": str(root / "s4-wheel" / "backup.key"),
+            "MEMORY_V4_URL": "http://127.0.0.1:9/mcp/",
+            "MEMORY_V4_TOKEN_FILE": str(common_root / "never-production.token"),
+            "MEMORY_V4_SERVICE_LABEL": "",
+        }
+        command([str(interpreters["sdist"]), "-B", "-c", COMMON_DRILL, str(archive)], root, common_env,
+                common_root / "s4.log", monitor)
+        lines = (common_root / "s4.log").read_text().splitlines()
+        common["drills"]["sdist"] = {**json.loads(next(line for line in reversed(lines) if line.startswith("{")))["drill"],
+                                     "artifact_sha256": artifact(manifest, ".tar.gz")["sha256"]}
+        common["archive_sha256_after"] = digest(archive)
+        report["s4_common"] = common
+        report["evidence_sha256"] = sealed_pieces(root)
         report["seconds"] = time.monotonic() - started
         report["ok"] = True
         validate_copy(report, manifest)
@@ -399,6 +449,12 @@ def main(argv=None):
     p.add_argument("--output-root", type=Path)
     a = p.parse_args(argv)
     sys.path.insert(0, str(ROOT / "v4/src"))
+    from release_410_checks import refuse_forbidden
+
+    for name in ("manifest", "environments", "lexical_environment", "baseline_python", "source_dir", "production_plist",
+                 "output_root"):
+        if getattr(a, name) is not None:
+            refuse_forbidden(getattr(a, name))  # lexical then resolved, before any read or copy
     if a.print_start_budget:
         if a.source_dir is None:
             p.error("--source-dir required")
