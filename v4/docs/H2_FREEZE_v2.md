@@ -1,5 +1,7 @@
 # H2 — gel v2 du manifeste `h2-lexical-parity-v1` (22/11/2026)
 
+> **Remplacé par [H2_FREEZE_v3.md](H2_FREEZE_v3.md).** Gel v2 jugé NON VALIDÉ, jamais exécuté sur BEAM.
+
 Pointeur vers le gel ; le protocole et les garanties sont dans [H2_RUN_v2.md](H2_RUN_v2.md), qui est
 attesté par ce gel. Ce fichier-ci ne l'est pas (il contient l'empreinte du manifeste).
 **Aucune récupération exécutée sur BEAM, aucun rappel calculé. Lancement soumis au verdict Codex.**
