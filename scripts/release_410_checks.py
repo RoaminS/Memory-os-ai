@@ -1,4 +1,4 @@
-"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 7). Fail closed.
+"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 8). Fail closed.
 
 Invariants of §1, gate states, admissible decisions, commit/artifact binding. No recording
 command raises ``release_ready``: only the final verification (G15) does, after the exit
@@ -106,8 +106,8 @@ DECISIONS = {
 CHAIN_STEPS = (
     "preconditions", "full", "lint1", "lint2", "build", "manifest", "rec_decisions_pre", "source_checks",
     "rec_source", "resolve_lexical", "rec_resolve_lexical", "resolve_semantic", "rec_resolve_semantic",
-    "install_lexical", "rec_install_lexical", "lexical_wheel", "rec_lexical_wheel", "lexical_store",
-    "rec_lexical_store", "envs", "install_semantic", "rec_install_semantic", "copy", "rec_copy",
+    "install_lexical", "rec_install_lexical", "lexical_wheel", "rec_lexical_wheel", "envs", "lexical_store",
+    "rec_lexical_store", "install_semantic", "rec_install_semantic", "copy", "rec_copy",
     "perimeter", "rec_perimeter", "await_d1", "rec_decisions_post", "rec_external", "relays", "rec_relay",
 )
 # Present only when Romain supplied the matching input (bounded wait for D1; external P-B proof).
@@ -460,11 +460,25 @@ def _clean_state(row, where):
             "Test label/port not recognised absent: " + where)
 
 
-def _zero_write(row, where):
+# SHA-256 of the canonical JSON of an inventory without any entry (``inventory_digest({})`` of the helper).
+EMPTY_INVENTORY_SHA256 = hashlib.sha256(b"{}").hexdigest()
+
+
+def _zero_write(row, where, *, allow_empty=False):
+    """Preview without any write: identical content-hash inventories before and after.
+
+    The entry count must be attested (present, a true integer, never negative). An EMPTY inventory is
+    accepted only where the harness creates the HOME empty on purpose (``allow_empty``: first lexical
+    installation, N6, nothing pre-copied) and only with the digest of the empty inventory on both sides:
+    any write into that HOME changes ``inventory_after_sha256`` and is still refused.
+    """
+    entries = row.get("inventory_entries")
     require(row.get("ok") is True and row.get("returncode") == 0 and row.get("inventory_identical") is True
             and is_sha(row.get("inventory_before_sha256"))
             and row.get("inventory_before_sha256") == row.get("inventory_after_sha256")
-            and row.get("inventory_hashes_content") is True and row.get("inventory_entries", 0) > 0,
+            and row.get("inventory_hashes_content") is True
+            and type(entries) is int and entries >= (0 if allow_empty else 1)
+            and (entries == 0) == (row["inventory_before_sha256"] == EMPTY_INVENTORY_SHA256),
             "Preview wrote, or its content-hash inventory is missing: " + where)
 
 
@@ -545,7 +559,7 @@ def validate_install(p, m, profile):
     expected_download = CL100K_BYTES if profile == "lexical" else 0
     require(one["apply"].get("download_bytes") == expected_download and two["apply"].get("download_bytes") == 0,
             "Resource download bytes differ from N6")
-    _zero_write(one["preview"], "quickstart preview")
+    _zero_write(one["preview"], "quickstart preview", allow_empty=True)
     undo = one["undo"]
     require(undo.get("ok") is True and undo.get("returncode") == 0 and undo.get("with_service") is True
             and undo.get("label_absent") is True and undo.get("port_free") is True and undo.get("plist_removed") is True
@@ -661,8 +675,19 @@ def validate_lexical_store(p, m):
     refusal = p.get("opposite_profile_open", {})
     require(refusal.get("refused") is True and refusal.get("code") == "store_profile_mismatch"
             and refusal.get("requested") == "semantic" and is_sha(refusal.get("inventory_before_sha256"))
-            and refusal.get("inventory_before_sha256") == refusal.get("inventory_after_sha256"),
+            and refusal.get("inventory_before_sha256") == refusal.get("inventory_after_sha256")
+            and type(refusal.get("inventory_entries")) is int and refusal["inventory_entries"] > 0
+            and refusal.get("files_created") == [],
             "Semantic open of the lexical store not refused without mutation")
+    # The opposite open runs in the installed SEMANTIC wheel environment, ML closure present: in the
+    # lexical venv the engine stops earlier (semantic_dependency_missing) and never reaches the store.
+    closure, semantic = refusal.get("ml_find_spec"), p.get("semantic_environment")
+    require(refusal.get("package_under_semantic_environment") is True
+            and isinstance(closure, dict) and set(closure) == set(ML_MODULES)
+            and all(value is True for value in closure.values())
+            and isinstance(semantic, dict) and semantic.get("artifact_sha256") == artifact(m, ".whl")["sha256"]
+            and is_sha(semantic.get("environments_sha256")),
+            "Opposite open not run by the installed semantic wheel with its ML closure")
 
 
 # ---------- G9, G10 ----------

@@ -628,6 +628,72 @@ def test_lexical_wheel_proof(path, value):
     refused(gate.validate_lexical_wheel, mutate(lexical_wheel_proof(), path, value), m)
 
 
+EMPTY_SHA = hashlib.sha256(b"{}").hexdigest()
+
+
+def empty_preview(**changes):
+    """Preview of the first lexical installation: HOME created empty on purpose (N6, nothing pre-copied)."""
+    row = {**zero_write(), "inventory_entries": 0, "inventory_before_sha256": EMPTY_SHA,
+           "inventory_after_sha256": EMPTY_SHA}
+    row.update(changes)
+    return {k: v for k, v in row.items() if v is not ...}
+
+
+def test_g7_an_attested_empty_home_is_a_valid_zero_write_preview(tmp_path):
+    """Counterexample of the review: H1 is empty before and after the preview, nothing was written."""
+    assert EMPTY_SHA == gate.EMPTY_INVENTORY_SHA256 == helper.inventory_digest(helper.inventory(tmp_path))
+    for profile in ("lexical", "semantic"):
+        proof, m = install_proof(profile)
+        proof["install_1"]["preview"] = empty_preview()
+        gate.validate_install(proof, m, profile)
+    # The helper produces exactly these fields for an empty HOME, and refuses one written file.
+    before, after, same = tmp_path / "before.json", tmp_path / "after.json", tmp_path / "same.json"
+    home = tmp_path / "home"
+    home.mkdir()
+    assert helper.main(["inventory", "--root", str(home), "--output", str(before)]) == 0
+    assert helper.main(["inventory", "--root", str(home), "--output", str(after)]) == 0
+    assert helper.main(["same-inventory", str(before), str(after), "--output", str(same)]) == 0
+    row = {**json.loads(same.read_text()), "ok": True, "returncode": 0}
+    assert row["inventory_entries"] == 0 and row["inventory_before_sha256"] == EMPTY_SHA
+    gate._zero_write(row, "empty", allow_empty=True)
+    (home / "written").write_text("x")
+    wrote, differs = tmp_path / "wrote.json", tmp_path / "differs.json"   # evidence is never overwritten
+    assert helper.main(["inventory", "--root", str(home), "--output", str(wrote)]) == 0
+    assert helper.main(["same-inventory", str(before), str(wrote), "--output", str(differs)]) == 1
+    refused(gate._zero_write, {**json.loads(differs.read_text()), "ok": True, "returncode": 0}, "wrote", allow_empty=True)
+
+
+@pytest.mark.parametrize("changes", [
+    {"inventory_entries": ...}, {"inventory_entries": None}, {"inventory_entries": -1}, {"inventory_entries": False},
+    {"inventory_entries": True}, {"inventory_entries": "0"}, {"inventory_entries": 0.0}, {"inventory_entries": [0]},
+    {"inventory_after_sha256": SHA}, {"inventory_before_sha256": SHA}, {"inventory_identical": False},
+    {"inventory_hashes_content": False}, {"inventory_hashes_content": ...}, {"inventory_identical": ...},
+    {"inventory_before_sha256": SHA, "inventory_after_sha256": SHA},   # 0 entry, digest of a non-empty inventory
+    {"inventory_entries": 3},                                          # entries, digest of the empty inventory
+    {"inventory_before_sha256": "", "inventory_after_sha256": ""}, {"ok": False}, {"returncode": 1},
+])
+def test_g7_an_empty_inventory_is_never_accepted_unattested(changes):
+    proof, m = install_proof("lexical")
+    proof["install_1"]["preview"] = empty_preview(**changes)
+    refused(gate.validate_install, proof, m, "lexical")
+
+
+@pytest.mark.parametrize("entries", [..., None, -1, True, "9", 9.0])
+def test_g7_g8_a_missing_or_invalid_entry_count_is_refused_for_both_previews(entries):
+    for block, key in (("install_1", "preview"), ("install_2", "uninstall_preview")):
+        proof, m = install_proof("lexical")
+        proof[block][key] = {k: v for k, v in {**zero_write(), "inventory_entries": entries}.items() if v is not ...}
+        refused(gate.validate_install, proof, m, "lexical")
+
+
+def test_g8_the_uninstall_preview_never_accepts_an_empty_inventory():
+    """The second HOME holds an installation and its witnesses: an empty inventory there proves nothing."""
+    proof, m = install_proof("lexical")
+    gate.validate_install(proof, m, "lexical")
+    proof["install_2"]["uninstall_preview"] = empty_preview()
+    refused(gate.validate_install, proof, m, "lexical")
+
+
 def lexical_store_proof():
     facts = worker.LEXICAL_FACTS
     ranks = {q: [facts[i], facts[(i + 1) % len(facts)]] for i, q in enumerate(worker.LEXICAL_QUERIES)}
@@ -637,8 +703,13 @@ def lexical_store_proof():
             "added": len(facts), "backup": {"ok": True, "archive": "lexical.mosb", "archive_sha256": SHA},
             "restore": {"ok": True, "archive_sha256": SHA},
             "rankings": {k: copy.deepcopy(ranks) for k in ("after_write", "after_reopen", "after_restore")},
+            "semantic_environment": {"path": "/e/wheel", "artifact_sha256": WHEEL_SHA, "environments_sha256": SHA},
             "opposite_profile_open": {"refused": True, "code": "store_profile_mismatch", "requested": "semantic",
-                                      "inventory_before_sha256": SHA, "inventory_after_sha256": SHA}}
+                                      "inventory_before_sha256": SHA, "inventory_after_sha256": SHA,
+                                      "inventory_entries": 2, "files_created": [],
+                                      "package_path": "/e/wheel/lib/python3.11/site-packages/memory_os_v4/__init__.py",
+                                      "package_under_semantic_environment": True,
+                                      "ml_find_spec": {name: True for name in gate.ML_MODULES}}}
 
 
 def test_blocker4_g11_with_one_arbitrary_query_or_no_restored_marker_is_refused():
@@ -668,11 +739,94 @@ def test_blocker4_g11_with_one_arbitrary_query_or_no_restored_marker_is_refused(
     (("restore", "ok"), False), (("fixed_data_sha256",), WHEEL_SHA), (("scripts_sha256",), {}),
     (("opposite_profile_open", "refused"), False), (("opposite_profile_open", "code"), "store_profile_unverifiable"),
     (("opposite_profile_open", "inventory_after_sha256"), WHEEL_SHA), (("opposite_profile_open", "requested"), "lexical"),
+    # G11: the opposite open is the installed semantic wheel's, ML closure present, and it creates nothing.
+    (("opposite_profile_open", "code"), "semantic_dependency_missing"),
+    (("opposite_profile_open", "files_created"), ["store.sqlite3-wal"]), (("opposite_profile_open", "files_created"), None),
+    (("opposite_profile_open", "inventory_entries"), 0), (("opposite_profile_open", "inventory_entries"), True),
+    (("opposite_profile_open", "package_under_semantic_environment"), False),
+    (("opposite_profile_open", "ml_find_spec"), {name: name != "faiss" for name in gate.ML_MODULES}),
+    (("opposite_profile_open", "ml_find_spec"), {"faiss": True}), (("opposite_profile_open", "ml_find_spec"), None),
+    (("semantic_environment", "artifact_sha256"), SDIST_SHA), (("semantic_environment", "environments_sha256"), "x"),
+    (("semantic_environment",), None),
 ])
 def test_lexical_store_proof(path, value):
     m = manifest()
     gate.validate_lexical_store(lexical_store_proof(), m)
     refused(gate.validate_lexical_store, mutate(lexical_store_proof(), path, value), m)
+
+
+def environments_file(tmp_path, **changes):
+    """``environments.json`` as prepare_release_410_envs.py writes it; nothing is installed."""
+    m = manifest()
+    wheel, lexical = tmp_path / "envs/wheel", tmp_path / "lexical/venv"
+    for env in (wheel, lexical):
+        (env / "bin").mkdir(parents=True, exist_ok=True)
+        (env / "bin/python").write_text("")
+    closure = {name: True for name in gate.ML_MODULES}
+    row = {"ok": True, "version": m["version"], "source_commit": COMMIT, "run_tag": TAG, "artifacts": m["artifacts"],
+           "wheel_environment": str(wheel), "lexical_environment": str(lexical),
+           "environments": {"wheel": {"profile": "semantic", "path": str(wheel), "artifact_sha256": WHEEL_SHA,
+                                      "ml_find_spec": closure},
+                            "lexical": {"profile": "lexical", "path": str(lexical), "artifact_sha256": WHEEL_SHA,
+                                        "ml_find_spec": {name: False for name in gate.ML_MODULES}}}}
+    for path, value in changes.items():
+        mutate(row, tuple(path.split("/")), value)
+    target = tmp_path / "envs/environments.json"
+    target.write_text(json.dumps(row))
+    return type("Args", (), {"environments": target, "lexical_environment": lexical})(), m, wheel
+
+
+@pytest.fixture
+def outside_checkout(tmp_path, monkeypatch):
+    """The test tmp dir may live below the checkout: the runner's checkout is moved aside for these cases."""
+    monkeypatch.setattr(sqlite_gate, "ROOT", tmp_path / "checkout")
+
+
+def test_g11_the_opposite_open_uses_the_attested_semantic_wheel_environment(tmp_path, outside_checkout):
+    a, m, wheel = environments_file(tmp_path)
+    environment, python, attested = sqlite_gate.semantic_wheel_environment(a, m)
+    assert environment == wheel and python == wheel / "bin/python"
+    assert attested == {"path": str(wheel), "artifact_sha256": WHEEL_SHA,
+                        "environments_sha256": hashlib.sha256(a.environments.read_bytes()).hexdigest()}
+
+
+@pytest.mark.parametrize("path,value", [
+    ("ok", False), ("run_tag", "v8"), ("source_commit", "f" * 40), ("version", "4.0.9"), ("artifacts", []),
+    ("environments/wheel/profile", "lexical"), ("environments/wheel/artifact_sha256", SDIST_SHA),
+    ("environments/wheel/ml_find_spec", {"faiss": False, "torch": True}), ("environments/wheel/ml_find_spec", {}),
+    ("environments/wheel/ml_find_spec", None), ("environments/wheel/path", "/elsewhere"),
+    ("environments/lexical/path", "/another/venv"), ("environments/wheel", None), ("environments", None),
+    ("wheel_environment", "/missing/wheel"),
+])
+def test_g11_a_semantic_environment_not_qualified_for_this_run_is_refused(tmp_path, outside_checkout, path, value):
+    a, m, _ = environments_file(tmp_path, **{path: value})
+    refused(sqlite_gate.semantic_wheel_environment, a, m)
+
+
+def test_g11_the_semantic_environment_is_never_the_lexical_venv_or_the_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(sqlite_gate, "ROOT", tmp_path / "checkout")
+    a, m, wheel = environments_file(tmp_path)
+    sqlite_gate.semantic_wheel_environment(a, m)
+    lexical = a.lexical_environment
+    a.lexical_environment = wheel                      # same venv on both sides: no opposite profile
+    refused(sqlite_gate.semantic_wheel_environment, a, m)
+    a.lexical_environment = lexical
+    monkeypatch.setattr(sqlite_gate, "ROOT", tmp_path)  # the environment now lies inside the checkout
+    refused(sqlite_gate.semantic_wheel_environment, a, m)
+
+
+def test_g11_semantic_refusal_runs_after_the_environments_with_the_semantic_interpreter():
+    steps = gate.CHAIN_STEPS
+    assert steps.index("rec_lexical_wheel") < steps.index("envs") < steps.index("lexical_store")
+    assert steps.index("lexical_store") + 1 == steps.index("rec_lexical_store") < steps.index("install_semantic")
+    source = (SCRIPTS / "sqlite_release_worker_410.py").read_text()
+    branch = source[source.index('if name == "semantic-refusal":'):source.index('if name == "lexical-refusal":')]
+    assert 'installed_candidate(plan, "semantic")' in branch and 'installed_candidate(plan, "lexical")' not in branch
+    runner = (SCRIPTS / "qualify_sqlite_release_410.py").read_text()
+    assert 'run(semantic_python, "semantic-refusal")' in runner and 'run(python, "lexical-store")' in runner
+    with pytest.raises(SystemExit):                    # --environments is required in this mode
+        sqlite_gate.main(["--mode", "lexical-store", "--manifest", "/x/m.json", "--lexical-environment", "/x/v",
+                          "--output-root", "/x/o"])
 
 
 def test_lexical_store_data_and_queries_are_fixed_literals():

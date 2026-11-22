@@ -2,7 +2,9 @@
 
 Kinds: ``snapshot`` and the five semantic workers (G9, as in 4.0.9), ``lexical-refusal``
 (G9 addition: the lexical profile is refused on the semantic copy), ``lexical-store`` and
-``semantic-refusal`` (G11: brand-new lexical store on FIXED data and queries).
+``semantic-refusal`` (G11: brand-new lexical store on FIXED data and queries). ``semantic-refusal``
+runs in the installed SEMANTIC wheel environment: the engine checks the ML closure before the store
+profile, so the lexical venv (no faiss) would stop at ``semantic_dependency_missing``.
 Heavy imports stay inside ``main`` so the fixed literals can be hashed without the engine.
 """
 
@@ -87,7 +89,7 @@ def installed_candidate(plan, profile):
     return str(Path(memory_os_v4.__file__).resolve())
 
 
-def refusal(root, name, store, requested):
+def refusal(root, name, store, requested, **attested):
     """Open ``store`` in the opposite profile: it must be refused by ``store_profile_mismatch``."""
     from memory_os_v4 import Config, MemoryV4
     from memory_os_v4.config import ProfileError
@@ -99,7 +101,7 @@ def refusal(root, name, store, requested):
         cfg.data_dir, cfg.store_backend = str(store), "sqlite_s1"
         if cfg.retrieval_profile != "semantic":
             raise ValueError("Semantic profile expected for the opposite open")
-    report = {"requested": requested, "refused": False, "code": None}
+    report = {"requested": requested, "refused": False, "code": None, **attested}
     try:
         with MemoryV4(config=cfg):
             report["error"] = "store opened in the opposite profile"
@@ -202,8 +204,16 @@ def main():
     if name == "semantic-refusal":
         socket.create_connection = denied
         socket.socket.connect = denied
-        installed_candidate(plan, "lexical")
-        return refusal(root, name, root / "lexical-store", "semantic")
+        import importlib.util as util
+
+        # Installed semantic candidate, ML closure present: only then does the engine reach the profile
+        # of the store instead of refusing on its own missing dependencies.
+        package = installed_candidate(plan, "semantic")
+        closure = {module: util.find_spec(module) is not None
+                   for module in ("torch", "sentence_transformers", "transformers", "faiss")}
+        if not all(closure.values()):
+            raise ValueError("Semantic ML closure required for the opposite open")
+        return refusal(root, name, root / "lexical-store", "semantic", package_path=package, ml_find_spec=closure)
     if name == "lexical-refusal":
         socket.create_connection = denied
         socket.socket.connect = denied

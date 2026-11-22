@@ -4,7 +4,8 @@
 4.0.7 / wheel / sdist workers and reopenings, private doctor, S4 x2, plus the 4.1.0 addition:
 the lexical profile is refused on the copy without any write.
 ``--mode lexical-store`` (G11): brand-new lexical store through the installed lexical wheel,
-on fixed data and queries; the opposite (semantic) open is refused without mutation.
+on fixed data and queries; the opposite (semantic) open, run by the installed semantic wheel
+environment (ML closure present), is refused without mutation.
 The production plist and store are only READ. ``--print-start-budget`` runs nothing.
 """
 
@@ -120,6 +121,36 @@ def worker_files(root, tools):
     return worker
 
 
+def semantic_wheel_environment(a, manifest):
+    """The installed semantic wheel environment of this run (``environments.json``), for the opposite open.
+
+    The engine checks the ML closure before the store profile: the lexical venv has no faiss and would
+    be refused by ``semantic_dependency_missing`` without ever reaching the store.
+    """
+    from release_410_checks import artifact
+
+    paths = json.loads(a.environments.read_text())
+    row = (paths.get("environments") or {}).get("wheel") or {}
+    lexical = (paths.get("environments") or {}).get("lexical") or {}
+    if not (paths.get("ok") is True and paths.get("version") == manifest["version"]
+            and paths.get("source_commit") == manifest["source_commit"]
+            and paths.get("artifacts") == manifest["artifacts"] and paths.get("run_tag") == manifest["run_tag"]):
+        raise ValueError("Installed environments are not qualified for this manifest")
+    closure = row.get("ml_find_spec")
+    if not (row.get("profile") == "semantic" and row.get("artifact_sha256") == artifact(manifest, ".whl")["sha256"]
+            and row.get("path") == paths.get("wheel_environment")
+            and isinstance(closure, dict) and closure and all(value is True for value in closure.values())):
+        raise ValueError("Semantic wheel environment is not the sealed wheel with its ML closure")
+    if Path(lexical.get("path") or "").resolve() != a.lexical_environment.resolve():
+        raise ValueError("Environments were attested with another lexical environment")
+    environment = Path(paths["wheel_environment"]).absolute()
+    python = environment / "bin/python"
+    if not python.is_file() or ROOT in python.parents or environment.resolve() == a.lexical_environment.resolve():
+        raise ValueError("Semantic environment must be outside checkout and distinct from the lexical one")
+    return environment, python, {"path": str(environment), "artifact_sha256": row["artifact_sha256"],
+                                 "environments_sha256": digest(a.environments)}
+
+
 def lexical_store(a, manifest):
     """G11."""
     from qualify_distribution_d1a import command
@@ -144,6 +175,7 @@ def lexical_store(a, manifest):
     try:
         if report["scripts_sha256"] != manifest["lexical_store_scripts_sha256"]:
             raise ValueError("Lexical store tools differ from sealed manifest")
+        semantic, semantic_python, report["semantic_environment"] = semantic_wheel_environment(a, manifest)
         (root / "home").mkdir(mode=0o700)
         plan = {"format": PLAN_FORMAT, "source_commit": manifest["source_commit"], "version": manifest["version"],
                 "lexical": {"fixed_data_sha256": report["fixed_data_sha256"]}}
@@ -160,25 +192,27 @@ def lexical_store(a, manifest):
                    MEMORY_V4_URL="http://127.0.0.1:9/mcp/", MEMORY_V4_TOKEN_FILE=str(root / "never-production.token"),
                    MEMORY_V4_SERVICE_LABEL="")
 
-        def run(kind):
-            command([str(python), "-B", str(worker), "--plan", str(plan_path), "--kind", kind], root, env,
+        def run(executable, kind):
+            command([str(executable), "-B", str(worker), "--plan", str(plan_path), "--kind", kind], root, env,
                     root / (kind + ".log"), guard)
             return json.loads((root / (kind + ".json")).read_text())
 
-        row = run("lexical-store")
+        row = run(python, "lexical-store")
         report.update(rankings=row["rankings"], marker=row["marker"], restored_marker=row["restored_marker"],
                       backup=row["backup"], restore=row["restore"], find_spec=row["find_spec"],
                       package_path=row["package_path"], store_instance_id=row["store_instance_id"],
                       package_under_site_packages="site-packages" in Path(row["package_path"]).parts
                       and (a.lexical_environment.resolve() in Path(row["package_path"]).parents))
-        # Opposite profile: inventories with content hashes taken by this parent, no worker alive.
+        # Opposite profile, by the installed SEMANTIC wheel (the lexical venv lacks the ML closure and
+        # would never reach the store): inventories with content hashes taken by this parent, no worker alive.
         before_rows, before = hashed_inventory(root / "lexical-store")
-        refused = run("semantic-refusal")
+        refused = run(semantic_python, "semantic-refusal")
         after_rows, after = hashed_inventory(root / "lexical-store")
-        report["opposite_profile_open"] = {**refused, "inventory_before_sha256": before,
-                                           "inventory_after_sha256": after,
-                                           "inventory_entries": len(before_rows),
-                                           "files_created": sorted(set(after_rows) - set(before_rows))}
+        report["opposite_profile_open"] = {
+            **refused, "inventory_before_sha256": before, "inventory_after_sha256": after,
+            "inventory_entries": len(before_rows), "files_created": sorted(set(after_rows) - set(before_rows)),
+            "package_under_semantic_environment": "site-packages" in Path(refused.get("package_path", "")).parts
+            and semantic.resolve() in Path(refused.get("package_path", "")).parents}
         report["added"] = row["added"]
         report["evidence_sha256"] = sealed_pieces(root, ["backups/" + row["backup"]["archive"]])
         report["seconds"] = time.monotonic() - started
@@ -471,7 +505,7 @@ def main(argv=None):
             p.error("--source-dir required")
         print(start_disk_budget(a.source_dir, shutil.disk_usage(Path.home()).free)["required_start_free_bytes"])
         return 0
-    needed = (("manifest", "lexical_environment", "output_root") if a.mode == "lexical-store" else
+    needed = (("manifest", "environments", "lexical_environment", "output_root") if a.mode == "lexical-store" else
               ("manifest", "environments", "baseline_python", "source_dir", "production_plist",
                "expected_instance_id", "output_root"))
     missing = [name for name in needed if getattr(a, name) is None]
