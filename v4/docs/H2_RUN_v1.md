@@ -1,5 +1,9 @@
 # H2 — parité lexical / sémantique sur BEAM 100K : exécution (v1)
 
+> **Remplacé par [H2_RUN_v2.md](H2_RUN_v2.md).** Le gel v1 (`h2-410-plan-v1`, manifeste `067fc008…47c059`) a été
+> jugé NON VALIDÉ par Codex le 22/11 et n'a jamais été exécuté sur BEAM ; il est conservé comme preuve. La
+> permission générale de re-gel écrite ci-dessous est retirée (voir v2).
+
 Statut : **harnais livré et manifeste `h2-lexical-parity-v1` gelé ; aucune récupération exécutée sur
 BEAM, aucun rappel calculé.** Contrat : [LEXICAL_PROFILE_4_1_0 §10](LEXICAL_PROFILE_4_1_0.md). Mesure
 rétrospective, sans réglage, sans indépendance statistique. La revue Codex du gel précède toute exécution.

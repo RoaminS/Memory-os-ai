@@ -44,14 +44,19 @@ class FakeHost(beam_h2.Host):
 
     def __init__(self, root):
         self.clone = root / 'clone'
-        self.clone.mkdir()
+        self.clone.mkdir(parents=True)
         self.head, self.code, self.lock = 'a' * 40, 'code-v1', 'numpy==2.4.2\n'
-        self.launched, self.fail = [], None
+        self.launched, self.fail, self.guards, self.fail_guard = [], None, 0, None
+        self.runtime_value, self.after_launch = None, None
 
     def attest(self, revision):
         if revision != self.head:
             raise ValueError('Cannot attest declared source commit')
-        return {'code_files': {'bench/e2e/beam_h2.py': self.code}, 'extra_files': {}}
+        return {'v4/bench/e2e/beam_h2.py': self.code, 'v4/tests/test_beam_h2_410.py': 'tests-v1',
+                'v4/docs/H2_RUN_v2.md': 'doc-v1'}
+
+    def runtime(self):
+        return copy.deepcopy(self.runtime_value)
 
     def archive(self, revision):
         return f'archive {revision} {self.code}'.encode()
@@ -64,13 +69,20 @@ class FakeHost(beam_h2.Host):
                 'python': '3.11', 'ram_gib': 16}
 
     def guard(self, directory):
+        self.guards += 1
+        if self.guards == self.fail_guard:
+            raise beam_h2.ResourceStop('swap 9000000000 > 8500000000 bytes')
         return {'swap_bytes': 0, 'free_bytes': 10 ** 12}
 
     def launch(self, plan, directory, arm, manifest_sha256, deadline):
         self.launched.append(arm)
         if arm == self.fail:
             raise RuntimeError(f'Worker {arm} failed')
+        if isinstance(self.fail, BaseException) and arm == 'semantic':
+            raise self.fail
         run_worker(directory, arm, {} if arm == 'lexical' else {'embed_model': 'hash'})
+        if self.after_launch:
+            self.after_launch(arm)
 
 
 def run_worker(directory, arm, patch):
@@ -205,6 +217,12 @@ CHANGES = {
     'corpus': lambda directory, data, host, monkeypatch: data.write_text(data.read_text() + '\n'),
     'commit': lambda directory, data, host, monkeypatch: setattr(host, 'head', 'c' * 40),
     'code': lambda directory, data, host, monkeypatch: setattr(host, 'code', 'code-v2'),
+    'runtime_record': lambda directory, data, host, monkeypatch: (
+        directory / 'runtime.json').write_text('{}'),
+    'query_budget_in_code': lambda directory, data, host, monkeypatch: monkeypatch.setattr(
+        beam_h2, 'QUERY_BYTES', 8192),
+    'expected_encoder_in_code': lambda directory, data, host, monkeypatch: monkeypatch.setitem(
+        beam_h2.EXPECTED_ENCODER, 'device', 'cpu'),
     'environment': lambda directory, data, host, monkeypatch: setattr(host, 'lock', 'numpy==9.9.9\n'),
     'arm_config': tamper_arm,
     'threshold_in_code': lambda directory, data, host, monkeypatch: monkeypatch.setattr(
@@ -399,3 +417,402 @@ def test_lexical_arm_refuses_an_interpreter_that_already_holds_or_cannot_block_m
     with pytest.raises(RuntimeError, match='fresh interpreter'):
         asyncio.run(beam_h2.run_arm(plan, 'lexical', directory, block=beam_h2.MLBlock()))
     assert not (directory / 'stores').exists()
+
+
+# ------------------------------------------------ freeze revision 2 (Codex verdict on freeze v1)
+def invalid_and_unscored(directory, result):
+    stored = json.loads((directory / 'retrieval/result.json').read_text())
+    assert stored['threshold_met'] is False and stored['complete'] is False and stored['invalid_reasons']
+    assert stored['decision'] == 'semantic_stays_recommended_lexical_light_profile_gap_published'
+    assert stored['recall_at_10'] is None and stored['paired_delta'] is None and stored['scored'] is None
+    assert not (directory / 'retrieval/questions.jsonl').exists()
+    assert result is None or (result['threshold_met'] is False and result['invalid_reasons'])
+    return stored['invalid_reasons']
+
+
+def test_a_final_resource_stop_after_both_arms_leaves_an_invalid_result_and_no_score(frozen_plan):
+    """Point 1: every final gate runs BEFORE the scorer; both arms had completed here."""
+    directory, data, spec, host, fingerprint = frozen_plan
+    host.fail_guard = 2  # the first guard opens the run, the second is the final gate
+    result = beam_h2.retrieve(directory, fingerprint, spec=spec, host=host)
+    assert host.launched == ['lexical', 'semantic'] and host.guards == 2
+    assert all((directory / 'retrieval' / arm / 'attestation.json').exists() for arm in beam_h2.ARMS)
+    reasons = invalid_and_unscored(directory, result)
+    assert reasons == ['final gates: swap 9000000000 > 8500000000 bytes']
+    assert not (directory / 'retrieval/resources.json').exists()
+
+
+def test_a_freeze_drift_seen_only_at_the_end_is_never_scored(frozen_plan):
+    directory, data, spec, host, fingerprint = frozen_plan
+    host.after_launch = lambda arm: arm == 'semantic' and setattr(host, 'lock', 'numpy==9.9.9\n')
+    reasons = invalid_and_unscored(directory, beam_h2.retrieve(directory, fingerprint, spec=spec, host=host))
+    assert reasons == ['final gates: Interpreter environment changed']
+
+
+def test_a_scoring_error_or_an_interruption_never_leaves_a_positive_result(frozen_plan, monkeypatch,
+                                                                           tmp_path):
+    directory, data, spec, host, fingerprint = frozen_plan
+
+    def broken(value, evidence):
+        raise ZeroDivisionError('scorer defect')
+    monkeypatch.setattr(beam_h2, 'exact_recall', broken)
+    reasons = invalid_and_unscored(directory, beam_h2.retrieve(directory, fingerprint, spec=spec, host=host))
+    assert reasons == ["scoring: ZeroDivisionError('scorer defect')"]
+    monkeypatch.undo()
+    other = FakeHost(tmp_path / 'second')
+    data, spec = beam_h2.selfcheck_corpus(tmp_path / 'second/corpus', model_cache=None)
+    done = beam_h2.prepare(tmp_path / 'second/plan', data, other.head, spec=spec, host=other)
+    other.fail = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        beam_h2.retrieve(tmp_path / 'second/plan', done['manifest_sha256'], spec=spec, host=other)
+    assert 'interrupted' in invalid_and_unscored(tmp_path / 'second/plan', None)[0]
+
+
+RUNTIME = {'sys_path': ['/clone/v4/src', '/clone/v4', '/site'], 'executable': '/bin/python',
+           'prefix': '/venv', 'base_prefix': '/base', 'python': '3.11',
+           'distributions': ['torch==2.10.0 @ /site'],
+           'files': {'/site/torch/__init__.py': 'a' * 64}}
+
+
+def test_runtime_content_is_frozen_and_checked_at_the_start_and_before_scoring(tmp_path):
+    """Point 5: same versions, another content or another import path -> refused."""
+    host = FakeHost(tmp_path)
+    host.runtime_value = copy.deepcopy(RUNTIME)
+    data, spec = beam_h2.selfcheck_corpus(tmp_path / 'corpus', model_cache=None)
+    directory = tmp_path / 'plan'
+    fingerprint = beam_h2.prepare(directory, data, host.head, spec=spec, host=host)['manifest_sha256']
+    plan = beam_h2.frozen(directory, fingerprint, spec=spec, host=host)
+    assert plan['runtime']['files'] == 1 and plan['runtime']['sys_path'] == RUNTIME['sys_path']
+    assert json.loads((directory / 'manifest.json').read_text())['h2']['runtime'] == plan['files']['runtime']
+    for change in (lambda value: value['files'].__setitem__('/site/torch/__init__.py', 'b' * 64),
+                   lambda value: value['sys_path'].append('/elsewhere'),
+                   lambda value: value['files'].__setitem__('/elsewhere/torch.py', 'c' * 64)):
+        host.runtime_value = copy.deepcopy(RUNTIME)
+        change(host.runtime_value)
+        with pytest.raises(ValueError, match='Interpreter runtime changed'):
+            beam_h2.frozen(directory, fingerprint, spec=spec, host=host)
+        with pytest.raises(ValueError, match='Interpreter runtime changed'):
+            beam_h2.retrieve(directory, fingerprint, spec=spec, host=host)
+        beam_h2.frozen(directory, fingerprint, spec=spec, host=host, runtime=False)  # light check only
+    assert host.launched == [] and not (directory / 'retrieval').exists()
+
+
+def test_tree_digest_sees_a_content_change_at_constant_name_and_version(tmp_path):
+    package = tmp_path / 'site/torch'
+    package.mkdir(parents=True)
+    (package / '__init__.py').write_text('version = "2.10.0"\n')
+    (package / '__pycache__').mkdir()
+    (package / '__pycache__/x.pyc').write_text('cache')
+    (tmp_path / 'site/link.py').symlink_to(package / '__init__.py')
+    before = beam_h2.tree_files(tmp_path / 'site')
+    assert list(before) == [str(package / '__init__.py')]  # caches and links are not content
+    (package / '__init__.py').write_text('version = "2.10.0"\nimport os\n')
+    assert beam_h2.tree_files(tmp_path / 'site') != before
+    with pytest.raises(ValueError, match='run_beam_h2.sh'):  # pytest is not the frozen launcher
+        beam_h2.runtime_record(beam_h2.Host.clone)
+
+
+def test_loaded_modules_must_come_from_the_frozen_runtime_or_the_attested_clone(tmp_path):
+    site, clone, outside = tmp_path / 'site', tmp_path / 'clone', tmp_path / 'outside'
+    for folder in (site, clone / 'v4/src/engine', outside):
+        folder.mkdir(parents=True)
+    files = {site / 'dep.py': 'dep = 1\n', clone / 'v4/src/engine/core.py': 'core = 1\n',
+             outside / 'torch.py': 'evil = 1\n'}
+    for path, text in files.items():
+        path.write_text(text)
+    digest = {path: hashlib.sha256(text.encode()).hexdigest() for path, text in files.items()}
+    runtime = {'sys_path': [str(clone / 'v4/src'), str(clone / 'v4'), str(site)],
+               'files': {str(site / 'dep.py'): digest[site / 'dep.py']}}
+    attested = {'v4/src/engine/core.py': digest[clone / 'v4/src/engine/core.py']}
+
+    def _module(path):
+        value = type(sys)('fixture')
+        value.__file__ = str(path)
+        return value
+    good = {'dep': _module(site / 'dep.py'), 'engine.core': _module(clone / 'v4/src/engine/core.py'),
+            'sys': sys}
+    proof = beam_h2.loaded_origins(runtime, attested, clone, good)
+    assert proof['problems'] == [] and proof['files'] == 2 and proof['by_root'] == {str(site): 1, 'clone': 1}
+    shadow = beam_h2.loaded_origins(runtime, attested, clone,
+                                    {**good, 'torch': _module(outside / 'torch.py')})
+    assert shadow['problems'] == [f"torch: loaded from outside the frozen paths: {outside / 'torch.py'}"]
+    (site / 'dep.py').write_text('dep = 2\n')
+    changed = beam_h2.loaded_origins(runtime, attested, clone, good)
+    assert changed['problems'] == [f"dep: content differs from the freeze: {site / 'dep.py'}"]
+    unattested = beam_h2.loaded_origins(runtime, {}, clone, good)
+    assert any('engine.core: loaded from outside' in problem for problem in unattested['problems'])
+
+
+def git(repo, *arguments):
+    command = ['git', '-C', str(repo), '-c', 'user.name=fixture', '-c', 'user.email=f@example.invalid',
+               '-c', 'commit.gpgsign=false', *arguments]
+    done = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+def test_source_attestation_covers_resources_tests_and_documents_and_refuses_strays(tmp_path):
+    """Point 8: not only *.py; nothing untracked may sit in an importable tree."""
+    repo = tmp_path / 'repo'
+    (repo / 'v4/src/engine/resources').mkdir(parents=True)
+    (repo / 'v4/tests').mkdir()
+    (repo / 'v4/src/engine/core.py').write_text('core = 1\n')
+    (repo / 'v4/src/engine/resources/catalog.json').write_text('{"revision": "x"}\n')
+    (repo / 'v4/tests/test_x.py').write_text('def test_x(): pass\n')
+    git(tmp_path, 'init', '-q', str(repo))
+    git(repo, 'add', '-A')
+    git(repo, 'commit', '-q', '-m', 'fixture')
+    head = git(repo, 'rev-parse', 'HEAD')
+    paths, strict = ('v4/src', 'v4/tests/test_x.py'), ('v4/src',)
+    files = beam_h2.attest_tree(repo, head, paths, strict)
+    assert sorted(files) == ['v4/src/engine/core.py', 'v4/src/engine/resources/catalog.json',
+                             'v4/tests/test_x.py']
+    (repo / 'v4/src/engine/__pycache__').mkdir()
+    (repo / 'v4/src/engine/__pycache__/core.pyc').write_text('cache')
+    assert beam_h2.attest_tree(repo, head, paths, strict) == files  # bytecode caches are never read (see env)
+    for name, text in (('v4/src/engine/resources/catalog.json', '{"revision": "y"}\n'),
+                       ('v4/tests/test_x.py', 'def test_x(): assert 0\n')):
+        original = (repo / name).read_text()
+        (repo / name).write_text(text)
+        with pytest.raises(ValueError, match='does not match the working tree'):
+            beam_h2.attest_tree(repo, head, paths, strict)
+        (repo / name).write_text(original)
+    (repo / 'v4/src/torch.py').write_text('shadow = 1\n')
+    with pytest.raises(ValueError, match='outside the declared commit'):
+        beam_h2.attest_tree(repo, head, paths, strict)
+    (repo / 'v4/src/torch.py').unlink()
+    with pytest.raises(ValueError, match='Cannot attest'):
+        beam_h2.attest_tree(repo, head, ('v4/src', 'v4/docs/missing.md'), strict)
+    assert {'v4/tests/test_beam_h2_410.py', 'v4/docs/H2_RUN_v2.md', 'v4/docs/LEXICAL_PROFILE_4_1_0.md',
+            'v4/bench/protocols/v1.md', 'scripts/run_beam_h2.sh'} <= set(beam_h2.ATTESTED)
+
+
+def test_tests_and_documents_are_archived_with_the_freeze(frozen_plan):
+    directory, data, spec, host, fingerprint = frozen_plan
+    receipt = json.loads((directory / 'receipt.json').read_text())
+    assert receipt['tests_and_documents'] == {'v4/tests/test_beam_h2_410.py': 'tests-v1',
+                                              'v4/docs/H2_RUN_v2.md': 'doc-v1'}
+    assert json.loads((directory / 'plan.json').read_text())['attested_files'] == host.attest(host.head)
+
+
+def test_worker_environment_is_explicit_and_inherits_no_cache_or_import_variable(frozen_plan, tmp_path):
+    """Point 6: the Hugging Face cache is the frozen one; inherited redirections are refused."""
+    directory, data, spec, host, fingerprint = frozen_plan
+    plan = json.loads((directory / 'plan.json').read_text())
+    plan['spec']['model_cache'] = str(beam_h2.GRANITE_CACHE)
+    expected = beam_h2.worker_environment(plan, 'semantic', Path('/clone'), tmp_path / 'out')
+    assert expected['HF_HUB_CACHE'] == '/Users/romain/.cache/huggingface/hub'
+    assert expected['HF_HOME'] == '/Users/romain/.cache/huggingface'
+    assert expected['PYTHONPATH'] == '/clone/v4/src:/clone/v4' and expected['PYTHONSAFEPATH'] == '1'
+    assert expected['PYTHONPYCACHEPREFIX'] == str(tmp_path / 'out/pycache')
+    assert expected['HF_HUB_OFFLINE'] == '1' and expected['PYTORCH_ENABLE_MPS_FALLBACK'] == '0'
+    forbidden = plan['forbidden_env_prefixes']
+    clean = {**expected, 'PATH': '/usr/bin', 'HOME': '/h'}
+    assert beam_h2.environment_problems(expected, forbidden, clean) == []
+    for name in ('HF_HUB_CACHE', 'HF_HOME'):
+        assert beam_h2.environment_problems(expected, forbidden, {**expected, name: '/tmp/other'}) == [
+            f'{name} must be {expected[name]!r}']
+    for name in ('TRANSFORMERS_CACHE', 'SENTENCE_TRANSFORMERS_HOME', 'HF_ENDPOINT', 'HUGGINGFACE_HUB_CACHE',
+                 'XDG_CACHE_HOME', 'PYTHONSTARTUP', 'PYTHONHOME', 'DYLD_INSERT_LIBRARIES', 'MEMORY_V4_DEVICE',
+                 'PYTORCH_MPS_PREFER_METAL', 'TORCH_HOME'):
+        assert beam_h2.environment_problems(expected, forbidden, {**expected, name: 'x'}) == [
+            f'{name} is inherited']
+    missing = {key: value for key, value in expected.items() if key != 'HF_HUB_OFFLINE'}
+    assert beam_h2.environment_problems(expected, forbidden, missing) == ["HF_HUB_OFFLINE must be '1'"]
+    lexical = beam_h2.worker_environment(plan, 'lexical', Path('/clone'), tmp_path / 'out')
+    assert 'PYTORCH_ENABLE_MPS_FALLBACK' not in lexical
+    assert lexical['HF_HUB_CACHE'] == expected['HF_HUB_CACHE']
+
+
+def real_like(directory):
+    plan = json.loads((directory / 'plan.json').read_text())
+    plan['runtime'] = {'files': 1}
+    start = {'environment_problems': [], 'runtime_verified': True,
+             'loaded_modules': {'problems': [], 'files': 10}}
+    binding = {'problems': [], 'weights_equal': True, 'tokenizer_equal': True}
+    encoder = {'model_revision': beam_h2.GRANITE_REVISION, 'device': 'mps', 'parameter_devices': ['mps'],
+               'parameter_dtypes': ['torch.bfloat16'], 'binding': binding}
+    usage = {'encoder_calls': 73, 'encoder_texts': 89, 'model_device': 'mps', 'model_dtype': 'torch.bfloat16',
+             'llm_calls': 0, 'reranker_calls': 0}
+    common = {'engine': 'memory_os_v4', 'config_patch': {}, 'questions': 40, 'rankings_sha256': 'r', **start}
+    return plan, copy.deepcopy({**common, 'ml_free': True}), {**common, 'encoder': encoder, 'usage': usage}
+
+
+SEMANTIC_DEFECTS = {
+    'usage_missing': (lambda proof: proof.pop('usage'), 'no encoder usage record'),
+    'usage_not_a_record': (lambda proof: proof.__setitem__('usage', []), 'no encoder usage record'),
+    'usage_zero_calls': (lambda proof: proof['usage'].__setitem__('encoder_calls', 0),
+                         'usage record invalid'),
+    'usage_calls_missing': (lambda proof: proof['usage'].pop('encoder_calls'), 'usage record invalid'),
+    'usage_calls_not_integer': (lambda proof: proof['usage'].__setitem__('encoder_calls', '73'),
+                                'usage record invalid'),
+    'usage_over_ceiling': (lambda proof: proof['usage'].update(encoder_calls=100_001, encoder_texts=100_001),
+                           'encoder call budget exceeded'),
+    'usage_other_device': (lambda proof: proof['usage'].__setitem__('model_device', 'cpu'),
+                           'another device or dtype'),
+    'usage_llm_call': (lambda proof: proof['usage'].__setitem__('llm_calls', 1), 'LLM or reranker'),
+    'device_cpu': (lambda proof: proof['encoder'].update(device='cpu', parameter_devices=['cpu']),
+                   "encoder device resolved to 'cpu'"),
+    'dtype_float32': (lambda proof: proof['encoder'].__setitem__('parameter_dtypes', ['torch.float32']),
+                      "encoder parameter_dtypes resolved to ['torch.float32']"),
+    'other_revision': (lambda proof: proof['encoder'].__setitem__('model_revision', 'f' * 40),
+                       'not the frozen Granite revision'),
+    'no_encoder': (lambda proof: proof.__setitem__('encoder', None), 'no encoder attestation'),
+    'no_binding': (lambda proof: proof['encoder'].pop('binding'), 'not bound to the frozen snapshot'),
+    'weights_differ': (lambda proof: proof['encoder']['binding'].__setitem__('weights_equal', False),
+                       'not bound to the frozen snapshot'),
+    'tokenizer_differs': (lambda proof: proof['encoder']['binding'].__setitem__('tokenizer_equal', False),
+                          'not bound to the frozen snapshot'),
+    'binding_problem': (lambda proof: proof['encoder']['binding'].__setitem__('problems', ['other cache']),
+                        'not bound to the frozen snapshot'),
+    'environment_unchecked': (lambda proof: proof.pop('environment_problems'), 'not attested at start'),
+    'runtime_unverified': (lambda proof: proof.__setitem__('runtime_verified', False),
+                           'not attested at start'),
+    'origins_missing': (lambda proof: proof.pop('loaded_modules'), 'origins of loaded modules'),
+    'origin_outside': (lambda proof: proof['loaded_modules'].__setitem__('problems', ['torch: outside']),
+                       'origins of loaded modules'),
+    'rankings_changed': (lambda proof: proof.__setitem__('rankings_sha256', 'other'), 'rankings differ'),
+    'patched': (lambda proof: proof.__setitem__('config_patch', {'device': 'cpu'}), 'injected engine'),
+}
+
+
+@pytest.mark.parametrize('defect', sorted(SEMANTIC_DEFECTS))
+def test_each_missing_or_divergent_worker_proof_invalidates_the_run(frozen_plan, defect):
+    """Points 2, 4, 5, 6: frozen device/dtype, mandatory usage record, runtime and snapshot binding."""
+    directory, data, spec, host, fingerprint = frozen_plan
+    plan, lexical, semantic = real_like(directory)
+    real = replace(spec, synthetic=False)
+    assert beam_h2.arm_problems('lexical', lexical, plan, real, 40, 'r') == []
+    assert beam_h2.arm_problems('semantic', semantic, plan, real, 40, 'r') == []  # precondition
+    change, message = SEMANTIC_DEFECTS[defect]
+    change(semantic)
+    problems = beam_h2.arm_problems('semantic', semantic, plan, real, 40, 'r')
+    assert problems and any(message in problem for problem in problems), problems
+    assert beam_h2.arm_problems('semantic', None, plan, real, 40, 'r') == ['semantic: no attestation']
+    lexical['ml_free'] = False
+    assert beam_h2.arm_problems('lexical', lexical, plan, real, 40, 'r') == ['lexical: ML-free proof missing']
+
+
+def test_a_real_semantic_arm_without_usage_record_invalidates_the_whole_result(frozen_plan):
+    """Point 4, end to end: the completed synthetic run is re-assembled with the usage record removed."""
+    directory, data, spec, host, fingerprint = frozen_plan
+    assert beam_h2.retrieve(directory, fingerprint, spec=spec, host=host)['complete'] is True
+    plan, _, semantic = real_like(directory)
+    path = directory / 'retrieval/semantic/attestation.json'
+    stored = json.loads(path.read_text())
+    for strip in (False, True):
+        proof = {**stored, **semantic, 'questions': 40, 'rankings_sha256': stored['rankings_sha256']}
+        if strip:
+            del proof['usage']
+        path.write_text(json.dumps(proof))
+        plan['runtime'] = None
+        result = beam_h2.assemble(plan, directory, None, spec)
+        assert result['complete'] is not strip
+    assert invalid_and_unscored(directory, result) == ['semantic: no encoder usage record']
+
+
+def test_budgets_are_declared_in_their_effective_units(frozen_plan, monkeypatch, tmp_path):
+    """Point 3: byte limits are bytes; 512 is the encoder sequence length, not the query budget."""
+    directory, data, spec, host, fingerprint = frozen_plan
+    manifest = json.loads((directory / 'manifest.json').read_text())
+    budgets = manifest['budgets']
+    assert [budgets[name] for name in ('memory_bytes', 'ingest_tokens', 'context_tokens', 'query_tokens',
+                                       'model_calls', 'wall_seconds', 'api_usd')] == [
+        16_000_000, 16_000_000, 12_000, 4096, 100_000, 28_800, 0]
+    for name in ('ingest_tokens', 'context_tokens', 'query_tokens'):
+        assert budgets['units'][name].startswith('UTF-8 BYTES, not tokens')
+    assert 512 not in budgets.values() and 3000 not in budgets.values() and 4_000_000 not in budgets.values()
+    embedding = manifest['models']['embedding']
+    assert embedding['max_seq_length'] == 512
+    assert 'NOT the shared query budget' in embedding['max_seq_length_meaning']
+    assert embedding['expected_resolution'] == {'device': 'mps', 'parameter_devices': ['mps'],
+                                                'parameter_dtypes': ['torch.bfloat16']}
+    assert 'no timing claim' in manifest['timing']['note']
+    assert 'incident review' in manifest['h2']['retry']
+    plan = json.loads((directory / 'plan.json').read_text())
+    assert plan['audit']['longest_question_bytes'] < 100 and plan['query_bytes'] == 4096
+    monkeypatch.setattr(beam_h2, 'QUERY_BYTES', 10)
+    with pytest.raises(ValueError, match='query byte budget'):
+        beam_h2.prepare(tmp_path / 'long', data, host.head, spec=spec, host=host)
+
+
+class FakeModule:
+    def __init__(self, state=None, config=None):
+        self.auto_model = self
+        self.state, self.config_value = state, config
+
+    def state_dict(self):
+        return self.state
+
+    def get_config_dict(self):
+        return self.config_value
+
+
+class FakeModel(list):
+    tokenizer = None
+
+
+def test_loaded_weights_and_tokenizer_are_bound_to_the_frozen_snapshot_files(tmp_path, monkeypatch):
+    """Point 6: content equality with the hashed snapshot, whatever path a name resolved to."""
+    torch = pytest.importorskip('torch')
+    from safetensors.torch import save_file
+    import huggingface_hub.constants
+    hub = tmp_path / 'hub'
+    snapshot = hub / 'models--fixture/snapshots/rev'
+    (snapshot / '1_Pooling').mkdir(parents=True)
+    state = {'embeddings.weight': torch.arange(12, dtype=torch.float32).reshape(3, 4),
+             'layer.bias': torch.ones(4, dtype=torch.float32)}
+    save_file(state, str(snapshot / 'model.safetensors'))
+    tokenizer = {'version': '1.0', 'truncation': None, 'padding': None, 'model': {'vocab': {'a': 0, 'b': 1}}}
+    (snapshot / 'tokenizer.json').write_text(json.dumps(tokenizer))
+    (snapshot / '1_Pooling/config.json').write_text(json.dumps({'pooling_mode_cls_token': True}))
+    (snapshot / 'config.json').write_text('{}')
+    (snapshot / 'modules.json').write_text('[]')
+    encoder = {'id': 'fixture/model', 'snapshot': str(snapshot), 'hub_cache': str(hub),
+               'snapshot_files': {name: hashlib.sha256((snapshot / name).read_bytes()).hexdigest()
+                                  for name in beam_h2.BOUND_FILES}}
+    monkeypatch.setattr(huggingface_hub.constants, 'HF_HUB_CACHE', str(hub))
+    resolved = {'root': snapshot}
+    monkeypatch.setattr(huggingface_hub, 'try_to_load_from_cache',
+                        lambda repo, name: str(resolved['root'] / name))
+
+    def model(weights=None, loaded_tokenizer=None, pooling=None):
+        weights = weights or {key: tensor.clone() for key, tensor in state.items()}
+        value = FakeModel([FakeModule(state=weights),
+                           FakeModule(config=pooling or {'pooling_mode_cls_token': True, 'extra': 1})])
+        text = json.dumps(loaded_tokenizer or {**tokenizer, 'truncation': {'max_length': 512}})
+        backend = type('B', (), {'to_str': lambda self: text})()
+        value.tokenizer = type('T', (), {'backend_tokenizer': backend})()
+        return value
+    good = beam_h2.bind_snapshot(model(), encoder)
+    assert good['problems'] == [] and good['weights_equal'] and good['tokenizer_equal']
+    assert good['tensors'] == 2
+    assert good['parameters'] == 16 and good['bound_files'] == encoder['snapshot_files']
+    half = beam_h2.bind_snapshot(model({key: tensor.to(torch.bfloat16) for key, tensor in state.items()}),
+                                 encoder)
+    assert half['problems'] == []  # same values in the dtype the model was loaded in
+    changed = {**state, 'layer.bias': torch.full((4,), 1.5)}
+    assert 'loaded weights differ from model.safetensors (0 names, 1 tensors)' in beam_h2.bind_snapshot(
+        model(changed), encoder)['problems']
+    renamed = {'embeddings.weight': state['embeddings.weight'], 'other.bias': state['layer.bias']}
+    assert beam_h2.bind_snapshot(model(renamed), encoder)['weights_equal'] is False
+    other = beam_h2.bind_snapshot(model(loaded_tokenizer={**tokenizer, 'model': {'vocab': {'a': 0}}}),
+                                  encoder)
+    assert other['problems'] == ['loaded tokenizer differs from tokenizer.json']
+    assert beam_h2.bind_snapshot(model(pooling={'pooling_mode_cls_token': False}), encoder)['problems'] == [
+        'loaded pooling differs from 1_Pooling/config.json']
+    resolved['root'] = tmp_path / 'elsewhere'
+    elsewhere = beam_h2.bind_snapshot(model(), encoder)['problems']
+    assert elsewhere == [f'the model name does not resolve to the frozen snapshot: {name}'
+                         for name in ('model.safetensors', 'tokenizer.json')]
+    resolved['root'] = snapshot
+    monkeypatch.setattr(huggingface_hub.constants, 'HF_HUB_CACHE', str(tmp_path / 'other-cache'))
+    assert beam_h2.bind_snapshot(model(), encoder)['problems'] == ['Hugging Face cache is not the frozen one']
+    monkeypatch.setattr(huggingface_hub.constants, 'HF_HUB_CACHE', str(hub))
+    (snapshot / 'tokenizer.json').write_text(json.dumps({**tokenizer, 'version': '1.1'}))
+    assert 'snapshot file changed: tokenizer.json' in beam_h2.bind_snapshot(model(), encoder)['problems']
+    proof = {'model_revision': beam_h2.GRANITE_REVISION, **beam_h2.EXPECTED_ENCODER, 'binding': good}
+    plan = {'model': beam_h2.frozen_values()['model']}
+    assert beam_h2.encoder_problems(proof, plan) == []
+    assert beam_h2.encoder_problems({**proof, 'device': 'cpu'}, plan) == [
+        "encoder device resolved to 'cpu', frozen expectation 'mps'"]
