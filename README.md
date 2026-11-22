@@ -24,8 +24,8 @@ help with handoffs, but need upkeep. Memory OS AI is a **local MCP server** your
 
 No LLM inside: your assistant extracts the facts; search runs locally, with the profile you choose at install time:
 **semantic** (hybrid BM25 + a 97M-parameter embedding model), the recommended profile, or **lexical** (literal BM25,
-no embedding model, no ML stack), the light profile, with a small measured retrieval gap
-([numbers and limits](#limits-and-evaluations)).
+no embedding model, no ML stack), the light profile. A retrospective retrieval comparison did not meet the
+pre-registered joint parity threshold ([numbers and limits](#limits-and-evaluations)).
 No account, no telemetry, no cloud service of ours.
 
 ## Install on macOS
@@ -37,8 +37,8 @@ for the SQLite backend; check the library linked to this Python interpreter, not
 
 Choose **one install profile**. It is explicit (`--profile` has no default for a new install), it is never guessed
 from the installed packages, and an existing installation keeps its profile: there is no in-place conversion.
-**Semantic is the recommended profile**; lexical is the light one, with a small measured retrieval gap
-([numbers and limits](#limits-and-evaluations)).
+**Semantic is the recommended profile**; lexical is offered as the light profile. The retrospective retrieval
+comparison did not establish parity under the pre-registered joint threshold ([numbers and limits](#limits-and-evaluations)).
 
 **Lexical profile (light)** — literal BM25 search, no embedding model, no ML stack: the only download is the 1.7 MB
 tokenizer table (with `--download-approved`); nothing is fetched from a model hub.
@@ -134,17 +134,14 @@ data). Interrupted writes are reported as
 - macOS Apple Silicon only; local clients on the same Mac.
 - Lexical vs semantic profile (4.1.0 engine), frozen BEAM 100K: this retrospective measurement covers 400 questions
   executed per arm, 355 of them scored, in 20 conversations. Mean Recall@10 is 44.089% for lexical and 45.764% for
-  semantic: a lexical − semantic gap of −1.675 points, 95% bootstrap CI by conversation [−3.747, +0.404] points.
-  The pre-registered joint parity threshold (lexical ≥ semantic − 2 points **and** lower bound of the 95% CI ≥ −3
-  points) **is not met**: the point criterion is met, the CI criterion is not. Semantic remains the recommended
-  profile and lexical is offered as the light profile. Conditions: semantic arm with the pinned-revision Granite
-  embedding model on MPS/bfloat16, both arms on the SQLite backend, 2,000 bootstrap resamples of whole conversations.
-  Retrospective: BEAM 100K had been seen before, and no selection was made on it. This measurement is not an
-  independent test, demonstrates no superiority, and supports no conclusion about generated answers or agent tasks.
-- Earlier 4.0.x retrieval measurement (a different run, hybrid engine vs a BM25 baseline; not comparable with the
-  figures above), BEAM 100K: Recall@10 0.462 vs 0.445 for BM25 (+0.017, 95% CI [-0.004, +0.040]); **our pre-registered
-  success criterion was not met**. This observed-data retrieval run used CPU/bfloat16; production uses auto/MPS native.
-  It is not an unseen-data confirmation or an end-to-end answer score comparable to other memory products.
+  semantic: a lexical − semantic gap of −1.675 percentage points, 95% bootstrap CI by conversation
+  [−3.747, +0.404] percentage points. The pre-registered joint parity threshold (lexical ≥ semantic − 2 percentage
+  points **and** lower bound of the 95% CI ≥ −3 percentage points) **is not met**: the point criterion is met, the
+  CI criterion is not. Semantic remains the recommended profile and lexical is offered as the light profile.
+  Conditions: semantic arm with the pinned-revision Granite embedding model on MPS/bfloat16, both arms on the SQLite
+  backend, 2,000 bootstrap replicates resampling whole conversations. Retrospective: BEAM 100K had been seen before,
+  and no selection was made on it. This measurement is not an independent test, demonstrates no superiority, and
+  supports no conclusion about generated answers or agent tasks.
 - Synthetic safety gates for the 4.0.7 engine: brief P-A 40/40 and integrity P-B 40/40 on frozen candidates;
   not user studies. P-B uses a hash encoder and simulated relay; cursor MACs are excluded, replay defaults use the
   candidate as oracle, query-forget ranking is not independently scored, and authenticity is conditional on the local
@@ -164,10 +161,11 @@ policy, dated append-only history, compare-and-set on tasks and core blocks.
 with per-profile qualified constraints; `quickstart --profile`, loaded-SQLite check before any write, no silent
 overwrite of an existing client entry, structured diagnostics without log excerpts, `quickstart --undo --with-service`
 and `uninstall` (never deletes data). Lexical vs semantic on frozen BEAM 100K (retrospective): Recall@10 gap of −1.675
-points, 95% CI [−3.747, +0.404]; the pre-registered parity threshold is not met, so semantic stays the recommended
-profile and lexical the light one ([details](#limits-and-evaluations)). No measured user-productivity gain.
+percentage points, 95% CI [−3.747, +0.404] percentage points; the pre-registered joint parity threshold is not met,
+so semantic stays the recommended profile and lexical the light one ([details](#limits-and-evaluations)). No measured
+user-productivity gain.
 
-**4.0.9** (candidate, not published): the operator health report probes `/health` and `/ready` with a 15 s timeout (the `/ready` integrity audit takes several seconds on a large store) and reports explicit client corrections as information instead of pending reviews; more than 10 replaced targets in 24 h raise an anomaly. Documentation states the published versions. No engine, brief, schema or encoder change. No measured user-productivity gain.
+**4.0.9** (candidate, not published): the operator health report probes `/health` and `/ready` with a 15 s timeout (the `/ready` integrity audit takes several seconds on a large store) and reports explicit client corrections as information instead of pending reviews; more than 10 replaced targets in 24 h raise an anomaly. Publication status checked on 22 November 2026: 4.0.8 is the latest published release; 4.0.9 remains unpublished. No engine, brief, schema or encoder change. No measured user-productivity gain.
 
 **4.0.8** (published on PyPI on 31 October 2026): declarative mutation authors, PEP 440 doctor support and bounded readiness audits. No schema or encoder change. No measured user-productivity gain.
 

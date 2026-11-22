@@ -2,7 +2,7 @@
 
 ## 4.1.0 — en développement (branche feature/4.1.0-lexical, 2026-11-21) ; non publiée / non déployée / non qualifiée
 
-- Profil de récupération explicite : `semantic` (défaut, moteur inchangé) ou `lexical` (politique `lex-4.1.0-v1`,
+- Profil de récupération explicite : `semantic` (défaut de `Config`, moteur inchangé ; aucun défaut pour une nouvelle installation via `quickstart`) ou `lexical` (politique `lex-4.1.0-v1`,
   SQLite, aucun encodeur ni vecteur, aucun import ML). Sélection par `Config.lexical()` ou
   `MEMORY_V4_RETRIEVAL_PROFILE=lexical`, jamais déduite des dépendances installées.
 - Marqueur `retrieval_profile` dans les métadonnées d'un store lexical ; sonde en lecture seule avant toute
@@ -38,9 +38,8 @@
 - Contenu fonctionnel = 4.0.9.dev1 (a745b40, rapport de santé) ; aucun changement moteur, brief, schéma ni encodeur.
   Le correctif brief 4.0.9.dev2 (branche fix/4.0.9-brief-focus) est EXCLU : il amende l'ordre scellé P-A et
   reste expérimental.
-- Documentation : README (statut, commandes d'installation, boutons Cursor/VS Code, notes de version) et
-  docs/CLIENTS.md, server.json (registre MCP) et la note docs/releases/v4.0.9.md (embarquée) ne disent plus « candidate, not published » pour une version publiée ; 4.0.8 est notée
-  publiée sur PyPI le 31/10/2026 (fait vérifié sur PyPI le 21/11 ; la publication n'avait pas été consignée ici).
+- Statut de publication vérifié sur PyPI le 2026-11-22 : 4.0.8, publiée le 2026-10-31,
+  reste la dernière version publiée ; 4.0.9 reste une candidate non publiée.
 - Le numéro 4.0.9 avait été préparé le 31/10 sur une autre arborescence (commit 06199a2, sources absentes de
   ce dépôt, suite complète en échec, ops/qualify_409_c1_chain.sh orphelin) : cette candidate-ci le remplace.
 - Précision sur l'entrée 4.0.9.dev1 ci-dessous : l'instantané unique et l'isolation d'une fiche corrompue concernent
@@ -86,7 +85,7 @@
   aucun report automatique du release_ready de v1, aucune publication/bascule.
 
 
-## 4.0.8 — candidate à chaîne finale (2026-10-16), non publiée / non déployée
+## 4.0.8 — publiée sur PyPI le 2026-10-31 ; historique de préparation de la candidate du 2026-10-16
 
 - Provenance déclarative relayée selon le schéma pour toutes les mutations connues ;
   champ accepté par les modèles, jamais authentification. Reçus anciens sans
