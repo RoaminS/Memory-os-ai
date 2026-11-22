@@ -236,7 +236,7 @@ def runtime_record(clone: Path) -> dict:
 def loaded_origins(runtime: dict, attested: dict, clone: Path, modules=None) -> dict:
     """Origin of every loaded module: a frozen runtime file or an attested clone file, content unchanged."""
     modules = dict(sys.modules if modules is None else modules)
-    problems, origins, roots = [], {}, Counter()
+    problems, origins, roots, dynamic = [], {}, Counter(), {}
     for name, module in sorted(modules.items()):
         spec = getattr(module, '__spec__', None)
         origin = getattr(module, '__file__', None) or getattr(spec, 'origin', None)
@@ -246,6 +246,11 @@ def loaded_origins(runtime: dict, attested: dict, clone: Path, modules=None) -> 
                     problems.append(f'{name}: namespace path outside the frozen import path: {folder}')
             continue
         origin = str(origin)
+        if not os.path.isabs(origin):
+            # Module objects built in memory by a library (torch.ops, torch.classes): no file was imported.
+            # Every sys.path entry is absolute and frozen, so a file import always has an absolute origin.
+            dynamic[name] = origin
+            continue
         if origin in origins:
             continue
         current = sha256(Path(origin)) if os.path.isfile(origin) else None
@@ -264,8 +269,9 @@ def loaded_origins(runtime: dict, attested: dict, clone: Path, modules=None) -> 
         origins[origin] = current
     digest = hashlib.sha256(json.dumps(sorted(origins.items())).encode()).hexdigest()
     return {'modules': len(modules), 'files': len(origins), 'by_root': dict(roots), 'files_sha256': digest,
-            'problems': problems, 'ml_packages': {name: getattr(modules[name], '__file__', None)
-                                                  for name in ML_MODULES if name in modules}}
+            'problems': problems, 'in_memory_modules': dynamic,
+            'ml_packages': {name: getattr(modules[name], '__file__', None)
+                            for name in ML_MODULES if name in modules}}
 
 
 def worker_environment(plan: dict, arm: str, clone: Path, output: Path) -> dict:

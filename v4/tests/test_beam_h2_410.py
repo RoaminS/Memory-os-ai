@@ -531,8 +531,9 @@ def test_loaded_modules_must_come_from_the_frozen_runtime_or_the_attested_clone(
         return value
     good = {'dep': _module(site / 'dep.py'), 'engine.core': _module(clone / 'v4/src/engine/core.py'),
             'sys': sys}
-    proof = beam_h2.loaded_origins(runtime, attested, clone, good)
+    proof = beam_h2.loaded_origins(runtime, attested, clone, {**good, 'torch.ops': _module('_ops.py')})
     assert proof['problems'] == [] and proof['files'] == 2 and proof['by_root'] == {str(site): 1, 'clone': 1}
+    assert proof['in_memory_modules'] == {'torch.ops': '_ops.py'}  # built in memory, recorded, not a file
     shadow = beam_h2.loaded_origins(runtime, attested, clone,
                                     {**good, 'torch': _module(outside / 'torch.py')})
     assert shadow['problems'] == [f"torch: loaded from outside the frozen paths: {outside / 'torch.py'}"]
