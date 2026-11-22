@@ -53,6 +53,7 @@ class Unobservable(RuntimeError):
 
 
 def sha256_file(path):
+    path = refuse_forbidden(path)  # before EVERY open, constructed paths and link targets included
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
         for block in iter(lambda: stream.read(1 << 20), b""):
@@ -63,8 +64,9 @@ def sha256_file(path):
 def refuse_forbidden(path):
     """Refuse a sealed validation folder: lexical form first (no stat), then the resolved form.
 
-    Called before any read or traversal of a path received from outside (seeds, caches, proofs,
-    inventories), and on the target of every link met while walking.
+    Called before every open and before every descent: on arguments, on every path built from them,
+    and on every entry met while walking (a link is judged by where it leads). Resolving a path
+    reads link targets only; it never opens or lists the destination.
     """
     text = os.path.abspath(os.fspath(path))
     if any(name in Path(text).parts for name in FORBIDDEN_NAMES):
@@ -72,6 +74,29 @@ def refuse_forbidden(path):
     if any(name in Path(os.path.realpath(text)).parts for name in FORBIDDEN_NAMES):
         raise SystemExit("REFUS: path resolves into a sealed validation folder")
     return Path(text)
+
+
+def read_text(path):
+    return refuse_forbidden(path).read_text()
+
+
+def guarded_walk(root):
+    """``os.walk`` that checks every entry BEFORE any descent, never follows links, and never hides an error.
+
+    A sub-folder with a sealed name is refused before it is listed; a link is refused when it leads
+    inside one; a listing error is a refusal (an incomplete inventory is never returned).
+    """
+    root = refuse_forbidden(root)
+
+    def fail(error):
+        raise Unobservable("folder unreadable while walking: %s (%s)" % (getattr(error, "filename", "?"),
+                                                                        type(error).__name__))
+
+    for folder, names, files in os.walk(root, onerror=fail, followlinks=False):
+        names.sort()
+        for name in names + files:
+            refuse_forbidden(os.path.join(folder, name))  # top-down: checked before os.walk descends
+        yield folder, names, sorted(files)
 
 
 def check_test_identity(label, port):
@@ -146,6 +171,7 @@ def attest_service(label, port, home, venv, profile, *, uid=None, run=subprocess
         return row
     info = parse_print(text)
     plist = home / "Library/LaunchAgents" / (label + ".plist")
+    refuse_forbidden(plist)
     declared = plistlib.loads(plist.read_bytes()) if plist.is_file() and not plist.is_symlink() else {}
     arguments = declared.get("ProgramArguments") or [""]
     environment = declared.get("EnvironmentVariables") or {}
@@ -180,7 +206,7 @@ def attest_service(label, port, home, venv, profile, *, uid=None, run=subprocess
 
 def fetch_ready(port, token_file):
     """Authenticated /ready of the TEST service (disposable token, never printed)."""
-    token = Path(token_file).read_text().strip()
+    token = read_text(token_file).strip()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request("http://127.0.0.1:%d/ready" % int(port), headers={"Authorization": "Bearer " + token})
     with opener.open(request, timeout=10) as response:
@@ -191,16 +217,13 @@ def fetch_ready(port, token_file):
 
 def inventory(root):
     """Every entry below ``root``: type, mode, size AND content SHA-256 (names/sizes/dates are not enough)."""
-    root = refuse_forbidden(root)
     rows = {}
-    for folder, names, files in os.walk(root):  # links to folders are recorded, never followed
-        names.sort()
+    for folder, names, files in guarded_walk(root):  # links to folders are recorded, never followed
         for name in sorted(names + files):
             path = Path(folder) / name
-            rel = str(path.relative_to(root))
+            rel = str(path.relative_to(os.path.abspath(os.fspath(root))))
             info = path.lstat()
             if path.is_symlink():
-                refuse_forbidden(os.path.join(folder, os.readlink(path)))  # an alias cannot lead inside
                 rows[rel] = {"type": "link", "target": os.readlink(path)}
             elif path.is_dir():
                 rows[rel] = {"type": "dir", "mode": info.st_mode & 0o7777}
@@ -286,7 +309,7 @@ def pip_distributions(report):
 
 def tree_bytes(root):
     total = 0
-    for folder, _, files in os.walk(root):
+    for folder, _, files in guarded_walk(root):
         for name in files:
             path = Path(folder) / name
             if path.is_file() and not path.is_symlink():
@@ -299,10 +322,11 @@ def tree_bytes(root):
 def verify_granite(cache, catalog):
     """Pre-placed model checked file by file against provision_v1.json (size and SHA-256)."""
     cache = refuse_forbidden(cache)
-    snapshots = sorted((cache / "snapshots").iterdir()) if (cache / "snapshots").is_dir() else []
+    folder = refuse_forbidden(cache / "snapshots")  # resolved before it is listed
+    snapshots = sorted(folder.iterdir()) if folder.is_dir() else []
     rows, ok = [], len(snapshots) == 1
     for record in catalog.get("files", []):
-        path = snapshots[0] / record["path"] if snapshots else None
+        path = refuse_forbidden(snapshots[0] / record["path"]) if snapshots else None  # link target included
         good = bool(path and path.is_file() and path.stat().st_size == record["bytes"]
                     and sha256_file(path) == record["sha256"])
         rows.append({"path": record["path"], "ok": good})
@@ -311,28 +335,28 @@ def verify_granite(cache, catalog):
             "revision": snapshots[0].name if len(snapshots) == 1 else None}
 
 
-def complete_hf_cache(model_dir):
-    """A usable offline Hugging Face model cache: refs/main -> one snapshot whose every entry reaches a blob.
+def hf_cache_files_present(model_dir):
+    """Local Hugging Face model cache PRESENT, with non-empty files: nothing more is claimed.
 
-    ``config.json`` alone proves nothing: the reference, the snapshot, the tokenizer and non-empty weights
-    must all be there, each snapshot link resolving inside ``blobs/``. Read-only; downloads nothing.
+    refs/main names one snapshot; every entry of it reaches a non-empty blob inside ``blobs/``; the
+    configuration, tokenizer and weights files exist. This proves neither that the files are valid nor
+    that the model loads: the cached MiniLM test of G4 remains the real proof. Read-only, no download.
     """
     model_dir = refuse_forbidden(model_dir)
     problems = []
-    ref = model_dir / "refs/main"
+    ref = refuse_forbidden(model_dir / "refs/main")  # a link here is judged by its target BEFORE the read
     revision = ref.read_text().strip() if ref.is_file() else ""
     snapshot = model_dir / "snapshots" / revision if re.fullmatch(r"[0-9a-f]{40}", revision) else None
     blobs = (model_dir / "blobs").resolve()
     files = {}
-    if snapshot is None or not snapshot.is_dir():
+    if snapshot is None or not refuse_forbidden(snapshot).is_dir():
         problems.append("refs/main does not name an existing snapshot")
     else:
-        for folder, _, names in os.walk(snapshot):
+        for folder, _, names in guarded_walk(snapshot):
             for name in names:
                 path = Path(folder) / name
                 rel = str(path.relative_to(snapshot))
-                target = path.resolve()
-                refuse_forbidden(target)
+                target = refuse_forbidden(path.resolve())
                 if path.is_symlink() and blobs not in target.parents:
                     problems.append("snapshot entry outside blobs/: " + rel)
                 elif not target.is_file() or target.stat().st_size == 0:
@@ -344,65 +368,94 @@ def complete_hf_cache(model_dir):
                 problems.append("missing " + required)
         if not any(name in files for name in ("model.safetensors", "pytorch_model.bin")):
             problems.append("missing model weights")
-    return {"ok": not problems, "revision": revision or None, "files": len(files), "problems": problems}
+    return {"ok": not problems, "label": "cache présent, fichiers non vides (ne prouve pas le chargement : G4)",
+            "revision": revision or None, "files": len(files), "problems": problems}
 
 
 # ---------- production: read only ----------
 
-def _fingerprint(path, volatile=False):
-    """None = absent (explicit); a digest = read; anything unreadable is a refusal, never "unchanged"."""
-    if not os.path.lexists(path):
-        return None
-    try:
-        if os.path.islink(path):
-            return {"link": os.readlink(path)}
-        if volatile:
-            found = []
-
-            def walk(node, trail):
-                if isinstance(node, dict):
-                    for key in sorted(node):
-                        if key == "mcpServers":
-                            found.append([trail + [key], node[key]])
-                        else:
-                            walk(node[key], trail + [key])
-
-            walk(json.loads(Path(path).read_text()), [])
-            return {"mcp_sections_sha256": hashlib.sha256(json.dumps(found, sort_keys=True).encode()).hexdigest()}
-        return {"sha256": sha256_file(path)}
-    except (OSError, ValueError) as exc:
-        raise Unobservable("protected file unreadable: %s (%s)" % (path, type(exc).__name__))
+MCP_PROJECTION_VERSION = 1
+# Claude Code MCP perimeter (QUALIFY_4_1_0 §2): server definitions and their enable / disable / approval
+# settings, global and per project. Versioned selection; the rest of the file is NOT compared.
+MCP_KEYS = ("mcpServers", "disabledMcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers",
+            "enableAllProjectMcpServers")
 
 
-def _tree(root):
-    if not os.path.lexists(root):
-        return None
-    rows = {}
-    try:
-        for folder, names, files in os.walk(root):
-            names.sort()
-            for name in sorted(files):
-                path = os.path.join(folder, name)
-                rows[os.path.relpath(path, root)] = _fingerprint(path)
-    except OSError as exc:
-        raise Unobservable("protected folder unreadable: %s (%s)" % (root, type(exc).__name__))
+def mcp_projection(document):
+    """Full JSON path, presence and value of every MCP key, at the top level and in every project."""
+    if not isinstance(document, dict):
+        raise Unobservable("client configuration is not a JSON object")
+    rows = []
+
+    def take(node, trail):
+        for key in MCP_KEYS:  # absent and present-but-empty are different observations; {} is not []
+            rows.append({"path": trail + [key], "present": key in node, "value": node.get(key)})
+
+    take(document, [])
+    projects = document.get("projects")
+    if projects is not None:
+        if not isinstance(projects, dict) or not all(isinstance(v, dict) for v in projects.values()):
+            raise Unobservable("client configuration: projects is not an object of objects")
+        for name in sorted(projects):
+            take(projects[name], ["projects", name])
     return rows
 
 
-def production_snapshot(real_home, uid=None, run=subprocess.run):
-    """Content fingerprints of what must never change (read only).
+def observe(path, volatile=False, _seen=()):
+    """One protected path: absent / file / dir / link, with its CONTENT fingerprint. Unreadable = refusal.
 
-    Every client configuration of the catalogue, EVERY file of the real LaunchAgents (content, not
-    names), the real ``~/.config/memory-os`` tree, and the production pid. Absence is recorded as
-    absence; an unreadable file is a refusal.
+    A link is never fingerprinted by its target path alone: its target is checked (allowed) and its
+    content observed too. A folder is walked entirely; any listing error is blocking.
+    """
+    path = os.fspath(refuse_forbidden(path))
+    try:
+        if os.path.islink(path):
+            resolved = os.path.realpath(path)
+            if resolved in _seen:
+                raise Unobservable("link cycle at " + path)
+            return {"state": "link", "target": os.readlink(path),
+                    "content": observe(resolved, volatile, _seen + (resolved,))}
+        if not os.path.lexists(path):
+            return {"state": "absent"}
+        if os.path.isdir(path):
+            entries = {}
+            for folder, names, files in guarded_walk(path):
+                for name in names:
+                    full = os.path.join(folder, name)
+                    entries[os.path.relpath(full, path)] = (observe(full, False, _seen) if os.path.islink(full)
+                                                            else {"state": "dir"})
+                for name in files:
+                    full = os.path.join(folder, name)
+                    entries[os.path.relpath(full, path)] = observe(full, False, _seen)
+            return {"state": "dir", "entries": entries}
+        if os.path.isfile(path):
+            if volatile:
+                rows = mcp_projection(json.loads(read_text(path)))  # in memory only; the digest alone is kept
+                return {"state": "file", "scope": "MCP perimeter only", "mcp_projection_version": MCP_PROJECTION_VERSION,
+                        "mcp_sha256": hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()}
+            return {"state": "file", "sha256": sha256_file(path)}
+        raise Unobservable("protected path is neither a file nor a folder: " + path)
+    except (OSError, ValueError) as exc:
+        raise Unobservable("protected path unreadable: %s (%s)" % (path, type(exc).__name__))
+
+
+
+
+
+def production_snapshot(real_home, uid=None, run=subprocess.run):
+    """Content fingerprints and observation states of what must never change (read only).
+
+    Every client configuration of the catalogue, EVERY entry of the real LaunchAgents (content, not
+    names; links with their target's content), the real ``~/.config/memory-os`` tree, and the
+    production pid. Absent, file, folder and link are distinct states; unreadable is a refusal.
     """
     real_home = Path(real_home)
-    clients = {rel: _fingerprint(real_home / rel, volatile=rel in VOLATILE_JSON_CONFIGS) for rel in REAL_CLIENT_CONFIGS}
-    agents = _tree(real_home / "Library/LaunchAgents")
-    trees = {rel: _tree(real_home / rel) for rel in PROTECTED_TREES}
+    clients = {rel: observe(real_home / rel, volatile=rel in VOLATILE_JSON_CONFIGS) for rel in REAL_CLIENT_CONFIGS}
+    agents = observe(real_home / "Library/LaunchAgents")
+    trees = {rel: observe(real_home / rel) for rel in PROTECTED_TREES}
     state, text = label_state(PRODUCTION_LABEL, uid=uid, run=run)
     row = {"client_configs": clients, "launch_agents": agents, "protected_trees": trees,
-           "production_plist": (agents or {}).get(PRODUCTION_LABEL + ".plist"),
+           "production_plist": (agents.get("entries") or {}).get(PRODUCTION_LABEL + ".plist"),
            "production_label_state": state, "production_pid": parse_print(text)["pid"] if state == "present" else None}
     row["sha256"] = hashlib.sha256(json.dumps(
         {k: row[k] for k in ("client_configs", "launch_agents", "protected_trees")}, sort_keys=True).encode()).hexdigest()
@@ -410,18 +463,23 @@ def production_snapshot(real_home, uid=None, run=subprocess.run):
 
 
 def production_unchanged(before, after):
-    """The exit booleans, over the whole protected perimeter."""
+    """The exit booleans, over the whole protected perimeter. Something never observed is not "unchanged"."""
+    def observed(row, states):
+        return isinstance(row, dict) and row.get("state") in states
+
+    plist = before.get("production_plist")
     return {
-        "production_plist_unchanged": before["production_plist"] is not None
-        and before["production_plist"] == after["production_plist"],
+        "production_plist_unchanged": observed(plist, ("file", "link")) and plist == after.get("production_plist"),
         "production_pid_unchanged": before["production_pid"] is not None
         and before["production_pid"] == after["production_pid"],
-        "real_launch_agents_unchanged": before["launch_agents"] is not None
-        and before["launch_agents"] == after["launch_agents"],
+        "real_launch_agents_unchanged": observed(before.get("launch_agents"), ("dir",))
+        and before["launch_agents"] == after.get("launch_agents"),
         "real_client_configs_unchanged": set(before["client_configs"]) == set(REAL_CLIENT_CONFIGS)
-        and before["client_configs"] == after["client_configs"],
+        and all(observed(row, ("absent", "file", "link")) for row in before["client_configs"].values())
+        and before["client_configs"] == after.get("client_configs"),
         "real_memory_os_config_unchanged": set(before["protected_trees"]) == set(PROTECTED_TREES)
-        and before["protected_trees"] == after["protected_trees"],
+        and all(observed(row, ("dir",)) for row in before["protected_trees"].values())
+        and before["protected_trees"] == after.get("protected_trees"),
     }
 
 
@@ -429,7 +487,7 @@ def production_unchanged(before, after):
 
 def store_logical(store_dir):
     """Identity and logical content of a SQLite store, read only; survives WAL checkpoint/close."""
-    db = Path(store_dir) / "store.sqlite3"
+    db = refuse_forbidden(Path(store_dir) / "store.sqlite3")
     connection = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=30)
     try:
         digest = hashlib.sha256()
@@ -619,14 +677,14 @@ def timeline(text):
 def out(value, path=None):
     text = json.dumps(value, indent=2, sort_keys=True) + "\n"
     if path:
-        with open(path, "x") as stream:  # evidence is never overwritten
+        with open(refuse_forbidden(path), "x") as stream:  # evidence is never overwritten
             stream.write(text)
     else:
         sys.stdout.write(text)
 
 
 def load(path):
-    return json.loads(Path(path).read_text())
+    return json.loads(read_text(path))
 
 
 def main(argv=None):
@@ -651,6 +709,8 @@ def main(argv=None):
     for name in ("--constraints", "--freeze", "--profile", "--output"):
         s.add_argument(name, required=True)
     s.add_argument("--variant", choices=("autonomous", "pth"), default="autonomous")
+    s = sub.add_parser("hf-cache")
+    s.add_argument("--model-dir", required=True)
     s = sub.add_parser("verify-granite")
     for name in ("--cache", "--catalog", "--output"):
         s.add_argument(name, required=True)
@@ -706,10 +766,14 @@ def main(argv=None):
         if args.command == "constraints-check":
             if args.variant == "pth" and args.profile != "semantic":
                 raise SystemExit("REFUS: the .pth variant exists for the semantic profile only")
-            row = constraints_check(Path(args.constraints).read_text(), Path(args.freeze).read_text(), args.profile,
+            row = constraints_check(read_text(args.constraints), read_text(args.freeze), args.profile,
                                     args.variant)
             row["constraints_sha256"] = sha256_file(args.constraints)
             out(row, args.output)
+            return 0 if row["ok"] else 1
+        if args.command == "hf-cache":
+            row = hf_cache_files_present(args.model_dir)
+            out(row)
             return 0 if row["ok"] else 1
         if args.command == "verify-granite":
             row = verify_granite(args.cache, load(args.catalog))
@@ -727,7 +791,7 @@ def main(argv=None):
             out({"root": args.root, "bytes": tree_bytes(args.root)}, args.output)
             return 0
         if args.command == "timeline":
-            out(timeline(Path(args.input).read_text()), args.output)
+            out(timeline(read_text(args.input)), args.output)
             return 0
         if args.command == "meta":
             if sha256_file(args.wheel) != args.wheel_sha256:
@@ -838,12 +902,16 @@ def assemble(d):
         removed = sorted(rel for rel in created if rel not in still and rel not in present)
         uninstall, state = load(d2 / "uninstall.json"), load(d2 / "uninstall_state.json")
 
+        compared = []  # the state documents actually used for the field-by-field comparison
+
         def text(folder):
             def read(rel):
                 try:
-                    return (d2 / folder / rel[len(STATE_PREFIX):]).read_text()
+                    content = read_text(d2 / folder / rel[len(STATE_PREFIX):])
                 except (OSError, ValueError):
                     return None
+                compared.append("install2/%s/%s" % (folder, rel[len(STATE_PREFIX):]))
+                return content
             return read
 
         data = data_conservation(load(d2 / "data_before.json")["rows"], load(d2 / "data_after.json")["rows"],
@@ -851,6 +919,7 @@ def assemble(d):
                                  stamp=uninstall.get("stamp"), text_before=text("state_before"),
                                  text_after=text("state_after"))
         data["checked_after_stop"] = state["label_state"] == "absent" and state["port_state"] == "free"
+        data["compared_documents"] = sorted(set(compared))
         data["witness"] = load(d2 / "witness.json")
         two["uninstall_preview"] = {**load(d2 / "uninstall_preview_inventory.json"),
                                     "ok": load(d2 / "uninstall_preview.json").get("ok") is True,
@@ -869,14 +938,25 @@ def assemble(d):
         report["safety_net_fired"] = load(d / "safety_net.json")["fired"]
         if profile == "semantic":
             report["model_pre_placed"] = [load(d / ("install%s" % i) / "granite.json") for i in ("1", "2")]
-        # Sealed pieces: re-verified at the final verification from this folder. proof.log is still being
-        # written while this runs, and the state copies are covered by the inventories: both stay out.
-        report["evidence_sha256"] = {
-            str(p.relative_to(d)): sha256_file(p) for p in sorted(d.rglob("*"))
-            if p.is_file() and not p.is_symlink() and p.suffix in (".json", ".txt") and p.name != "report.json"
-            and not any(part in ("venv", "pip-cache", "tmp", "state_before", "state_after") or part.startswith("home")
-                        for part in p.relative_to(d).parts)}
-        missing = sorted(set(REQUIRED_EVIDENCE) - set(report["evidence_sha256"]))
+        # Sealed pieces, sub-folders included: re-verified (presence and bytes) at G15 and --check-final from
+        # this folder. The copies of the state folder used for the G8 comparison are sealed whole. proof.log
+        # is still being written while this runs: it stays out.
+        sealed = {}
+        for folder, names, files in guarded_walk(d):
+            parts = Path(folder).relative_to(d).parts
+            if not parts:
+                names[:] = [n for n in names if n not in ("venv", "pip-cache", "tmp") and not n.startswith("home")]
+            state_copy = len(parts) >= 2 and parts[0] == "install2" and parts[1] in ("state_before", "state_after")
+            for name in files:
+                p = Path(folder) / name
+                if p.is_file() and not p.is_symlink() and name != "report.json" and (
+                        state_copy or p.suffix in (".json", ".txt")):
+                    sealed[str(p.relative_to(d))] = sha256_file(p)
+        report["evidence_sha256"] = sealed
+        missing = sorted((set(REQUIRED_EVIDENCE) | set(data["compared_documents"])) - set(sealed))
+        if not any("/state_before/" in rel for rel in data["compared_documents"]) or \
+                not any("/state_after/" in rel for rel in data["compared_documents"]):
+            raise ValueError("the state documents of the G8 comparison were not kept")
         if missing:
             raise ValueError("required evidence missing: " + ", ".join(missing))
         report["ok"] = load(d / "shell_verdict.json")["ok"] is True
