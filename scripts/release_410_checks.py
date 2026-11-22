@@ -1,4 +1,4 @@
-"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 4). Fail closed.
+"""Closed 4.1.0 qualification rules (v4/docs/QUALIFY_4_1_0.md, revision 6). Fail closed.
 
 Invariants of §1, gate states, admissible decisions, commit/artifact binding. No recording
 command raises ``release_ready``: only the final verification (G15) does, after the exit
@@ -996,10 +996,14 @@ def m3_summary(lines):
       probe ended (overlap demonstrated at both ends);
     - ``overlap_only``: the command was running when the probe started and had ended before the probe
       finished; kept as an overlap observation with its bounds, flagged as a short-command exception;
-    - ``none_short_command``: the first probe found the command already finished; flagged, no sample is
-      invented, and only admitted for a command shorter than SHORT_COMMAND_MAX_S.
-    A probe finished before the command started never counts. A failed probe (non-zero status, even
-    without any error marker) makes M3 unusable.
+    - ``none_short_command``: the probe never saw the executed command running (it had already finished,
+      or the probe only ever saw the pre-exec relay); flagged, no sample is invented, and only admitted
+      when ``command_seconds_upper_bound`` is at most SHORT_COMMAND_MAX_S (10 s).
+    ``command_seconds_upper_bound`` runs from the start bound recorded before ``exec`` to the observation
+    taken after the supervisor returned and the probe ended: an upper bound, not an exact duration.
+    A probe finished before the command started, or limited to the relay before ``exec``, never counts.
+    A failed probe (non-zero status, even without any error marker) or an impossible detection makes M3
+    unusable: neither is ever a short-command exception.
     """
     rows = [json.loads(line) for line in lines if line.strip()]
     number = (int, float)
@@ -1025,11 +1029,15 @@ def m3_summary(lines):
                 "M3: command bounds missing: " + name)
 
         def bound(r):  # a probe of THIS command, started after it started, finished before the step closed
-            return (r.get("command_pid") == cmd["pid"] and r.get("command_start_mono") == cmd["start_mono"]
+            return (r.get("detection") == "ok" and r.get("command_pid") == cmd["pid"]
+                    and r.get("command_start_mono") == cmd["start_mono"]
                     and isinstance(r.get("probe_start_mono"), number) and isinstance(r.get("probe_end_mono"), number)
                     and cmd["start_mono"] <= r["probe_start_mono"] <= r["probe_end_mono"] <= after["mono"])
 
-        probes = [r for r in phases.get("during", []) if bound(r) and r.get("alive_at_probe_start") is True]
+        # The start marker is written BEFORE exec: a probe that only saw the relay proves nothing about the
+        # command. Only a probe that identified the executed command (post-exec) at its start is credited.
+        probes = [r for r in phases.get("during", []) if bound(r) and r.get("alive_at_probe_start") is True
+                  and r.get("post_exec_at_probe_start") is True]
         inside = [r for r in probes if r.get("alive_at_probe_end") is True]
         upper = after["mono"] - cmd["start_mono"]
         if inside:
@@ -1414,6 +1422,43 @@ def main(args):
 
 # ---------- chain-facing commands (run by the chain; none records anything in a manifest) ----------
 
+def provision_paths(record, *, resources, cache_dir=None, table_path=None):
+    """Every path ``provision.plan`` will stat, read or hash for these resources, parents first."""
+    paths = []
+    if "granite" in resources:
+        require(cache_dir is not None, "An explicit Granite cache folder is required")
+        cache = Path(cache_dir).expanduser().absolute()
+        model = cache / ("models--" + record["model_id"].replace("/", "--"))
+        snapshot = model / "snapshots" / record["revision"]
+        paths += [cache, model, model / "refs", model / "refs" / "main", model / "snapshots", snapshot]
+        for item in record["files"]:
+            target = snapshot / item["path"]
+            paths += [*reversed([parent for parent in target.parents if snapshot in parent.parents]), target]
+    if "cl100k" in resources:
+        require(table_path is not None, "An explicit cl100k table path is required")
+        table = Path(table_path).expanduser().absolute()
+        paths += [table.parent, table]
+    return paths
+
+
+def guarded_plan(provision, *, resources, cache_dir=None, table_path=None):
+    """``provision.plan`` (engine, unchanged), called only AFTER the guard has seen everything it will read.
+
+    The engine checks whether ``refs/main`` itself is a link, not whether a PARENT folder is one, and it
+    hashes snapshot files wherever they lead. So each constructed path is checked here first, in its
+    lexical and in its resolved form (a link carried by any parent, or by the file, is followed by the
+    resolution, never by an open). Nothing is read before this loop completes.
+    """
+    for path in provision_paths(provision.catalog(), resources=resources, cache_dir=cache_dir, table_path=table_path):
+        refuse_forbidden(path)
+    kwargs = {"resources": tuple(resources)}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = cache_dir
+    if table_path is not None:
+        kwargs["table_path"] = table_path
+    return provision.plan(**kwargs)
+
+
 def preconditions(a):
     """§9: checked by the chain before any step. Any gap is a STOP. Reads production, writes nothing there."""
     import importlib.util
@@ -1450,8 +1495,9 @@ def preconditions(a):
         # config.json, and nothing more is claimed. Validity and loading are proven by G4's cached test only.
         report["minilm_cache"] = helper.hf_cache_files_present(hub / "models--sentence-transformers--all-MiniLM-L6-v2")
         checks["minilm_cache_present"] = report["minilm_cache"]["ok"] is True
-        checks["granite_cache_conforms"] = provision.plan(resources=("granite",), cache_dir=a.granite_hub)["ready"] is True
-        checks["cl100k_conforms"] = provision.plan(resources=("cl100k",), table_path=a.cl100k)["ready"] is True
+        checks["granite_cache_conforms"] = guarded_plan(provision, resources=("granite",),
+                                                        cache_dir=a.granite_hub)["ready"] is True
+        checks["cl100k_conforms"] = guarded_plan(provision, resources=("cl100k",), table_path=a.cl100k)["ready"] is True
         baseline, _ = baseline_from_plist(a.production_plist, a.baseline_python)
         checks["baseline_interpreter_matches_plist"] = os.access(baseline, os.X_OK)
         report["existing_run_paths"] = [p for p in a.fresh if os.path.lexists(refuse_forbidden(p))]

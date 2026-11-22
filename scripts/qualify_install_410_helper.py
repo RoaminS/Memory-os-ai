@@ -16,6 +16,7 @@ from pathlib import Path
 import plistlib
 import re
 import socket
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -401,6 +402,22 @@ def mcp_projection(document):
     return rows
 
 
+def lstat_state(path):
+    """Explicit observation of one path: its ``lstat`` result, or None when its absence is ESTABLISHED.
+
+    Only "no such entry" (ENOENT) and "a parent is not a folder" (ENOTDIR) establish absence. A permission
+    error, or any other failure, means the state could NOT be observed: that is a refusal, never "absent"
+    (``os.path.lexists`` would silently turn such an error into False).
+    """
+    try:
+        return os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise Unobservable("protected path cannot be observed: %s (%s, errno %s)"
+                           % (path, type(exc).__name__, exc.errno))
+
+
 def observe(path, volatile=False, _seen=()):
     """One protected path: absent / file / dir / link, with its CONTENT fingerprint. Unreadable = refusal.
 
@@ -408,16 +425,17 @@ def observe(path, volatile=False, _seen=()):
     content observed too. A folder is walked entirely; any listing error is blocking.
     """
     path = os.fspath(refuse_forbidden(path))
+    info = lstat_state(path)
+    if info is None:
+        return {"state": "absent"}
     try:
-        if os.path.islink(path):
+        if stat.S_ISLNK(info.st_mode):
             resolved = os.path.realpath(path)
             if resolved in _seen:
                 raise Unobservable("link cycle at " + path)
             return {"state": "link", "target": os.readlink(path),
                     "content": observe(resolved, volatile, _seen + (resolved,))}
-        if not os.path.lexists(path):
-            return {"state": "absent"}
-        if os.path.isdir(path):
+        if stat.S_ISDIR(info.st_mode):
             entries = {}
             for folder, names, files in guarded_walk(path):
                 for name in names:
@@ -428,7 +446,7 @@ def observe(path, volatile=False, _seen=()):
                     full = os.path.join(folder, name)
                     entries[os.path.relpath(full, path)] = observe(full, False, _seen)
             return {"state": "dir", "entries": entries}
-        if os.path.isfile(path):
+        if stat.S_ISREG(info.st_mode):
             if volatile:
                 rows = mcp_projection(json.loads(read_text(path)))  # in memory only; the digest alone is kept
                 return {"state": "file", "scope": "MCP perimeter only", "mcp_projection_version": MCP_PROJECTION_VERSION,
@@ -437,9 +455,6 @@ def observe(path, volatile=False, _seen=()):
         raise Unobservable("protected path is neither a file nor a folder: " + path)
     except (OSError, ValueError) as exc:
         raise Unobservable("protected path unreadable: %s (%s)" % (path, type(exc).__name__))
-
-
-
 
 
 def production_snapshot(real_home, uid=None, run=subprocess.run):
