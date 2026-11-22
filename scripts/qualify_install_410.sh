@@ -161,7 +161,7 @@ fi
 span control_pip_check tenv "$H1" "$VENV/bin/python" -m pip check > "$P/pip_check.txt"; rcfile "$P/pip_check.json" $?
 span control_freeze tenv "$H1" "$VENV/bin/python" -m pip freeze --exclude-editable > "$P/freeze.txt" || fail "pip freeze"
 span control_constraints helper constraints-check --constraints "$C" --freeze "$P/freeze.txt" --profile "$PROFILE" \
-  --output "$P/constraints_check.json" || fail "versions ≠ verrous, paquet hors liste ou paquet ML"
+  --variant "$VARIANT" --output "$P/constraints_check.json" || fail "versions ≠ verrous, paquet hors liste ou paquet ML"
 span control_locations tenv "$H1" "$VENV/bin/python" -I - "$PROFILE" "$VENV" > "$P/locations.json" <<'EOF' || fail "localisation du paquet installé"
 import importlib.metadata as md, json, sys
 from pathlib import Path

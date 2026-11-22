@@ -441,6 +441,11 @@ def test_uninstall_complete_false_alone_is_not_a_failure_but_a_kept_service_is()
 def test_pth_variant_must_attest_paths_and_candidate_origin_and_is_semantic_only():
     proof, m = install_proof("semantic", "pth")
     refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "reused_paths"), []), m, "semantic")
+    # Reduced coverage: other packages of the reused environment are listed, a drifting lock still refuses.
+    gate.validate_install(mutate(copy.deepcopy(proof), ("environment", "unpinned"), ["pytest", "ruff"]), m, "semantic")
+    refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "mismatch"), ["torch 2.9 != 2.10"]), m, "semantic")
+    refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "missing"), ["torch"]), m, "semantic")
+    refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "unpinned"), None), m, "semantic")
     refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "candidate_origin_sha256"), SHA), m, "semantic")
     refused(gate.validate_install, mutate(copy.deepcopy(proof), ("m1", "label"), "first installation"), m, "semantic")
     refused(gate.validate_install, mutate(copy.deepcopy(proof), ("m1", "protocol_deviations"),
@@ -1222,6 +1227,9 @@ def test_constraints_check_finds_drift_unpinned_ml_and_missing_packages():
     assert helper.constraints_check(constraints, good + "torch==2.10.0\n", "lexical")["ml_packages"] == ["torch"]
     assert helper.constraints_check(constraints, good.replace("mcp==1.2\n", ""), "lexical")["missing"] == ["mcp"]
     assert not helper.constraints_check(constraints, good + "pytest==9.0.2\n", "lexical")["ok"]  # only pip/setuptools/wheel
+    reused = helper.constraints_check(constraints, good + "pytest==9.0.2\n", "semantic", "pth")
+    assert reused["ok"] and reused["unpinned"] == ["pytest"] and reused["variant"] == "pth"  # listed, not refused
+    assert not helper.constraints_check(constraints, good.replace("mcp==1.2", "mcp==1.3"), "semantic", "pth")["ok"]
 
 
 def test_pip_distributions_tie_installed_wheels_to_url_and_sha256():

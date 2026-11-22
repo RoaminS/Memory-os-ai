@@ -209,7 +209,12 @@ def canonical(name):
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def constraints_check(constraints_text, freeze_text, profile):
+def constraints_check(constraints_text, freeze_text, profile, variant="autonomous"):
+    """Installed versions against the locks. Autonomous: no package outside the list (bootstrap apart).
+
+    ``.pth`` variant (decision of Romain, reduced coverage): the reused environment may expose other
+    packages; they are listed (``unpinned``), every lock must still be present at its exact version.
+    """
     pins = {}
     for raw in constraints_text.splitlines():
         found = re.fullmatch(r"([A-Za-z0-9_.\-]+)==([^\s;]+)", raw.split("#")[0].strip())
@@ -240,7 +245,9 @@ def constraints_check(constraints_text, freeze_text, profile):
         else:
             out["pinned_and_equal"] += 1
     out["missing"] = sorted(set(pins) - seen)
-    out["ok"] = not (out["unpinned"] or out["mismatch"] or out["ml_packages"] or out["missing"])
+    out["variant"] = variant
+    outside = out["unpinned"] if variant == "autonomous" else []
+    out["ok"] = not (outside or out["mismatch"] or out["ml_packages"] or out["missing"])
     return out
 
 
@@ -490,6 +497,7 @@ def main(argv=None):
     s = sub.add_parser("constraints-check")
     for name in ("--constraints", "--freeze", "--profile", "--output"):
         s.add_argument(name, required=True)
+    s.add_argument("--variant", choices=("autonomous", "pth"), default="autonomous")
     s = sub.add_parser("verify-granite")
     for name in ("--cache", "--catalog", "--output"):
         s.add_argument(name, required=True)
@@ -537,7 +545,10 @@ def main(argv=None):
                  "difference": diff(a["rows"], b["rows"])}, args.output)
             return 0 if same else 1
         if args.command == "constraints-check":
-            row = constraints_check(Path(args.constraints).read_text(), Path(args.freeze).read_text(), args.profile)
+            if args.variant == "pth" and args.profile != "semantic":
+                raise SystemExit("REFUS: the .pth variant exists for the semantic profile only")
+            row = constraints_check(Path(args.constraints).read_text(), Path(args.freeze).read_text(), args.profile,
+                                    args.variant)
             row["constraints_sha256"] = sha256_file(args.constraints)
             out(row, args.output)
             return 0 if row["ok"] else 1

@@ -420,9 +420,13 @@ def validate_install(p, m, profile):
     env = p["environment"]
     require(env.get("constraints_sha256") == m["profiles"][profile]["constraints_sha256"]
             and env.get("locator_under_site_packages") is True and env.get("package_under_site_packages") is True
-            and env.get("pip_check_ok") is True and env.get("mismatch") == [] and env.get("unpinned") == []
+            and env.get("pip_check_ok") is True and env.get("mismatch") == [] and env.get("missing", []) == []
             and set(env.get("bootstrap", [])) <= {"pip", "setuptools", "wheel"}
             and env.get("pinned_and_equal") == m["profiles"][profile]["locks"], "Installed runtime differs from the locks")
+    # No package outside the list in an autonomous environment. The .pth variant reuses a wider
+    # environment: its other packages are listed, not refused (reduced coverage, decision 4).
+    require(isinstance(env.get("unpinned"), list) and (variant == "pth" or env["unpinned"] == []),
+            "Package outside the lock list")
     if profile == "lexical":
         require(env.get("ml_packages") == [], "ML package in the lexical environment")
     if variant == "autonomous":
