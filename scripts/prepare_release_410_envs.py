@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import venv
 from qualify_distribution_d1a import command
-from release_410_checks import artifact, digest, validate_local
+from release_410_checks import artifact, digest, refuse_forbidden, validate_local
 
 ROOT = Path(__file__).resolve().parents[1]
 IDENTITY = (
@@ -50,6 +50,8 @@ def main():
     p.add_argument("--lexical-environment", type=Path, required=True,
                    help="venv of the lexical installation (N3); attested, never modified")
     a = p.parse_args()
+    for given in (a.manifest, a.output, a.build_python, a.lexical_environment):
+        refuse_forbidden(given)  # lexical then resolved, before any read
     a.manifest = a.manifest.resolve()
     m = json.loads(a.manifest.read_text())
     validate_local(m, a.manifest.parent, require_source=False, require_copy=False)

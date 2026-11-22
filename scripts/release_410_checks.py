@@ -56,7 +56,11 @@ PRODUCTION_LABEL = "com.romain.memory-os-v4"
 PRODUCTION_PORT = 8765
 CL100K_BYTES = 1681126
 CL100K_SHA256 = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+CL100K_URL = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
 GRANITE_HOME_BYTES = 220_227_876
+TEST_CLIENT_FILES = (".codex/config.toml", ".cursor/mcp.json")  # the two clients every installation requests
+REQUIRED_DOCTOR_AREAS = ("token", "local-runtime", "server", "security", "ready", "service", "store", "storage",
+                         "store-profile", "relay-journals", "client:codex", "client:cursor")
 PYTEST_PINS = "qualify_410_pytest_pins.txt"
 PYPI_HOSTS = ("pypi.org", "files.pythonhosted.org")
 # Romain's permanent rule: nothing reads or lists these folders. Names only; never opened.
@@ -75,6 +79,22 @@ RELAY_CHECKS = ("installed", "ready", "roundtrip", "failure_reported", "reconnec
 P_B_GATES = ("all_40_pass", "unexpected_invalidations_0", "partial_success_0", "hard_safety_0",
              "legit_replacements_all", "collection_integrity")
 NETWORK = ("N1", "N2", "N3", "N4", "N5", "N6")
+DOSSIER_FORMAT = "qualify-410-network-dossier-v1"
+PYPI_INDEX = "https://pypi.org/simple"
+# What each acquisition EFFECTIVELY does (the scripts are tested against these parameters). A GO names a
+# dossier; the dossier must be exactly this description for the run: nothing wider, nothing else.
+NETWORK_SPEC = {
+    "N1": {"tool": "scripts/qualify_runtime_resolution.py", "operation": "pip install --dry-run", "profile": "lexical",
+           "installs": False},
+    "N2": {"tool": "scripts/qualify_runtime_resolution.py", "operation": "pip install --dry-run", "profile": "semantic",
+           "installs": False},
+    "N3": {"tool": "scripts/qualify_install_410.sh", "operation": "pip install", "profile": "lexical", "installs": True},
+    "N4": {"tool": "scripts/qualify_lexical_wheel_410.py", "operation": "pip install -r " + PYTEST_PINS,
+           "profile": "lexical", "installs": True},
+    "N5": {"tool": "scripts/qualify_install_410.sh", "operation": "pip install", "profile": "semantic", "installs": True},
+    "N6": {"tool": "scripts/qualify_install_410.sh", "operation": "memory-os-admin quickstart --download-approved",
+           "profile": "lexical", "installs": False},
+}
 DECISION_FORMAT = "qualify-410-decision-v1"
 # id -> (bound to RUN_TAG, section of §10)
 DECISIONS = {
@@ -120,6 +140,47 @@ def refuse_forbidden(path):
     require(not any(name in Path(resolved).parts for name in FORBIDDEN_NAMES),
             "Path resolves into a sealed validation folder: refused")
     return Path(text)
+
+
+def exact_pins(text):
+    rows = {}
+    for raw in text.splitlines():
+        line = raw.split("#")[0].strip()
+        if line:
+            found = re.fullmatch(r"([A-Za-z0-9_.\-]+)==([^\s;]+)", line)
+            require(found is not None, "Only exact pins are allowed: " + line)
+            rows[re.sub(r"[-_.]+", "-", found.group(1)).lower()] = found.group(2)
+    require(rows, "Empty pin file")
+    return rows
+
+
+def network_context(root):
+    """Effective parameters of the acquisitions, from the candidate tree (sealed in the manifest later)."""
+    root = Path(root)
+    pins = root / "scripts" / PYTEST_PINS
+    return {"pins_sha256": digest(pins), "pins": exact_pins(pins.read_text()),
+            "constraints": {name: digest(root / spec["constraints"]) for name, spec in PROFILES.items()}}
+
+
+def network_dossier(acquisition, *, commit, run_tag, context):
+    """The one dossier a GO Nn may authorise for this candidate and run: exact operation, sources, inputs."""
+    require(acquisition in NETWORK_SPEC, "Unknown acquisition")
+    spec = NETWORK_SPEC[acquisition]
+    dossier = {"format": DOSSIER_FORMAT, "acquisition": acquisition, "source_commit": commit, "run_tag": run_tag,
+               "tool": spec["tool"], "operation": spec["operation"], "installs": spec["installs"],
+               "attempts": 1, "retries_or_widening_covered": False}
+    if acquisition == "N6":
+        dossier.update(sources=["openaipublic.blob.core.windows.net"], url=CL100K_URL, bytes=CL100K_BYTES,
+                       sha256=CL100K_SHA256, times=1, where="first lexical installation only")
+    else:
+        profile = spec["profile"]
+        dossier.update(sources=sorted(PYPI_HOSTS), index_url=PYPI_INDEX, only_binary=True, profile=profile,
+                       constraints_sha256=context["constraints"][profile])
+        if acquisition == "N4":
+            dossier.update(pins_sha256=context["pins_sha256"], pins=context["pins"])
+        else:
+            dossier.update(extras=PROFILES[profile]["extras"], environments=1 if spec["installs"] else 0)
+    return dossier
 
 
 def evidence(m, directory, name):
@@ -251,7 +312,7 @@ def validate_preconditions(p, m):
     require(p.get("format") == "qualify-410-preconditions-v1" and p.get("ok") is True
             and p.get("source_commit") == m["source_commit"] and p.get("run_tag") == m["run_tag"],
             "Preconditions proof missing or for another candidate/run")
-    for key in ("tree_clean", "rc_py_runtime_ok", "build_tools_present", "minilm_cache_present",
+    for key in ("tree_clean", "rc_py_runtime_ok", "build_tools_present", "hf_offline", "minilm_cache_present",
                 "granite_cache_conforms", "cl100k_conforms", "baseline_interpreter_matches_plist",
                 "run_tag_unused", "locks_absent", "test_label_absent", "test_port_free"):
         require(p.get("checks", {}).get(key) is True, "Precondition not established: " + key)
@@ -400,10 +461,23 @@ def _service(row, profile, m, where):
             and row.get("plist_under_home") is True and row.get("program_is_run_venv") is True
             and row.get("listener_is_service_pid") is True and row.get("ready") is True
             and row.get("label") == TEST_LABEL and row.get("port") == TEST_PORT
-            and row.get("version") == m["version"] and row.get("retrieval_profile") == marker,
-            "Test service not attested as this run's, with the expected profile: " + where)
+            and row.get("version") == m["version"] and row.get("commit") == m["source_commit"]
+            and row.get("retrieval_profile") == marker,
+            "Test service not attested as this run's candidate, with the expected profile: " + where)
     if profile == "lexical":
         require(row.get("ml_libraries_open") == 0, "ML library opened by the lexical server")
+
+
+def _doctor(row, where):
+    """doctor: exit code 0, zero FAIL, and the expected inventory of checks actually present."""
+    statuses = row.get("statuses", {})
+    require(row.get("returncode") == 0 and row.get("fail") == 0 and row.get("checks", 0) >= len(REQUIRED_DOCTOR_AREAS),
+            "doctor failed (exit code or FAIL): " + where)
+    require(set(REQUIRED_DOCTOR_AREAS) <= set(row.get("areas", [])) and row.get("missing_areas") == []
+            and set(statuses) == set(REQUIRED_DOCTOR_AREAS) and all(v in ("PASS", "WARN") for v in statuses.values())
+            and statuses.get("client:codex") == statuses.get("client:cursor") == "PASS"
+            and statuses.get("server") == statuses.get("ready") == statuses.get("store-profile") == "PASS",
+            "doctor did not run its expected checks: " + where)
 
 
 def validate_install(p, m, profile):
@@ -429,6 +503,9 @@ def validate_install(p, m, profile):
             "Package outside the lock list")
     if profile == "lexical":
         require(env.get("ml_packages") == [], "ML package in the lexical environment")
+    # Identity of the installed package: the sealed wheel, at the release version, in both variants.
+    require(env.get("candidate_origin_sha256") == artifact(m, ".whl")["sha256"]
+            and env.get("package_version") == m["version"], "Installed package is not the sealed candidate wheel")
     if variant == "autonomous":
         rows = env.get("distributions", [])
         # Wheels only; installed bytes tied to the recorded URL and SHA-256.
@@ -436,8 +513,8 @@ def validate_install(p, m, profile):
                 and all(is_sha(r.get("sha256")) and str(r.get("url", "")).startswith("https://files.pythonhosted.org/")
                         and str(r["url"]).endswith(".whl") for r in rows), "Installed wheels not tied to URL/SHA-256")
     else:
-        require(env.get("reused_paths") and env.get("candidate_origin_sha256") == artifact(m, ".whl")["sha256"],
-                ".pth variant must attest reused paths, versions and candidate origin")
+        require(env.get("reused_paths") and all(r.get("path") and r.get("distributions") for r in env["reused_paths"]),
+                ".pth variant must attest reused paths and versions")
     one, two = p["install_1"], p["install_2"]
     require(one.get("home") != two.get("home") and one.get("home") and two.get("home"), "Two disposable HOMEs required")
     for name, block in (("install_1", one), ("install_2", two)):
@@ -447,7 +524,10 @@ def validate_install(p, m, profile):
                 and block["apply"].get("demo") is True and block["apply"].get("profile") == profile,
                 "quickstart --apply --demo not ok: " + name)
         _service(block["service"], profile, m, name)
-        require(block["doctor"].get("fail") == 0 and block["doctor"].get("checks", 0) > 0, "doctor FAIL: " + name)
+        _doctor(block["doctor"], name)
+        # Exactly the two requested clients, as structured relay entries.
+        require(sorted(block.get("client_entries_created", [])) == sorted(TEST_CLIENT_FILES),
+                "The two requested client entries were not both created: " + name)
     # N6 is exercised once, in the first lexical installation; every other install downloads nothing.
     expected_download = CL100K_BYTES if profile == "lexical" else 0
     require(one["apply"].get("download_bytes") == expected_download and two["apply"].get("download_bytes") == 0,
@@ -462,11 +542,16 @@ def validate_install(p, m, profile):
     created = two.get("client_entries_created", [])
     # complete=false alone is not a failure; a kept service or a kept expected entry is.
     require(un.get("ok") is True and un.get("partial") is False and un.get("returncode") == 0
-            and created and sorted(un.get("entries_removed", [])) == sorted(created)
+            and sorted(created) == sorted(TEST_CLIENT_FILES)
+            and sorted(un.get("entries_removed", [])) == sorted(created)
             and un.get("label_absent") is True and un.get("port_free") is True
             and un.get("plist_removed_from_active") is True and un.get("plist_journal_copy_kept") is True
             and un.get("data_deleted") is False, "Uninstall kept the service or an expected entry")
     data = two["data_conservation"]
+    counts = data.get("immutable_files", {})
+    # Witnesses: an absent key or backup proves nothing about its preservation.
+    require(data.get("immutable_witnessed") is True and set(counts) == {"token", "resources", "backups", "key"}
+            and all(isinstance(v, int) and v >= 1 for v in counts.values()), "Immutable files not witnessed (empty kind)")
     require(data.get("immutable_unchanged") is True and set(data.get("immutable_kinds", [])) >=
             {"token", "resources", "backups", "key"} and data.get("store_identity_unchanged") is True
             and data.get("store_logical_unchanged") is True and data.get("checked_after_stop") is True
@@ -474,10 +559,15 @@ def validate_install(p, m, profile):
             "User data not preserved by uninstall")
     require(p.get("safety_net_fired") is False, "The safety net fired: a rollback failure is never a success")
     prod = p["production"]
+    require(all(prod.get(key) is True for key in PRODUCTION_FLAGS), "Protected real files changed or not observed")
     require(prod.get("unchanged") is True and prod.get("pid_before") and prod.get("pid_before") == prod.get("pid_after")
             and is_sha(prod.get("snapshot_before_sha256"))
             and prod.get("snapshot_before_sha256") == prod.get("snapshot_after_sha256"), "Production state changed")
     return validate_m1(p["m1"], profile, variant)
+
+
+PRODUCTION_FLAGS = ("production_plist_unchanged", "production_pid_unchanged", "real_launch_agents_unchanged",
+                    "real_client_configs_unchanged", "real_memory_os_config_unchanged")
 
 
 def validate_m1(m1, profile, variant):
@@ -488,20 +578,24 @@ def validate_m1(m1, profile, variant):
     require(abs(m1["total_s"] - (m1["t1_epoch"] - m1["t0_epoch"])) < 1e-3
             and abs(m1["net_s"] - (m1["total_s"] - m1["controls_s"])) < 1e-3, "M1 gross/net totals inconsistent")
     require(isinstance(m1.get("install_json_timing"), dict) and m1["install_json_timing"].get("clock") == "monotonic"
-            and isinstance(m1.get("pip_download_bytes"), int)
             and m1.get("quickstart_download_bytes") == m1["install_json_timing"].get("download_bytes"),
             "M1 timing/download record incomplete")
+    # pip's transferred bytes are NOT measured. A cache size is never presented as a download count.
+    require("pip_download_bytes" not in m1 and isinstance(m1.get("pip_cache_bytes"), int)
+            and m1.get("pip_cache_bytes_nature") and m1.get("pip_downloaded_bytes_measured") is False
+            and m1.get("pip_downloaded_bytes") is None, "M1: pip cache size must be reported as such, downloads as unmeasured")
     deviations = set(m1.get("protocol_deviations", []))
     require({"non_blank_machine", "local_wheel"} <= deviations
             and (profile == "lexical" or "model_pre_placed" in deviations), "M1 protocol deviations not written")
     wanted = "reused-dependencies variant" if variant == "pth" else "first installation"
     require(m1.get("label") == wanted, "M1 label")
-    return {k: m1[k] for k in (*numbers, "pip_download_bytes", "quickstart_download_bytes", "label")}
+    return {k: m1[k] for k in (*numbers, "pip_downloaded_bytes", "pip_downloaded_bytes_measured", "pip_cache_bytes",
+                               "pip_cache_bytes_nature", "quickstart_download_bytes", "label")}
 
 
 # ---------- G6, G11 ----------
 
-def validate_lexical_wheel(p, m):
+def validate_lexical_wheel(p, m, pins=None):
     require(p.get("format") == "qualify-410-lexical-wheel-v1" and p.get("ok") is True
             and p.get("source_commit") == m["source_commit"] and p.get("run_tag") == m["run_tag"]
             and p.get("wheel_sha256") == artifact(m, ".whl")["sha256"], "Lexical wheel proof binding")
@@ -510,6 +604,13 @@ def validate_lexical_wheel(p, m):
             and p.get("find_spec") == {name: None for name in ML_MODULES}, "Lexical wheel not proven installed/ML-free")
     require(p.get("pytest_pins_sha256") == m["pytest_pins_sha256"] and p.get("pip_check_ok") is True
             and p.get("runtime_recheck_ok") is True, "pytest closure (N4) or runtime re-check")
+    # N4: versions AND URL/SHA-256 of exactly the frozen closure.
+    pins = exact_pins((Path(__file__).with_name(PYTEST_PINS)).read_text()) if pins is None else pins
+    rows = p.get("pytest_distributions")
+    require(isinstance(rows, list) and {r.get("name"): r.get("version") for r in rows} == pins and len(rows) == len(pins)
+            and all(is_sha(r.get("sha256")) and str(r.get("url", "")).startswith("https://files.pythonhosted.org/")
+                    and str(r["url"]).endswith(".whl") for r in rows),
+            "pytest closure not recorded with URL and SHA-256 (N4)")
     counts = p.get("counts", {})
     require(p.get("returncode") == 0 and counts.get("tests", 0) > 0
             and all(counts.get(k) == 0 for k in ("failures", "errors", "skipped")), "Lexical wheel tests")
@@ -529,13 +630,21 @@ def validate_lexical_store(p, m):
     require(p.get("scripts_sha256") == m["lexical_store_scripts_sha256"], "Lexical store tooling mismatch")
     require(p.get("package_under_site_packages") is True and p.get("fixed_data_sha256")
             and p.get("fixed_data_sha256") == m["lexical_store_fixed_data_sha256"], "Fixed data/queries differ")
+    from sqlite_release_worker_410 import LEXICAL_FACTS, LEXICAL_QUERIES
+
     moments = p.get("rankings", {})
     require(set(moments) == {"after_write", "after_reopen", "after_restore"}
-            and moments["after_write"] == moments["after_reopen"] == moments["after_restore"]
-            and moments["after_write"] and all(ids for ids in moments["after_write"].values()),
-            "Rankings differ between the three moments (or are empty)")
-    require(p.get("marker") == LEXICAL_MARKER and p.get("backup", {}).get("ok") is True
-            and p.get("restore", {}).get("ok") is True, "Marker/backup/restore")
+            and moments["after_write"] == moments["after_reopen"] == moments["after_restore"],
+            "Rankings differ between the three moments")
+    # Exactly the fixed queries, each returning fixed facts: one arbitrary query proves nothing.
+    require(list(moments["after_write"]) == list(LEXICAL_QUERIES) and p.get("added") == len(LEXICAL_FACTS)
+            and all(isinstance(hits, list) and hits and len(set(hits)) == len(hits) and set(hits) <= set(LEXICAL_FACTS)
+                    for hits in moments["after_write"].values()),
+            "Rankings are not those of the fixed queries over the fixed facts")
+    require(p.get("marker") == LEXICAL_MARKER and p.get("restored_marker") == LEXICAL_MARKER
+            and p.get("backup", {}).get("ok") is True and p.get("restore", {}).get("ok") is True
+            and p["backup"].get("archive_sha256") and p["restore"].get("archive_sha256") == p["backup"]["archive_sha256"],
+            "Marker (store and restored copy) / backup / restore")
     refusal = p.get("opposite_profile_open", {})
     require(refusal.get("refused") is True and refusal.get("code") == "store_profile_mismatch"
             and refusal.get("requested") == "semantic" and is_sha(refusal.get("inventory_before_sha256"))
@@ -614,19 +723,32 @@ def validate_copy(p, m):
             and refusal.get("files_created") == [], "Lexical open of the semantic copy not refused without write")
     for name in ("wheel", "sdist"):
         s = p["s4"][name]
-        b, d = s["backup"], s["drill"]
-        service = d.get("server_check", {})
-        require(b.get("ok") is True and b["qualified"] is True and b["source_sql_writes"] is False
-                and b["store_instance_id"] == ident and b["verified"] is True and d.get("ok") is True
-                and d.get("private_reopen_verified") is True and d.get("verified") is True
-                and d.get("forget_reconciliation") == "complete" and d.get("restored_from_instance_id") == ident,
-                "S4 backup/private reopening")
-        require(d.get("level") == "service" and d.get("archive") == b.get("archive")
-                and d.get("archive_sha256") == b.get("archive_sha256") and b.get("archive_sha256")
-                and service.get("match") is True and service.get("version") == m["version"]
-                and service.get("commit") == m["source_commit"] and service.get("corpus_reencodings") == 0
-                and service.get("private_only") is True and service.get("production_modified") is False,
-                "S4 must qualify this artifact/backup at service level")
+        _s4_drill(s["backup"], s["drill"], m, ident, name)
+    # G10 "same archive, two artifacts": ONE sealed archive restored by the wheel AND by the sdist.
+    common = p["s4_common"]
+    sealed = p["s4"]["wheel"]["backup"]
+    require(common.get("archive") == sealed["archive"] and common.get("archive_sha256") == sealed["archive_sha256"]
+            and is_sha(common.get("archive_sha256")) and common.get("archive_sha256_after") == common["archive_sha256"]
+            and set(common.get("drills", {})) == {"wheel", "sdist"}, "S4 common sealed archive missing")
+    for name, drill in common["drills"].items():
+        _s4_drill(sealed, drill, m, ident, "common archive by " + name)
+        require(drill.get("artifact_sha256") == artifact(m, ".whl" if name == "wheel" else ".tar.gz")["sha256"],
+                "Common archive drill not attributed to its artifact: " + name)
+
+
+def _s4_drill(b, d, m, ident, where):
+    service = d.get("server_check", {})
+    require(b.get("ok") is True and b["qualified"] is True and b["source_sql_writes"] is False
+            and b["store_instance_id"] == ident and b["verified"] is True and d.get("ok") is True
+            and d.get("private_reopen_verified") is True and d.get("verified") is True
+            and d.get("forget_reconciliation") == "complete" and d.get("restored_from_instance_id") == ident,
+            "S4 backup/private reopening: " + where)
+    require(d.get("level") == "service" and d.get("archive") == b.get("archive")
+            and d.get("archive_sha256") == b.get("archive_sha256") and b.get("archive_sha256")
+            and service.get("match") is True and service.get("version") == m["version"]
+            and service.get("commit") == m["source_commit"] and service.get("corpus_reencodings") == 0
+            and service.get("private_only") is True and service.get("production_modified") is False,
+            "S4 must qualify this artifact/backup at service level: " + where)
 
 
 # ---------- G13 ----------
@@ -644,6 +766,22 @@ def validate_perimeter(p, m):
             and all(row.get("files") for row in p["closures"].values()) and p.get("union")
             and set(p.get("callers", {})) == {"v4/src/memory_os_v4/server.py", "v4/src/memory_os_v4/memory.py"},
             "Perimeter inventory incomplete")
+    union = set(p["union"])
+    for role, row in p["closures"].items():
+        require(row.get("count") == len(row["files"]) and row.get("roots") and set(row["files"]) <= union
+                and all(is_sha(sha) for sha in row["files"].values()), "Closure inventory incomplete: " + role)
+    roles = {"p_a_proof", "intermediate", "candidate"}
+    require(all(set(v) == roles for v in p["union"].values()), "Union must give every file at the three commits")
+    # Callers, dependencies and resources are inventoried apart: a report without them is not a perimeter.
+    for section, wanted in (("callers", None), ("dependencies", {"pyproject.toml", "v4/pyproject.toml"}), ("resources", None)):
+        rows = p.get(section)
+        require(isinstance(rows, dict) and rows and (wanted is None or set(rows) == wanted)
+                and all(isinstance(r, dict) and set(r.get("sha256", {})) == roles
+                        and "changed_intermediate_to_candidate" in r and "changed_p_a_proof_to_intermediate" in r
+                        for r in rows.values()), "Perimeter inventory incomplete: " + section)
+    require(any(path.endswith("provision_v1.json") for path in p["resources"]) and p.get("limits")
+            and set(p.get("p_a_proof_to_intermediate", {})) == set(p.get("intermediate_to_candidate", {}))
+            == {"joined", "left", "changed_among_common", "identical_among_common"}, "Perimeter comparisons missing")
     require(p.get("tool_sha256") == m["qualification_tooling_sha256"]["check_brief_perimeter_410.py"],
             "Perimeter tool differs from the sealed one")
 
@@ -696,8 +834,12 @@ def validate_relay(proof, m):
 
 # ---------- decisions (§10) ----------
 
-def check_decision(d, *, decision, commit, run_tag=None, chain_sha256=None):
-    """One explicit yes/no of Romain, bound to the final SHA (and RUN_TAG). Absence is never consent."""
+def check_decision(d, *, decision, commit, run_tag=None, chain_sha256=None, dossier_path=None, context=None):
+    """One explicit yes/no of Romain, bound to the final SHA (and RUN_TAG). Absence is never consent.
+
+    A network GO is checked against its dossier FILE (read and hashed here) and against the effective
+    parameters of the acquisition (``context``): operation, sources, constraints, pins.
+    """
     require(decision in DECISIONS, "Unknown decision")
     require(isinstance(d, dict) and d.get("format") == DECISION_FORMAT and d.get("decision") == decision,
             "Decision file format/id")
@@ -728,12 +870,21 @@ def check_decision(d, *, decision, commit, run_tag=None, chain_sha256=None):
         require(isinstance(d.get(key), dict) and d[key].get("reference") and is_sha(d[key].get("sha256")),
                 "Decision must identify its %s by reference and SHA-256" % key)
     if decision.startswith("network_"):
-        dossier = d.get("dossier", {})
-        require(d.get("acquisition") == decision.split("_")[1] and dossier.get("reference")
-                and is_sha(dossier.get("sha256")) and d.get("operations") and d.get("acquisitions"),
-                "Network GO must name its dossier, operations and acquisitions")
-        allowed = (("openaipublic.blob.core.windows.net",) if decision == "network_N6" else PYPI_HOSTS)
-        require(d.get("sources") and set(d["sources"]) <= set(allowed), "Network source outside the authorised list")
+        acquisition = decision.split("_")[1]
+        named = d.get("dossier", {})
+        require(d.get("acquisition") == acquisition and isinstance(named, dict)
+                and isinstance(named.get("reference"), str) and Path(named["reference"]).name == named["reference"]
+                and is_sha(named.get("sha256")), "Network GO must name its dossier file by name and SHA-256")
+        require(dossier_path is not None and context is not None, "Network GO cannot be checked without its dossier")
+        path = refuse_forbidden(dossier_path)
+        require(path.is_file() and digest(path) == named["sha256"], "Dossier absent or different from the approved SHA-256")
+        expected = network_dossier(acquisition, commit=commit, run_tag=run_tag, context=context)
+        require(json.loads(path.read_text()) == expected,
+                "Dossier is not the exact description of what %s does in this run" % acquisition)
+        # The GO itself restates sources and operation: exactly those of the dossier, nothing wider or narrower.
+        require(isinstance(d.get("sources"), list) and sorted(d["sources"]) == expected["sources"]
+                and d.get("operations") == [expected["operation"]] and d.get("acquisitions") == [acquisition],
+                "Network GO sources/operations differ from the effective acquisition")
     if decision == "launch":
         require(chain_sha256 is not None and d.get("chain_sha256") == chain_sha256,
                 "Launch GO bound to another chain script")
@@ -763,22 +914,31 @@ def decision(m, directory, name):
 # ---------- M3, exit checks, final verification ----------
 
 def m3_summary(lines):
-    """Sampled extrema, never guaranteed peaks. Requires usable before/during/after samples per step."""
+    """Sampled extrema, never guaranteed peaks. Every step needs before, DURING and after samples.
+
+    "During" means inside the step window: the chain takes one probe concurrently with the step and waits
+    for it before the "after" sample, so even a very short step has one (it may then fall just after the
+    command returned). A step without such a sample, or a failed probe, makes M3 unusable.
+    """
     rows = [json.loads(line) for line in lines if line.strip()]
-    require(rows and all(isinstance(r.get("t"), (int, float)) and isinstance(r.get("free_bytes"), int)
-                         and isinstance(r.get("swap_bytes"), int) and r.get("phase") in ("before", "during", "after")
-                         for r in rows), "M3 samples unusable")
+    require(rows and all(isinstance(r, dict) and isinstance(r.get("t"), (int, float))
+                         and isinstance(r.get("free_bytes"), int) and isinstance(r.get("swap_bytes"), int)
+                         and r.get("phase") in ("before", "during", "after") for r in rows), "M3 samples unusable")
     steps = {}
     for r in rows:
         if r.get("step"):
             steps.setdefault(r["step"], {}).setdefault(r["phase"], []).append(r["t"])
-    durations = {}
+    durations, during = {}, {}
     for name, phases in steps.items():
-        require(phases.get("before") and phases.get("after"), "M3: step without before/after sample: " + name)
-        durations[name] = max(phases["after"]) - min(phases["before"])
+        require(len(phases.get("before", [])) == 1 and len(phases.get("after", [])) == 1,
+                "M3: step without exactly one before/after sample: " + name)
+        start, end = phases["before"][0], phases["after"][0]
+        inside = [t for t in phases.get("during", []) if start <= t <= end]
+        require(end >= start and inside, "M3: no sample during the step: " + name)
+        durations[name], during[name] = end - start, len(inside)
     return {"samples": len(rows), "min_free_bytes_observed": min(r["free_bytes"] for r in rows),
             "max_swap_bytes_observed": max(r["swap_bytes"] for r in rows), "step_seconds": durations,
-            "total_seconds": max(r["t"] for r in rows) - min(r["t"] for r in rows),
+            "during_samples": during, "total_seconds": max(r["t"] for r in rows) - min(r["t"] for r in rows),
             "nature": "sampled extrema, not guaranteed peaks"}
 
 
@@ -791,23 +951,89 @@ def validate_exit_checks(x, m):
     require([s for s in done if s not in OPTIONAL_STEPS] == [s for s in CHAIN_STEPS if s not in OPTIONAL_STEPS]
             and [s for s in CHAIN_STEPS if s in done] == done,
             "A chain step is missing, skipped or out of order")
-    for key in ("test_label_absent", "test_port_free", "no_suspect_process", "production_plist_unchanged",
-                "production_pid_unchanged", "real_launch_agents_unchanged", "real_client_configs_unchanged",
-                "lock_409_absent"):
+    for key in ("test_label_absent", "test_port_free", "no_suspect_process", *PRODUCTION_FLAGS, "lock_409_absent",
+                "sampler_ok"):
         require(x.get(key) is True, "Exit check failed: " + key)
+    require(is_sha(x.get("production_before_sha256")) and x.get("production_before_sha256") == x.get("production_after_sha256"),
+            "Protected perimeter fingerprint changed")
     summary = x.get("m3", {})
     require(is_sha(x.get("m3_samples_sha256")) and summary.get("samples", 0) > 0
             and isinstance(summary.get("min_free_bytes_observed"), int)
             and isinstance(summary.get("max_swap_bytes_observed"), int)
-            and set(summary.get("step_seconds", {})) >= set(done), "M3 measures unusable")
+            and set(summary.get("step_seconds", {})) >= set(done)
+            and all(summary.get("during_samples", {}).get(step, 0) >= 1 for step in done)
+            and isinstance(x.get("m3_samples_path"), str), "M3 measures unusable")
+
+
+CHAIN_RESULT_RE = r"PASS ([0-9a-f]{40}) ([0-9a-f]{64}) (v[0-9]+) [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\n"
+
+
+def check_chain_result(text, m):
+    """One complete line, nothing before or after: a truncated or extended marker is refused."""
+    found = re.fullmatch(CHAIN_RESULT_RE, text)
+    require(found is not None, "CHAIN_RESULT truncated, extended or malformed")
+    require(" ".join(("PASS",) + found.groups()) == m["chain_result_expected"],
+            "CHAIN_RESULT does not match this manifest")
+
+
+REQUIRED_PIECES = {
+    "lexical_wheel": ("lexical-wheel.xml", "lexical-wheel.log", "pytest-pip-report.json", "pytest-install.log",
+                      "probe.log", "pip-check.log"),
+    "lexical_store": ("plan.json", "lexical-store.json", "lexical-store.log", "semantic-refusal.json",
+                      "semantic-refusal.log"),
+    "copy": ("plan.json", "snapshot.json", "snapshot.log", "lexical-refusal.json", "lexical-refusal.log",
+             *(name + ext for name in ("baseline", "wheel", "sdist", "wheel-warm", "sdist-warm") for ext in (".json", ".log"))),
+}
+
+
+def required_pieces(name):
+    if name.startswith("install_"):
+        from qualify_install_410_helper import REQUIRED_EVIDENCE
+
+        return REQUIRED_EVIDENCE
+    return REQUIRED_PIECES[name]
+
+
+def verify_pieces(report, origin, required):
+    """The detailed supporting files a report seals: all required ones listed, each still at its SHA-256."""
+    inventory = report.get("evidence_sha256")
+    require(isinstance(inventory, dict) and set(required) <= set(inventory), "Report does not seal its required pieces")
+    origin = refuse_forbidden(origin)
+    for rel, sha in inventory.items():
+        part = Path(rel)
+        require(not part.is_absolute() and ".." not in part.parts and is_sha(sha), "Unsafe piece in a report")
+        path = refuse_forbidden(origin / part)
+        require(path.is_file() and not path.is_symlink() and digest(path) == sha, "Sealed piece absent or changed: " + rel)
+
+
+def manifest_context(m):
+    """Effective acquisition parameters as sealed in the manifest (pins read from the hashed tooling file)."""
+    pins = Path(__file__).with_name(PYTEST_PINS)
+    require(digest(pins) == m["pytest_pins_sha256"], "Frozen pytest pins changed")
+    return {"pins_sha256": m["pytest_pins_sha256"], "pins": exact_pins(pins.read_text()),
+            "constraints": {name: m["profiles"][name]["constraints_sha256"] for name in PROFILES}}
 
 
 def chain_stamp(m):
     return "%s %s %s" % (m["source_commit"], m["external_tooling_sha256"]["chain"]["sha256"], m["run_tag"])
 
 
+def recorded_decision(m, directory, name):
+    """A recorded decision, re-checked exactly as when it was accepted (dossier included)."""
+    row = m["decisions"][name]
+    dossier = None
+    if row.get("dossier"):
+        part = Path(row["dossier"]["path"])
+        require(not part.is_absolute() and ".." not in part.parts, "Unsafe dossier path")
+        dossier = directory / part
+        require(digest(dossier) == row["dossier"]["sha256"], "Sealed dossier changed: " + name)
+    return check_decision(decision(m, directory, name), decision=name, commit=m["source_commit"],
+                          run_tag=m["run_tag"], chain_sha256=m["external_tooling_sha256"]["chain"]["sha256"],
+                          dossier_path=dossier, context=manifest_context(m))
+
+
 def validate_everything(m, directory):
-    """Every proof and decision, bound to the same commit and artifacts. Used only by G15."""
+    """Every proof, its sealed pieces and every decision, bound to the same commit and artifacts (G15)."""
     validate_local(m, directory)
     for profile in PROFILES:
         name = "resolution_" + profile
@@ -820,14 +1046,15 @@ def validate_everything(m, directory):
     validate_lexical_store(evidence(m, directory, "lexical_store"), m)
     validate_perimeter(evidence(m, directory, "perimeter"), m)
     validate_relay(evidence(m, directory, "relays"), m)
+    # The detailed supporting files are replayed too, from where each harness left them.
+    for name in ("install_lexical", "install_semantic", "lexical_wheel", "lexical_store", "copy"):
+        verify_pieces(evidence(m, directory, name), m["evidence"][name]["origin"], required_pieces(name))
     if m["gates"]["G12"]["state"] == "pass":
         validate_external_p_b(evidence(m, directory, "external_p_b"), m)
-    chain_sha = m["external_tooling_sha256"]["chain"]["sha256"]
     for name in required_decisions(m, directory):
         require(name in m["decisions"], "Required decision of Romain missing: " + name)
-        d = check_decision(decision(m, directory, name), decision=name, commit=m["source_commit"],
-                           run_tag=m["run_tag"], chain_sha256=chain_sha)
-        require(d["answer"] == "oui", "Required decision answered no: " + name)
+        require(recorded_decision(m, directory, name)["answer"] == "oui", "Required decision answered no: " + name)
+        require(not name.startswith("network_") or m["decisions"][name].get("dossier"), "Network GO without sealed dossier")
     d1 = decision(m, directory, "d1_resign")
     require(d1["measure"]["sha256"] == m["evidence"]["install_lexical"]["sha256"],
             "D1 re-signature is not on this run's lexical M1 measure")
@@ -848,6 +1075,14 @@ def validate_everything(m, directory):
             "Measures M1-M4 not reported")
 
 
+def validate_samples(m, directory, exit_checks):
+    """The sealed M3 samples themselves: same bytes, and the same summary when recomputed."""
+    row = m["evidence"]["m3_samples"]
+    path = directory / row["path"]
+    require(digest(path) == row["sha256"] == exit_checks["m3_samples_sha256"], "M3 samples changed")
+    require(m3_summary(path.read_text().splitlines()) == exit_checks["m3"], "M3 summary differs from its samples")
+
+
 def write(path, m):
     Path(path).write_text(json.dumps(m, indent=2) + "\n")
 
@@ -857,7 +1092,8 @@ def store(m, directory, name, source, *, target=None):
     target = directory / (target or (name.replace("_", "-") + "-proof.json"))
     require(name not in m["evidence"] and not target.exists(), "Proof already recorded: " + name)
     target.write_bytes(Path(source).read_bytes())
-    m["evidence"][name] = {"path": target.name, "sha256": digest(target)}
+    m["evidence"][name] = {"path": target.name, "sha256": digest(target),
+                           "origin": str(Path(source).resolve().parent)}  # where its sealed pieces stay
     return target
 
 
@@ -876,6 +1112,8 @@ def main(args):
         require(len(chosen) <= 1 and not any(getattr(args, name, None) for name in UNSUPPORTED),
                 "Unsupported mixed proof")
         mode = chosen[0] if chosen else None
+        if mode:
+            refuse_forbidden(getattr(args, mode))  # every proof, decision or marker path, before any read
         if mode not in ("finalize", "check_final"):
             require(m.get("release_ready") is False, "Manifest already finalised: nothing can be recorded")
         if mode == "record_source_proof":
@@ -901,6 +1139,7 @@ def main(args):
             require(profile in PROFILES, "Install proof profile")
             validate_local(m, directory, require_copy=False, require_source=False)
             measure = validate_install(report, m, profile)
+            verify_pieces(report, Path(args.record_install_proof).resolve().parent, required_pieces("install_" + profile))
             store(m, directory, "install_" + profile, args.record_install_proof)
             m["measures"]["M1"][profile] = {**measure, "proof_sha256": m["evidence"]["install_" + profile]["sha256"]}
             for gate in ("G7", "G8"):
@@ -913,14 +1152,18 @@ def main(args):
             kind = report.get("format")
             if kind == "qualify-410-lexical-wheel-v1":
                 validate_lexical_wheel(report, m)
+                verify_pieces(report, Path(args.record_lexical_proof).resolve().parent, required_pieces("lexical_wheel"))
                 store(m, directory, "lexical_wheel", args.record_lexical_proof)
                 set_gate(m, "G6", "pass", name="lexical_wheel")
             else:
                 validate_lexical_store(report, m)
+                verify_pieces(report, Path(args.record_lexical_proof).resolve().parent, required_pieces("lexical_store"))
                 store(m, directory, "lexical_store", args.record_lexical_proof)
                 set_gate(m, "G11", "pass", name="lexical_store")
         elif mode == "record_copy_proof":
-            validate_copy(json.loads(Path(args.record_copy_proof).read_text()), m)
+            report = json.loads(Path(args.record_copy_proof).read_text())
+            validate_copy(report, m)
+            verify_pieces(report, Path(args.record_copy_proof).resolve().parent, required_pieces("copy"))
             store(m, directory, "copy", args.record_copy_proof)
             validate_local(m, directory, require_copy=True, require_source=True)
             set_gate(m, "G9", "pass", name="copy")
@@ -941,8 +1184,12 @@ def main(args):
             source = refuse_forbidden(args.record_decision)
             d = json.loads(source.read_text())
             name = d.get("decision")
+            dossier = None
+            if isinstance(name, str) and name.startswith("network_") and d.get("answer") == "oui":
+                dossier = source.parent / str((d.get("dossier") or {}).get("reference"))
             check_decision(d, decision=name, commit=m["source_commit"], run_tag=m["run_tag"],
-                           chain_sha256=m["external_tooling_sha256"]["chain"]["sha256"])
+                           chain_sha256=m["external_tooling_sha256"]["chain"]["sha256"],
+                           dossier_path=dossier, context=manifest_context(m))
             require(name not in m["decisions"], "Decision already recorded: " + name)
             target = directory / "decisions" / (name + ".json")
             require(not target.exists(), "Decision file exists")
@@ -960,6 +1207,10 @@ def main(args):
             target.write_bytes(source.read_bytes())
             m["decisions"][name] = {"path": "decisions/" + target.name, "sha256": digest(target),
                                     "answer": d["answer"], "section": DECISIONS[name][1]}
+            if dossier is not None:  # the approved dossier is sealed with the GO, and re-checked at G15
+                sealed = directory / "decisions" / (name + ".dossier.json")
+                sealed.write_bytes(dossier.read_bytes())
+                m["decisions"][name]["dossier"] = {"path": "decisions/" + sealed.name, "sha256": digest(sealed)}
             if name == "m2_lexical":
                 m["measures"]["M2"] = {"state": "non mesuré", "wished_by_romain": d["answer"] == "oui",
                                        "effect_on_release_ready": "none"}
@@ -975,6 +1226,11 @@ def main(args):
             exit_checks = json.loads(Path(args.finalize).read_text())
             validate_exit_checks(exit_checks, m)
             validate_everything(m, directory)
+            samples = refuse_forbidden(exit_checks["m3_samples_path"])
+            require(digest(samples) == exit_checks["m3_samples_sha256"]
+                    and m3_summary(samples.read_text().splitlines()) == exit_checks["m3"],
+                    "M3 samples do not match the exit checks")
+            store(m, directory, "m3_samples", samples, target="m3-samples.jsonl")
             store(m, directory, "exit_checks", args.finalize)
             m["measures"]["M3"] = {**exit_checks["m3"], "samples_sha256": exit_checks["m3_samples_sha256"]}
             set_gate(m, "G15", "pass", name="exit_checks")
@@ -989,10 +1245,11 @@ def main(args):
             require(m.get("release_ready") is True and m["gates"]["G15"]["state"] == "pass", "Not finalised")
             validate_everything(m, directory)
             validate_exit_checks(evidence(m, directory, "exit_checks"), m)
+            validate_samples(m, directory, evidence(m, directory, "exit_checks"))
             result = Path(args.check_final)
-            require(result.name == "CHAIN_RESULT" and result.is_file(), "CHAIN_RESULT absent or invalidated")
-            words = result.read_text().split()
-            require(words[:4] == m["chain_result_expected"].split(), "CHAIN_RESULT does not match this manifest")
+            require(result.name == "CHAIN_RESULT" and result.is_file() and not result.is_symlink(),
+                    "CHAIN_RESULT absent or invalidated")
+            check_chain_result(result.read_text(), m)
             print("Run qualified: manifest and CHAIN_RESULT=PASS agree. Publication, push and production "
                   "switch each need a separate GO from Romain.")
             return 0
@@ -1042,10 +1299,13 @@ def preconditions(a):
         tools = all(os.access(p, os.X_OK) for p in (a.build_python, a.ruff))
         probe = subprocess.run([a.build_python, "-B", "-c", "import build, setuptools, wheel"], capture_output=True)
         checks["build_tools_present"] = tools and probe.returncode == 0 and importlib.util.find_spec("twine") is not None
-        hub = Path(os.environ.get("HF_HUB_CACHE") or Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub")
-        minilm = hub / "models--sentence-transformers--all-MiniLM-L6-v2/snapshots"
-        checks["minilm_cache_present"] = minilm.is_dir() and any(
-            (s / "config.json").is_file() for s in minilm.iterdir())
+        # Offline stays on: a missing model is a STOP, never an implicit download.
+        checks["hf_offline"] = os.environ.get("HF_HUB_OFFLINE") == "1" and os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+        hub = refuse_forbidden(os.environ.get("HF_HUB_CACHE")
+                               or Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub")
+        # A COMPLETE local cache (reference, snapshot, blobs, tokenizer, weights), not a lone config.json.
+        report["minilm_cache"] = helper.complete_hf_cache(hub / "models--sentence-transformers--all-MiniLM-L6-v2")
+        checks["minilm_cache_present"] = report["minilm_cache"]["ok"] is True
         checks["granite_cache_conforms"] = provision.plan(resources=("granite",), cache_dir=a.granite_hub)["ready"] is True
         checks["cl100k_conforms"] = provision.plan(resources=("cl100k",), table_path=a.cl100k)["ready"] is True
         baseline, _ = baseline_from_plist(a.production_plist, a.baseline_python)
@@ -1056,7 +1316,7 @@ def preconditions(a):
         state = helper.service_state(TEST_LABEL, TEST_PORT)
         checks["test_label_absent"] = state["label_state"] == "absent"
         checks["test_port_free"] = state["port_state"] == "free"
-        report["ok"] = all(v is True for v in checks.values()) and len(checks) == 11
+        report["ok"] = all(v is True for v in checks.values()) and len(checks) == 12
     except (OSError, ValueError, KeyError, RuntimeError, SubprocessError) as exc:
         report["error"] = type(exc).__name__ + ": " + str(exc)
     with open(a.output, "x") as stream:
@@ -1080,15 +1340,13 @@ def exit_checks(a):
         "steps_ok": [s for s in a.steps.split(",") if s],
         "test_label_absent": state["label_state"] == "absent", "test_port_free": state["port_state"] == "free",
         "no_suspect_process": a.suspects.strip() == "",
-        "production_plist_unchanged": before["files"]["Library/LaunchAgents/%s.plist" % PRODUCTION_LABEL] is not None
-        and before["files"]["Library/LaunchAgents/%s.plist" % PRODUCTION_LABEL]
-        == now["files"]["Library/LaunchAgents/%s.plist" % PRODUCTION_LABEL],
-        "production_pid_unchanged": before["production_pid"] is not None
-        and before["production_pid"] == now["production_pid"],
-        "real_launch_agents_unchanged": before["launch_agents"] == now["launch_agents"],
-        "real_client_configs_unchanged": all(before["files"][k] == now["files"][k] for k in helper.REAL_CLIENT_CONFIGS),
+        **helper.production_unchanged(before, now),
+        "production_before_sha256": before["sha256"], "production_after_sha256": now["sha256"],
         "lock_409_absent": not os.path.lexists(a.lock_409),
+        # A sampler error is blocking: its marker must not exist.
+        "sampler_ok": not os.path.lexists(a.sampler_failed),
         "m3": m3_summary(samples.read_text().splitlines()), "m3_samples_sha256": digest(samples),
+        "m3_samples_path": str(samples.resolve()),
     }
     with open(a.output, "x") as stream:
         stream.write(json.dumps(report, indent=2) + "\n")
@@ -1112,11 +1370,16 @@ def cli(argv=None):
         s.add_argument(name, required=True)
     s.add_argument("--run-tag")
     s.add_argument("--chain-sha256")
+    s.add_argument("--expect-sha256", help="SHA-256 this decision file had when first accepted in this run")
+    s.add_argument("--manifest", help="once recorded: the file must still be the sealed one")
+    s = sub.add_parser("network-dossier", help="write the exact dossier a GO Nn may authorise (nothing is acquired)")
+    for name in ("--acquisition", "--source-commit", "--run-tag", "--output"):
+        s.add_argument(name, required=True)
     s = sub.add_parser("m3-summary")
     s.add_argument("--samples", required=True)
     s = sub.add_parser("exit-checks")
     for name in ("--manifest", "--samples", "--steps", "--chain-sha256", "--supervisor", "--production-before",
-                 "--lock-409", "--output"):
+                 "--lock-409", "--sampler-failed", "--output"):
         s.add_argument(name, required=True)
     s.add_argument("--suspects", default="")
     a = parser.parse_args(argv)
@@ -1125,10 +1388,32 @@ def cli(argv=None):
             return preconditions(a)
         if a.command == "check-decision":
             # A GO must exist, be bound to this candidate/run, and say yes. Absence is never consent.
-            d = check_decision(json.loads(refuse_forbidden(a.file).read_text()), decision=a.decision,
-                               commit=a.source_commit, run_tag=a.run_tag, chain_sha256=a.chain_sha256)
+            root = Path(__file__).resolve().parents[1]
+            source = refuse_forbidden(a.file)
+            d = json.loads(source.read_text())
+            dossier = None
+            if a.decision.startswith("network_") and d.get("answer") == "oui":
+                dossier = source.parent / str((d.get("dossier") or {}).get("reference"))
+            d = check_decision(d, decision=a.decision, commit=a.source_commit, run_tag=a.run_tag,
+                               chain_sha256=a.chain_sha256, dossier_path=dossier, context=network_context(root))
             require(d["answer"] == "oui", "Decision answered no: " + a.decision)
-            print("GO " + a.decision + " sha256=" + digest(a.file))
+            # The same sealed decision from the first check to G15: it may not change during the run.
+            require(a.expect_sha256 in (None, digest(source)), "Decision file changed since it was accepted")
+            if a.manifest:
+                recorded = json.loads(Path(a.manifest).read_text())["decisions"].get(a.decision)
+                require(recorded is None or recorded["sha256"] == digest(source),
+                        "Decision file differs from the one sealed in the manifest")
+                require(recorded is None or dossier is None or recorded["dossier"]["sha256"] == digest(dossier),
+                        "Dossier differs from the one sealed in the manifest")
+            print("GO " + a.decision + " sha256=" + digest(source))
+            return 0
+        if a.command == "network-dossier":
+            root = Path(__file__).resolve().parents[1]
+            dossier = network_dossier(a.acquisition, commit=a.source_commit, run_tag=a.run_tag,
+                                      context=network_context(root))
+            with open(refuse_forbidden(a.output), "x") as stream:
+                stream.write(json.dumps(dossier, indent=2, sort_keys=True) + "\n")
+            print("dossier " + a.acquisition + " sha256=" + digest(a.output))
             return 0
         if a.command == "m3-summary":
             print(json.dumps(m3_summary(Path(a.samples).read_text().splitlines()), indent=2))

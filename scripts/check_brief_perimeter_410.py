@@ -28,6 +28,7 @@ RESOURCE_PREFIX = PACKAGE + "/resources/"
 P_A_PROOF = "ceedb5cfdfd0d61929276dbcd1417ea077044412"
 INTERMEDIATE = "9e41ea40141f8ed4d7ed12a92a1900d2409272c3"
 ROLES = ("p_a_proof", "intermediate", "candidate")
+FORBIDDEN_NAMES = ("brief_v5_val", "brient_v5_val")  # sealed folders: named only to be refused
 
 
 class Tree:
@@ -152,6 +153,9 @@ def main(argv=None):
     parser.add_argument("--candidate", required=True, help="complete SHA of the final commit")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    resolved = str(args.output.resolve())
+    if any(name in resolved or name in str(args.output) for name in FORBIDDEN_NAMES):
+        parser.error("REFUS: sealed validation folder (never read, listed or written)")
     if args.output.exists():
         parser.error("Fresh report required; earlier evidence is kept")
     root = Path(__file__).resolve().parents[1]

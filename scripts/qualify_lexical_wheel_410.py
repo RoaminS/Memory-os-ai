@@ -99,9 +99,11 @@ def main(argv=None):
     parser.add_argument("--network-go", default="", help="N4 must be named: nominative GO of Romain")
     args = parser.parse_args(argv)
     from qualify_distribution_d1a import command
-    from release_410_checks import artifact, validate_lexical_wheel, validate_local
+    from release_410_checks import artifact, refuse_forbidden, validate_lexical_wheel, validate_local
     from memory_os_v4.ops.provision import guard
 
+    for given in (args.manifest, args.venv, args.output):
+        refuse_forbidden(given)  # lexical, then resolved: before any read
     manifest = json.loads(args.manifest.read_text())
     validate_local(manifest, args.manifest.parent, require_source=False, require_copy=False)
     out, venv = args.output.absolute(), args.venv.absolute()

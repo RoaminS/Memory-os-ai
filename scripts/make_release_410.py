@@ -23,6 +23,7 @@ from release_410_checks import (
     SUPERVISOR_SHA256,
     digest,
     new_gates,
+    refuse_forbidden,
     set_gate,
     validate_local,
     verify_invariants,
@@ -109,6 +110,9 @@ def main(argv=None):
     p.add_argument("--supervisor", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     a = p.parse_args(argv)
+    for given in (a.artifact_proof, a.full_proof, a.preconditions_proof, a.chain, a.supervisor, a.output,
+                  *(path for row in a.lint for path in row[1:])):
+        refuse_forbidden(given)  # lexical then resolved, before any read
     out = a.output.absolute()
     if out.exists() or not out.resolve().is_relative_to(ROOT / ".local-qualification"):
         p.error("Fresh owned release directory required")
