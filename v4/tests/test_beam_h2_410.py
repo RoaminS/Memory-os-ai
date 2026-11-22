@@ -48,15 +48,23 @@ class FakeHost(beam_h2.Host):
         self.head, self.code, self.lock = 'a' * 40, 'code-v1', 'numpy==2.4.2\n'
         self.launched, self.fail, self.guards, self.fail_guard = [], None, 0, None
         self.runtime_value, self.after_launch = None, None
+        self.isolation_problems, self.origin_problems = [], []
 
     def attest(self, revision):
         if revision != self.head:
             raise ValueError('Cannot attest declared source commit')
         return {'v4/bench/e2e/beam_h2.py': self.code, 'v4/tests/test_beam_h2_410.py': 'tests-v1',
-                'v4/docs/H2_RUN_v2.md': 'doc-v1'}
+                'v4/docs/H2_RUN_v3.md': 'doc-v1'}
 
     def runtime(self):
         return copy.deepcopy(self.runtime_value)
+
+    def isolation(self):
+        return {'pycache_prefix': '/fresh-empty', 'cached_entries': 0,
+                'problems': list(self.isolation_problems)}
+
+    def origins(self, directory, plan):
+        return {'files': 3, 'problems': list(self.origin_problems)}
 
     def archive(self, revision):
         return f'archive {revision} {self.code}'.encode()
@@ -531,9 +539,9 @@ def test_loaded_modules_must_come_from_the_frozen_runtime_or_the_attested_clone(
         return value
     good = {'dep': _module(site / 'dep.py'), 'engine.core': _module(clone / 'v4/src/engine/core.py'),
             'sys': sys}
-    proof = beam_h2.loaded_origins(runtime, attested, clone, {**good, 'torch.ops': _module('_ops.py')})
+    proof = beam_h2.loaded_origins(runtime, attested, clone, good)
     assert proof['problems'] == [] and proof['files'] == 2 and proof['by_root'] == {str(site): 1, 'clone': 1}
-    assert proof['in_memory_modules'] == {'torch.ops': '_ops.py'}  # built in memory, recorded, not a file
+    assert proof['without_file'] == {'built-in': 1}
     shadow = beam_h2.loaded_origins(runtime, attested, clone,
                                     {**good, 'torch': _module(outside / 'torch.py')})
     assert shadow['problems'] == [f"torch: loaded from outside the frozen paths: {outside / 'torch.py'}"]
@@ -584,7 +592,7 @@ def test_source_attestation_covers_resources_tests_and_documents_and_refuses_str
     (repo / 'v4/src/torch.py').unlink()
     with pytest.raises(ValueError, match='Cannot attest'):
         beam_h2.attest_tree(repo, head, ('v4/src', 'v4/docs/missing.md'), strict)
-    assert {'v4/tests/test_beam_h2_410.py', 'v4/docs/H2_RUN_v2.md', 'v4/docs/LEXICAL_PROFILE_4_1_0.md',
+    assert {'v4/tests/test_beam_h2_410.py', 'v4/docs/H2_RUN_v3.md', 'v4/docs/LEXICAL_PROFILE_4_1_0.md',
             'v4/bench/protocols/v1.md', 'scripts/run_beam_h2.sh'} <= set(beam_h2.ATTESTED)
 
 
@@ -592,7 +600,7 @@ def test_tests_and_documents_are_archived_with_the_freeze(frozen_plan):
     directory, data, spec, host, fingerprint = frozen_plan
     receipt = json.loads((directory / 'receipt.json').read_text())
     assert receipt['tests_and_documents'] == {'v4/tests/test_beam_h2_410.py': 'tests-v1',
-                                              'v4/docs/H2_RUN_v2.md': 'doc-v1'}
+                                              'v4/docs/H2_RUN_v3.md': 'doc-v1'}
     assert json.loads((directory / 'plan.json').read_text())['attested_files'] == host.attest(host.head)
 
 
@@ -629,6 +637,7 @@ def real_like(directory):
     plan = json.loads((directory / 'plan.json').read_text())
     plan['runtime'] = {'files': 1}
     start = {'environment_problems': [], 'runtime_verified': True,
+             'bytecode_isolation': {'problems': [], 'pycache_prefix': '/fresh-empty'},
              'loaded_modules': {'problems': [], 'files': 10}}
     binding = {'problems': [], 'weights_equal': True, 'tokenizer_equal': True}
     encoder = {'model_revision': beam_h2.GRANITE_REVISION, 'device': 'mps', 'parameter_devices': ['mps'],
@@ -670,6 +679,10 @@ SEMANTIC_DEFECTS = {
     'runtime_unverified': (lambda proof: proof.__setitem__('runtime_verified', False),
                            'not attested at start'),
     'origins_missing': (lambda proof: proof.pop('loaded_modules'), 'origins of loaded modules'),
+    'bytecode_unattested': (lambda proof: proof.pop('bytecode_isolation'), 'bytecode isolation not attested'),
+    'bytecode_cache_present': (
+        lambda proof: proof['bytecode_isolation'].__setitem__('problems', ['not empty']),
+                               'bytecode isolation not attested'),
     'origin_outside': (lambda proof: proof['loaded_modules'].__setitem__('problems', ['torch: outside']),
                        'origins of loaded modules'),
     'rankings_changed': (lambda proof: proof.__setitem__('rankings_sha256', 'other'), 'rankings differ'),
@@ -817,3 +830,208 @@ def test_loaded_weights_and_tokenizer_are_bound_to_the_frozen_snapshot_files(tmp
     assert beam_h2.encoder_problems(proof, plan) == []
     assert beam_h2.encoder_problems({**proof, 'device': 'cpu'}, plan) == [
         "encoder device resolved to 'cpu', frozen expectation 'mps'"]
+
+
+# ------------------------------------------------ freeze revision 3 (Codex verdict on freeze v2)
+def typed(module_name, class_name, **attributes):
+    """An object whose type prints exactly as ``module_name.class_name`` (as torch's module objects do)."""
+    return type(class_name, (), {'__module__': module_name, '__qualname__': class_name, **attributes})()
+
+
+def origin_fixture(tmp_path):
+    site, clone = tmp_path / 'site', tmp_path / 'clone'
+    (site / 'torch').mkdir(parents=True)
+    (clone / 'v4/src').mkdir(parents=True)
+    (site / 'torch/_C.so').write_text('native')
+    runtime = {'sys_path': [str(clone / 'v4/src'), str(clone / 'v4'), str(site)],
+               'files': {str(site / 'torch/_C.so'): hashlib.sha256(b'native').hexdigest()}}
+    core = type(sys)('torch._C')
+    core.__file__ = str(site / 'torch/_C.so')
+    return site, clone, runtime, {'torch._C': core, 'sys': sys}
+
+
+def test_only_the_explicit_in_memory_modules_are_accepted_without_a_frozen_file(tmp_path):
+    """Verdict v2, B: a relative or absent origin is no longer a free pass."""
+    site, clone, runtime, base = origin_fixture(tmp_path)
+    string_loader = typed('torch.distributed.nn.jit.instantiator', '_StringLoader')
+    remote = type(sys)('_remote_module_non_scriptable')
+    remote.__spec__ = typed('importlib.machinery', 'ModuleSpec', origin='torch-git', loader=string_loader,
+                            submodule_search_locations=None)
+    allowed = {**base,
+               'torch.ops': typed('torch._ops', '_Ops', __file__='_ops.py'),
+               'torch.classes': typed('torch._classes', '_Classes', __file__='_classes.py'),
+               '_remote_module_non_scriptable': remote,
+               'torch._VF': typed('torch._VF', 'VFModule'), 'typing.io': typed('typing', '_DeprecatedType'),
+               'cython_runtime': type(sys)('cython_runtime'), '_cython_3_2_4': type(sys)('_cython_3_2_4'),
+               'swig_runtime_data4': type(sys)('swig_runtime_data4'),
+               'torch._C._nn': type(sys)('torch._C._nn'), 'blocked': None}
+    proof = beam_h2.loaded_origins(runtime, {}, clone, allowed)
+    assert proof['problems'] == [] and proof['files'] == 1
+    assert proof['in_memory_modules'] == {
+        '_cython_3_2_4': 'file-less family', '_remote_module_non_scriptable': 'in-memory torch-git',
+        'cython_runtime': 'file-less', 'swig_runtime_data4': 'file-less', 'torch._C._nn': 'file-less family',
+        'torch._VF': 'file-less', 'torch.classes': 'in-memory _classes.py', 'torch.ops': 'in-memory _ops.py',
+        'typing.io': 'file-less'}
+
+    def refused(name, module, without=()):
+        modules = {key: value for key, value in {**base, name: module}.items() if key not in without}
+        problems = beam_h2.loaded_origins(runtime, {}, clone, modules)['problems']
+        assert len(problems) == 1 and problems[0].startswith(name + ':'), problems
+        return problems[0]
+
+    foreign = type(sys)('foreign')
+    foreign.__file__ = 'foreign.py'  # the case reproduced by Codex
+    assert 'not a frozen file, built-in or allow-listed' in refused('foreign', foreign)
+    assert 'no frozen file and not an allow-listed' in refused('foreign', type(sys)('foreign'))
+    plain_ops = type(sys)('torch.ops')
+    plain_ops.__file__ = '_ops.py'  # right name and origin, but not torch's own object type
+    assert 'not a frozen file' in refused('torch.ops', plain_ops)
+    assert 'not a frozen file' in refused('torch.ops', typed('torch._ops', '_Ops', __file__='other.py'))
+    assert 'not a frozen file' in refused('torch.evil', typed('torch._ops', '_Ops', __file__='_ops.py'))
+    assert 'no frozen file' in refused('torch._VF', type(sys)('torch._VF'))  # wrong type for this name
+    assert 'creator torch._C is not a verified frozen file' in refused(
+        'torch._C._nn', type(sys)('torch._C._nn'), without=('torch._C',))
+    fake_builtin = type(sys)('zlib2')
+    fake_builtin.__spec__ = typed('importlib.machinery', 'ModuleSpec', origin='built-in',
+                                  loader=string_loader, submodule_search_locations=None)
+    assert 'not a frozen file' in refused('zlib2', fake_builtin)  # "built-in" claimed by another loader
+    bytecode = type(sys)('legacy')
+    (site / 'legacy.pyc').write_text('bytecode')
+    bytecode.__file__ = str(site / 'legacy.pyc')
+    runtime['files'][str(site / 'legacy.pyc')] = hashlib.sha256(b'bytecode').hexdigest()
+    assert 'loaded from bytecode without source' in refused('legacy', bytecode)
+    namespace = type(sys)('ns')
+    namespace.__spec__ = typed('importlib.machinery', 'ModuleSpec', origin=None,
+                               loader=typed('_frozen_importlib_external', 'NamespaceLoader'),
+                               submodule_search_locations=[str(tmp_path / 'elsewhere/ns')])
+    assert 'namespace path outside the frozen import path' in refused('ns', namespace)
+    namespace.__spec__.submodule_search_locations = [str(site / 'ns')]
+    assert beam_h2.loaded_origins(runtime, {}, clone, {**base, 'ns': namespace})['problems'] == []
+
+
+PLANTED = r"""
+import os, py_compile, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+source = root / 'scorer.py'
+source.write_text("value = 'forged'\n")
+py_compile.compile(str(source), cfile=str(root / '__pycache__/scorer.cpython-311.pyc'))
+stamp = source.stat()
+source.write_text("value = 'source'\n")  # same size, then same mtime: the stale cache looks valid
+os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+"""
+
+
+def test_a_divergent_bytecode_cache_is_executed_without_the_prefix_and_never_with_it(tmp_path):
+    """Verdict v2, A: -B only prevents writing; the private empty prefix is what prevents reading."""
+    package = tmp_path / 'package'
+    (package / '__pycache__').mkdir(parents=True)
+    subprocess.run([sys.executable, '-c', PLANTED, str(package)], check=True, timeout=60)
+    assert (package / 'scorer.py').read_text() == "value = 'source'\n"
+    probe = 'import scorer, sys; print(scorer.value, sys.pycache_prefix)'
+
+    def run(**extra):
+        env = {key: value for key, value in os.environ.items() if not key.startswith('PYTHON')}
+        env.update(PYTHONPATH=str(package), **extra)
+        done = subprocess.run([sys.executable, '-P', '-B', '-c', probe], env=env, capture_output=True,
+                              text=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+        return done.stdout.split()
+    assert run() == ['forged', 'None']  # the threat: attested source, another code executed
+    prefix = tmp_path / 'fresh-prefix'
+    prefix.mkdir()
+    assert run(PYTHONPYCACHEPREFIX=str(prefix)) == ['source', str(prefix)]
+    assert list(prefix.iterdir()) == []  # -B: nothing written, the prefix stays empty
+
+
+def test_bytecode_isolation_is_verified_not_assumed(tmp_path, monkeypatch):
+    clone = tmp_path / 'clone'
+    clone.mkdir()
+    prefix = tmp_path / 'prefix'
+    prefix.mkdir()
+    flags = type('Flags', (), {'safe_path': True})()
+    monkeypatch.setattr(sys, 'pycache_prefix', str(prefix))
+    monkeypatch.setattr(sys, 'dont_write_bytecode', True)
+    monkeypatch.setattr(sys, 'flags', flags)
+    clean = {'PATH': '/usr/bin', 'PYTHONPATH': 'x', 'PYTHONPYCACHEPREFIX': str(prefix), 'PYTHONSAFEPATH': '1',
+             'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONNOUSERSITE': '1', 'PYTHONOPTIMIZE': '0',
+             'HF_HOME': '/any'}
+    proof = beam_h2.bytecode_isolation(clone, clean)
+    assert proof == {'pycache_prefix': str(prefix), 'cached_entries': 0, 'dont_write_bytecode': True,
+                     'safe_path': True, 'problems': []}
+    for name in ('PYTHONSTARTUP', 'PYTHONHOME', 'PYTHONINSPECT', 'DYLD_INSERT_LIBRARIES', 'LD_PRELOAD'):
+        assert beam_h2.bytecode_isolation(clone, {**clean, name: 'x'})['problems'] == [f'{name} is inherited']
+    (prefix / 'planted').mkdir()
+    (prefix / 'planted/scorer.cpython-311.pyc').write_text('forged')
+    planted = beam_h2.bytecode_isolation(clone, clean)
+    assert planted['cached_entries'] == 2 and 'not empty' in planted['problems'][0]
+    monkeypatch.setattr(sys, 'pycache_prefix', str(clone / 'pycache'))
+    assert beam_h2.bytecode_isolation(clone, clean)['problems'] == [
+        'the bytecode cache prefix is inside an import root']
+    monkeypatch.setattr(sys, 'pycache_prefix', None)
+    monkeypatch.setattr(sys, 'dont_write_bytecode', False)
+    flags.safe_path = False
+    assert beam_h2.bytecode_isolation(clone, clean)['problems'] == [
+        'no private bytecode cache prefix: a stale __pycache__ could be executed',
+        'bytecode writing is enabled (-B required)', 'safe path mode is off (-P required)']
+    monkeypatch.undo()
+    with pytest.raises(ValueError, match='isolation refused'):  # pytest itself is not the isolated launcher
+        beam_h2.isolated(beam_h2.Host())
+
+
+def test_supervisor_refuses_to_freeze_or_run_without_bytecode_isolation(frozen_plan, tmp_path):
+    directory, data, spec, host, fingerprint = frozen_plan
+    host.isolation_problems = ['no private bytecode cache prefix: a stale __pycache__ could be executed']
+    with pytest.raises(ValueError, match='isolation refused'):
+        beam_h2.prepare(tmp_path / 'other', data, host.head, spec=spec, host=host)
+    with pytest.raises(ValueError, match='isolation refused'):
+        beam_h2.retrieve(directory, fingerprint, spec=spec, host=host)
+    assert host.launched == [] and not (directory / 'retrieval').exists()
+    assert not (tmp_path / 'other').exists()
+
+
+@pytest.mark.parametrize('late', ['bytecode', 'origin'])
+def test_supervisor_bytecode_or_module_drift_seen_before_scoring_is_never_scored(frozen_plan, late):
+    directory, data, spec, host, fingerprint = frozen_plan
+    if late == 'bytecode':
+        host.after_launch = lambda arm: arm == 'semantic' and host.isolation_problems.append(
+            'the bytecode cache prefix is not empty: a cached .pyc could be executed')
+    else:
+        host.origin_problems = [
+            'bench.e2e.stats: content differs from the freeze: /clone/v4/bench/e2e/stats.py']
+    reasons = invalid_and_unscored(directory, beam_h2.retrieve(directory, fingerprint, spec=spec, host=host))
+    assert host.launched == ['lexical', 'semantic'] and len(reasons) == 1
+    assert reasons[0].startswith('final gates: ') and ('not empty' in reasons[0] or 'stats.py' in reasons[0])
+
+
+@pytest.mark.parametrize('moment', ['bootstrap', 'evidence', 'final_write'])
+def test_an_interruption_during_scoring_leaves_an_invalid_result_and_no_partial_output(
+        frozen_plan, monkeypatch, moment):
+    """Verdict v2, C: KeyboardInterrupt is a BaseException; scoring is inside the guarded block."""
+    directory, data, spec, host, fingerprint = frozen_plan
+
+    def interrupt(*arguments, **options):
+        raise KeyboardInterrupt()
+    if moment == 'bootstrap':
+        monkeypatch.setattr(beam_h2, 'paired_bootstrap', interrupt)
+    elif moment == 'evidence':
+        monkeypatch.setattr(beam_h2, 'rankings', interrupt)
+    else:
+        original = beam_h2.write_atomic
+
+        def write(path, value):
+            if path.name == 'result.json' and value.get('complete'):
+                assert (directory / 'retrieval/questions.jsonl').exists()  # the partial output exists here
+                raise KeyboardInterrupt()
+            original(path, value)
+        monkeypatch.setattr(beam_h2, 'write_atomic', write)
+    with pytest.raises(KeyboardInterrupt):
+        beam_h2.retrieve(directory, fingerprint, spec=spec, host=host)
+    monkeypatch.undo()
+    assert host.launched == ['lexical', 'semantic']
+    reasons = invalid_and_unscored(directory, None)
+    assert len(reasons) == 1 and 'KeyboardInterrupt' in reasons[0]
+    assert sorted(path.name for path in (directory / 'retrieval').iterdir()) == [
+        'lexical', 'resources.json', 'result.json', 'semantic']
+    with pytest.raises(FileExistsError):  # still one attempt per manifest
+        beam_h2.retrieve(directory, fingerprint, spec=spec, host=host)

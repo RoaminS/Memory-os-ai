@@ -9,12 +9,16 @@ on fresh sqlite_s1 stores instead of memory versus BM25.
 Freeze revision 2 (Codex verdict on freeze v1): gates before scoring, frozen encoder resolution, byte
 budgets declared as bytes, mandatory encoder usage record, content attestation of the interpreter
 runtime, Granite weights and tokenizer bound to the frozen snapshot files, tests and documents attested.
+Freeze revision 3 (verdict on freeze v2): no bytecode cache is ever read, by the supervisor or the
+workers; a module without a frozen file is accepted only from an explicit allow-list; an interruption
+during scoring leaves an explicit invalid result.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -27,7 +31,9 @@ import os
 from pathlib import Path
 import platform
 import random
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -43,7 +49,7 @@ from .run import kill_group, model_record, write_json
 from .stats import score
 
 RUN_ID = 'h2-lexical-parity-v1'
-VERSION = 'beam-h2-lexical-parity-v2'
+VERSION = 'beam-h2-lexical-parity-v3'
 ARMS = ('lexical', 'semantic')  # execution order; each arm is one sequential worker process
 SEED = 20261010
 REPLICATES = 2000
@@ -67,8 +73,30 @@ ML_MODULES = ('torch', 'sentence_transformers', 'faiss', 'transformers')
 # Everything of the clone that the measure executes or relies on, tests and contract documents included.
 ATTESTED = ('v4/src', 'v4/bench/e2e', 'v4/bench/__init__.py', 'v4/bench/evaluation_manifest.py',
             'v4/bench/protocols/v1.md', 'scripts/run_beam_h2.sh', 'v4/tests/test_beam_h2_410.py',
-            'v4/docs/H2_RUN_v2.md', 'v4/docs/LEXICAL_PROFILE_4_1_0.md', 'v4/docs/BEAM_PROTOCOL_v1.md')
+            'v4/docs/H2_RUN_v3.md', 'v4/docs/LEXICAL_PROFILE_4_1_0.md', 'v4/docs/BEAM_PROTOCOL_v1.md')
 STRICT_TREES = ('v4/src', 'v4/bench/e2e')  # importable trees: no file outside the commit may sit there
+# Modules that legitimately have NO file of their own. Anything else must be a frozen runtime file or an
+# attested clone file. Each entry is (exact name or pattern, exact type of the module object, and for the
+# pattern families the module that creates them, which must itself be a verified frozen file).
+FILELESS_MODULES = {  # created in memory by a native extension or by the standard library itself
+    'cython_runtime': 'builtins.module',  # Cython runtime, created by any Cython-compiled extension
+    'swig_runtime_data4': 'builtins.module',  # SWIG runtime, created by faiss._swigfaiss
+    'typing.io': 'typing._DeprecatedType', 'typing.re': 'typing._DeprecatedType',  # typing pseudo-modules
+    'torch._VF': 'torch._VF.VFModule',  # torch/_VF.py replaces its own sys.modules entry
+}
+FILELESS_FAMILIES = (  # (pattern, exact type, creator that must be loaded from a frozen file)
+    (re.compile(r'_cython_\d+_\d+_\d+'), 'builtins.module', None),  # Cython shared ABI module
+    (re.compile(r'torch\._C\.[A-Za-z_][\w.]*'), 'builtins.module', 'torch._C'),  # C submodules of torch._C
+)
+# In-memory modules carrying a NON-file origin: exact (type, __file__, spec origin, loader type).
+IN_MEMORY_MODULES = {
+    'torch.ops': ('torch._ops._Ops', '_ops.py', None, None),  # class attribute of torch/_ops.py
+    'torch.classes': ('torch._classes._Classes', '_classes.py', None, None),  # torch/_classes.py
+    '_remote_module_non_scriptable': (  # source string compiled by torch.distributed.nn.jit.instantiator
+        'builtins.module', None, 'torch-git', 'torch.distributed.nn.jit.instantiator._StringLoader'),
+}
+SUPERVISOR_PYTHON_ENV = ('PYTHONDONTWRITEBYTECODE', 'PYTHONNOUSERSITE', 'PYTHONSAFEPATH', 'PYTHONOPTIMIZE',
+                         'PYTHONPATH', 'PYTHONPYCACHEPREFIX')
 STORE_PLACEHOLDER = '<fresh private sqlite_s1 store per arm and per conversation>'
 ENCODER_CALL_CEILING = 100_000
 BUDGETS = {'retrieval_seconds': 28800, 'conversation_seconds': 3600, 'swap_bytes': 8_500_000_000,
@@ -233,45 +261,127 @@ def runtime_record(clone: Path) -> dict:
             'base_prefix': sys.base_prefix, 'python': sys.version, 'distributions': packages, 'files': files}
 
 
+def type_name(value) -> str:
+    return f'{type(value).__module__}.{type(value).__qualname__}'
+
+
+def module_identity(module) -> tuple:
+    """(file, spec origin, loader type, search locations); libraries with a dynamic __getattr__ may raise."""
+    def read(value, name):
+        try:
+            return getattr(value, name, None)
+        except Exception:
+            return None
+    spec = read(module, '__spec__')
+    loader = read(spec, 'loader')
+    locations = read(spec, 'submodule_search_locations')
+    return (read(module, '__file__'), read(spec, 'origin'), loader,
+            None if locations is None else [str(folder) for folder in locations])
+
+
 def loaded_origins(runtime: dict, attested: dict, clone: Path, modules=None) -> dict:
-    """Origin of every loaded module: a frozen runtime file or an attested clone file, content unchanged."""
+    """Every loaded module is a frozen runtime file, an attested clone file, a built-in/frozen module, a
+    namespace package inside the frozen roots, or an explicitly allow-listed in-memory module."""
+    from importlib import machinery
     modules = dict(sys.modules if modules is None else modules)
-    problems, origins, roots, dynamic = [], {}, Counter(), {}
+    problems, origins, roots, accepted, verified = [], {}, Counter(), {}, set()
+    trusted = [root + os.sep for root in runtime['sys_path'][2:]] + [
+        str(clone / tree) + os.sep for tree in STRICT_TREES]
+    pending = []
     for name, module in sorted(modules.items()):
-        spec = getattr(module, '__spec__', None)
-        origin = getattr(module, '__file__', None) or getattr(spec, 'origin', None)
-        if origin in (None, 'built-in', 'frozen'):
-            for folder in list(getattr(module, '__path__', None) or []):  # namespace package
-                if not any(str(folder).startswith(root) for root in runtime['sys_path']):
-                    problems.append(f'{name}: namespace path outside the frozen import path: {folder}')
+        if module is None:  # negative entry: the import of this name is blocked, nothing was loaded
             continue
-        origin = str(origin)
-        if not os.path.isabs(origin):
-            # Module objects built in memory by a library (torch.ops, torch.classes): no file was imported.
-            # Every sys.path entry is absolute and frozen, so a file import always has an absolute origin.
-            dynamic[name] = origin
-            continue
-        if origin in origins:
-            continue
-        current = sha256(Path(origin)) if os.path.isfile(origin) else None
-        relative = os.path.relpath(origin, clone)
-        if origin in runtime['files']:
-            expected = runtime['files'][origin]
-            roots[next((root for root in runtime['sys_path'][2:] if origin.startswith(root)), 'other')] += 1
-        elif relative in attested:
-            expected = attested[relative]
-            roots['clone'] += 1
+        file, origin, loader, locations = module_identity(module)
+        kind = type_name(module)
+        if isinstance(file, str) and os.path.isabs(file):
+            if file.endswith('.pyc') or isinstance(loader, machinery.SourcelessFileLoader):
+                problems.append(f'{name}: loaded from bytecode without source: {file}')
+                continue
+            if file not in origins:
+                current = sha256(Path(file)) if os.path.isfile(file) else None
+                relative = os.path.relpath(file, clone)
+                if file in runtime['files']:
+                    expected = runtime['files'][file]
+                    roots[next((root for root in runtime['sys_path'][2:] if file.startswith(root)),
+                               'other')] += 1
+                elif relative in attested:
+                    expected = attested[relative]
+                    roots['clone'] += 1
+                else:
+                    problems.append(f'{name}: loaded from outside the frozen paths: {file}')
+                    continue
+                if current != expected:
+                    problems.append(f'{name}: content differs from the freeze: {file}')
+                    continue
+                origins[file] = current
+            verified.add(name)
+        elif file is None and origin in ('built-in', 'frozen') and loader in (
+                machinery.BuiltinImporter, machinery.FrozenImporter):
+            accepted[name] = origin
+        elif file is None and locations is not None and type_name(loader).endswith('NamespaceLoader'):
+            outside = [folder for folder in locations if not (folder + os.sep).startswith(tuple(trusted))]
+            if outside:
+                problems.append(f'{name}: namespace path outside the frozen import path: {outside[0]}')
+            accepted[name] = 'namespace'
+        elif IN_MEMORY_MODULES.get(name) == (kind, file, origin,
+                                             None if loader is None else type_name(loader)):
+            accepted[name] = f'in-memory {file or origin}'
+        elif file is None and origin is None and loader is None and FILELESS_MODULES.get(name) == kind:
+            accepted[name] = 'file-less'
+        elif file is None and origin is None and loader is None:
+            family = next((creator for pattern, expected, creator in FILELESS_FAMILIES
+                           if pattern.fullmatch(name) and expected == kind), False)
+            if family is False:
+                problems.append(f'{name}: no frozen file and not an allow-listed in-memory module')
+            else:
+                accepted[name] = 'file-less family'
+                if family:
+                    pending.append((name, family))
         else:
-            problems.append(f'{name}: loaded from outside the frozen paths: {origin}')
-            continue
-        if current != expected:
-            problems.append(f'{name}: content differs from the freeze: {origin}')
-        origins[origin] = current
+            problems.append(f'{name}: not a frozen file, built-in or allow-listed in-memory module '
+                            f'(origin {file or origin!r})')
+    for name, creator in pending:
+        if creator not in verified:
+            problems.append(f'{name}: its creator {creator} is not a verified frozen file')
     digest = hashlib.sha256(json.dumps(sorted(origins.items())).encode()).hexdigest()
     return {'modules': len(modules), 'files': len(origins), 'by_root': dict(roots), 'files_sha256': digest,
-            'problems': problems, 'in_memory_modules': dynamic,
-            'ml_packages': {name: getattr(modules[name], '__file__', None)
-                            for name in ML_MODULES if name in modules}}
+            'problems': problems,
+            'without_file': dict(Counter(value.split(' ')[0] for value in accepted.values())),
+            'in_memory_modules': {name: value for name, value in accepted.items()
+                                  if value not in ('built-in', 'frozen', 'namespace')},
+            'ml_packages': {name: module_identity(modules[name])[0]
+                            for name in ML_MODULES if modules.get(name) is not None}}
+
+
+def bytecode_isolation(clone: Path, environ=None) -> dict:
+    """No bytecode cache may ever be read: sources are compiled from the attested files, every time.
+
+    With a cache prefix, CPython never consults a ``__pycache__`` directory next to a source file; the
+    prefix must therefore be private and EMPTY, and nothing may be written to it (-B). Source-less
+    ``*.pyc`` modules are refused separately by ``loaded_origins``.
+    """
+    environ = os.environ if environ is None else environ
+    prefix, problems, cached = sys.pycache_prefix, [], 0
+    if not prefix:
+        problems.append('no private bytecode cache prefix: a stale __pycache__ could be executed')
+    else:
+        cached = sum(len(names) + len(entries) for _, names, entries in os.walk(prefix))
+        if cached:
+            problems.append('the bytecode cache prefix is not empty: a cached .pyc could be executed')
+        resolved = os.path.realpath(prefix) + os.sep
+        if any(resolved.startswith(os.path.realpath(root) + os.sep)
+               for root in (str(clone), *sys.path) if root):
+            problems.append('the bytecode cache prefix is inside an import root')
+    if not sys.dont_write_bytecode:
+        problems.append('bytecode writing is enabled (-B required)')
+    if not sys.flags.safe_path:
+        problems.append('safe path mode is off (-P required)')
+    problems += [f'{key} is inherited' for key in sorted(environ)
+                 if key.startswith(('DYLD_', 'LD_')) or (key.startswith('PYTHON')
+                                                         and key not in SUPERVISOR_PYTHON_ENV)]
+    return {'pycache_prefix': prefix, 'cached_entries': cached,
+            'dont_write_bytecode': sys.dont_write_bytecode, 'safe_path': bool(sys.flags.safe_path),
+            'problems': problems}
 
 
 def worker_environment(plan: dict, arm: str, clone: Path, output: Path) -> dict:
@@ -317,6 +427,14 @@ class Host:
     def runtime(self) -> dict | None:
         return runtime_record(self.clone)
 
+    def isolation(self) -> dict:
+        return bytecode_isolation(self.clone)
+
+    def origins(self, directory: Path, plan: dict) -> dict:
+        """The supervisor's own loaded modules (the scorer included) against the frozen runtime."""
+        runtime = json.loads((directory / 'runtime.json').read_text())
+        return loaded_origins(runtime, plan['attested_files'], self.clone)
+
     def hardware(self) -> dict:
         memory = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
         return {'os': platform.platform(), 'cpu': platform.processor() or platform.machine(),
@@ -358,6 +476,14 @@ class Host:
 
 
 # ------------------------------------------------------------------ prepare
+def isolated(host: Host) -> dict:
+    proof = host.isolation()
+    if proof['problems']:
+        raise ValueError('Bytecode/import isolation refused (run through scripts/run_beam_h2.sh): '
+                         + '; '.join(proof['problems']))
+    return proof
+
+
 def inventory(data: Path, spec: Spec) -> tuple[dict, list[dict]]:
     """Counts and opaque identifiers only: no retrieval, no engine, no score."""
     if sha256(data) != spec.dataset_sha256:
@@ -481,6 +607,7 @@ def prepare(directory: Path, data: Path, revision: str, *, spec: Spec = SPEC,
         raise ValueError('A new or empty plan directory is required; a prior freeze is never overwritten')
     if len(revision) != 40 or any(c not in '0123456789abcdef' for c in revision):
         raise ValueError('An exact source Git commit is required')
+    isolated(host)
     attested = host.attest(revision)
     audit, rows = inventory(data, spec)
     arms = arm_configs()
@@ -749,6 +876,12 @@ async def run_arm(plan: dict, arm: str, output: Path, *, block: MLBlock | None =
             write_json(output / 'refused.json', {'arm': arm, 'problems': problems,
                                                  'encoder': attestation['encoder']})
             raise RuntimeError('Semantic encoder refused before any ingestion: ' + '; '.join(problems))
+    if origins is not None:  # everything loaded so far (engine, encoder) is checked BEFORE any ingestion
+        early = origins()
+        if early['problems']:
+            write_json(output / 'refused.json', {'arm': arm, 'loaded_modules': early})
+            raise RuntimeError('Modules outside the frozen runtime before any ingestion: '
+                               + '; '.join(early['problems'][:5]))
     adapter = AddSearchAdapter(EngineClient(server), plan['capture_namespace'])
     expected, started_all = [], time.monotonic()
     with (output / 'rankings.jsonl').open('x') as rankings:
@@ -904,6 +1037,10 @@ def arm_problems(arm: str, proof, plan: dict, spec: Spec, questions: int, rankin
     if plan['runtime'] is not None:  # real interpreter: start and end attestations are mandatory
         if proof.get('environment_problems') != [] or proof.get('runtime_verified') is not True:
             problems.append('worker environment/runtime not attested at start')
+        isolation = proof.get('bytecode_isolation')
+        if not isinstance(isolation, dict) or isolation.get('problems') != [] or not isolation.get(
+                'pycache_prefix'):
+            problems.append('bytecode isolation not attested at start')
         loaded = proof.get('loaded_modules')
         if not isinstance(loaded, dict) or loaded.get('problems') != [] or not loaded.get('files'):
             problems.append('origins of loaded modules not attested, or outside the frozen runtime')
@@ -916,12 +1053,53 @@ def write_atomic(path: Path, value) -> None:
     os.replace(temporary, path)
 
 
-def assemble(plan: dict, directory: Path, stopped: str | None, spec: Spec) -> dict:
+@contextmanager
+def uninterruptible():
+    """Final writes are not cut by Ctrl-C (SIGINT is ignored for their duration)."""
+    try:
+        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except ValueError:  # not the main thread: nothing to mask
+        previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+
+
+def invalidate(plan: dict, directory: Path, spec: Spec, reason: str) -> dict:
+    """Whatever was being written: remove partial outputs and leave an explicit invalid result."""
+    output = directory / 'retrieval'
+    result = {'run_id': plan['run_id'], 'version': plan['version'], 'synthetic': spec.synthetic,
+              'source_commit': plan['source_commit'], 'dataset_sha256': plan['dataset_sha256'],
+              'invalid_reasons': [reason], 'threshold': plan['threshold'],
+              **verdict(Fraction(0), Fraction(0), None, executed=0, expected=1, failed=1),
+              'point_criterion_met': None, 'ci_criterion_met': None, 'scored': None, 'clusters': None,
+              'recall_at_10': None, 'paired_delta': None, 'questions_sha256': None,
+              'note': 'interrupted or failed while scoring: nothing is scored. The rankings are an '
+                      'observation: no new attempt without an explicit incident review'}
+    with uninterruptible():
+        for name in ('questions.jsonl', 'questions.jsonl.tmp', 'result.json.tmp'):
+            (output / name).unlink(missing_ok=True)
+        write_atomic(output / 'result.json', result)
+    return result
+
+
+def assemble(plan: dict, directory: Path, stopped: str | None, spec: Spec, supervisor=None) -> dict:
     """Score both arms, or write an explicit invalid result. Nothing partial is ever left on disk.
 
-    Called only after the final gates. Scores are computed in memory; ``questions.jsonl`` then
-    ``result.json`` are written last, so no later step can fail after a positive result exists.
+    Called only after the final gates. Any exception, an interruption included (BaseException), removes
+    partial outputs, writes the invalid result and propagates.
     """
+    try:
+        return score_run(plan, directory, stopped, spec, supervisor)
+    except BaseException as error:
+        invalidate(plan, directory, spec, f'scoring interrupted or failed: {error!r}')
+        raise
+
+
+def score_run(plan: dict, directory: Path, stopped: str | None, spec: Spec, supervisor=None) -> dict:
+    """Scores are computed in memory; ``questions.jsonl`` then ``result.json`` are written last."""
     output = directory / 'retrieval'
     reasons = [stopped] if stopped else []
     split, found, attestations, failed, hashes = [], {}, {arm: None for arm in ARMS}, [], {}
@@ -946,7 +1124,7 @@ def assemble(plan: dict, directory: Path, stopped: str | None, spec: Spec) -> di
               'expected': len(split), 'executed': len(split) - len(failed), 'failed': len(failed),
               'failed_question_ids': failed, 'invalid_reasons': reasons, 'threshold': plan['threshold'],
               'bootstrap': {**plan['bootstrap'], 'seed': plan['seed']}, 'arms': attestations,
-              'rankings_sha256': hashes}
+              'rankings_sha256': hashes, 'supervisor': supervisor}
 
     def invalid():
         outcome = verdict(Fraction(0), Fraction(0), None, executed=result['executed'], expected=len(split),
@@ -956,8 +1134,9 @@ def assemble(plan: dict, directory: Path, stopped: str | None, spec: Spec) -> di
                       questions_sha256=None,
                       note='incomplete or invalid run: nothing is scored. The rankings are an observation: '
                            'no new attempt without an explicit incident review')
-        (output / 'questions.jsonl').unlink(missing_ok=True)
-        write_atomic(output / 'result.json', result)
+        with uninterruptible():
+            (output / 'questions.jsonl').unlink(missing_ok=True)
+            write_atomic(output / 'result.json', result)
         return result
 
     if failed or reasons:
@@ -996,8 +1175,9 @@ def assemble(plan: dict, directory: Path, stopped: str | None, spec: Spec) -> di
                                     'ci95_exact': None if interval is None else [str(v) for v in interval]},
                       questions_sha256=hashlib.sha256(text.encode()).hexdigest())
         json.dumps(result, allow_nan=False)  # serialisable before anything is written
-        (output / 'questions.jsonl').write_text(text)
-        write_atomic(output / 'result.json', result)  # last write of the run
+        with uninterruptible():  # both files or neither
+            (output / 'questions.jsonl').write_text(text)
+            write_atomic(output / 'result.json', result)  # last write of the run
         return result
     except Exception as error:
         reasons.append(f'scoring: {error!r}')
@@ -1011,30 +1191,41 @@ def retrieve(directory: Path, manifest_sha256: str, *, spec: Spec = SPEC, host: 
         raise ValueError('H2 runs both arms')
     host = host or Host()
     directory = directory.resolve()
+    isolation = isolated(host)  # the supervisor itself never reads a bytecode cache
     plan = frozen(directory, manifest_sha256, spec=spec, host=host)
     first = host.guard(directory)
     output = directory / 'retrieval'
     output.mkdir(mode=0o700, exist_ok=False)  # one attempt per frozen manifest, never a restart
     deadline, stopped, stage = time.monotonic() + plan['budgets']['retrieval_seconds'], None, 'start'
+    supervisor = None
     try:
-        for arm in arms:
-            stage = arm
-            (output / arm).mkdir(mode=0o700)
-            frozen(directory, manifest_sha256, spec=spec, host=host, runtime=False)
-            host.launch(plan, directory, arm, manifest_sha256, deadline)
-        # Final gates, ALL before the scorer: freeze and runtime content, resources, wall time.
-        stage = 'final gates'
-        frozen(directory, manifest_sha256, spec=spec, host=host)
-        last = host.guard(directory)
-        if time.monotonic() > deadline:
-            raise ResourceStop('Frozen campaign budget exceeded')
-        write_atomic(output / 'resources.json', {'first': first, 'last': last})
-    except Exception as error:
-        stopped = f'{stage}: {error}'  # no later arm is started, nothing is scored
-    except BaseException as error:  # interruption: leave an explicit invalid result, then propagate
-        assemble(plan, directory, f'{stage}: interrupted ({error!r})', spec)
+        try:
+            for arm in arms:
+                stage = arm
+                (output / arm).mkdir(mode=0o700)
+                frozen(directory, manifest_sha256, spec=spec, host=host, runtime=False)
+                host.launch(plan, directory, arm, manifest_sha256, deadline)
+            # Final gates, ALL before the scorer: freeze and runtime content, bytecode isolation and
+            # origins of the supervisor's own modules, resources, wall time.
+            stage = 'final gates'
+            frozen(directory, manifest_sha256, spec=spec, host=host)
+            supervisor = {'isolation_at_start': isolation, 'isolation': isolated(host),
+                          'loaded_modules': host.origins(directory, plan)}
+            if supervisor['loaded_modules']['problems']:
+                raise ValueError('Supervisor modules outside the frozen runtime: '
+                                 + '; '.join(supervisor['loaded_modules']['problems'][:5]))
+            last = host.guard(directory)
+            if time.monotonic() > deadline:
+                raise ResourceStop('Frozen campaign budget exceeded')
+            write_atomic(output / 'resources.json', {'first': first, 'last': last, 'supervisor': supervisor})
+        except Exception as error:
+            stopped = f'{stage}: {error}'  # no later arm is started, nothing is scored
+        return assemble(plan, directory, stopped, spec, supervisor)
+    except BaseException as error:
+        # Interruption or failure anywhere, the scorer included: explicit invalid result, then propagate.
+        # (Conservative: an interrupt delivered just after a complete result also invalidates it.)
+        invalidate(plan, directory, spec, f'{stage}: interrupted or failed ({error!r})')
         raise
-    return assemble(plan, directory, stopped, spec)
 
 
 SELFCHECK_TOPICS = ('harbour lighthouse', 'saffron risotto', 'violin recital', 'glacier trek', 'pottery kiln',
@@ -1106,6 +1297,7 @@ def worker(directory: Path, arm: str, manifest_sha256: str, synthetic: bool = Fa
         spec = Spec(**json.loads((directory / 'plan.json').read_text())['spec'])
         if not spec.synthetic:
             raise ValueError('The frozen H2 plan is never run as a synthetic self-check')
+    isolation = isolated(Host())  # before the freeze is even read: no bytecode cache in this process
     plan = frozen(directory, manifest_sha256, spec=spec)  # includes the full runtime content digest
     expected = worker_environment(plan, arm, Host.clone, output)
     problems = environment_problems(expected, plan['forbidden_env_prefixes'])
@@ -1113,9 +1305,15 @@ def worker(directory: Path, arm: str, manifest_sha256: str, synthetic: bool = Fa
         raise ValueError('Worker environment refused: ' + '; '.join(problems))
     runtime = json.loads((directory / 'runtime.json').read_text())
     proofs = {'environment': expected, 'environment_problems': problems, 'runtime_verified': True,
-              'sys_path': list(sys.path), 'runtime_sha256': plan['files']['runtime']['sha256']}
-    asyncio.run(run_arm(plan, arm, output, block=block, proofs=proofs,
-                        origins=lambda: loaded_origins(runtime, plan['attested_files'], Host.clone)))
+              'bytecode_isolation': isolation, 'sys_path': list(sys.path),
+              'runtime_sha256': plan['files']['runtime']['sha256']}
+
+    def origins():
+        proof = loaded_origins(runtime, plan['attested_files'], Host.clone)
+        proof['bytecode_isolation'] = bytecode_isolation(Host.clone)
+        proof['problems'] += proof['bytecode_isolation']['problems']
+        return proof
+    asyncio.run(run_arm(plan, arm, output, block=block, proofs=proofs, origins=origins))
 
 
 def main(argv=None) -> int:

@@ -1,5 +1,9 @@
 # H2 — parité lexical / sémantique sur BEAM 100K : exécution (v2)
 
+> **Remplacé par [H2_RUN_v3.md](H2_RUN_v3.md).** Le gel v2 (`h2-410-plan-v2`, manifeste `6181b179…8d0309`) a été
+> jugé NON VALIDÉ par Codex le 22/11 (bytecode du superviseur, origines de modules, interruption du
+> scoreur) et n'a jamais été exécuté sur BEAM ; il est conservé comme preuve.
+
 Contrat : [LEXICAL_PROFILE_4_1_0 §10](LEXICAL_PROFILE_4_1_0.md). Mesure rétrospective, sans réglage, sans
 indépendance statistique. Ce document décrit le harnais `v4/bench/e2e/beam_h2.py` dans sa révision de gel 2,
 qui répond au verdict Codex « NON VALIDÉ » sur le gel v1. Il fait partie des fichiers attestés par le gel :
