@@ -918,6 +918,109 @@ def test_aliases_of_a_file_are_the_same_checked_path_or_a_refusal(tmp_path, monk
     assert path.read_text() == "x" and leftovers(path) == []
 
 
+# ---- Codex implementation review n° 5: the last look never follows a link ----
+
+def during_preparation(monkeypatch, path, action):
+    """Run ``action`` on the target while OUR temporary file for it is being prepared."""
+    real = qs.tempfile.mkstemp
+    seen = []
+
+    def mkstemp(*args, **kwargs):
+        made = real(*args, **kwargs)
+        if kwargs.get("prefix") == f".{path.name}." and not seen:
+            seen.append(1)
+            action()
+        return made
+    monkeypatch.setattr(qs.tempfile, "mkstemp", mkstemp)
+    return seen
+
+
+def test_a_dangling_symbolic_link_created_during_the_preparation_is_not_absence(tmp_path, monkeypatch):
+    directory = tmp_path / "config"
+    directory.mkdir()
+    path = directory / "file.json"
+    seen = during_preparation(monkeypatch, path, lambda: path.symlink_to(tmp_path / "nowhere"))
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "ours", expected=qs.ABSENT)
+    assert seen and path.is_symlink() and os.readlink(path) == str(tmp_path / "nowhere")
+    assert not (tmp_path / "nowhere").exists() and [item.name for item in directory.iterdir()] == ["file.json"]
+
+
+def test_a_symbolic_link_to_identical_content_created_during_the_preparation_is_not_the_target(tmp_path, monkeypatch):
+    path = target(tmp_path)
+    twin = tmp_path / "twin.json"
+    twin.write_text("zero")  # exactly the expected bytes, behind a link
+
+    def swap():
+        path.unlink()
+        path.symlink_to(twin)
+    seen = during_preparation(monkeypatch, path, swap)
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "ours", expected=sha("zero"))
+    assert seen and path.is_symlink() and twin.read_text() == "zero" and leftovers(path) == []
+
+
+def test_a_hard_link_created_during_the_preparation_is_a_conflict(tmp_path, monkeypatch):
+    path = target(tmp_path)
+    other = tmp_path / "second-name.json"
+    seen = during_preparation(monkeypatch, path, lambda: os.link(path, other))
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "ours", expected=sha("zero"))
+    assert seen and path.read_text() == "zero" and other.read_text() == "zero"
+    assert path.stat().st_ino == other.stat().st_ino and leftovers(path) == []
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+@pytest.mark.parametrize("expectation", ["absent", "digest"])
+def test_a_directory_or_a_fifo_appearing_during_the_preparation_is_a_conflict(tmp_path, monkeypatch, kind, expectation):
+    directory = tmp_path / "config"
+    directory.mkdir()
+    path = directory / "file.json"
+    if expectation == "digest":
+        path.write_text("zero")
+
+    def put():
+        if path.exists():
+            path.unlink()
+        path.mkdir() if kind == "directory" else os.mkfifo(path)
+    seen = during_preparation(monkeypatch, path, put)
+    with pytest.raises(qs.EntryChanged):
+        qs._atomic_write(path, "ours", expected=qs.ABSENT if expectation == "absent" else sha("zero"))
+    import stat as modes
+    mode = os.lstat(path).st_mode
+    assert seen and (modes.S_ISDIR(mode) if kind == "directory" else modes.S_ISFIFO(mode))
+    assert [item.name for item in directory.iterdir()] == ["file.json"]
+
+
+@pytest.mark.parametrize("key", ["cursor", "codex"])
+def test_a_client_file_swapped_for_a_link_during_the_preparation_is_never_written_through(home, tmp_path, monkeypatch, key):
+    """Through the real mutation path: same content behind a symbolic link, created during the preparation."""
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=(key,))
+    path = home / PATHS[key]
+    twin = tmp_path / "twin"
+    original = path.read_bytes()
+
+    def swap():
+        twin.write_bytes(original)
+        path.unlink()
+        path.symlink_to(twin)
+    seen = during_preparation(monkeypatch, path, swap)
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal")
+    assert seen and status(result) == {key: "conflict-file-changed-since-preview"}
+    assert path.is_symlink() and twin.read_bytes() == original and no_temporary_left(home, key)
+
+
+def test_a_client_file_that_did_not_exist_is_not_created_over_a_dangling_link(home, tmp_path, monkeypatch):
+    path = home / PATHS["cursor"]
+    path.unlink()
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("cursor",))
+    assert plan["clients"][0]["action"] == "create" and plan["clients"][0]["file_sha256"] is None
+    seen = during_preparation(monkeypatch, path, lambda: path.symlink_to(tmp_path / "nowhere"))
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal")
+    assert seen and status(result) == {"cursor": "conflict-file-changed-since-preview"}
+    assert path.is_symlink() and not (tmp_path / "nowhere").exists() and no_temporary_left(home, "cursor")
+
+
 def test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent(home, tmp_path):
     """E1 -> E2 (proven replace) -> undo puts E1 back from the backup, but its proof was consumed."""
     install_from(home, tmp_path, "cursor")  # E1

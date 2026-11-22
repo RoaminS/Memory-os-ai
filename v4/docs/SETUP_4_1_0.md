@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (619 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (629 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 619 tests verts** (clients 210, cycle de vie 216, profil 62, reprise 46, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 90 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.7). Le reste de
+**État après implémentation : 629 tests verts** (clients 220, cycle de vie 216, profil 62, reprise 46, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 100 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.8). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1174,6 +1174,29 @@ l'écriture elle-même attend toujours l'empreinte des octets dont elle est cons
 | chemins distincts | `test_writes_on_distinct_paths_do_not_share_anything` |
 | exception pendant l'écriture : ni état, ni temporaire | `test_an_exception_during_a_write_leaves_no_state_and_no_temporary_file` |
 | alias : lien symbolique, lien physique, chemin relatif | `test_aliases_of_a_file_are_the_same_checked_path_or_a_refusal` |
+
+### 23.8 Revue d'implémentation Codex n° 5 (`codex_verdict_setup_impl_v5.md`, sur `724a8b4`) : le dernier contrôle ne suit jamais un lien
+
+Les contrôles de type et de nombre de liens précédaient la préparation du temporaire, et le contrôle final
+lisait la cible en suivant les liens : un lien symbolique **pendant** posé durant la préparation passait pour
+une absence (`ABSENT`) et était écrasé. Correction, pour **toute** attente et donc tout chemin de mutation du
+§23.6 (ils passent tous par `_atomic_write`) : `_verify_target`, dernière étape avant `os.replace`,
+
+- n'utilise que `os.lstat` : `ABSENT` exige que le nom n'existe pas (un lien pendant n'est pas une absence) ;
+- pour une empreinte : fichier ordinaire à lien unique, octets lus par un descripteur ouvert avec
+  `O_NOFOLLOW` (et `O_NONBLOCK`), identité (périphérique, inode) égale à celle vue par `lstat` avant **et**
+  après la lecture ;
+- `UNGUARDED` : absent, ou fichier ordinaire à lien unique ;
+- sinon `EntryChanged` : l'objet trouvé est laissé tel quel, le temporaire est supprimé.
+
+| Injection pendant la préparation du temporaire | Test |
+|---|---|
+| lien symbolique pendant, `ABSENT` attendu | `test_a_dangling_symbolic_link_created_during_the_preparation_is_not_absence` ; par le chemin réel : `test_a_client_file_that_did_not_exist_is_not_created_over_a_dangling_link` |
+| lien symbolique vers un fichier au contenu attendu, empreinte attendue | `test_a_symbolic_link_to_identical_content_created_during_the_preparation_is_not_the_target` ; par le chemin réel (JSON, TOML) : `test_a_client_file_swapped_for_a_link_during_the_preparation_is_never_written_through` (2) |
+| lien physique créé pendant la préparation | `test_a_hard_link_created_during_the_preparation_is_a_conflict` |
+| dossier ou FIFO à la place de la cible (`ABSENT` et empreinte) | `test_a_directory_or_a_fifo_appearing_during_the_preparation_is_a_conflict` (4) |
+
+Chaque test vérifie que l'objet posé est conservé, que le temporaire est nettoyé et que le conflit est rendu.
 
 ### 23.3 Limites résiduelles
 

@@ -463,6 +463,53 @@ def _expected_of(digest: str | None):
     return ABSENT if digest is None else digest
 
 
+def _verify_target(path: Path, expected) -> None:
+    """Last look at the target, immediately before ``os.replace``. It NEVER follows a link.
+
+    ``ABSENT``: ``lstat`` must say the name does not exist (a dangling symbolic link is not absent).
+    A digest: the name must be a regular file with a single hard link; its bytes are read through a
+    descriptor opened with ``O_NOFOLLOW`` whose identity (device, inode) is the one ``lstat`` saw
+    before and still sees after the read. ``UNGUARDED``: absent, or a regular single-link file.
+    Anything else raises ``EntryChanged``: the object found there is left as it is.
+    """
+    changed = EntryChanged("The target changed while the write was prepared; nothing written")
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        if expected is ABSENT or expected is UNGUARDED:
+            return
+        raise changed from None
+    except OSError:
+        raise changed from None
+    if expected is ABSENT or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise changed
+    if expected is UNGUARDED:
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # never blocks on a FIFO swapped in
+    except OSError:
+        raise changed from None
+    try:
+        opened = os.fstat(fd)
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(fd, 1 << 16)
+            if not block:
+                break
+            digest.update(block)
+    except OSError:
+        raise changed from None
+    finally:
+        os.close(fd)
+    try:
+        after = os.lstat(path)
+    except OSError:
+        raise changed from None
+    same = {(info.st_dev, info.st_ino) for info in (before, opened, after)}
+    if len(same) != 1 or not stat.S_ISREG(after.st_mode) or after.st_nlink != 1 or digest.hexdigest() != expected:
+        raise changed
+
+
 def _atomic_write(path: Path, text: str, *, expected) -> None:
     """Prepare first, verify last, then replace. ``expected`` is REQUIRED and explicit:
 
@@ -476,7 +523,9 @@ def _atomic_write(path: Path, text: str, *, expected) -> None:
     fsync, close, chmod) BEFORE the target is looked at one last time; the comparison is the very
     last step, with nothing but ``os.replace`` after it. A mismatch unlinks the temporary file
     and raises ``EntryChanged``. A target that is a symbolic link, not a regular file, or has
-    several hard links is refused: every alias of a file is either the same single-link path or a refusal.
+    several hard links is refused before the preparation AND at the last look (``_verify_target``,
+    which uses ``lstat`` and ``O_NOFOLLOW``): every alias of a file is either the same single-link
+    path or a refusal, including one that appears while the temporary file is prepared.
     """
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise QuickstartError("Unsafe write target")
@@ -498,8 +547,7 @@ def _atomic_write(path: Path, text: str, *, expected) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.chmod(tmp, mode)
-        if expected is not UNGUARDED and _sha(path) != (None if expected is ABSENT else expected):
-            raise EntryChanged("The target changed while the write was prepared; nothing written")
+        _verify_target(path, expected)  # never follows a link; nothing but os.replace after it
         os.replace(tmp, path)
         fd = os.open(path.parent, os.O_RDONLY)
         try:
