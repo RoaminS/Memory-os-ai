@@ -42,6 +42,9 @@ SDIST_SHA = "d" * 64
 CHAIN_SHA = "e" * 64
 TAG = "v7"
 LEX_SHA, SEM_SHA = "1" * 64, "2" * 64
+PINS_SHA = hashlib.sha256((SCRIPTS / "qualify_410_pytest_pins.txt").read_bytes()).hexdigest()
+PINS = gate.exact_pins((SCRIPTS / "qualify_410_pytest_pins.txt").read_text())
+CONTEXT = {"pins_sha256": PINS_SHA, "pins": PINS, "constraints": {"lexical": LEX_SHA, "semantic": SEM_SHA}}
 
 
 def manifest():
@@ -57,7 +60,7 @@ def manifest():
         "external_tooling_sha256": {"chain": {"path": "/x/" + gate.CHAIN_NAME, "sha256": CHAIN_SHA},
                                     "supervisor": {"path": "/x/" + gate.SUPERVISOR_NAME,
                                                    "sha256": gate.SUPERVISOR_SHA256}},
-        "pytest_pins_sha256": SHA, "qualification_source_sha256": {
+        "pytest_pins_sha256": PINS_SHA, "qualification_source_sha256": {
             "v4/tests/" + name: SHA for name in gate.LEXICAL_WHEEL_FILES},
         "copy_scripts_sha256": {}, "lexical_store_scripts_sha256": {"runner": SHA},
         "lexical_store_fixed_data_sha256": SHA, "installed_relay_scripts_sha256": {"runner": SHA, "case": SHA},
@@ -194,6 +197,19 @@ def test_invariants_hold_on_the_real_blobs_of_the_contract_commit():
 
 # ---------- decisions (§10) ----------
 
+def dossier_text(acquisition, context=None):
+    """The exact dossier of one acquisition for this candidate and run, as the tool writes it."""
+    return json.dumps(gate.network_dossier(acquisition, commit=COMMIT, run_tag=TAG, context=context or CONTEXT),
+                      indent=2, sort_keys=True) + "\n"
+
+
+def write_dossier(folder, acquisition, text=None):
+    path = Path(folder) / (acquisition + ".dossier.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dossier_text(acquisition) if text is None else text)
+    return path
+
+
 def decision(name, **changes):
     d = {"format": gate.DECISION_FORMAT, "decision": name, "answer": "oui", "decided_by": "Romain",
          "decided_at": "2026-11-23T10:00:00+01:00", "source_commit": COMMIT,
@@ -212,9 +228,11 @@ def decision(name, **changes):
     if name == "d1_resign":
         d["measure"] = {"reference": "report.json", "sha256": SHA}
     if name.startswith("network_"):
-        d.update(acquisition=name[-2:], dossier={"reference": "N.json", "sha256": SHA}, operations=["pip"],
-                 acquisitions=["wheels"],
-                 sources=["openaipublic.blob.core.windows.net"] if name == "network_N6" else ["pypi.org", "files.pythonhosted.org"])
+        n = name[-2:]
+        expected = gate.network_dossier(n, commit=COMMIT, run_tag=TAG, context=CONTEXT)
+        d.update(acquisition=n, acquisitions=[n], operations=[expected["operation"]], sources=list(expected["sources"]),
+                 dossier={"reference": n + ".dossier.json",
+                          "sha256": hashlib.sha256(dossier_text(n).encode()).hexdigest()})
     if name == "launch":
         d.update(chain_sha256=CHAIN_SHA, authorises_publication=False, authorises_push=False,
                  authorises_production_switch=False)
@@ -222,14 +240,25 @@ def decision(name, **changes):
     return d
 
 
-def check(d, **kw):
-    return gate.check_decision(d, decision=d["decision"], commit=COMMIT, run_tag=TAG, chain_sha256=CHAIN_SHA, **kw)
+@pytest.fixture
+def dossiers(tmp_path):
+    for n in gate.NETWORK:
+        write_dossier(tmp_path, n)
+    return tmp_path
+
+
+def check(d, folder=None, **kw):
+    name = d["decision"]
+    if name.startswith("network_") and folder is not None:
+        kw.setdefault("dossier_path", Path(folder) / str((d.get("dossier") or {}).get("reference")))
+        kw.setdefault("context", CONTEXT)
+    return gate.check_decision(d, decision=name, commit=COMMIT, run_tag=TAG, chain_sha256=CHAIN_SHA, **kw)
 
 
 @pytest.mark.parametrize("name", sorted(gate.DECISIONS))
-def test_every_decision_of_section_10_has_an_accepted_explicit_form(name):
-    assert check(decision(name))["answer"] == "oui"
-    assert check(decision(name, answer="non"))["answer"] == "non"  # a no is recorded; it authorises nothing
+def test_every_decision_of_section_10_has_an_accepted_explicit_form(name, dossiers):
+    assert check(decision(name), dossiers)["answer"] == "oui"
+    assert check(decision(name, answer="non"), dossiers)["answer"] == "non"  # a no is recorded; it authorises nothing
 
 
 def test_the_nine_propositions_are_covered():
@@ -245,7 +274,12 @@ def test_the_nine_propositions_are_covered():
     ("launchd_nice", {"run_tag": None}), ("semantic_pth_variant", {"run_tag": "v1"}),
     ("network_N1", {"sources": ["example.org"]}), ("network_N6", {"sources": ["pypi.org"]}),
     ("network_N3", {"dossier": {"reference": "x"}}), ("network_N3", {"acquisition": "N5"}),
-    ("network_N2", {"operations": []}),
+    ("network_N2", {"operations": []}), ("network_N2", {"operations": ["pip install"]}),
+    ("network_N4", {"sources": ["pypi.org"]}),  # narrower than what the step really fetches from
+    ("network_N4", {"sources": ["pypi.org", "files.pythonhosted.org", "example.org"]}),
+    ("network_N3", {"acquisitions": ["N3", "N5"]}),
+    ("network_N3", {"dossier": {"reference": "../N3.dossier.json", "sha256": SHA}}),
+    ("network_N5", {"dossier": {"reference": "N3.dossier.json", "sha256": SHA}}),
     ("g13_p_a", {"status": "pass"}), ("g13_p_a", {"reason": "court"}), ("g13_p_a", {"evidence": []}),
     ("g13_p_a", {"replay": True}), ("g13_p_a", {"result_attributed_to": COMMIT}),
     ("g13_p_a", {"claims_result_on_candidate": True}), ("g13_p_a", {"release_ready_effect": "may_satisfy_G12"}),
@@ -253,14 +287,61 @@ def test_the_nine_propositions_are_covered():
     ("g12_waiver", {"scope": ""}), ("g12_external_proof", {"proof": {"reference": "pb"}}),
     ("d1_resign", {"measure": None}),
 ])
-def test_decisions_refuse_anything_implicit_unbound_or_widened(name, changes):
-    refused(check, decision(name, **changes))
+def test_decisions_refuse_anything_implicit_unbound_or_widened(name, changes, dossiers):
+    refused(check, decision(name, **changes), dossiers)
 
 
 def test_unknown_decision_and_wrong_id_are_refused():
     refused(gate.check_decision, decision("launch"), decision="go", commit=COMMIT, run_tag=TAG)
     refused(gate.check_decision, decision("launch"), decision="launchd_nice", commit=COMMIT, run_tag=TAG)
     refused(gate.check_decision, decision("launch"), decision="launch", commit=COMMIT, run_tag=TAG)  # no chain sha
+
+
+# Blocker 1 (Codex review of 2dfec6f): a network GO must bound what is really acquired.
+
+def test_blocker1_n4_go_with_a_missing_dossier_no_pins_and_only_pypi_org_is_refused(tmp_path):
+    """Counterexample of the review: nonexistent dossier, no pin hash, sources = pypi.org only."""
+    go = decision("network_N4", sources=["pypi.org"], dossier={"reference": "absent.json", "sha256": SHA})
+    refused(check, go, tmp_path)                      # the dossier file is read and hashed: absent = refusal
+    refused(check, decision("network_N4"))            # no dossier/context given: cannot be checked, so refused
+    write_dossier(tmp_path, "N4")
+    assert check(decision("network_N4"), tmp_path)["answer"] == "oui"
+    refused(check, decision("network_N4", sources=["pypi.org"]), tmp_path)  # wheels come from files.pythonhosted.org
+
+
+def test_blocker1_dossier_is_the_exact_description_of_the_effective_acquisition(tmp_path):
+    n4 = gate.network_dossier("N4", commit=COMMIT, run_tag=TAG, context=CONTEXT)
+    assert n4["pins_sha256"] == PINS_SHA and n4["pins"] == PINS and n4["constraints_sha256"] == LEX_SHA
+    assert n4["sources"] == ["files.pythonhosted.org", "pypi.org"] and n4["only_binary"] is True
+    n6 = gate.network_dossier("N6", commit=COMMIT, run_tag=TAG, context=CONTEXT)
+    assert (n6["url"], n6["bytes"], n6["sha256"], n6["times"]) == (gate.CL100K_URL, 1681126, gate.CL100K_SHA256, 1)
+    for change in ({"pins_sha256": SHA}, {"constraints_sha256": SEM_SHA}, {"run_tag": "v8"}, {"source_commit": "f" * 40},
+                   {"attempts": 3}, {"index_url": "https://example.org/simple"}, {"only_binary": False},
+                   {"retries_or_widening_covered": True}, {"extra": "widened"}):
+        text = json.dumps({**n4, **change}, indent=2, sort_keys=True) + "\n"
+        write_dossier(tmp_path, "N4", text)
+        go = decision("network_N4", dossier={"reference": "N4.dossier.json",
+                                             "sha256": hashlib.sha256(text.encode()).hexdigest()})
+        refused(check, go, tmp_path)  # approved hash matches, but the content is not what N4 does
+    # Pins changed after the GO: the sealed context no longer matches the approved dossier.
+    write_dossier(tmp_path, "N4")
+    refused(check, decision("network_N4"), tmp_path, context={**CONTEXT, "pins_sha256": SHA})
+    # The dossier changed on disk after approval.
+    write_dossier(tmp_path, "N4", dossier_text("N4") + " ")
+    refused(check, decision("network_N4"), tmp_path)
+
+
+def test_blocker1_effective_parameters_are_those_the_scripts_use():
+    install = (SCRIPTS / "qualify_install_410.sh").read_text()
+    wheel = (SCRIPTS / "qualify_lexical_wheel_410.py").read_text()
+    resolve = (SCRIPTS / "qualify_runtime_resolution.py").read_text()
+    for text in (install, wheel, resolve):
+        assert gate.PYPI_INDEX in text and "--only-binary=:all:" in text
+    assert "qualify_410_pytest_pins.txt" in wheel and '"-r", str(PINS)' in wheel
+    assert gate.CL100K_URL in (ROOT / "v4/src/memory_os_v4/resources/provision_v1.json").read_text()
+    assert {s["tool"] for s in gate.NETWORK_SPEC.values()} <= {"scripts/" + n for n in maker.TOOLS}
+    real = gate.network_context(ROOT)
+    assert real["pins_sha256"] == PINS_SHA and set(real["constraints"]) == {"lexical", "semantic"}
 
 
 # ---------- G5 ----------
@@ -317,10 +398,19 @@ def test_resolution_refuses_a_distribution_outside_the_authorised_wheel_host(tmp
 def service(profile):
     row = {"present": True, "belongs_to_run": True, "plist_under_home": True, "program_is_run_venv": True,
            "listener_is_service_pid": True, "ready": True, "label": gate.TEST_LABEL, "port": gate.TEST_PORT,
-           "version": "4.1.0", "retrieval_profile": gate.LEXICAL_MARKER if profile == "lexical" else gate.SEMANTIC_MARKER}
+           "version": "4.1.0", "commit": COMMIT,
+           "retrieval_profile": gate.LEXICAL_MARKER if profile == "lexical" else gate.SEMANTIC_MARKER}
     if profile == "lexical":
         row["ml_libraries_open"] = 0
     return row
+
+
+def doctor_ok():
+    areas = sorted(gate.REQUIRED_DOCTOR_AREAS)
+    statuses = {area: "PASS" for area in areas}
+    statuses["storage"] = "WARN"  # a warning is not a failure
+    return {"returncode": 0, "fail": 0, "checks": len(areas) + 3, "areas": sorted(areas + ["backup", "backup-key"]),
+            "missing_areas": [], "statuses": statuses}
 
 
 def zero_write():
@@ -332,7 +422,8 @@ def install_block(profile, home, download):
     clean = {"label_absent": True, "port_free": True}
     return {"home": home, "pre": dict(clean), "post": dict(clean),
             "apply": {"ok": True, "returncode": 0, "demo": True, "profile": profile, "download_bytes": download},
-            "service": service(profile), "doctor": {"fail": 0, "checks": 12}}
+            "service": service(profile), "doctor": doctor_ok(),
+            "client_entries_created": [".codex/config.toml", ".cursor/mcp.json"]}
 
 
 def install_proof(profile="lexical", variant="autonomous"):
@@ -340,12 +431,13 @@ def install_proof(profile="lexical", variant="autonomous"):
     locks = m["profiles"][profile]["locks"]
     env = {"constraints_sha256": m["profiles"][profile]["constraints_sha256"], "locator_under_site_packages": True,
            "package_under_site_packages": True, "pip_check_ok": True, "mismatch": [], "unpinned": [],
+           "candidate_origin_sha256": WHEEL_SHA, "package_version": "4.1.0",
            "bootstrap": ["pip", "setuptools"], "pinned_and_equal": locks, "ml_packages": []}
     if variant == "autonomous":
         env.update(wheels_only=True, distributions=[
             {"name": f"p{i}", "sha256": SHA, "url": f"https://files.pythonhosted.org/p{i}.whl"} for i in range(locks)])
     else:
-        env.update(reused_paths=[{"path": "/site"}], candidate_origin_sha256=WHEEL_SHA)
+        env.update(reused_paths=[{"path": "/site", "distributions": ["torch==2.10.0"]}])
     one = install_block(profile, "/p/home1", gate.CL100K_BYTES if profile == "lexical" else 0)
     one["preview"] = zero_write()
     one["undo"] = {"ok": True, "returncode": 0, "with_service": True, "label_absent": True, "port_free": True,
@@ -356,6 +448,8 @@ def install_proof(profile="lexical", variant="autonomous"):
                           "entries_removed": [".cursor/mcp.json", ".codex/config.toml"], "label_absent": True,
                           "port_free": True, "plist_removed_from_active": True, "plist_journal_copy_kept": True},
                data_conservation={"immutable_unchanged": True, "immutable_kinds": ["backups", "key", "resources", "token"],
+                                  "immutable_witnessed": True,
+                                  "immutable_files": {"token": 1, "resources": 1, "backups": 1, "key": 1},
                                   "store_identity_unchanged": True, "store_logical_unchanged": True,
                                   "checked_after_stop": True, "journals_present": True, "unexpected_changes": []})
     timing = {"clock": "monotonic", "download_bytes": one["apply"]["download_bytes"], "profile": profile}
@@ -365,11 +459,13 @@ def install_proof(profile="lexical", variant="autonomous"):
         "source_commit": COMMIT, "run_tag": TAG, "version": "4.1.0", "wheel": {"sha256": WHEEL_SHA},
         "label": gate.TEST_LABEL, "port": gate.TEST_PORT, "environment": env, "install_1": one, "install_2": two,
         "m1": {"t0_epoch": 100.0, "t1_epoch": 160.0, "total_s": 60.0, "pip_s": 20.0, "controls_s": 5.0, "net_s": 55.0,
-               "outside_model_s": 58.0, "install_json_timing": timing, "pip_download_bytes": 1000,
+               "outside_model_s": 58.0, "install_json_timing": timing, "pip_downloaded_bytes": None,
+               "pip_downloaded_bytes_measured": False, "pip_cache_bytes": 1000,
+               "pip_cache_bytes_nature": "size of the run's own pip cache; not transferred bytes",
                "quickstart_download_bytes": timing["download_bytes"], "protocol_deviations": deviations,
                "label": "reused-dependencies variant" if variant == "pth" else "first installation"},
         "production": {"unchanged": True, "pid_before": 77, "pid_after": 77, "snapshot_before_sha256": SHA,
-                       "snapshot_after_sha256": SHA},
+                       "snapshot_after_sha256": SHA, **{flag: True for flag in gate.PRODUCTION_FLAGS}},
         "safety_net_fired": False,
     }
     return proof, m
@@ -407,11 +503,24 @@ def mutate(proof, path, value):
     (("install_1", "service", "belongs_to_run"), False), (("install_1", "service", "program_is_run_venv"), False),
     (("install_1", "service", "plist_under_home"), False), (("install_1", "service", "retrieval_profile"), gate.SEMANTIC_MARKER),
     (("install_1", "service", "ml_libraries_open"), 2), (("install_2", "service", "present"), False),
-    (("install_1", "doctor", "fail"), 1), (("install_1", "undo", "plist_removed"), False),
+    (("install_1", "doctor", "fail"), 1), (("install_1", "doctor", "returncode"), 9),
+    (("install_2", "doctor", "missing_areas"), ["server"]), (("install_1", "doctor", "areas"), ["store"]),
+    (("install_1", "doctor", "statuses"), {"server": "PASS"}), (("install_1", "service", "commit"), "f" * 40),
+    (("install_2", "service", "commit"), None), (("install_1", "client_entries_created"), [".cursor/mcp.json"]),
+    (("environment", "candidate_origin_sha256"), SHA), (("environment", "package_version"), "4.0.9"),
+    (("install_2", "data_conservation", "immutable_witnessed"), False),
+    (("install_2", "data_conservation", "immutable_files"), {"token": 1, "resources": 1, "backups": 0, "key": 1}),
+    (("install_2", "data_conservation", "immutable_files"), {"token": 1, "resources": 1}),
+    (("production", "real_launch_agents_unchanged"), False), (("production", "real_client_configs_unchanged"), False),
+    (("production", "real_memory_os_config_unchanged"), None),
+    (("m1", "pip_downloaded_bytes"), 1000), (("m1", "pip_downloaded_bytes_measured"), True),
+    (("m1", "pip_download_bytes"), 1000), (("m1", "pip_cache_bytes"), None),
+    (("install_1", "undo", "plist_removed"), False),
     (("install_1", "undo", "label_absent"), False), (("install_1", "undo", "client_entries_restored"), False),
     (("install_2", "home"), "/p/home1"), (("install_2", "uninstall_preview", "inventory_identical"), False),
     (("install_2", "uninstall", "partial"), True), (("install_2", "uninstall", "ok"), False),
     (("install_2", "uninstall", "entries_removed"), [".cursor/mcp.json"]), (("install_2", "client_entries_created"), []),
+    (("install_2", "client_entries_created"), [".cursor/mcp.json"]),
     (("install_2", "uninstall", "label_absent"), False), (("install_2", "uninstall", "port_free"), False),
     (("install_2", "uninstall", "plist_removed_from_active"), False),
     (("install_2", "uninstall", "plist_journal_copy_kept"), False), (("install_2", "uninstall", "data_deleted"), True),
@@ -438,9 +547,32 @@ def test_uninstall_complete_false_alone_is_not_a_failure_but_a_kept_service_is()
     gate.validate_install(proof, m, "lexical")
 
 
+def test_blocker3_service_of_another_commit_and_doctor_exit_9_are_refused():
+    """Counterexample of the review: every other field positive, another commit attested, doctor returning 9."""
+    proof, m = install_proof("lexical")
+    proof["install_1"]["service"]["commit"] = "f" * 40
+    refused(gate.validate_install, proof, m, "lexical")
+    proof, m = install_proof("lexical")
+    proof["install_1"]["doctor"]["returncode"] = 9
+    refused(gate.validate_install, proof, m, "lexical")
+    # Both at once, as in the review; and a doctor that did not run its expected checks.
+    proof, m = install_proof("semantic")
+    proof["install_2"]["service"]["commit"] = "f" * 40
+    proof["install_2"]["doctor"]["returncode"] = 9
+    refused(gate.validate_install, proof, m, "semantic")
+    proof, m = install_proof("lexical")
+    proof["install_1"]["doctor"] = {"returncode": 0, "fail": 0, "checks": 1, "areas": ["token"], "missing_areas": [],
+                                    "statuses": {"token": "PASS"}}
+    refused(gate.validate_install, proof, m, "lexical")
+    proof, m = install_proof("lexical")
+    proof["install_1"]["doctor"]["statuses"]["client:cursor"] = "WARN"  # the requested client entry is not a relay
+    refused(gate.validate_install, proof, m, "lexical")
+
+
 def test_pth_variant_must_attest_paths_and_candidate_origin_and_is_semantic_only():
     proof, m = install_proof("semantic", "pth")
     refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "reused_paths"), []), m, "semantic")
+    refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "reused_paths"), [{"path": "/site"}]), m, "semantic")
     # Reduced coverage: other packages of the reused environment are listed, a drifting lock still refuses.
     gate.validate_install(mutate(copy.deepcopy(proof), ("environment", "unpinned"), ["pytest", "ruff"]), m, "semantic")
     refused(gate.validate_install, mutate(copy.deepcopy(proof), ("environment", "mismatch"), ["torch 2.9 != 2.10"]), m, "semantic")
@@ -458,15 +590,32 @@ def lexical_wheel_proof():
     return {"format": "qualify-410-lexical-wheel-v1", "ok": True, "source_commit": COMMIT, "run_tag": TAG,
             "wheel_sha256": WHEEL_SHA, "outside_checkout": True, "pythonpath_set": False,
             "package_under_site_packages": True, "find_spec": {n: None for n in gate.ML_MODULES},
-            "pytest_pins_sha256": SHA, "pip_check_ok": True, "runtime_recheck_ok": True, "returncode": 0,
+            "pytest_pins_sha256": PINS_SHA, "pip_check_ok": True, "runtime_recheck_ok": True, "returncode": 0,
+            "pytest_distributions": [{"name": name, "version": version, "sha256": SHA,
+                                      "url": f"https://files.pythonhosted.org/x/{name}-{version}-py3-none-any.whl"}
+                                     for name, version in sorted(PINS.items())],
             "counts": {"tests": 80, "failures": 0, "errors": 0, "skipped": 0},
             "test_files": {n: SHA for n in gate.LEXICAL_WHEEL_FILES}}
+
+
+def test_blocker4_g6_without_the_recorded_pytest_closure_is_refused():
+    """Counterexample of the review: G6 accepted although the URL/SHA-256 required by N4 are missing."""
+    m = manifest()
+    for change in (lambda p: p.pop("pytest_distributions"), lambda p: p.update(pytest_distributions=[]),
+                   lambda p: p["pytest_distributions"].pop(), lambda p: p["pytest_distributions"][0].update(sha256=None),
+                   lambda p: p["pytest_distributions"][0].update(version="0.0.1"),
+                   lambda p: p["pytest_distributions"][0].update(url="https://example.org/x.whl"),
+                   lambda p: p["pytest_distributions"].append({"name": "colorama", "version": "1", "sha256": SHA,
+                                                               "url": "https://files.pythonhosted.org/c.whl"})):
+        proof = lexical_wheel_proof()
+        change(proof)
+        refused(gate.validate_lexical_wheel, proof, m)
 
 
 @pytest.mark.parametrize("path,value", [
     (("outside_checkout",), False), (("pythonpath_set",), True), (("package_under_site_packages",), False),
     (("find_spec", "torch"), "present"), (("find_spec",), {"torch": None}), (("pytest_pins_sha256",), WHEEL_SHA),
-    (("runtime_recheck_ok",), False), (("counts", "skipped"), 1), (("counts", "failures"), 1), (("counts", "tests"), 0),
+    (("runtime_recheck_ok",), False), (("pytest_distributions",), None), (("counts", "skipped"), 1), (("counts", "failures"), 1), (("counts", "tests"), 0),
     (("returncode",), 1), (("wheel_sha256",), SHA), (("test_files", "lexical_fixture_410.py"), WHEEL_SHA),
     (("test_files",), {"test_lexical_profile.py": SHA}),
 ])
@@ -477,18 +626,41 @@ def test_lexical_wheel_proof(path, value):
 
 
 def lexical_store_proof():
-    ranks = {q: ["fact a", "fact b"] for q in worker.LEXICAL_QUERIES}
+    facts = worker.LEXICAL_FACTS
+    ranks = {q: [facts[i], facts[(i + 1) % len(facts)]] for i, q in enumerate(worker.LEXICAL_QUERIES)}
     return {"format": "qualify-410-lexical-store-v1", "ok": True, "source_commit": COMMIT, "run_tag": TAG,
             "wheel_sha256": WHEEL_SHA, "scripts_sha256": {"runner": SHA}, "package_under_site_packages": True,
-            "fixed_data_sha256": SHA, "marker": dict(gate.LEXICAL_MARKER), "backup": {"ok": True}, "restore": {"ok": True},
+            "fixed_data_sha256": SHA, "marker": dict(gate.LEXICAL_MARKER), "restored_marker": dict(gate.LEXICAL_MARKER),
+            "added": len(facts), "backup": {"ok": True, "archive_sha256": SHA},
+            "restore": {"ok": True, "archive_sha256": SHA},
             "rankings": {k: copy.deepcopy(ranks) for k in ("after_write", "after_reopen", "after_restore")},
             "opposite_profile_open": {"refused": True, "code": "store_profile_mismatch", "requested": "semantic",
                                       "inventory_before_sha256": SHA, "inventory_after_sha256": SHA}}
 
 
+def test_blocker4_g11_with_one_arbitrary_query_or_no_restored_marker_is_refused():
+    """Counterexample of the review: one arbitrary query identical at the three moments; restored_marker None."""
+    m = manifest()
+    proof = lexical_store_proof()
+    proof["rankings"] = {k: {"anything": ["x"]} for k in ("after_write", "after_reopen", "after_restore")}
+    refused(gate.validate_lexical_store, proof, m)
+    proof = lexical_store_proof()
+    proof["restored_marker"] = None
+    refused(gate.validate_lexical_store, proof, m)
+    for change in (lambda p: [r.pop(worker.LEXICAL_QUERIES[3]) for r in p["rankings"].values()],   # a query missing
+                   lambda p: [r.update(extra=[worker.LEXICAL_FACTS[0]]) for r in p["rankings"].values()],
+                   lambda p: [r.update({worker.LEXICAL_QUERIES[0]: ["not a fixed fact"]}) for r in p["rankings"].values()],
+                   lambda p: p.update(added=11), lambda p: p["restore"].update(archive_sha256=WHEEL_SHA),
+                   lambda p: p.update(restored_marker={"name": "semantic", "policy": None})):
+        proof = lexical_store_proof()
+        change(proof)
+        refused(gate.validate_lexical_store, proof, m)
+
+
 @pytest.mark.parametrize("path,value", [
-    (("rankings", "after_restore", worker.LEXICAL_QUERIES[0]), ["fact b", "fact a"]),
+    (("rankings", "after_restore", worker.LEXICAL_QUERIES[0]), [worker.LEXICAL_FACTS[1], worker.LEXICAL_FACTS[0]]),
     (("rankings", "after_reopen", worker.LEXICAL_QUERIES[1]), []), (("rankings",), {"after_write": {}}),
+    (("restored_marker",), None), (("added",), 0),
     (("marker",), {"name": "semantic", "policy": None}), (("marker",), None), (("backup", "ok"), False),
     (("restore", "ok"), False), (("fixed_data_sha256",), WHEEL_SHA), (("scripts_sha256",), {}),
     (("opposite_profile_open", "refused"), False), (("opposite_profile_open", "code"), "store_profile_unverifiable"),
@@ -529,7 +701,32 @@ def copy_proof():
     p["doctor"]["ready"]["capabilities"]["retrieval_profile"] = dict(gate.SEMANTIC_MARKER)
     for s in p["s4"].values():
         s["drill"]["server_check"]["version"] = "4.1.0"
+        s["backup"]["archive_sha256"] = s["drill"]["archive_sha256"] = SHA
+    p["s4"]["sdist"]["backup"]["archive"] = p["s4"]["sdist"]["drill"]["archive"] = "sdist.mosb"
+    p["s4"]["sdist"]["backup"]["archive_sha256"] = p["s4"]["sdist"]["drill"]["archive_sha256"] = WHEEL_SHA
+    # One sealed archive (the wheel exercise's) restored by both artifacts.
+    drill = copy.deepcopy(p["s4"]["wheel"]["drill"])
+    p["s4_common"] = {"archive": "private.mosb", "archive_sha256": SHA, "archive_sha256_after": SHA,
+                      "drills": {"wheel": {**copy.deepcopy(drill), "artifact_sha256": WHEEL_SHA},
+                                 "sdist": {**copy.deepcopy(drill), "artifact_sha256": SDIST_SHA}}}
     return p, m
+
+
+def test_blocker7_g10_needs_one_common_sealed_archive_restored_by_both_artifacts():
+    p, m = copy_proof()
+    gate.validate_copy(p, m)
+    assert p["s4"]["wheel"]["backup"]["archive_sha256"] != p["s4"]["sdist"]["backup"]["archive_sha256"]  # two exercises kept
+    for change in (lambda p: p.pop("s4_common"), lambda p: p["s4_common"]["drills"].pop("sdist"),
+                   lambda p: p["s4_common"]["drills"]["sdist"].update(archive_sha256=WHEEL_SHA, archive="sdist.mosb"),
+                   lambda p: p["s4_common"].update(archive_sha256=WHEEL_SHA),
+                   lambda p: p["s4_common"].update(archive_sha256_after=WHEEL_SHA),
+                   lambda p: p["s4_common"]["drills"]["sdist"].update(artifact_sha256=WHEEL_SHA),
+                   lambda p: p["s4_common"]["drills"]["sdist"].update(level="files"),
+                   lambda p: p["s4_common"]["drills"]["sdist"]["server_check"].update(commit="f" * 40),
+                   lambda p: p["s4_common"]["drills"]["wheel"].update(ok=False)):
+        p, m = copy_proof()
+        change(p)
+        refused(gate.validate_copy, p, m)
 
 
 def test_copy_proof_passes_with_the_lexical_refusal_addition():
@@ -564,6 +761,7 @@ def test_copy_start_threshold_is_the_higher_of_9_2_gb_and_the_dynamic_budget(tmp
     assert small["required_start_free_bytes"] == 9_200_000_000 > small["dynamic_budget_bytes"]
     big = sqlite_gate.start_disk_budget(tmp_path, 10**10, policy=lambda size: ("adaptive_v1", 10 * 10**9, 0))
     assert big["required_start_free_bytes"] == big["dynamic_budget_bytes"] > 9_200_000_000
+    assert small["dynamic_budget_bytes"] == 3 * 10**9 + 6 * 1524 + 4 * 1524 + 256 * 1024**2 + 3 * 1524
     legacy = sqlite_gate.start_disk_budget(tmp_path, 1, policy=lambda size: ("legacy5gb", 0, 0))
     assert legacy["required_start_free_bytes"] == 9_200_000_000
     refused(sqlite_gate.start_disk_budget, tmp_path / "other", 1, policy=lambda size: ("adaptive_v1", 0, 0))
@@ -636,12 +834,32 @@ def test_brief_perimeter_only_runs_read_only_git_commands():
     assert "import memory_os_v4" not in source and "from memory_os_v4" not in source
 
 
+_REAL_PERIMETER = []
+
+
 def perimeter_report():
-    return {"format": "qualify-410-brief-perimeter-v1", "git_only": True, "sealed_inputs_read": False,
-            "brief_executed": False, "automatic_transfer": False, "conclusion": "decision_of_romain_required",
-            "commits": {"p_a_proof": gate.P_A_PROOF_COMMIT, "intermediate": gate.P_A_INTERMEDIATE, "candidate": COMMIT},
-            "closures": {r: {"files": {"a.py": SHA}} for r in ("p_a_proof", "intermediate", "candidate")},
-            "union": {"a.py": {}}, "callers": {p: {} for p in perimeter.CALLERS}, "tool_sha256": SHA}
+    """The real report of the pinned base (read-only git), rebound to the synthetic candidate."""
+    if not _REAL_PERIMETER:
+        _REAL_PERIMETER.append(perimeter.report(ROOT, QUAL_BASE))
+    report = copy.deepcopy(_REAL_PERIMETER[0])
+    report["commits"]["candidate"] = COMMIT
+    report["tool_sha256"] = SHA
+    return report
+
+
+def test_blocker4_g13_without_dependencies_or_resources_inventory_is_refused():
+    """Counterexample of the review: a perimeter report accepted without dependencies nor resources."""
+    m = manifest()
+    gate.validate_perimeter(perimeter_report(), m)
+    for change in (lambda p: p.pop("dependencies"), lambda p: p.pop("resources"), lambda p: p.update(dependencies={}),
+                   lambda p: p.update(resources={}), lambda p: p["dependencies"].pop("v4/pyproject.toml"),
+                   lambda p: next(iter(p["resources"].values())).pop("sha256"),
+                   lambda p: p["closures"]["candidate"].pop("roots"), lambda p: p.pop("intermediate_to_candidate"),
+                   lambda p: p["closures"]["candidate"]["files"].update({"v4/src/memory_os_v4/zz.py": SHA}),
+                   lambda p: p.update(limits=[])):
+        report = perimeter_report()
+        change(report)
+        refused(gate.validate_perimeter, report, m)
 
 
 @pytest.mark.parametrize("path,value", [
@@ -749,19 +967,37 @@ def test_m3_summary_reports_sampled_extrema_and_requires_usable_samples():
     summary = gate.m3_summary(samples())
     assert summary["min_free_bytes_observed"] < 15e9 and summary["max_swap_bytes_observed"] > 1000
     assert set(summary["step_seconds"]) == set(gate.CHAIN_STEPS) and "not guaranteed" in summary["nature"]
+    assert all(count == 1 for count in summary["during_samples"].values())
     refused(gate.m3_summary, [])
     refused(gate.m3_summary, [json.dumps({"t": 1, "phase": "before", "step": "full", "free_bytes": None, "swap_bytes": 1})])
     refused(gate.m3_summary, [json.dumps({"t": 1, "phase": "before", "step": "full", "free_bytes": 1, "swap_bytes": 1})])
+    # Run-bracket samples carry no step: they count for the extrema only.
+    bracket = [json.dumps({"t": 1.0, "phase": "before", "step": "", "free_bytes": 5, "swap_bytes": 9 * 10**9})]
+    assert gate.m3_summary(bracket + samples(["full"]))["max_swap_bytes_observed"] == 9 * 10**9
 
 
-def exit_proof(steps=None):
+def test_blocker8_m3_without_any_sample_during_the_step_is_refused():
+    """Counterexample of the review: two samples (before, after), no ``during``: the summary was accepted."""
+    def row(t, phase, step="full"):
+        return json.dumps({"t": t, "phase": phase, "step": step, "free_bytes": 10**10, "swap_bytes": 1})
+
+    refused(gate.m3_summary, [row(1.0, "before"), row(9.0, "after")])
+    # A "during" sample outside the step window does not count either.
+    refused(gate.m3_summary, [row(1.0, "before"), row(9.0, "after"), row(10.0, "during")])
+    refused(gate.m3_summary, [row(1.0, "before"), row(9.0, "after"), row(0.5, "during")])
+    refused(gate.m3_summary, [row(1.0, "before"), row(9.0, "after"), row(5.0, "during", "lint1")])
+    refused(gate.m3_summary, [row(1.0, "before"), row(2.0, "before"), row(9.0, "after"), row(5.0, "during")])
+    # A very short step: the probe taken in its window is enough.
+    assert gate.m3_summary([row(1.0, "before"), row(1.2, "during"), row(1.3, "after")])["during_samples"] == {"full": 1}
+
+
+def exit_proof(steps=None, samples_path="/nonexistent/m3_samples.jsonl", samples_sha256=SHA):
     steps = list(steps or [s for s in gate.CHAIN_STEPS if s not in gate.OPTIONAL_STEPS])
     return {"format": "qualify-410-exit-checks-v1", "source_commit": COMMIT, "run_tag": TAG, "chain_sha256": CHAIN_SHA,
             "supervisor_sha256": gate.SUPERVISOR_SHA256, "steps_ok": steps, "test_label_absent": True,
-            "test_port_free": True, "no_suspect_process": True, "production_plist_unchanged": True,
-            "production_pid_unchanged": True, "real_launch_agents_unchanged": True,
-            "real_client_configs_unchanged": True, "lock_409_absent": True, "m3": gate.m3_summary(samples(steps)),
-            "m3_samples_sha256": SHA}
+            "test_port_free": True, "no_suspect_process": True, **{flag: True for flag in gate.PRODUCTION_FLAGS},
+            "production_before_sha256": SHA, "production_after_sha256": SHA, "lock_409_absent": True, "sampler_ok": True,
+            "m3": gate.m3_summary(samples(steps)), "m3_samples_sha256": samples_sha256, "m3_samples_path": samples_path}
 
 
 def test_exit_checks_require_every_step_in_order_and_every_control():
@@ -772,10 +1008,14 @@ def test_exit_checks_require_every_step_in_order_and_every_control():
     refused(gate.validate_exit_checks, exit_proof(required[:-1]), m)            # a step missing
     refused(gate.validate_exit_checks, exit_proof(required[1:] + required[:1]), m)  # out of order
     refused(gate.validate_exit_checks, exit_proof(required + ["rec_external"]), m)  # optional step out of place
-    for key in ("test_label_absent", "test_port_free", "no_suspect_process", "production_plist_unchanged",
-                "production_pid_unchanged", "real_launch_agents_unchanged", "real_client_configs_unchanged",
-                "lock_409_absent"):
+    for key in ("test_label_absent", "test_port_free", "no_suspect_process", *gate.PRODUCTION_FLAGS,
+                "lock_409_absent", "sampler_ok"):
         refused(gate.validate_exit_checks, {**exit_proof(), key: False}, m)
+    assert "real_memory_os_config_unchanged" in gate.PRODUCTION_FLAGS
+    refused(gate.validate_exit_checks, {**exit_proof(), "production_after_sha256": WHEEL_SHA}, m)
+    broken = exit_proof()
+    broken["m3"]["during_samples"].pop("full")  # a step without any sample during it
+    refused(gate.validate_exit_checks, broken, m)
     refused(gate.validate_exit_checks, {**exit_proof(), "chain_sha256": SHA}, m)
     refused(gate.validate_exit_checks, {**exit_proof(), "supervisor_sha256": SHA}, m)
     refused(gate.validate_exit_checks, {**exit_proof(), "run_tag": "v8"}, m)
@@ -811,6 +1051,35 @@ def release(tmp_path, monkeypatch):
         target.write_text(json.dumps(value))
         return target
 
+    def sealed(folder, report, name):
+        """A proof in its own folder, with the supporting pieces it seals (as each harness leaves them)."""
+        origin = inputs / folder
+        origin.mkdir(parents=True)
+        report, inventory = dict(report), {}
+        for rel in gate.required_pieces(name):
+            piece = origin / rel
+            piece.parent.mkdir(parents=True, exist_ok=True)
+            piece.write_text("piece " + rel)
+            inventory[rel] = gate.digest(piece)
+        report["evidence_sha256"] = inventory
+        (origin / "report.json").write_text(json.dumps(report))
+        return origin / "report.json"
+
+    def go(name, **changes):
+        """A decision file of Romain, with its dossier beside it for a network GO."""
+        if name.startswith("network_"):
+            write_dossier(inputs / "d", name[-2:])
+        return put(f"d/{name}.json", decision(name, **changes))
+
+    def exit_file(**changes):
+        folder = inputs / ("exit-%d" % len(list(inputs.iterdir())))
+        folder.mkdir()
+        rows = folder / "m3_samples.jsonl"
+        rows.write_text("\n".join(samples([s for s in gate.CHAIN_STEPS if s not in gate.OPTIONAL_STEPS])) + "\n")
+        proof = {**exit_proof(samples_path=str(rows), samples_sha256=gate.digest(rows)), **changes}
+        (folder / "exit.json").write_text(json.dumps(proof))
+        return folder / "exit.json"
+
     def run(**options):
         return gate.main(Args(path, **options))
 
@@ -818,7 +1087,8 @@ def release(tmp_path, monkeypatch):
         return json.loads(path.read_text())
 
     return type("Release", (), {"dir": directory, "path": path, "put": staticmethod(put), "run": staticmethod(run),
-                                "load": staticmethod(load), "inputs": inputs})
+                                "load": staticmethod(load), "inputs": inputs, "sealed": staticmethod(sealed),
+                                "go": staticmethod(go), "exit_file": staticmethod(exit_file)})
 
 
 def record_everything(release, *, variant="autonomous", g12="waiver"):
@@ -827,7 +1097,7 @@ def record_everything(release, *, variant="autonomous", g12="waiver"):
     pre = ["launch", "launchd_nice", "network_N1", "network_N2", "network_N3", "network_N4", "network_N6",
            "network_N5" if variant == "autonomous" else "semantic_pth_variant"]
     for name in pre:
-        assert release.run(record_decision=release.put(f"d/{name}.json", decision(name))) == 0
+        assert release.run(record_decision=release.go(name)) == 0
     assert release.run(record_source_proof=release.put("source.json", {"ok": True})) == 0
     for profile in ("lexical", "semantic"):
         folder = release.inputs / ("res-" + profile)
@@ -836,28 +1106,28 @@ def record_everything(release, *, variant="autonomous", g12="waiver"):
         pip.rename(folder / "pip-report.json")
         assert release.run(record_resolution_proof=release.put(f"res-{profile}/report.json", report)) == 0
     proof, _ = install_proof("lexical")
-    lexical_install = release.put("install-lexical.json", proof)
+    lexical_install = release.sealed("install-lexical", proof, "install_lexical")
     assert release.run(record_install_proof=lexical_install) == 0
-    assert release.run(record_lexical_proof=release.put("lexical-wheel.json", lexical_wheel_proof())) == 0
-    assert release.run(record_lexical_proof=release.put("lexical-store.json", lexical_store_proof())) == 0
+    assert release.run(record_lexical_proof=release.sealed("lexical-wheel", lexical_wheel_proof(), "lexical_wheel")) == 0
+    assert release.run(record_lexical_proof=release.sealed("lexical-store", lexical_store_proof(), "lexical_store")) == 0
     proof, _ = install_proof("semantic", variant)
-    assert release.run(record_install_proof=release.put("install-semantic.json", proof)) == 0
+    assert release.run(record_install_proof=release.sealed("install-semantic", proof, "install_semantic")) == 0
     copy_report, _ = copy_proof()
-    assert release.run(record_copy_proof=release.put("copy.json", copy_report)) == 0
+    assert release.run(record_copy_proof=release.sealed("copy", copy_report, "copy")) == 0
     report = release.put("perimeter.json", perimeter_report())
     assert release.run(record_perimeter_report=report) == 0
     sha = {"perimeter": gate.digest(report), "install_lexical": gate.digest(lexical_install)}
     assert release.load()["gates"]["G13"]["state"] == "pending"  # recorded, never concluded
-    assert release.run(record_decision=release.put("d/g13_p_a.json", decision(
-        "g13_p_a", evidence=[{"reference": "perimeter", "sha256": sha["perimeter"]}]))) == 0
-    assert release.run(record_decision=release.put("d/d1_resign.json", decision(
-        "d1_resign", measure={"reference": "install", "sha256": sha["install_lexical"]}))) == 0
+    assert release.run(record_decision=release.go(
+        "g13_p_a", evidence=[{"reference": "perimeter", "sha256": sha["perimeter"]}])) == 0
+    assert release.run(record_decision=release.go(
+        "d1_resign", measure={"reference": "install", "sha256": sha["install_lexical"]})) == 0
     if g12 == "waiver":
-        assert release.run(record_decision=release.put("d/g12_waiver.json", decision("g12_waiver"))) == 0
+        assert release.run(record_decision=release.go("g12_waiver")) == 0
     elif g12 == "proof":
         external = release.put("pb.json", external_proof())
-        assert release.run(record_decision=release.put("d/g12_external_proof.json", decision(
-            "g12_external_proof", proof={"reference": "pb", "sha256": gate.digest(external)}))) == 0
+        assert release.run(record_decision=release.go(
+            "g12_external_proof", proof={"reference": "pb", "sha256": gate.digest(external)})) == 0
         assert release.run(record_external_proof=external) == 0
     assert release.run(record_relay_proof=release.put("relays.json", relay_proof())) == 0
     return sha
@@ -872,29 +1142,139 @@ def test_only_the_final_verification_raises_release_ready(release, variant, g12)
     assert m["gates"]["G12"]["state"] == ("waived_by_romain" if g12 == "waiver" else "pass")
     assert m["gates"]["G13"]["state"] == "waived_by_romain" and m["gates"]["G13"]["decision"] == "g13_p_a"
     assert set(m["measures"]["M1"]) == {"lexical", "semantic"} and m["measures"]["M2"]["state"] == "non mesuré"
+    assert m["measures"]["M1"]["lexical"]["pip_downloaded_bytes_measured"] is False
     assert len(m["resolved_distributions"]["lexical"]) == 37
+    assert m["decisions"]["network_N3"]["dossier"]["sha256"] == hashlib.sha256(dossier_text("N3").encode()).hexdigest()
     assert release.run() == 0 and release.load()["release_ready"] is False  # plain check: read-only
-    assert release.run(finalize=release.put("exit.json", {**exit_proof(), "no_suspect_process": False})) == 1
+    assert release.run(finalize=release.exit_file(no_suspect_process=False)) == 1
+    assert release.run(finalize=release.exit_file(sampler_ok=False)) == 1
     assert release.load()["release_ready"] is False
-    assert release.run(finalize=release.put("exit-ok.json", exit_proof())) == 0
+    assert release.run(finalize=release.exit_file()) == 0
     m = release.load()
     assert m["release_ready"] is True and m["gates"]["G15"]["state"] == "pass" and m["measures"]["M3"]["samples"] > 0
+    assert (release.dir / m["evidence"]["m3_samples"]["path"]).is_file()  # the samples themselves are kept, sealed
     # A manifest alone is not a success: CHAIN_RESULT=PASS must exist and match.
     result = release.dir / "CHAIN_RESULT"
     assert release.run(check_final=result) == 1
     result.write_text(f"PASS {COMMIT} {SHA} {TAG} 2026-11-23 10:00:00\n")
     assert release.run(check_final=result) == 1
-    (release.dir / "CHAIN_RESULT.invalid").write_text(m["chain_result_expected"] + "\n")
+    (release.dir / "CHAIN_RESULT.invalid").write_text(m["chain_result_expected"] + " 2026-11-23 10:00:00\n")
     assert release.run(check_final=release.dir / "CHAIN_RESULT.invalid") == 1
     result.write_text(m["chain_result_expected"] + " 2026-11-23 10:00:00\n")
     assert release.run(check_final=result) == 0
     # Nothing can be recorded or finalised again afterwards.
-    assert release.run(finalize=release.put("exit-again.json", exit_proof())) == 1
-    assert release.run(record_decision=release.put("d/m2.json", decision("m2_lexical"))) == 1
+    assert release.run(finalize=release.exit_file()) == 1
+    assert release.run(record_decision=release.go("m2_lexical")) == 1
+
+
+def finalised(release):
+    record_everything(release)
+    assert release.run(finalize=release.exit_file()) == 0
+    m = release.load()
+    result = release.dir / "CHAIN_RESULT"
+    result.write_text(m["chain_result_expected"] + " 2026-11-23 10:00:00\n")
+    assert release.run(check_final=result) == 0
+    return m, result
+
+
+def test_blocker9_a_truncated_or_extended_chain_result_is_refused(release):
+    """Counterexample of the review: a file stopping after ``PASS <commit> <chain_sha> <tag>`` was accepted."""
+    m, result = finalised(release)
+    good = m["chain_result_expected"] + " 2026-11-23 10:00:00\n"
+    for text in (m["chain_result_expected"],                       # truncated after the tag
+                 m["chain_result_expected"] + "\n",
+                 m["chain_result_expected"] + " 2026-11-23\n",      # truncated inside the date
+                 good[:-1],                                         # write cut before the final newline
+                 good + "PASS again\n", good + "\n", " " + good,   # anything more
+                 good.replace("PASS", "FAIL"), "", good.replace(TAG, "v8"),
+                 good.replace(COMMIT, "f" * 40), good.replace(CHAIN_SHA, SHA)):
+        result.write_text(text)
+        assert release.run(check_final=result) == 1, repr(text)
+        refused(gate.check_chain_result, text, m)
+    result.write_text(good)
+    assert release.run(check_final=result) == 0
+    gate.check_chain_result(good, m)
+    result.unlink()
+    result.symlink_to(release.dir / "manifest.json")
+    assert release.run(check_final=result) == 1
+
+
+def test_blocker4_sealed_pieces_are_replayed_at_the_final_verification(release):
+    """The detailed supporting files of each report are re-verified at G15 and at --check-final."""
+    record_everything(release)
+    for folder, piece in (("install-lexical", "install1/doctor.json"), ("install-semantic", "install2/uninstall.json"),
+                          ("lexical-wheel", "lexical-wheel.xml"), ("lexical-store", "semantic-refusal.json"),
+                          ("copy", "wheel-warm.json")):
+        target = release.inputs / folder / piece
+        kept = target.read_text()
+        target.write_text(kept + " tampered")
+        assert release.run(finalize=release.exit_file()) == 1, piece
+        target.unlink()
+        assert release.run(finalize=release.exit_file()) == 1, piece  # an absent piece is a failure too
+        target.write_text(kept)
+    assert release.load()["release_ready"] is False
+    assert release.run(finalize=release.exit_file()) == 0
+    result = release.dir / "CHAIN_RESULT"
+    result.write_text(release.load()["chain_result_expected"] + " 2026-11-23 10:00:00\n")
+    (release.inputs / "copy" / "plan.json").write_text("changed after G15")
+    assert release.run(check_final=result) == 1
+
+
+def test_blocker4_a_report_without_its_required_pieces_is_not_recorded(release):
+    proof, _ = install_proof("lexical")
+    assert release.run(record_install_proof=release.put("bare/report.json", proof)) == 1          # no inventory at all
+    path = release.sealed("partial", proof, "install_lexical")
+    report = json.loads(path.read_text())
+    report["evidence_sha256"].pop("install2/data_after.json")
+    path.write_text(json.dumps(report))
+    assert release.run(record_install_proof=path) == 1                                             # a required piece unsealed
+    path = release.sealed("escape", proof, "install_lexical")
+    report = json.loads(path.read_text())
+    report["evidence_sha256"]["../outside.json"] = SHA
+    path.write_text(json.dumps(report))
+    assert release.run(record_install_proof=path) == 1
+    assert release.run(record_lexical_proof=release.put("bare2/report.json", lexical_wheel_proof())) == 1
+    copy_report, _ = copy_proof()
+    assert release.run(record_copy_proof=release.put("bare3/report.json", copy_report)) == 1
+
+
+def test_blocker8_sealed_samples_are_reverified_at_check_final(release):
+    m, result = finalised(release)
+    stored = release.dir / m["evidence"]["m3_samples"]["path"]
+    kept = stored.read_text()
+    stored.write_text(kept.replace('"during"', '"before"', 1))
+    assert release.run(check_final=result) == 1
+    stored.write_text(kept)
+    assert release.run(check_final=result) == 0
+
+
+def test_blocker8_exit_checks_whose_samples_do_not_match_are_refused(release):
+    record_everything(release)
+    path = release.exit_file()
+    proof = json.loads(path.read_text())
+    Path(proof["m3_samples_path"]).write_text(Path(proof["m3_samples_path"]).read_text() + "\n")
+    assert release.run(finalize=path) == 1                       # samples changed after their hash was taken
+    assert release.run(finalize=release.exit_file(m3_samples_path="/nonexistent/samples.jsonl")) == 1
+    assert release.run(finalize=release.exit_file()) == 0
+
+
+def test_blocker1_the_sealed_dossier_is_rechecked_at_the_final_verification(release):
+    record_everything(release)
+    m = release.load()
+    sealed_dossier = release.dir / m["decisions"]["network_N4"]["dossier"]["path"]
+    kept = sealed_dossier.read_text()
+    sealed_dossier.write_text(kept.replace("pypi.org", "example.org"))
+    assert release.run(finalize=release.exit_file()) == 1
+    sealed_dossier.write_text(kept)
+    m["decisions"]["network_N4"].pop("dossier")
+    gate.write(release.path, m)
+    assert release.run(finalize=release.exit_file()) == 1          # a network GO without its sealed dossier
+    # Recording a network GO whose dossier is absent, or not the effective acquisition, is refused.
+    assert release.run(record_decision=release.put("lone/network_N5.json", decision("network_N5"))) == 1
 
 
 def finalize(release):
-    return release.run(finalize=release.put("exit-%d.json" % len(list(release.inputs.iterdir())), exit_proof()))
+    return release.run(finalize=release.exit_file())
 
 
 def test_final_verification_refuses_when_a_gate_or_a_required_decision_is_missing(release):
@@ -967,7 +1347,7 @@ def test_semantic_variant_decision_must_match_what_the_run_did(release):
 
 def test_recordings_are_single_shot_unmixed_and_evidence_is_tamper_evident(release):
     proof, _ = install_proof("lexical")
-    path = release.put("install.json", proof)
+    path = release.sealed("install", proof, "install_lexical")
     assert release.run(record_install_proof=path) == 0
     assert release.run(record_install_proof=path) == 1  # earlier evidence is kept, never replaced
     assert release.run(record_install_proof=path, record_decision=path) == 1
@@ -997,7 +1377,7 @@ def test_verifier_dispatches_4_1_0_and_plain_check_never_raises_the_guard(releas
     assert verifier.main([str(release.path)]) == 0
     assert release.load()["release_ready"] is False
     proof, _ = install_proof("semantic", "pth")
-    assert verifier.main([str(release.path), "--record-install-proof", str(release.put("s.json", proof))]) == 0
+    assert verifier.main([str(release.path), "--record-install-proof", str(release.sealed("s", proof, "install_semantic"))]) == 0
     assert release.load()["release_ready"] is False and "install_semantic" in release.load()["evidence"]
 
 
@@ -1246,16 +1626,33 @@ def test_pip_distributions_tie_installed_wheels_to_url_and_sha256():
 
 # ---------- G8: user data preserved by uninstall ----------
 
+JOURNAL = ".local/state/memory-os/quickstart/S1/journal.json"
+INSTALL_JSON = ".local/state/memory-os/quickstart/S1/install.json"
+PLIST = "Library/LaunchAgents/%s.plist" % helper.TEST_LABEL
+PLIST_COPY = ".local/state/memory-os/uninstall/U1/%s.plist" % helper.TEST_LABEL
+RECORDS = {"version": 1, "stamp": "S1", "records": [
+    {"client": "codex", "path": ".codex/config.toml", "digest": "d1"},
+    {"client": "cursor", "path": ".cursor/mcp.json", "digest": "d2"},
+    {"client": "service", "label": helper.TEST_LABEL}]}
+
+
+def revoked(records=RECORDS, by="U1", only=("codex", "cursor")):
+    after = copy.deepcopy(records)
+    for record in after["records"]:
+        if record["client"] in only:
+            record.update(revoked=True, revoked_by=by)
+    return after
+
+
 def home_inventory(extra=None):
     f = lambda sha: {"type": "file", "mode": 0o600, "bytes": 4, "sha256": sha}  # noqa: E731
-    label = helper.TEST_LABEL
     rows = {
         ".config/memory-os/http.token": f("t"), ".config/memory-os/cl100k_base.tiktoken": f("c"),
-        ".config/memory-os/backup.key": f("k"), "memory-os-backups/a.mosb": f("b"),
+        ".config/memory-os/backup.key": f("k"), "memory-os-backups/qualify-410-witness.mosb": f("b"),
         ".local/share/memory-os/store/store.sqlite3": f("s1"), ".local/share/memory-os/store/store.sqlite3-wal": f("w"),
         ".local/share/memory-os/store/store.sqlite3-shm": f("h"),
-        ".local/state/memory-os/quickstart/S1/install.json": f("i"), ".local/state/memory-os/quickstart/S1/journal.json": f("j"),
-        "Library/LaunchAgents/%s.plist" % label: f("p"), "Library/Logs/memory-os/server.log": f("l1"),
+        INSTALL_JSON: f("i"), JOURNAL: f("j"),
+        PLIST: f("p"), "Library/Logs/memory-os/server.log": f("l1"),
         ".codex/config.toml": f("x1"), ".cursor/mcp.json": f("y1"),
     }
     rows.update(extra or {})
@@ -1264,17 +1661,26 @@ def home_inventory(extra=None):
 
 def uninstalled(rows, f):
     after = dict(rows)
-    label = helper.TEST_LABEL
-    del after["Library/LaunchAgents/%s.plist" % label], after[".local/share/memory-os/store/store.sqlite3-wal"]
+    del after[PLIST], after[".local/share/memory-os/store/store.sqlite3-wal"]
     del after[".local/share/memory-os/store/store.sqlite3-shm"]
     after.update({
         ".local/share/memory-os/store/store.sqlite3": f("s2"),  # checkpoint at close: bytes change, logic compared
         ".local/state/memory-os/uninstall/U1/uninstall.json": f("u"),
-        ".local/state/memory-os/uninstall/U1/%s.plist" % label: f("p"),
-        ".local/state/memory-os/quickstart/S1/journal.json": f("j-revoked"),
-        "Library/Logs/memory-os/server.log": f("l2"), ".codex/config.toml": f("x2"), ".cursor/mcp.json": f("y2"),
+        PLIST_COPY: f("p"),  # exactly the bytes of the original plist
+        JOURNAL: f("j-revoked"),
+        "Library/Logs/memory-os/server.log": {**f("l2"), "bytes": 9}, ".codex/config.toml": f("x2"), ".cursor/mcp.json": f("y2"),
     })
     return after
+
+
+def conservation(before, after, *, store_after=None, journal_after=None, stamp="U1", texts_after=None):
+    """helper.data_conservation with the state copies the script takes (journal contents, field by field)."""
+    texts_before = {JOURNAL: json.dumps(RECORDS), INSTALL_JSON: json.dumps({"ok": True})}
+    after_texts = {JOURNAL: json.dumps(revoked() if journal_after is None else journal_after),
+                   INSTALL_JSON: json.dumps({"ok": True}), **(texts_after or {})}
+    return helper.data_conservation(before, after, STORE, dict(STORE) if store_after is None else store_after,
+                                    helper.TEST_LABEL, CLIENTS, stamp=stamp, text_before=texts_before.get,
+                                    text_after=after_texts.get)
 
 
 STORE = {"store_instance_id": "id1", "logical_sha256": "L", "tables": {"items": 2}}
@@ -1283,20 +1689,85 @@ CLIENTS = [".codex/config.toml", ".cursor/mcp.json"]
 
 def test_uninstall_protocol_mutations_are_admitted_and_data_is_preserved():
     before, f = home_inventory()
-    row = helper.data_conservation(before, uninstalled(before, f), STORE, dict(STORE), helper.TEST_LABEL, CLIENTS)
+    row = conservation(before, uninstalled(before, f))
     assert row["unexpected_changes"] == [] and row["immutable_unchanged"] and row["journals_present"]
     assert row["store_identity_unchanged"] and row["store_logical_unchanged"]
-    assert row["plist_removed_from_active"] and row["plist_journal_copy_kept"]
-    assert row["immutable_files"] == {"token": 1, "resources": 1, "backups": 1, "key": 1}
+    assert row["plist_removed_from_active"] and row["plist_journal_copy_kept"] and row["plist_journal_copies"] == [PLIST_COPY]
+    assert row["immutable_files"] == {"token": 1, "resources": 1, "backups": 1, "key": 1} and row["immutable_witnessed"]
     reasons = {m["path"]: m["why"] for m in row["expected_mutations"]}
     assert "SQLite close transition" in reasons[".local/share/memory-os/store/store.sqlite3"]
-    assert "revocation" in reasons[".local/state/memory-os/quickstart/S1/journal.json"]
+    assert "field by field" in reasons[JOURNAL]
+
+
+def test_blocker2_corrupted_install_json_and_journalled_plist_are_refused():
+    """Counterexample of the review: install.json and the journalled plist corrupted, yet
+    unexpected_changes == [], journals_present and plist_journal_copy_kept were all positive."""
+    before, f = home_inventory()
+    after = uninstalled(before, f)
+    after[INSTALL_JSON] = f("corrupted")
+    after[PLIST_COPY] = f("corrupted-plist")
+    row = conservation(before, after, texts_after={INSTALL_JSON: "{corrupt"})
+    assert [c["path"] for c in row["unexpected_changes"]] == [INSTALL_JSON]
+    assert row["plist_journal_copy_kept"] is False and row["plist_journal_copies"] == []
+    # Each corruption alone is caught too.
+    after = uninstalled(before, f)
+    after[INSTALL_JSON] = f("corrupted")
+    assert conservation(before, after)["unexpected_changes"]
+    after = uninstalled(before, f)
+    after[PLIST_COPY] = f("corrupted-plist")
+    assert conservation(before, after)["plist_journal_copy_kept"] is False
+    # Any file ending in .plist elsewhere is not a kept copy.
+    after = uninstalled(before, f)
+    del after[PLIST_COPY]
+    after[".local/state/memory-os/quickstart/S1/other.plist"] = f("p")
+    row = conservation(before, after)
+    assert row["plist_journal_copy_kept"] is False and row["unexpected_changes"]
+
+
+@pytest.mark.parametrize("journal", [
+    {**RECORDS, "stamp": "S2"},                                                # another field of the document changed
+    {**revoked(), "records": revoked()["records"][:2]},                        # a record removed
+    {**revoked(), "records": revoked()["records"] + [{"client": "x"}]},        # a record added
+    revoked(by="other-stamp"),                                                 # revoked by something else than this uninstall
+    {**RECORDS, "records": [{**RECORDS["records"][0], "revoked": True, "revoked_by": "U1", "digest": "changed"},
+                            *RECORDS["records"][1:]]},                         # a revocation that also rewrites a field
+    {**RECORDS, "records": [{**RECORDS["records"][0], "revoked": True, "revoked_by": "U1", "extra": 1},
+                            *RECORDS["records"][1:]]},
+    RECORDS,                                                                   # bytes changed but nothing revoked
+    "not json",
+])
+def test_blocker2_a_journal_may_only_gain_revocations_of_this_uninstall(journal):
+    before, f = home_inventory()
+    row = conservation(before, uninstalled(before, f), journal_after=journal)
+    assert [c["path"] for c in row["unexpected_changes"]] == [JOURNAL]
+    assert helper.revocation_only(json.dumps(RECORDS), json.dumps(revoked()), "U1") is True
+    assert helper.revocation_only(json.dumps(RECORDS), json.dumps(revoked()), None) is False
+    assert helper.revocation_only(json.dumps(revoked()), json.dumps(revoked()), "U1") is False
+
+
+def test_blocker2_absent_key_or_backups_do_not_prove_their_preservation():
+    """Refused ambiguity 14: an empty kind is not witnessed; the gate needs non-empty key and backups."""
+    for missing in (".config/memory-os/backup.key", "memory-os-backups/qualify-410-witness.mosb"):
+        before, f = home_inventory()
+        del before[missing]
+        row = conservation(before, uninstalled(before, f))
+        assert row["immutable_witnessed"] is False and row["immutable_unchanged"] is False
+        assert 0 in row["immutable_files"].values()
+    before, f = home_inventory({".config/memory-os/backup.key": {"type": "file", "mode": 0o600, "bytes": 0, "sha256": "e"}})
+    assert conservation(before, uninstalled(before, f))["immutable_witnessed"] is False  # an empty file is no witness
+    script = (SCRIPTS / "qualify_install_410.sh").read_text()
+    assert "qualify-410-witness.mosb" in script and "backup.key" in script and "witness.json" in script
+    assert script.index("witness.json") < script.index('--output "$D2/data_before.json"')  # written before the inventory
 
 
 @pytest.mark.parametrize("change", [
     lambda a, f: a.update({".config/memory-os/http.token": f("changed")}),
     lambda a, f: a.pop(".config/memory-os/cl100k_base.tiktoken"),
-    lambda a, f: a.update({"memory-os-backups/a.mosb": f("changed")}),
+    lambda a, f: a.update({"memory-os-backups/qualify-410-witness.mosb": f("changed")}),
+    lambda a, f: a.pop("memory-os-backups/qualify-410-witness.mosb"),
+    lambda a, f: a.update({".local/state/memory-os/quickstart/S2/journal.json": f("n")}),   # a journal appearing
+    lambda a, f: a.update({"Library/Logs/memory-os/server.log": {**f("short"), "bytes": 1}}),  # a log shortened
+    lambda a, f: a.update({".local/state/memory-os/health.jsonl": f("n")}),
     lambda a, f: a.pop(".config/memory-os/backup.key"),
     lambda a, f: a.pop(".local/state/memory-os/quickstart/S1/install.json"),   # a journal must stay
     lambda a, f: a.pop("Library/Logs/memory-os/server.log"),                    # a log must stay
@@ -1308,22 +1779,19 @@ def test_any_other_modification_refuses_the_uninstall_gate(change):
     before, f = home_inventory()
     after = uninstalled(before, f)
     change(after, f)
-    row = helper.data_conservation(before, after, STORE, dict(STORE), helper.TEST_LABEL, CLIENTS)
+    row = conservation(before, after)
     assert row["unexpected_changes"] or not row["immutable_unchanged"] or not row["journals_present"]
 
 
 def test_store_identity_or_logical_change_is_a_data_modification_not_a_close_transition():
     before, f = home_inventory()
     after = uninstalled(before, f)
-    row = helper.data_conservation(before, after, STORE, {**STORE, "logical_sha256": "other"}, helper.TEST_LABEL, CLIENTS)
-    assert row["store_logical_unchanged"] is False
-    row = helper.data_conservation(before, after, STORE, {**STORE, "store_instance_id": "id2"}, helper.TEST_LABEL, CLIENTS)
-    assert row["store_identity_unchanged"] is False
-    row = helper.data_conservation(before, after, STORE, {**STORE, "tables": {"items": 1}}, helper.TEST_LABEL, CLIENTS)
-    assert row["store_logical_unchanged"] is False
+    assert conservation(before, after, store_after={**STORE, "logical_sha256": "other"})["store_logical_unchanged"] is False
+    assert conservation(before, after, store_after={**STORE, "store_instance_id": "id2"})["store_identity_unchanged"] is False
+    assert conservation(before, after, store_after={**STORE, "tables": {"items": 1}})["store_logical_unchanged"] is False
     kept = dict(after)
-    kept["Library/LaunchAgents/%s.plist" % helper.TEST_LABEL] = f("p")
-    assert helper.data_conservation(before, kept, STORE, STORE, helper.TEST_LABEL, CLIENTS)["plist_removed_from_active"] is False
+    kept[PLIST] = f("p")
+    assert conservation(before, kept)["plist_removed_from_active"] is False
 
 
 def test_store_logical_digest_survives_a_checkpoint_and_sees_a_row_change(tmp_path):
@@ -1368,9 +1836,17 @@ def test_m1_runs_from_venv_launch_to_apply_return_with_controls_timed_apart():
     timeline = helper.timeline(line)
     timing = {"clock": "monotonic", "download_bytes": 1681126, "steps_ms": {"resources": 2000}, "profile": "lexical"}
     m1 = helper.m1(timeline, {"timing": timing}, "lexical", "autonomous", 12345)
+    # Blocker 10: a cache size is never presented as downloaded bytes; the download count is unmeasured.
+    assert "pip_download_bytes" not in m1 and m1["pip_cache_bytes"] == 12345
+    assert m1["pip_downloaded_bytes"] is None and m1["pip_downloaded_bytes_measured"] is False
+    assert "not transferred bytes" in m1["pip_cache_bytes_nature"]
+    reported = gate.validate_m1(m1, "lexical", "autonomous")
+    assert reported["pip_cache_bytes_nature"] == m1["pip_cache_bytes_nature"] and reported["pip_downloaded_bytes"] is None
+    refused(gate.validate_m1, {**m1, "pip_download_bytes": 12345}, "lexical", "autonomous")
+    refused(gate.validate_m1, {**m1, "pip_downloaded_bytes": 12345}, "lexical", "autonomous")
     assert (m1["t0_epoch"], m1["t1_epoch"], m1["total_s"]) == (100.0, 160.0, 60.0)
     assert m1["pip_s"] == 22.0 and m1["controls_s"] == 5.0 and m1["net_s"] == 55.0 and m1["outside_model_s"] == 58.0
-    assert m1["pip_download_bytes"] == 12345 != m1["quickstart_download_bytes"] == 1681126  # N3 bytes vs N6 bytes
+    assert m1["quickstart_download_bytes"] == 1681126  # N6 bytes: the only download actually measured
     assert gate.validate_m1(m1, "lexical", "autonomous")["label"] == "first installation"
     pth = helper.m1(timeline, {"timing": {**timing, "download_bytes": 0}}, "semantic", "pth", 0)
     assert pth["label"] == "reused-dependencies variant" and "model_pre_placed" in pth["protocol_deviations"]
@@ -1380,12 +1856,34 @@ def test_m1_runs_from_venv_launch_to_apply_return_with_controls_timed_apart():
     refused(helper.timeline, "venv 5 2\napply 3 4\n")
 
 
+def client_rows(present, kind="relay"):
+    return {key: {"path": rel, "state": "ok" if present else "missing-config", "entry_present": present,
+                  "kind": kind if present else None, "file_sha256": SHA if present else None}
+            for key, rel in helper.TEST_CLIENTS.items()}
+
+
+def doctor_rows(overrides=None):
+    rows = [{"area": area, "status": "PASS", "detail": "ok", "hint": ""} for area in helper.REQUIRED_DOCTOR_AREAS]
+    rows += [{"area": "backup-key", "status": "WARN", "detail": "missing", "hint": ""}]
+    for row in rows:
+        row["status"] = (overrides or {}).get(row["area"], row["status"])
+    return rows
+
+
+def production_rows(pid=77, agent="a"):
+    return {"client_configs": {rel: None for rel in helper.REAL_CLIENT_CONFIGS},
+            "launch_agents": {helper.PRODUCTION_LABEL + ".plist": {"sha256": "p"}, "other.plist": {"sha256": agent}},
+            "protected_trees": {".config/memory-os": {"http.token": {"sha256": "t"}}},
+            "production_plist": {"sha256": "p"}, "production_pid": pid, "production_label_state": "present",
+            "sha256": hashlib.sha256(agent.encode()).hexdigest()}
+
+
 def write_install_tree(d, profile="lexical"):
     """Files exactly as qualify_install_410.sh writes them, without running anything."""
     def put(rel, value):
         path = d / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(value))
+        path.write_text(value if isinstance(value, str) else json.dumps(value))
 
     locks = 36 if profile == "lexical" else 65
     absent = {"label_state": "absent", "port_state": "free"}
@@ -1395,25 +1893,22 @@ def write_install_tree(d, profile="lexical"):
                       "version": "4.1.0", "venv": str(d / "venv"), "label": helper.TEST_LABEL, "port": helper.TEST_PORT,
                       "wheel": {"name": "w.whl", "sha256": WHEEL_SHA}})
     put("constraints_check.json", {"constraints_sha256": LEX_SHA if profile == "lexical" else SEM_SHA, "mismatch": [],
-                                   "unpinned": [], "ml_packages": [], "bootstrap": ["pip", "setuptools"],
+                                   "unpinned": [], "ml_packages": [], "bootstrap": ["pip", "setuptools"], "missing": [],
                                    "pinned_and_equal": locks, "locks": locks, "ok": True})
     put("locations.json", {"locator_under_site_packages": True, "package_under_site_packages": True,
                            "package_path": "/v/site-packages/memory_os_v4/__init__.py", "reused_paths": [],
-                           "candidate_origin_sha256": WHEEL_SHA})
+                           "candidate_origin_sha256": WHEEL_SHA, "version": "4.1.0"})
     put("pip_check.json", {"returncode": 0})
     put("pip_install_report.json", {"install": [
         {"metadata": {"name": f"p{i}", "version": "1"},
          "download_info": {"url": f"https://files.pythonhosted.org/p{i}.whl", "archive_info": {"hashes": {"sha256": SHA}}}}
         for i in range(locks)]})
-    prod = {"files": {}, "launch_agents": ["a.plist"], "production_pid": 77, "production_label_state": "present", "sha256": SHA}
-    put("production_before.json", prod)
-    put("production_after.json", prod)
+    put("production_before.json", production_rows())
+    put("production_after.json", production_rows())
     put("timeline.json", helper.timeline("venv 100 103\npip_deps 103 123\ncontrol_preview 123 128\napply 128 160\n"))
     put("pip_cache_bytes.json", {"bytes": 4096})
     put("safety_net.json", {"fired": False})
     put("shell_verdict.json", {"ok": True})
-    created = {rel: {"sha256": SHA, "mentions_test_service": True} for rel in helper.TEST_CLIENT_FILES}
-    none = {rel: None for rel in helper.TEST_CLIENT_FILES}
     for index, download in (("1", gate.CL100K_BYTES if profile == "lexical" else 0), ("2", 0)):
         p = "install" + index
         (d / ("home" + index)).mkdir(parents=True, exist_ok=True)
@@ -1425,30 +1920,35 @@ def write_install_tree(d, profile="lexical"):
         put(p + "/apply_rc.json", {"returncode": 0})
         put(p + "/install.json", {"ok": True, "timing": timing})
         put(p + "/service.json", service(profile))
-        put(p + "/doctor.json", [{"area": "store", "status": "PASS"}, {"area": "token", "status": "WARN"}])
+        put(p + "/doctor.json", doctor_rows())
         put(p + "/doctor_rc.json", {"returncode": 0})
-        put(p + "/clients_after_apply.json", created)
+        put(p + "/clients_after_apply.json", client_rows(True))
     put("install1/preview.json", {"ok": True, "profile": profile})
     put("install1/preview_rc.json", {"returncode": 0})
     put("install1/preview_inventory.json", inv)
     put("install1/undo.json", {"ok": True})
     put("install1/undo_rc.json", {"returncode": 0})
     put("install1/undo_state.json", absent)
-    put("install1/clients_before_apply.json", none)
-    put("install1/clients_after_undo.json", none)
+    put("install1/clients_before_apply.json", client_rows(False))
+    put("install1/clients_after_undo.json", client_rows(False))
     put("install2/uninstall_preview.json", {"ok": True})
     put("install2/uninstall_preview_rc.json", {"returncode": 0})
     put("install2/uninstall_preview_inventory.json", inv)
-    put("install2/uninstall.json", {"ok": True, "partial": False, "complete": False, "data_deleted": False, "clients": []})
+    put("install2/uninstall.json", {"ok": True, "partial": False, "complete": False, "data_deleted": False,
+                                    "clients": [], "stamp": "U1"})
     put("install2/uninstall_rc.json", {"returncode": 0})
     put("install2/uninstall_state.json", absent)
-    put("install2/clients_after_uninstall.json", {rel: {"sha256": "z" * 64, "mentions_test_service": False}
-                                                  for rel in helper.TEST_CLIENT_FILES})
+    put("install2/clients_after_uninstall.json", client_rows(False))
+    put("install2/witness.json", {"backup": "memory-os-backups/qualify-410-witness.mosb",
+                                  "key": ".config/memory-os/backup.key", "key_written_as_witness": True})
     before, f = home_inventory()
     put("install2/data_before.json", {"rows": before})
     put("install2/data_after.json", {"rows": uninstalled(before, f)})
     put("install2/store_before.json", STORE)
     put("install2/store_after.json", STORE)
+    # Copies of the state folder taken by the script around uninstall --apply (journal contents).
+    put("install2/state_before/quickstart/S1/journal.json", RECORDS)
+    put("install2/state_after/quickstart/S1/journal.json", revoked())
     if profile == "semantic":
         put("install1/granite.json", {"ok": True})
         put("install2/granite.json", {"ok": True})
@@ -1461,24 +1961,43 @@ def test_assembled_install_report_is_accepted_by_the_release_rules(tmp_path, pro
     assert report["ok"] is True and "error" not in report, report.get("error")
     measure = gate.validate_install(report, manifest(), profile)
     assert measure["total_s"] == 60.0 and report["install_2"]["uninstall"]["entries_removed"] == sorted(helper.TEST_CLIENT_FILES)
-    assert report["install_1"]["doctor"] == {"returncode": 0, "checks": 2, "fail": 0}
-    assert "meta.json" in report["evidence_sha256"] and "report.json" not in report["evidence_sha256"]
+    assert report["install_1"]["doctor"]["returncode"] == 0 and report["install_1"]["doctor"]["missing_areas"] == []
+    assert report["install_2"]["client_entries_created"] == sorted(helper.TEST_CLIENT_FILES)
+    assert report["install_2"]["data_conservation"]["immutable_witnessed"] is True
+    assert set(helper.REQUIRED_EVIDENCE) <= set(report["evidence_sha256"]) and "report.json" not in report["evidence_sha256"]
+    assert not any("state_before" in rel or rel == "proof.log" for rel in report["evidence_sha256"])
+    gate.verify_pieces(report, tmp_path, gate.required_pieces("install_" + profile))  # what G15 replays
+
+
+def put_json(path, value):
+    path.write_text(json.dumps(value))
 
 
 @pytest.mark.parametrize("damage", [
-    lambda d: (d / "install2/uninstall_state.json").write_text(json.dumps({"label_state": "present", "port_state": "busy"})),
-    lambda d: (d / "install1/undo_state.json").write_text(json.dumps({"label_state": "present", "port_state": "free"})),
-    lambda d: (d / "safety_net.json").write_text(json.dumps({"fired": True})),
-    lambda d: (d / "shell_verdict.json").write_text(json.dumps({"ok": False})),
-    lambda d: (d / "install2/clients_after_uninstall.json").write_text(json.dumps(
-        {rel: {"sha256": SHA, "mentions_test_service": True} for rel in helper.TEST_CLIENT_FILES})),
-    lambda d: (d / "install1/doctor.json").write_text(json.dumps([{"area": "store", "status": "FAIL"}])),
-    lambda d: (d / "install1/clients_after_undo.json").write_text(json.dumps({".cursor/mcp.json": {"sha256": SHA}})),
-    lambda d: (d / "install2/uninstall.json").write_text(json.dumps({"ok": True, "partial": True, "data_deleted": False})),
-    lambda d: (d / "production_after.json").write_text(json.dumps({"files": {}, "launch_agents": [], "production_pid": 78,
-                                                                   "sha256": WHEEL_SHA})),
-    lambda d: (d / "install2/store_after.json").write_text(json.dumps({**STORE, "logical_sha256": "x"})),
-    lambda d: (d / "install1/install.json").unlink(),         # an absent proof is a failure
+    lambda d: put_json(d / "install2/uninstall_state.json", {"label_state": "present", "port_state": "busy"}),
+    lambda d: put_json(d / "install1/undo_state.json", {"label_state": "present", "port_state": "free"}),
+    lambda d: put_json(d / "safety_net.json", {"fired": True}),
+    lambda d: put_json(d / "shell_verdict.json", {"ok": False}),
+    lambda d: put_json(d / "install2/clients_after_uninstall.json", client_rows(True)),         # entries still there
+    lambda d: put_json(d / "install2/clients_after_uninstall.json", client_rows(True, "foreign")),
+    lambda d: put_json(d / "install2/clients_after_apply.json", client_rows(True, "foreign")),  # not our relay entry
+    lambda d: put_json(d / "install1/doctor.json", doctor_rows({"store": "FAIL"})),
+    lambda d: put_json(d / "install1/doctor_rc.json", {"returncode": 9}),                        # blocker 3
+    lambda d: put_json(d / "install2/doctor.json", doctor_rows()[:3]),                           # expected checks missing
+    lambda d: put_json(d / "install1/service.json", {**service("lexical"), "commit": "f" * 40}),  # blocker 3
+    lambda d: put_json(d / "install1/clients_after_undo.json", client_rows(True)),
+    lambda d: put_json(d / "install2/uninstall.json", {"ok": True, "partial": True, "data_deleted": False, "stamp": "U1"}),
+    lambda d: put_json(d / "install2/uninstall.json", {"ok": True, "partial": False, "data_deleted": False, "stamp": "U9"}),
+    lambda d: put_json(d / "production_after.json", production_rows(pid=78)),
+    lambda d: put_json(d / "production_after.json", production_rows(agent="changed")),          # blocker 5: content
+    lambda d: put_json(d / "install2/store_after.json", {**STORE, "logical_sha256": "x"}),
+    lambda d: put_json(d / "install2/state_after/quickstart/S1/journal.json", {**RECORDS, "stamp": "S9"}),  # blocker 2
+    lambda d: (d / "install2/state_after/quickstart/S1/journal.json").unlink(),
+    lambda d: put_json(d / "locations.json", {"locator_under_site_packages": True, "package_under_site_packages": True,
+                                              "package_path": "/x", "reused_paths": [], "version": "4.1.0",
+                                              "candidate_origin_sha256": SHA}),
+    lambda d: (d / "install2/witness.json").unlink(),         # an absent proof is a failure
+    lambda d: (d / "install1/install.json").unlink(),
     lambda d: (d / "timeline.json").write_text("{trunc"),     # a truncated proof is a failure
 ])
 def test_assembled_install_report_fails_closed(tmp_path, damage):
@@ -1554,3 +2073,236 @@ def test_run_tag_glob_refuses_only_the_exact_tag(tmp_path):
     (q / "release-4.1.0-v1").mkdir()
     (tmp_path / "logs_v1").mkdir()
     assert count() == 4
+
+
+# ---------- blocker 5: the protected real perimeter is fingerprinted by content ----------
+
+def real_home(tmp_path):
+    home = tmp_path / "real-home"
+    agents = home / "Library/LaunchAgents"
+    agents.mkdir(parents=True)
+    (agents / (helper.PRODUCTION_LABEL + ".plist")).write_bytes(plistlib.dumps({"Label": helper.PRODUCTION_LABEL}))
+    (agents / "com.example.other.plist").write_bytes(plistlib.dumps({"Label": "com.example.other"}))
+    (home / ".config/memory-os").mkdir(parents=True)
+    (home / ".config/memory-os/http.token").write_text("real-token")
+    (home / ".cursor").mkdir()
+    (home / ".cursor/mcp.json").write_text('{"mcpServers": {}}')
+    (home / ".claude.json").write_text(json.dumps({"numStartups": 1, "mcpServers": {"a": {"command": "x"}},
+                                                   "projects": {"/p": {"mcpServers": {}, "history": [1]}}}))
+    return home
+
+
+def snapshot(home):
+    running = Done(0, "gui/501/%s = {\n\tpid = 77\n}\n" % helper.PRODUCTION_LABEL)
+    return helper.production_snapshot(home, uid=501, run=lambda argv, **kw: running)
+
+
+def test_protected_client_list_is_the_product_catalogue():
+    from memory_os_v4.ops.clients import CLIENTS
+
+    assert tuple(client.path for client in CLIENTS) == helper.REAL_CLIENT_CONFIGS
+    for name in (".claude.json", ".gemini/settings.json", ".grok/config.toml", ".config/zed/settings.json",
+                 ".config/devin/mcp_config.json", ".codeium/windsurf/mcp_config.json"):
+        assert name in helper.REAL_CLIENT_CONFIGS  # the ones the review found missing
+    assert {client.key: client.path for client in CLIENTS if client.key in helper.TEST_CLIENTS} == helper.TEST_CLIENTS
+    assert helper.PROTECTED_TREES == (".config/memory-os",)
+    assert tuple(helper.REQUIRED_DOCTOR_AREAS) == gate.REQUIRED_DOCTOR_AREAS
+
+
+def test_blocker5_a_content_change_of_any_real_launch_agent_or_protected_file_is_seen(tmp_path):
+    home = real_home(tmp_path)
+    before = snapshot(home)
+    assert all(helper.production_unchanged(before, snapshot(home)).values()) and before["production_pid"] == 77
+    assert "real-token" not in json.dumps(before)  # fingerprints only
+    assert before["client_configs"][".codex/config.toml"] is None  # absence is recorded as absence
+
+    def changed(mutation, flag):
+        mutation()
+        flags = helper.production_unchanged(before, snapshot(home))
+        assert flags[flag] is False, flag
+        return flags
+
+    other = home / "Library/LaunchAgents/com.example.other.plist"
+    kept = other.read_bytes()
+    stamp = other.stat()
+
+    def same_name_other_content():  # same name, same size, same dates: only the content differs
+        other.write_bytes(kept.replace(b"com.example.other", b"com.example.xther"))
+        os.utime(other, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+
+    changed(same_name_other_content, "real_launch_agents_unchanged")
+    other.write_bytes(kept)
+    changed(lambda: (home / "Library/LaunchAgents/new.plist").write_text("x"), "real_launch_agents_unchanged")
+    (home / "Library/LaunchAgents/new.plist").unlink()
+    changed(lambda: (home / ".config/memory-os/http.token").write_text("other-token"), "real_memory_os_config_unchanged")
+    (home / ".config/memory-os/http.token").write_text("real-token")
+    changed(lambda: (home / ".config/memory-os/backup.key").write_text("k"), "real_memory_os_config_unchanged")
+    (home / ".config/memory-os/backup.key").unlink()
+    changed(lambda: (home / ".cursor/mcp.json").write_text('{"mcpServers": {"memory-os-ai": {}}}'),
+            "real_client_configs_unchanged")
+    (home / ".cursor/mcp.json").write_text('{"mcpServers": {}}')
+    (home / ".grok").mkdir()
+    changed(lambda: (home / ".grok/config.toml").write_text("[mcp_servers.x]\n"), "real_client_configs_unchanged")
+    (home / ".grok/config.toml").unlink()
+    production = home / "Library/LaunchAgents" / (helper.PRODUCTION_LABEL + ".plist")
+    kept = production.read_bytes()
+    flags = changed(lambda: production.write_bytes(kept + b"\n"), "production_plist_unchanged")
+    assert flags["real_launch_agents_unchanged"] is False
+    production.write_bytes(kept)
+    assert all(helper.production_unchanged(before, snapshot(home)).values())
+
+
+def test_blocker5_claude_code_config_is_covered_through_its_mcp_sections(tmp_path):
+    home = real_home(tmp_path)
+    before = snapshot(home)
+    config = home / ".claude.json"
+    data = json.loads(config.read_text())
+    data["numStartups"] = 99
+    data["projects"]["/p"]["history"].append(2)  # what a running Claude Code rewrites all the time
+    config.write_text(json.dumps(data))
+    assert all(helper.production_unchanged(before, snapshot(home)).values())
+    data["projects"]["/p"]["mcpServers"]["memory-os-ai"] = {"command": "relay"}
+    config.write_text(json.dumps(data))
+    assert helper.production_unchanged(before, snapshot(home))["real_client_configs_unchanged"] is False
+
+
+def test_blocker5_unreadable_is_a_refusal_and_absence_is_not_unchanged(tmp_path):
+    home = real_home(tmp_path)
+    before = snapshot(home)
+    (home / ".claude.json").write_text("{not json")
+    with pytest.raises(helper.Unobservable):  # distinguish absence from impossibility of reading
+        snapshot(home)
+    (home / ".claude.json").unlink()
+    after = snapshot(home)
+    assert after["client_configs"][".claude.json"] is None
+    assert helper.production_unchanged(before, after)["real_client_configs_unchanged"] is False
+    # A perimeter that was never observed is not "unchanged".
+    empty = {**before, "launch_agents": None, "production_plist": None, "production_pid": None}
+    flags = helper.production_unchanged(empty, empty)
+    assert not flags["real_launch_agents_unchanged"] and not flags["production_plist_unchanged"]
+    assert not flags["production_pid_unchanged"]
+    partial = {**before, "client_configs": {".cursor/mcp.json": None}}
+    assert helper.production_unchanged(partial, partial)["real_client_configs_unchanged"] is False
+
+
+# ---------- blocker 6: sealed folders refused on every read path, resolved form included ----------
+
+def test_blocker6_an_outside_alias_does_not_bypass_the_refusal(tmp_path):
+    sealed = tmp_path / "brief_v5_val"
+    sealed.mkdir()
+    (sealed / "seed.tiktoken").write_text("x")
+    alias = tmp_path / "innocent-name"
+    alias.symlink_to(sealed)
+    for call in (helper.refuse_forbidden, ):
+        with pytest.raises(SystemExit):
+            call(alias / "seed.tiktoken")   # text is clean, destination is not
+        with pytest.raises(SystemExit):
+            call(alias)
+    refused(gate.refuse_forbidden, alias / "seed.tiktoken")
+    # The command the shell runs on its inputs before reading any of them.
+    with pytest.raises(SystemExit):
+        helper.main(["refuse-forbidden", str(tmp_path / "ok"), str(alias / "seed.tiktoken")])
+    assert helper.main(["refuse-forbidden", str(tmp_path / "ok")]) == 0
+    with pytest.raises(SystemExit):
+        helper.main(["verify-granite", "--cache", str(alias), "--catalog", str(tmp_path / "c"), "--output", str(tmp_path / "o")])
+    with pytest.raises(SystemExit):
+        helper.main(["inventory", "--root", str(alias), "--output", str(tmp_path / "o")])
+    with pytest.raises(SystemExit):
+        helper.verify_granite(alias, {"files": []})
+    with pytest.raises(SystemExit):
+        helper.complete_hf_cache(alias)
+
+
+def test_blocker6_a_link_met_while_walking_an_inventory_cannot_lead_inside(tmp_path):
+    sealed = tmp_path / "elsewhere" / "brient_v5_val"
+    sealed.mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "ok.txt").write_text("x")
+    assert "ok.txt" in helper.inventory(home)
+    (home / "shortcut").symlink_to(sealed)
+    with pytest.raises(SystemExit):
+        helper.inventory(home)
+    (home / "shortcut").unlink()
+    (home / "safe").symlink_to(tmp_path / "elsewhere")  # an ordinary link is recorded, never followed
+    assert helper.inventory(home)["safe"]["type"] == "link"
+
+
+def test_blocker6_every_script_checks_resolved_paths_before_reading():
+    lines = INSTALL.splitlines()
+    guard = next(i for i, line in enumerate(lines) if "refuse-forbidden $INPUTS" in line)
+    first_read = next(i for i, line in enumerate(lines) if "shasum -a 256" in line)
+    assert guard < first_read  # resolved check before the wheel or the seed are read
+    assert 'INPUTS=("$WHEEL" "$P" "$SEED")' in INSTALL and "GRANITE" in lines[guard - 1] and "PTH_PY" in lines[guard - 1]
+    wheel = (SCRIPTS / "qualify_lexical_wheel_410.py").read_text()
+    assert wheel.index("refuse_forbidden(given)") < wheel.index("json.loads(args.manifest.read_text())")
+    source = (SCRIPTS / "release_410_checks.py").read_text()
+    assert "refuse_forbidden(getattr(args, mode))" in source and "hub = refuse_forbidden(" in source
+    for name in ("qualify_sqlite_release_410.py", "prepare_release_410_envs.py", "make_release_410.py"):
+        text = (SCRIPTS / name).read_text()
+        main = text[text.index("def main("):]
+        assert main.index("refuse_forbidden(g") < main.index("json.loads("), name  # before the first proof is read
+    with pytest.raises(SystemExit):
+        perimeter.main(["--candidate", QUAL_BASE, "--output", "/nonexistent/brief_v5_val/report.json"])
+
+
+# ---------- minor reserve: the MiniLM precondition needs a complete offline cache ----------
+
+def hf_cache(root, *, files=("config.json", "modules.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors"),
+             revision="a" * 40, ref=True):
+    model = root / "models--sentence-transformers--all-MiniLM-L6-v2"
+    (model / "blobs").mkdir(parents=True)
+    (model / "snapshots" / revision).mkdir(parents=True)
+    for index, name in enumerate(files):
+        blob = model / "blobs" / ("%040d" % index)
+        blob.write_text("content of " + name)
+        (model / "snapshots" / revision / name).symlink_to(blob)
+    if ref:
+        (model / "refs").mkdir()
+        (model / "refs/main").write_text(revision)
+    return model
+
+
+def test_minilm_precondition_needs_references_snapshot_blobs_tokenizer_and_weights(tmp_path):
+    assert helper.complete_hf_cache(hf_cache(tmp_path / "ok"))["ok"] is True
+    # The lone config.json that used to be enough.
+    lone = helper.complete_hf_cache(hf_cache(tmp_path / "lone", files=("config.json",)))
+    assert lone["ok"] is False and "missing model weights" in lone["problems"]
+    assert helper.complete_hf_cache(hf_cache(tmp_path / "noref", ref=False))["ok"] is False
+    model = hf_cache(tmp_path / "dangling")
+    next((model / "blobs").iterdir()).unlink()  # a snapshot entry whose blob is gone
+    assert helper.complete_hf_cache(model)["ok"] is False
+    model = hf_cache(tmp_path / "empty")
+    (model / "blobs" / ("%040d" % 4)).write_text("")  # empty weights
+    assert helper.complete_hf_cache(model)["ok"] is False
+    model = hf_cache(tmp_path / "outside")
+    link = model / "snapshots" / ("a" * 40) / "model.safetensors"
+    link.unlink()
+    (tmp_path / "foreign.bin").write_text("weights elsewhere")
+    link.symlink_to(tmp_path / "foreign.bin")
+    assert helper.complete_hf_cache(model)["ok"] is False  # must resolve inside blobs/
+    assert helper.complete_hf_cache(tmp_path / "absent")["ok"] is False
+
+
+def test_preconditions_require_offline_mode_and_the_twelve_checks():
+    m = manifest()
+    m["invariants"] = {"x": 1}
+    keys = ("tree_clean", "rc_py_runtime_ok", "build_tools_present", "hf_offline", "minilm_cache_present",
+            "granite_cache_conforms", "cl100k_conforms", "baseline_interpreter_matches_plist", "run_tag_unused",
+            "locks_absent", "test_label_absent", "test_port_free")
+    proof = {"format": "qualify-410-preconditions-v1", "ok": True, "source_commit": COMMIT, "run_tag": TAG,
+             "checks": {key: True for key in keys}, "invariants": {"x": 1}}
+    gate.validate_preconditions(proof, m)
+    for key in keys:
+        refused(gate.validate_preconditions, {**proof, "checks": {**proof["checks"], key: False}}, m)
+    source = (SCRIPTS / "release_410_checks.py").read_text()
+    assert 'os.environ.get("HF_HUB_OFFLINE") == "1" and os.environ.get("TRANSFORMERS_OFFLINE") == "1"' in source
+    assert "complete_hf_cache" in source and "len(checks) == 12" in source
+
+
+def test_install_script_reads_client_entries_through_the_installed_product():
+    assert "from memory_os_v4.ops.clients import CLIENTS, classify, read_entry" in INSTALL
+    assert INSTALL.count("clients_state ") == 4 and "client-state" not in INSTALL
+    assert 'cp -R "$H2/.local/state/memory-os" "$D2/state_before"' in INSTALL
+    assert INSTALL.index('"$D2/state_before"') < INSTALL.index("uninstall --apply") < INSTALL.index('"$D2/state_after"')
+    assert "--variant \"$VARIANT\" --output \"$P/constraints_check.json\"" in INSTALL
