@@ -211,6 +211,12 @@ def main(argv=None) -> int:
                         help='4.1.0: a finalised manifest is a success only with a matching CHAIN_RESULT=PASS')
     args = parser.parse_args(argv)
     try:
+        # Sealed validation folders are refused at the dispatcher, for the manifest and every proof,
+        # decision or marker path, lexically then resolved: before the first read of any of them.
+        from release_410_checks import refuse_forbidden
+        for value in vars(args).values():
+            if isinstance(value, Path):
+                refuse_forbidden(value)
         manifest = json.loads(args.manifest.read_text())
         if manifest.get('version') == '4.1.0':
             from release_410_checks import main as verify_rc

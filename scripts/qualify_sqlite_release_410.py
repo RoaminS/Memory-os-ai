@@ -26,7 +26,9 @@ PLAN_FORMAT = "sqlite-release-410-v1"
 
 
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    from release_410_checks import read_bytes  # guard before every open, link targets included
+
+    return hashlib.sha256(read_bytes(path)).hexdigest()
 
 
 def hashed_inventory(directory):
@@ -46,10 +48,18 @@ def hashed_inventory(directory):
     return rows, hashlib.sha256(text).hexdigest()
 
 
-def sealed_pieces(root):
-    """SHA-256 of the logs and JSON pieces a harness leaves at the top of its folder (re-verified at G15)."""
-    return {path.name: digest(path) for path in sorted(Path(root).iterdir())
-            if path.is_file() and not path.is_symlink() and path.suffix in (".json", ".log") and path.name != "report.json"}
+def sealed_pieces(root, extra=()):
+    """SHA-256 of the pieces a harness leaves: logs and JSON at the top of its folder, plus the named
+    pieces of its sub-folders (S4 logs, sealed archives). All are re-verified, presence and bytes, at G15."""
+    root = Path(root)
+    pieces = {path.name: digest(path) for path in sorted(root.iterdir())
+              if path.is_file() and not path.is_symlink() and path.suffix in (".json", ".log") and path.name != "report.json"}
+    for rel in extra:
+        path = root / rel
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("Piece to seal is missing: " + rel)
+        pieces[rel] = digest(path)
+    return pieces
 
 
 COMMON_DRILL = """import json, os, sys; from contextlib import closing; from pathlib import Path
@@ -170,7 +180,7 @@ def lexical_store(a, manifest):
                                            "inventory_entries": len(before_rows),
                                            "files_created": sorted(set(after_rows) - set(before_rows))}
         report["added"] = row["added"]
-        report["evidence_sha256"] = sealed_pieces(root)
+        report["evidence_sha256"] = sealed_pieces(root, ["backups/" + row["backup"]["archive"]])
         report["seconds"] = time.monotonic() - started
         report["ok"] = True
         validate_lexical_store(report, manifest)
@@ -421,7 +431,8 @@ if not d.get('ok'): raise RuntimeError(d)
                                      "artifact_sha256": artifact(manifest, ".tar.gz")["sha256"]}
         common["archive_sha256_after"] = digest(archive)
         report["s4_common"] = common
-        report["evidence_sha256"] = sealed_pieces(root)
+        report["evidence_sha256"] = sealed_pieces(root, ["s4-wheel/s4.log", "s4-sdist/s4.log", "s4-common-sdist/s4.log",
+                                                         "s4-wheel/backups/" + common["archive"]])
         report["seconds"] = time.monotonic() - started
         report["ok"] = True
         validate_copy(report, manifest)

@@ -115,7 +115,7 @@ OPTIONAL_STEPS = ("await_d1", "rec_external")
 
 
 def digest(p):
-    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+    return hashlib.sha256(read_bytes(p)).hexdigest()
 
 
 def require(ok, message):
@@ -142,6 +142,19 @@ def refuse_forbidden(path):
     return Path(text)
 
 
+def read_bytes(path):
+    """Every read of this module goes through the guard first: arguments, constructed paths, link targets."""
+    return refuse_forbidden(path).read_bytes()
+
+
+def read_text(path):
+    return refuse_forbidden(path).read_text()
+
+
+def load_json(path):
+    return json.loads(read_text(path))
+
+
 def exact_pins(text):
     rows = {}
     for raw in text.splitlines():
@@ -158,7 +171,7 @@ def network_context(root):
     """Effective parameters of the acquisitions, from the candidate tree (sealed in the manifest later)."""
     root = Path(root)
     pins = root / "scripts" / PYTEST_PINS
-    return {"pins_sha256": digest(pins), "pins": exact_pins(pins.read_text()),
+    return {"pins_sha256": digest(pins), "pins": exact_pins(read_text(pins)),
             "constraints": {name: digest(root / spec["constraints"]) for name, spec in PROFILES.items()}}
 
 
@@ -189,7 +202,7 @@ def evidence(m, directory, name):
     require(not p.is_absolute() and ".." not in p.parts, "Unsafe evidence path")
     p = directory / p
     require(digest(p) == e["sha256"], "Evidence changed: " + name)
-    return json.loads(p.read_text())
+    return load_json(p)
 
 
 def _git(root, *args, text=True):
@@ -378,8 +391,8 @@ def validate_local(m, directory, *, require_copy=True, require_source=True, **kw
             "Installed smokes incomplete")
     require(m.get("entry_points_checked") is True, "Entry points (memory-os-constraints) not checked")
     tw = directory / m["twine_evidence"]["path"]
-    require(digest(tw) == m["twine_evidence"]["sha256"] and tw.read_text().count("PASSED") == 2
-            and "FAILED" not in tw.read_text(), "Twine strict missing")
+    require(digest(tw) == m["twine_evidence"]["sha256"] and read_text(tw).count("PASSED") == 2
+            and "FAILED" not in read_text(tw), "Twine strict missing")
     validate_preconditions(evidence(m, directory, "preconditions"), m)
     commands = validate_full(evidence(m, directory, "full"), m)
     validate_lints(evidence(m, directory, "lints"), m, directory)
@@ -437,7 +450,7 @@ def validate_resolution(report, pip_report_path, m, profile):
     require(report.get("expected_packages") == report.get("resolved_packages") == m["profiles"][profile]["locks"] + 1,
             "Resolution package count")
     require(digest(pip_report_path) == report.get("pip_report_sha256"), "pip report changed")
-    return resolved_distributions(json.loads(Path(pip_report_path).read_text()), m, profile)
+    return resolved_distributions(load_json(Path(pip_report_path)), m, profile)
 
 
 # ---------- G7, G8, M1 ----------
@@ -605,7 +618,7 @@ def validate_lexical_wheel(p, m, pins=None):
     require(p.get("pytest_pins_sha256") == m["pytest_pins_sha256"] and p.get("pip_check_ok") is True
             and p.get("runtime_recheck_ok") is True, "pytest closure (N4) or runtime re-check")
     # N4: versions AND URL/SHA-256 of exactly the frozen closure.
-    pins = exact_pins((Path(__file__).with_name(PYTEST_PINS)).read_text()) if pins is None else pins
+    pins = exact_pins(read_text(Path(__file__).with_name(PYTEST_PINS))) if pins is None else pins
     rows = p.get("pytest_distributions")
     require(isinstance(rows, list) and {r.get("name"): r.get("version") for r in rows} == pins and len(rows) == len(pins)
             and all(is_sha(r.get("sha256")) and str(r.get("url", "")).startswith("https://files.pythonhosted.org/")
@@ -753,8 +766,34 @@ def _s4_drill(b, d, m, ident, where):
 
 # ---------- G13 ----------
 
-def validate_perimeter(p, m):
-    """The report is an inventory. It never concludes a transfer on its own."""
+PERIMETER_ROLES = ("p_a_proof", "intermediate", "candidate")
+PERIMETER_PACKAGE = "v4/src/memory_os_v4/"
+PERIMETER_CALLERS = (PERIMETER_PACKAGE + "server.py", PERIMETER_PACKAGE + "memory.py")
+PERIMETER_DEPENDENCIES = ("pyproject.toml", "v4/pyproject.toml")
+
+
+def perimeter_inventory(root, commit):
+    """The perimeter recomputed from the Git objects of the three commits (never from a sealed input)."""
+    from check_brief_perimeter_410 import report
+
+    return report(Path(root), commit)
+
+
+def _closure_delta(older, newer):
+    a, b = older["files"], newer["files"]
+    common = sorted(set(a) & set(b))
+    return {"joined": sorted(set(b) - set(a)), "left": sorted(set(a) - set(b)),
+            "changed_among_common": [p for p in common if a[p] != b[p]],
+            "identical_among_common": [p for p in common if a[p] == b[p]]}
+
+
+def validate_perimeter(p, m, recompute=None):
+    """The report is an inventory. It never concludes a transfer on its own.
+
+    Every cell is checked (a SHA-256, or an admissible historical absence), every comparison is
+    re-derived, and the whole inventory must equal the one recomputed from Git at the three commits.
+    """
+    roles = set(PERIMETER_ROLES)
     require(p.get("format") == "qualify-410-brief-perimeter-v1" and p.get("git_only") is True
             and p.get("sealed_inputs_read") is False and p.get("brief_executed") is False, "Perimeter report format")
     commits = p.get("commits", {})
@@ -762,28 +801,60 @@ def validate_perimeter(p, m):
             "Perimeter commits differ")
     require(p.get("automatic_transfer") is False and p.get("conclusion") == "decision_of_romain_required",
             "A perimeter report must never conclude a transfer")
-    require(set(p.get("closures", {})) == {"p_a_proof", "intermediate", "candidate"}
-            and all(row.get("files") for row in p["closures"].values()) and p.get("union")
-            and set(p.get("callers", {})) == {"v4/src/memory_os_v4/server.py", "v4/src/memory_os_v4/memory.py"},
+    closures = p.get("closures")
+    require(isinstance(closures, dict) and set(closures) == roles and isinstance(p.get("union"), dict) and p["union"],
             "Perimeter inventory incomplete")
-    union = set(p["union"])
-    for role, row in p["closures"].items():
-        require(row.get("count") == len(row["files"]) and row.get("roots") and set(row["files"]) <= union
-                and all(is_sha(sha) for sha in row["files"].values()), "Closure inventory incomplete: " + role)
-    roles = {"p_a_proof", "intermediate", "candidate"}
-    require(all(set(v) == roles for v in p["union"].values()), "Union must give every file at the three commits")
-    # Callers, dependencies and resources are inventoried apart: a report without them is not a perimeter.
-    for section, wanted in (("callers", None), ("dependencies", {"pyproject.toml", "v4/pyproject.toml"}), ("resources", None)):
+    for role, row in closures.items():
+        files = row.get("files")
+        require(isinstance(files, dict) and files and row.get("count") == len(files)
+                and all(isinstance(path, str) and path.startswith(PERIMETER_PACKAGE) and path.endswith(".py")
+                        and is_sha(sha) for path, sha in files.items()), "Closure cells invalid: " + role)
+        roots = row.get("roots")
+        require(isinstance(roots, list) and roots and set(roots) <= set(files)
+                and all(re.fullmatch(re.escape(PERIMETER_PACKAGE) + r"brief[^/]*\.py", r) for r in roots),
+                "Closure roots invalid: " + role)
+    # Union: every file of any closure, at the three commits; a file may be absent at a commit (historical
+    # absence, sha null) only where it is NOT in that commit's closure.
+    require(set(p["union"]) == {path for row in closures.values() for path in row["files"]},
+            "Union is not the union of the three closures")
+    for path, cells in p["union"].items():
+        require(isinstance(cells, dict) and set(cells) == roles, "Union must give every file at the three commits")
+        for role, cell in cells.items():
+            inside = path in closures[role]["files"]
+            require(isinstance(cell, dict) and set(cell) == {"sha256", "in_closure"} and cell["in_closure"] is inside
+                    and (cell["sha256"] is None or is_sha(cell["sha256"]))
+                    and (not inside or cell["sha256"] == closures[role]["files"][path]),
+                    "Union cell invalid: %s at %s" % (path, role))
+    for name, older, newer in (("p_a_proof_to_intermediate", "p_a_proof", "intermediate"),
+                               ("intermediate_to_candidate", "intermediate", "candidate")):
+        require(p.get(name) == _closure_delta(closures[older], closures[newer]), "Comparison not derived from the closures: " + name)
+    # Callers, dependencies and resources, inventoried apart: valid cells and exact sets.
+    for section, wanted in (("callers", set(PERIMETER_CALLERS)), ("dependencies", set(PERIMETER_DEPENDENCIES)),
+                            ("resources", None)):
         rows = p.get(section)
-        require(isinstance(rows, dict) and rows and (wanted is None or set(rows) == wanted)
-                and all(isinstance(r, dict) and set(r.get("sha256", {})) == roles
-                        and "changed_intermediate_to_candidate" in r and "changed_p_a_proof_to_intermediate" in r
-                        for r in rows.values()), "Perimeter inventory incomplete: " + section)
-    require(any(path.endswith("provision_v1.json") for path in p["resources"]) and p.get("limits")
-            and set(p.get("p_a_proof_to_intermediate", {})) == set(p.get("intermediate_to_candidate", {}))
-            == {"joined", "left", "changed_among_common", "identical_among_common"}, "Perimeter comparisons missing")
+        require(isinstance(rows, dict) and rows and (wanted is None or set(rows) == wanted),
+                "Perimeter inventory incomplete: " + section)
+        for path, row in rows.items():
+            shas = row.get("sha256") if isinstance(row, dict) else None
+            require(isinstance(shas, dict) and set(shas) == roles
+                    and all(v is None or is_sha(v) for v in shas.values()) and any(shas.values()),
+                    "Perimeter cell invalid: %s %s" % (section, path))
+            require(row.get("changed_p_a_proof_to_intermediate") is (shas["p_a_proof"] != shas["intermediate"])
+                    and row.get("changed_intermediate_to_candidate") is (shas["intermediate"] != shas["candidate"])
+                    and set(row) == {"sha256", "changed_p_a_proof_to_intermediate", "changed_intermediate_to_candidate"},
+                    "Perimeter change flags not derived from the cells: " + path)
+            if section == "resources":
+                require(path.startswith(PERIMETER_PACKAGE + "resources/"), "Not a packaged resource: " + path)
+            else:
+                require(is_sha(shas["candidate"]), "Caller/dependency absent at the candidate: " + path)
+    require(any(path.endswith("/provision_v1.json") for path in p["resources"]) and p.get("limits"),
+            "Perimeter resources/limits missing")
     require(p.get("tool_sha256") == m["qualification_tooling_sha256"]["check_brief_perimeter_410.py"],
             "Perimeter tool differs from the sealed one")
+    # Exact sets and values: the same inventory, recomputed now from the Git objects.
+    root = Path(__file__).resolve().parents[1]
+    require(p == (recompute or perimeter_inventory)(root, m["source_commit"]),
+            "Perimeter report differs from the inventory recomputed from Git objects")
 
 
 # ---------- G12 ----------
@@ -879,7 +950,7 @@ def check_decision(d, *, decision, commit, run_tag=None, chain_sha256=None, doss
         path = refuse_forbidden(dossier_path)
         require(path.is_file() and digest(path) == named["sha256"], "Dossier absent or different from the approved SHA-256")
         expected = network_dossier(acquisition, commit=commit, run_tag=run_tag, context=context)
-        require(json.loads(path.read_text()) == expected,
+        require(load_json(path) == expected,
                 "Dossier is not the exact description of what %s does in this run" % acquisition)
         # The GO itself restates sources and operation: exactly those of the dossier, nothing wider or narrower.
         require(isinstance(d.get("sources"), list) and sorted(d["sources"]) == expected["sources"]
@@ -908,37 +979,75 @@ def decision(m, directory, name):
     p = Path(row["path"])
     require(not p.is_absolute() and ".." not in p.parts, "Unsafe decision path")
     require(digest(directory / p) == row["sha256"], "Decision changed: " + name)
-    return json.loads((directory / p).read_text())
+    return load_json((directory / p))
 
 
 # ---------- M3, exit checks, final verification ----------
 
-def m3_summary(lines):
-    """Sampled extrema, never guaranteed peaks. Every step needs before, DURING and after samples.
+SHORT_COMMAND_MAX_S = 10.0  # above this, "no probe could start in time" is not a credible exception
+M3_OBSERVATIONS = ("during", "overlap_only", "none_short_command")
 
-    "During" means inside the step window: the chain takes one probe concurrently with the step and waits
-    for it before the "after" sample, so even a very short step has one (it may then fall just after the
-    command returned). A step without such a sample, or a failed probe, makes M3 unusable.
+
+def m3_summary(lines):
+    """M3 (QUALIFY_4_1_0 §4): sampled extrema, never guaranteed peaks; durations on a monotonic clock.
+
+    The bounds of every command and of every probe are recorded apart. Per step:
+    - ``during``: a probe that started after the command started, with the command still running when the
+      probe ended (overlap demonstrated at both ends);
+    - ``overlap_only``: the command was running when the probe started and had ended before the probe
+      finished; kept as an overlap observation with its bounds, flagged as a short-command exception;
+    - ``none_short_command``: the first probe found the command already finished; flagged, no sample is
+      invented, and only admitted for a command shorter than SHORT_COMMAND_MAX_S.
+    A probe finished before the command started never counts. A failed probe (non-zero status, even
+    without any error marker) makes M3 unusable.
     """
     rows = [json.loads(line) for line in lines if line.strip()]
-    require(rows and all(isinstance(r, dict) and isinstance(r.get("t"), (int, float))
+    number = (int, float)
+    require(rows and all(isinstance(r, dict) and isinstance(r.get("t"), number) and isinstance(r.get("mono"), number)
                          and isinstance(r.get("free_bytes"), int) and isinstance(r.get("swap_bytes"), int)
-                         and r.get("phase") in ("before", "during", "after") for r in rows), "M3 samples unusable")
+                         and r.get("phase") in ("before", "during", "missed", "after") for r in rows),
+            "M3 samples unusable")
     steps = {}
     for r in rows:
         if r.get("step"):
-            steps.setdefault(r["step"], {}).setdefault(r["phase"], []).append(r["t"])
-    durations, during = {}, {}
+            steps.setdefault(r["step"], {}).setdefault(r["phase"], []).append(r)
+    durations, commands, observations, counts, exceptions = {}, {}, {}, {}, {}
     for name, phases in steps.items():
         require(len(phases.get("before", [])) == 1 and len(phases.get("after", [])) == 1,
                 "M3: step without exactly one before/after sample: " + name)
-        start, end = phases["before"][0], phases["after"][0]
-        inside = [t for t in phases.get("during", []) if start <= t <= end]
-        require(end >= start and inside, "M3: no sample during the step: " + name)
-        durations[name], during[name] = end - start, len(inside)
+        before, after = phases["before"][0], phases["after"][0]
+        require(after["mono"] >= before["mono"], "M3: step bounds inverted: " + name)
+        require(after.get("probe_rc") == 0 and isinstance(after.get("supervisor_rc"), int),
+                "M3: the probe of this step failed or its status is unknown: " + name)
+        cmd = after.get("command")
+        require(isinstance(cmd, dict) and cmd.get("started") is True and isinstance(cmd.get("pid"), int)
+                and isinstance(cmd.get("start_mono"), number) and before["mono"] <= cmd["start_mono"] <= after["mono"],
+                "M3: command bounds missing: " + name)
+
+        def bound(r):  # a probe of THIS command, started after it started, finished before the step closed
+            return (r.get("command_pid") == cmd["pid"] and r.get("command_start_mono") == cmd["start_mono"]
+                    and isinstance(r.get("probe_start_mono"), number) and isinstance(r.get("probe_end_mono"), number)
+                    and cmd["start_mono"] <= r["probe_start_mono"] <= r["probe_end_mono"] <= after["mono"])
+
+        probes = [r for r in phases.get("during", []) if bound(r) and r.get("alive_at_probe_start") is True]
+        inside = [r for r in probes if r.get("alive_at_probe_end") is True]
+        upper = after["mono"] - cmd["start_mono"]
+        if inside:
+            observations[name] = "during"
+        elif probes:
+            observations[name] = exceptions[name] = "overlap_only"
+        else:
+            missed = [r for r in phases.get("missed", []) if bound(r) and r.get("alive_at_probe_start") is False
+                      and r.get("reason") == "command_ended_before_first_probe"]
+            require(missed and upper <= SHORT_COMMAND_MAX_S,
+                    "M3: no probe overlapped the command, and no admissible short-command exception: " + name)
+            observations[name] = exceptions[name] = "none_short_command"
+        durations[name], commands[name], counts[name] = after["mono"] - before["mono"], upper, len(inside)
     return {"samples": len(rows), "min_free_bytes_observed": min(r["free_bytes"] for r in rows),
-            "max_swap_bytes_observed": max(r["swap_bytes"] for r in rows), "step_seconds": durations,
-            "during_samples": during, "total_seconds": max(r["t"] for r in rows) - min(r["t"] for r in rows),
+            "max_swap_bytes_observed": max(r["swap_bytes"] for r in rows), "clock": "monotonic",
+            "step_seconds": durations, "command_seconds_upper_bound": commands, "observation": observations,
+            "during_samples": counts, "short_command_exceptions": exceptions,
+            "total_seconds": max(r["mono"] for r in rows) - min(r["mono"] for r in rows),
             "nature": "sampled extrema, not guaranteed peaks"}
 
 
@@ -951,8 +1060,7 @@ def validate_exit_checks(x, m):
     require([s for s in done if s not in OPTIONAL_STEPS] == [s for s in CHAIN_STEPS if s not in OPTIONAL_STEPS]
             and [s for s in CHAIN_STEPS if s in done] == done,
             "A chain step is missing, skipped or out of order")
-    for key in ("test_label_absent", "test_port_free", "no_suspect_process", *PRODUCTION_FLAGS, "lock_409_absent",
-                "sampler_ok"):
+    for key in ("test_label_absent", "test_port_free", "no_suspect_process", *PRODUCTION_FLAGS, "lock_409_absent"):
         require(x.get(key) is True, "Exit check failed: " + key)
     require(is_sha(x.get("production_before_sha256")) and x.get("production_before_sha256") == x.get("production_after_sha256"),
             "Protected perimeter fingerprint changed")
@@ -961,7 +1069,11 @@ def validate_exit_checks(x, m):
             and isinstance(summary.get("min_free_bytes_observed"), int)
             and isinstance(summary.get("max_swap_bytes_observed"), int)
             and set(summary.get("step_seconds", {})) >= set(done)
-            and all(summary.get("during_samples", {}).get(step, 0) >= 1 for step in done)
+            and summary.get("clock") == "monotonic"
+            and all(summary.get("observation", {}).get(step) in M3_OBSERVATIONS for step in done)
+            # Every short-command exception is flagged explicitly, in the proof and in the summary.
+            and {step: kind for step, kind in summary["observation"].items() if kind != "during"}
+            == summary.get("short_command_exceptions")
             and isinstance(x.get("m3_samples_path"), str), "M3 measures unusable")
 
 
@@ -986,12 +1098,43 @@ REQUIRED_PIECES = {
 }
 
 
-def required_pieces(name):
+S4_LOGS = ("s4-wheel/s4.log", "s4-sdist/s4.log", "s4-common-sdist/s4.log")
+
+
+def required_pieces(name, report=None):
+    """Pieces a report must seal, sub-folders included; some depend on the report itself."""
+    report = report or {}
     if name.startswith("install_"):
         from qualify_install_410_helper import REQUIRED_EVIDENCE
 
-        return REQUIRED_EVIDENCE
+        compared = ((report.get("install_2") or {}).get("data_conservation") or {}).get("compared_documents") or []
+        return (*REQUIRED_EVIDENCE, *compared)  # the state documents used for the G8 comparison
+    if name == "copy":
+        archive = (report.get("s4_common") or {}).get("archive")
+        return (*REQUIRED_PIECES[name], *S4_LOGS, *(["s4-wheel/backups/" + archive] if archive else []))
+    if name == "lexical_store":
+        archive = (report.get("backup") or {}).get("archive")
+        return (*REQUIRED_PIECES[name], *(["backups/" + archive] if archive else []))
     return REQUIRED_PIECES[name]
+
+
+def piece_bindings(name, report):
+    """Sealed pieces whose SHA-256 must be the one the report states elsewhere (archives)."""
+    if name == "copy":
+        return {"s4-wheel/backups/" + report["s4_common"]["archive"]: report["s4_common"]["archive_sha256"]}
+    if name == "lexical_store":
+        return {"backups/" + report["backup"]["archive"]: report["backup"]["archive_sha256"]}
+    if name.startswith("install_"):
+        compared = report["install_2"]["data_conservation"].get("compared_documents") or []
+        require(any("/state_before/" in rel for rel in compared) and any("/state_after/" in rel for rel in compared),
+                "The state documents of the G8 comparison are not sealed")
+    return {}
+
+
+def check_pieces(name, report, origin):
+    verify_pieces(report, origin, required_pieces(name, report))
+    for rel, sha in piece_bindings(name, report).items():
+        require(is_sha(sha) and report["evidence_sha256"].get(rel) == sha, "Sealed archive differs from the report: " + rel)
 
 
 def verify_pieces(report, origin, required):
@@ -1010,7 +1153,7 @@ def manifest_context(m):
     """Effective acquisition parameters as sealed in the manifest (pins read from the hashed tooling file)."""
     pins = Path(__file__).with_name(PYTEST_PINS)
     require(digest(pins) == m["pytest_pins_sha256"], "Frozen pytest pins changed")
-    return {"pins_sha256": m["pytest_pins_sha256"], "pins": exact_pins(pins.read_text()),
+    return {"pins_sha256": m["pytest_pins_sha256"], "pins": exact_pins(read_text(pins)),
             "constraints": {name: m["profiles"][name]["constraints_sha256"] for name in PROFILES}}
 
 
@@ -1048,7 +1191,7 @@ def validate_everything(m, directory):
     validate_relay(evidence(m, directory, "relays"), m)
     # The detailed supporting files are replayed too, from where each harness left them.
     for name in ("install_lexical", "install_semantic", "lexical_wheel", "lexical_store", "copy"):
-        verify_pieces(evidence(m, directory, name), m["evidence"][name]["origin"], required_pieces(name))
+        check_pieces(name, evidence(m, directory, name), m["evidence"][name]["origin"])
     if m["gates"]["G12"]["state"] == "pass":
         validate_external_p_b(evidence(m, directory, "external_p_b"), m)
     for name in required_decisions(m, directory):
@@ -1080,7 +1223,7 @@ def validate_samples(m, directory, exit_checks):
     row = m["evidence"]["m3_samples"]
     path = directory / row["path"]
     require(digest(path) == row["sha256"] == exit_checks["m3_samples_sha256"], "M3 samples changed")
-    require(m3_summary(path.read_text().splitlines()) == exit_checks["m3"], "M3 summary differs from its samples")
+    require(m3_summary(read_text(path).splitlines()) == exit_checks["m3"], "M3 summary differs from its samples")
 
 
 def write(path, m):
@@ -1091,7 +1234,7 @@ def store(m, directory, name, source, *, target=None):
     """Copy a proof beside the manifest, as is; one recording per name, earlier evidence kept."""
     target = directory / (target or (name.replace("_", "-") + "-proof.json"))
     require(name not in m["evidence"] and not target.exists(), "Proof already recorded: " + name)
-    target.write_bytes(Path(source).read_bytes())
+    target.write_bytes(read_bytes(Path(source)))
     m["evidence"][name] = {"path": target.name, "sha256": digest(target),
                            "origin": str(Path(source).resolve().parent)}  # where its sealed pieces stay
     return target
@@ -1107,7 +1250,7 @@ def main(args):
     path = args.manifest
     directory = path.parent
     try:
-        m = json.loads(path.read_text())
+        m = load_json(path)
         chosen = [name for name in RECORD_OPTIONS if getattr(args, name, None)]
         require(len(chosen) <= 1 and not any(getattr(args, name, None) for name in UNSUPPORTED),
                 "Unsupported mixed proof")
@@ -1122,7 +1265,7 @@ def main(args):
             set_gate(m, "G4", "pass", name="source")
         elif mode == "record_resolution_proof":
             source = Path(args.record_resolution_proof)
-            report = json.loads(source.read_text())
+            report = load_json(source)
             profile = report.get("profile")
             validate_local(m, directory, require_copy=False, require_source=False)
             rows = validate_resolution(report, source.parent / "pip-report.json", m, profile)
@@ -1134,12 +1277,12 @@ def main(args):
                 set_gate(m, "G5", "pass")
             m["gates"]["G5"]["evidence"].append("resolution_" + profile)
         elif mode == "record_install_proof":
-            report = json.loads(Path(args.record_install_proof).read_text())
+            report = load_json(Path(args.record_install_proof))
             profile = report.get("profile")
             require(profile in PROFILES, "Install proof profile")
             validate_local(m, directory, require_copy=False, require_source=False)
             measure = validate_install(report, m, profile)
-            verify_pieces(report, Path(args.record_install_proof).resolve().parent, required_pieces("install_" + profile))
+            check_pieces("install_" + profile, report, Path(args.record_install_proof).resolve().parent)
             store(m, directory, "install_" + profile, args.record_install_proof)
             m["measures"]["M1"][profile] = {**measure, "proof_sha256": m["evidence"]["install_" + profile]["sha256"]}
             for gate in ("G7", "G8"):
@@ -1147,42 +1290,42 @@ def main(args):
                 if all("install_" + p in m["evidence"] for p in PROFILES):
                     set_gate(m, gate, "pass")
         elif mode == "record_lexical_proof":
-            report = json.loads(Path(args.record_lexical_proof).read_text())
+            report = load_json(Path(args.record_lexical_proof))
             validate_local(m, directory, require_copy=False, require_source=False)
             kind = report.get("format")
             if kind == "qualify-410-lexical-wheel-v1":
                 validate_lexical_wheel(report, m)
-                verify_pieces(report, Path(args.record_lexical_proof).resolve().parent, required_pieces("lexical_wheel"))
+                check_pieces("lexical_wheel", report, Path(args.record_lexical_proof).resolve().parent)
                 store(m, directory, "lexical_wheel", args.record_lexical_proof)
                 set_gate(m, "G6", "pass", name="lexical_wheel")
             else:
                 validate_lexical_store(report, m)
-                verify_pieces(report, Path(args.record_lexical_proof).resolve().parent, required_pieces("lexical_store"))
+                check_pieces("lexical_store", report, Path(args.record_lexical_proof).resolve().parent)
                 store(m, directory, "lexical_store", args.record_lexical_proof)
                 set_gate(m, "G11", "pass", name="lexical_store")
         elif mode == "record_copy_proof":
-            report = json.loads(Path(args.record_copy_proof).read_text())
+            report = load_json(Path(args.record_copy_proof))
             validate_copy(report, m)
-            verify_pieces(report, Path(args.record_copy_proof).resolve().parent, required_pieces("copy"))
+            check_pieces("copy", report, Path(args.record_copy_proof).resolve().parent)
             store(m, directory, "copy", args.record_copy_proof)
             validate_local(m, directory, require_copy=True, require_source=True)
             set_gate(m, "G9", "pass", name="copy")
             set_gate(m, "G10", "pass", name="copy")
         elif mode == "record_perimeter_report":
             validate_local(m, directory, require_copy=False, require_source=False)
-            validate_perimeter(json.loads(Path(args.record_perimeter_report).read_text()), m)
+            validate_perimeter(load_json(Path(args.record_perimeter_report)), m)
             store(m, directory, "perimeter", args.record_perimeter_report)
             # Recorded, never concluded: G13 stays pending until a reasoned decision of Romain.
             m["gates"]["G13"]["evidence"].append("perimeter")
         elif mode == "record_external_proof":
             source = refuse_forbidden(args.record_external_proof)
             validate_local(m, directory, require_copy=False, require_source=False)
-            validate_external_p_b(json.loads(source.read_text()), m)
+            validate_external_p_b(load_json(source), m)
             store(m, directory, "external_p_b", source)
             set_gate(m, "G12", "pass", name="external_p_b")
         elif mode == "record_decision":
             source = refuse_forbidden(args.record_decision)
-            d = json.loads(source.read_text())
+            d = load_json(source)
             name = d.get("decision")
             dossier = None
             if isinstance(name, str) and name.startswith("network_") and d.get("answer") == "oui":
@@ -1204,31 +1347,31 @@ def main(args):
                 require(m["gates"]["G12"]["state"] == "pending", "G12 waiver only without a conforming proof")
                 set_gate(m, "G12", "waived_by_romain", decision=name)
             target.parent.mkdir(mode=0o700, exist_ok=True)
-            target.write_bytes(source.read_bytes())
+            target.write_bytes(read_bytes(source))
             m["decisions"][name] = {"path": "decisions/" + target.name, "sha256": digest(target),
                                     "answer": d["answer"], "section": DECISIONS[name][1]}
             if dossier is not None:  # the approved dossier is sealed with the GO, and re-checked at G15
                 sealed = directory / "decisions" / (name + ".dossier.json")
-                sealed.write_bytes(dossier.read_bytes())
+                sealed.write_bytes(read_bytes(dossier))
                 m["decisions"][name]["dossier"] = {"path": "decisions/" + sealed.name, "sha256": digest(sealed)}
             if name == "m2_lexical":
                 m["measures"]["M2"] = {"state": "non mesuré", "wished_by_romain": d["answer"] == "oui",
                                        "effect_on_release_ready": "none"}
         elif mode == "record_relay_proof":
             validate_local(m, directory)
-            validate_relay(json.loads(Path(args.record_relay_proof).read_text()), m)
+            validate_relay(load_json(Path(args.record_relay_proof)), m)
             store(m, directory, "relays", args.record_relay_proof, target="installed-relay-proof.json")
             set_gate(m, "G14", "pass", name="relays")
         elif mode == "finalize":
             # G15: replayed last, never skipped; it alone raises release_ready, exit checks done.
             require(m.get("release_ready") is False and m["gates"]["G15"]["state"] == "pending",
                     "Final verification already ran")
-            exit_checks = json.loads(Path(args.finalize).read_text())
+            exit_checks = load_json(Path(args.finalize))
             validate_exit_checks(exit_checks, m)
             validate_everything(m, directory)
             samples = refuse_forbidden(exit_checks["m3_samples_path"])
             require(digest(samples) == exit_checks["m3_samples_sha256"]
-                    and m3_summary(samples.read_text().splitlines()) == exit_checks["m3"],
+                    and m3_summary(read_text(samples).splitlines()) == exit_checks["m3"],
                     "M3 samples do not match the exit checks")
             store(m, directory, "m3_samples", samples, target="m3-samples.jsonl")
             store(m, directory, "exit_checks", args.finalize)
@@ -1249,7 +1392,7 @@ def main(args):
             result = Path(args.check_final)
             require(result.name == "CHAIN_RESULT" and result.is_file() and not result.is_symlink(),
                     "CHAIN_RESULT absent or invalidated")
-            check_chain_result(result.read_text(), m)
+            check_chain_result(read_text(result), m)
             print("Run qualified: manifest and CHAIN_RESULT=PASS agree. Publication, push and production "
                   "switch each need a separate GO from Romain.")
             return 0
@@ -1303,8 +1446,9 @@ def preconditions(a):
         checks["hf_offline"] = os.environ.get("HF_HUB_OFFLINE") == "1" and os.environ.get("TRANSFORMERS_OFFLINE") == "1"
         hub = refuse_forbidden(os.environ.get("HF_HUB_CACHE")
                                or Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub")
-        # A COMPLETE local cache (reference, snapshot, blobs, tokenizer, weights), not a lone config.json.
-        report["minilm_cache"] = helper.complete_hf_cache(hub / "models--sentence-transformers--all-MiniLM-L6-v2")
+        # "Cache present, files non-empty" (reference, snapshot, blobs, tokenizer, weights): not a lone
+        # config.json, and nothing more is claimed. Validity and loading are proven by G4's cached test only.
+        report["minilm_cache"] = helper.hf_cache_files_present(hub / "models--sentence-transformers--all-MiniLM-L6-v2")
         checks["minilm_cache_present"] = report["minilm_cache"]["ok"] is True
         checks["granite_cache_conforms"] = provision.plan(resources=("granite",), cache_dir=a.granite_hub)["ready"] is True
         checks["cl100k_conforms"] = provision.plan(resources=("cl100k",), table_path=a.cl100k)["ready"] is True
@@ -1319,7 +1463,7 @@ def preconditions(a):
         report["ok"] = all(v is True for v in checks.values()) and len(checks) == 12
     except (OSError, ValueError, KeyError, RuntimeError, SubprocessError) as exc:
         report["error"] = type(exc).__name__ + ": " + str(exc)
-    with open(a.output, "x") as stream:
+    with open(refuse_forbidden(a.output), "x") as stream:
         stream.write(json.dumps(report, indent=2) + "\n")
     print(json.dumps({"ok": report["ok"], "checks": checks, "error": report.get("error")}))
     return 0 if report["ok"] else 1
@@ -1329,10 +1473,10 @@ def exit_checks(a):
     """Exit controls that condition release_ready: finished BEFORE the final verification raises it."""
     import qualify_install_410_helper as helper
 
-    m = json.loads(Path(a.manifest).read_text())
+    m = load_json(Path(a.manifest))
     samples = Path(a.samples)
     state = helper.service_state(TEST_LABEL, TEST_PORT)
-    before = json.loads(Path(a.production_before).read_text())
+    before = load_json(Path(a.production_before))
     now = helper.production_snapshot(Path.home())
     report = {
         "format": "qualify-410-exit-checks-v1", "source_commit": m["source_commit"], "run_tag": m["run_tag"],
@@ -1343,12 +1487,10 @@ def exit_checks(a):
         **helper.production_unchanged(before, now),
         "production_before_sha256": before["sha256"], "production_after_sha256": now["sha256"],
         "lock_409_absent": not os.path.lexists(a.lock_409),
-        # A sampler error is blocking: its marker must not exist.
-        "sampler_ok": not os.path.lexists(a.sampler_failed),
-        "m3": m3_summary(samples.read_text().splitlines()), "m3_samples_sha256": digest(samples),
+        "m3": m3_summary(read_text(samples).splitlines()), "m3_samples_sha256": digest(samples),
         "m3_samples_path": str(samples.resolve()),
     }
-    with open(a.output, "x") as stream:
+    with open(refuse_forbidden(a.output), "x") as stream:
         stream.write(json.dumps(report, indent=2) + "\n")
     validate_exit_checks(report, m)
     print("Exit checks passed.")
@@ -1379,7 +1521,7 @@ def cli(argv=None):
     s.add_argument("--samples", required=True)
     s = sub.add_parser("exit-checks")
     for name in ("--manifest", "--samples", "--steps", "--chain-sha256", "--supervisor", "--production-before",
-                 "--lock-409", "--sampler-failed", "--output"):
+                 "--lock-409", "--output"):
         s.add_argument(name, required=True)
     s.add_argument("--suspects", default="")
     a = parser.parse_args(argv)
@@ -1390,7 +1532,7 @@ def cli(argv=None):
             # A GO must exist, be bound to this candidate/run, and say yes. Absence is never consent.
             root = Path(__file__).resolve().parents[1]
             source = refuse_forbidden(a.file)
-            d = json.loads(source.read_text())
+            d = load_json(source)
             dossier = None
             if a.decision.startswith("network_") and d.get("answer") == "oui":
                 dossier = source.parent / str((d.get("dossier") or {}).get("reference"))
@@ -1400,7 +1542,7 @@ def cli(argv=None):
             # The same sealed decision from the first check to G15: it may not change during the run.
             require(a.expect_sha256 in (None, digest(source)), "Decision file changed since it was accepted")
             if a.manifest:
-                recorded = json.loads(Path(a.manifest).read_text())["decisions"].get(a.decision)
+                recorded = load_json(Path(a.manifest))["decisions"].get(a.decision)
                 require(recorded is None or recorded["sha256"] == digest(source),
                         "Decision file differs from the one sealed in the manifest")
                 require(recorded is None or dossier is None or recorded["dossier"]["sha256"] == digest(dossier),
@@ -1416,7 +1558,7 @@ def cli(argv=None):
             print("dossier " + a.acquisition + " sha256=" + digest(a.output))
             return 0
         if a.command == "m3-summary":
-            print(json.dumps(m3_summary(Path(a.samples).read_text().splitlines()), indent=2))
+            print(json.dumps(m3_summary(read_text(Path(a.samples)).splitlines()), indent=2))
             return 0
         return exit_checks(a)
     except (OSError, KeyError, TypeError, ValueError, AssertionError, SubprocessError) as exc:
