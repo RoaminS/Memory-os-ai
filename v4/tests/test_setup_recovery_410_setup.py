@@ -259,6 +259,27 @@ def test_crlf_client_files_keep_their_line_endings(c):
     assert {key: (c.home / PATHS[key]).read_bytes() for key in originals} == originals
 
 
+@pytest.mark.parametrize("kind", ["symlink-to-the-same-bytes", "hardlink"])
+def test_the_plist_is_not_moved_when_it_became_a_link_while_the_service_stopped(c, kind):
+    """The last look before the move never follows a link: same bytes behind a link is not our definition."""
+    result = install(c, profile="lexical")
+    plist = c.home / PLIST
+    content = plist.read_bytes()
+
+    def swap():
+        if kind == "hardlink":
+            os.link(plist, c.root / "second-name.plist")
+        else:
+            (c.root / "same.plist").write_bytes(content)
+            plist.unlink()
+            plist.symlink_to(c.root / "same.plist")
+    c.system.hooks[("launchctl", "bootout")] = swap
+    out = qs.undo(result["stamp"], home=c.home, run=c.system, with_service=True)
+    assert out["service"]["undo"] == "refused-changed-since-install" and out["code"] == "service_changed_since_install"
+    assert "plist_moved_to" not in out["service"] and not list((c.home / STATE).rglob("*.plist"))
+    assert plist.is_symlink() if kind != "hardlink" else os.lstat(plist).st_nlink == 2
+
+
 # ---- interrupted install ----
 
 def interrupted(c, clients=("cursor",)):

@@ -463,40 +463,36 @@ def _expected_of(digest: str | None):
     return ABSENT if digest is None else digest
 
 
-def _verify_target(path: Path, expected) -> None:
-    """Last look at the target, immediately before ``os.replace``. It NEVER follows a link.
+def _read_verified(path: Path) -> bytes | None:
+    """THE last-look read, shared by every mutation path. It NEVER follows a link.
 
-    ``ABSENT``: ``lstat`` must say the name does not exist (a dangling symbolic link is not absent).
-    A digest: the name must be a regular file with a single hard link; its bytes are read through a
-    descriptor opened with ``O_NOFOLLOW`` whose identity (device, inode) is the one ``lstat`` saw
-    before and still sees after the read. ``UNGUARDED``: absent, or a regular single-link file.
-    Anything else raises ``EntryChanged``: the object found there is left as it is.
+    Returns None when ``lstat`` says the name does not exist (a dangling symbolic link is not
+    absent), or the bytes of a regular file with a single hard link, read through a descriptor
+    opened with ``O_NOFOLLOW | O_NONBLOCK`` whose identity (device, inode) is the one ``lstat`` saw
+    before and still sees after the read. Any other object (symbolic link, directory, FIFO,
+    several hard links, a file swapped during the read) raises ``EntryChanged``.
     """
-    changed = EntryChanged("The target changed while the write was prepared; nothing written")
+    changed = EntryChanged("The target is not the plain file expected; nothing written")
     try:
         before = os.lstat(path)
     except FileNotFoundError:
-        if expected is ABSENT or expected is UNGUARDED:
-            return
-        raise changed from None
+        return None
     except OSError:
         raise changed from None
-    if expected is ABSENT or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise changed
-    if expected is UNGUARDED:
-        return
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # never blocks on a FIFO swapped in
     except OSError:
         raise changed from None
     try:
         opened = os.fstat(fd)
-        digest = hashlib.sha256()
+        blocks = []
         while True:
             block = os.read(fd, 1 << 16)
             if not block:
                 break
-            digest.update(block)
+            blocks.append(block)
     except OSError:
         raise changed from None
     finally:
@@ -505,9 +501,58 @@ def _verify_target(path: Path, expected) -> None:
         after = os.lstat(path)
     except OSError:
         raise changed from None
-    same = {(info.st_dev, info.st_ino) for info in (before, opened, after)}
-    if len(same) != 1 or not stat.S_ISREG(after.st_mode) or after.st_nlink != 1 or digest.hexdigest() != expected:
+    if (len({(info.st_dev, info.st_ino) for info in (before, opened, after)}) != 1
+            or not stat.S_ISREG(after.st_mode) or after.st_nlink != 1):
         raise changed
+    return b"".join(blocks)
+
+
+def _verify_target(path: Path, expected) -> None:
+    """Last look at the target, immediately before ``os.replace`` (see ``_read_verified``).
+
+    ``ABSENT``: the name must not exist. A digest: a plain single-link file with exactly these
+    bytes. ``UNGUARDED``: absent, or a plain single-link file. Otherwise ``EntryChanged``.
+    """
+    data = _read_verified(path)
+    if expected is UNGUARDED:
+        return
+    found = ABSENT if data is None else hashlib.sha256(data).hexdigest()
+    if found != expected:
+        raise EntryChanged("The target changed while the write was prepared; nothing written")
+
+
+_UNSET = _Sentinel("UNSET")
+
+
+def _claude_guard(client: Client, home: Path, *, file_sha256=_UNSET, entry_sha256=_UNSET, name_absent=False):
+    """Pre-command check for Claude Code, immediately before EACH mutating ``claude mcp`` command.
+
+    Same last look as every other mutation (``_read_verified``: never follows a link; a dangling
+    link, a directory, a FIFO or a multi-link file is refused), then, on the bytes just read:
+    ``file_sha256`` (None: the file must not exist), ``entry_sha256`` (our entry must be exactly
+    this one), ``name_absent`` (our name must not be in the user-scope table; true absence of the
+    file qualifies). Returns our current entry. Any mismatch raises ``EntryChanged``: no further
+    command is run and what is there is left as it is.
+    """
+    path = client.config_path(home)
+    data = _read_verified(path)
+    if file_sha256 is not _UNSET and (None if data is None else hashlib.sha256(data).hexdigest()) != file_sha256:
+        raise EntryChanged("The client file changed since the preview; nothing written")
+    entry = None
+    if data is not None and data.strip():
+        try:
+            document = json.loads(data.decode("utf-8"))
+            servers = document.get(_json_key(client), {}) if isinstance(document, dict) else None
+            if not isinstance(servers, dict):
+                raise ValueError("unexpected server table")
+            entry = servers.get(SERVER)
+        except (ValueError, RecursionError):
+            raise EntryChanged("The client file is no longer readable; nothing written") from None
+    if name_absent and entry is not None:
+        raise EntryChanged("A memory-os-ai entry appeared before the claude command; nothing written")
+    if entry_sha256 is not _UNSET and (not isinstance(entry, dict) or _entry_hash(entry) != entry_sha256):
+        raise EntryChanged()
+    return entry
 
 
 def _atomic_write(path: Path, text: str, *, expected) -> None:
@@ -568,17 +613,11 @@ def _claude(argv: list[str], home: Path, *, run) -> int | None:
         return None
 
 
-def _still(path: Path, expected_file_sha256) -> None:
-    if expected_file_sha256 is not _ANY and _sha(path) != expected_file_sha256:
-        raise EntryChanged("The client file changed since the preview; nothing written")
-
-
-def _claude_add(client: Client, home: Path, entry: dict, *, run) -> int | None:
-    """``claude mcp add`` of ``entry``, revalidated immediately before the command: our name must be
-    ABSENT from the file at that moment (an entry written by someone else is never replaced)."""
-    state, current = read_entry(client, home)
-    if state not in {"ok", "missing-config"} or current is not None:
-        raise EntryChanged("A memory-os-ai entry appeared before claude mcp add; nothing written")
+def _claude_add(client: Client, home: Path, entry: dict, *, run, file_sha256=_UNSET) -> int | None:
+    """``claude mcp add`` of ``entry``, guarded immediately before the command: our name must be ABSENT
+    from a verified plain file, or the file truly absent (an entry or an object put there by someone
+    else is never replaced)."""
+    _claude_guard(client, home, file_sha256=file_sha256, name_absent=True)
     flags = [x for k, v in entry.get("env", {}).items() for x in ("--env", f"{k}={v}")]
     return _claude(["mcp", "add", "--scope", "user", "--transport", "stdio", *flags, SERVER, "--",
                     entry["command"], *entry["args"]], home, run=run)
@@ -591,24 +630,24 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
     JSON / TOML: the candidate is built from the bytes read here, whose digest must be
     ``expected_file_sha256`` when one is given (None: no file); the temporary file is prepared,
     and the target must still have the digest of those bytes at the last moment before
-    ``os.replace`` (``_atomic_write``). Claude Code: the file digest is revalidated immediately
-    before ``claude mcp remove``, and our name must be absent immediately before every
-    ``claude mcp add`` (the add after a remove, and the best-effort return to a previous entry).
-    Any mismatch raises ``EntryChanged``: nothing more is written.
+    ``os.replace`` (``_atomic_write``). Claude Code: ``_claude_guard`` runs immediately before
+    ``claude mcp remove`` (file digest of the preview, else the entry found) and before every
+    ``claude mcp add`` (our name absent): the add of a create, the add after a remove, and the
+    best-effort return to a previous entry. Any mismatch raises ``EntryChanged``: no further command.
     """
     path = client.config_path(home)
     _safe_path(path, home)
     if client.fmt == "claude-user":
-        _, existing = read_entry(client, home)
+        preview_sha = _UNSET if expected_file_sha256 is _ANY else expected_file_sha256
+        existing = _claude_guard(client, home, file_sha256=preview_sha)
         if existing is not None:
-            _still(path, expected_file_sha256)  # immediately before the remove
-            if expected_file_sha256 is _ANY:
-                _expect(read_entry(client, home)[1], _entry_hash(existing))
+            # Immediately before the remove: the file of the preview, and the entry just read.
+            _claude_guard(client, home, file_sha256=preview_sha, entry_sha256=_entry_hash(existing))
             if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
                 raise QuickstartError("claude mcp remove refused; previous entry retained")
+            code = _claude_add(client, home, entry, run=run)
         else:
-            _still(path, expected_file_sha256)  # immediately before the add
-        code = _claude_add(client, home, entry, run=run)
+            code = _claude_add(client, home, entry, run=run, file_sha256=preview_sha)
         if code != 0:
             if existing is not None and relay_form(existing) and existing != entry:
                 # Best effort: put back a previous entry of OUR strict form (no secret, plain shape).
@@ -616,7 +655,7 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
                 try:
                     _claude_add(client, home, existing, run=run)
                 except EntryChanged:
-                    pass  # someone wrote an entry meanwhile: theirs stays
+                    pass  # someone wrote an entry or put another object meanwhile: theirs stays
             raise QuickstartError(f"claude mcp add failed ({code})")
         return "claude-cli"
     try:
@@ -672,7 +711,7 @@ def _removal(client: Client, home: Path, *, previous: dict | None = None, toml_a
         if previous is not None and not relay_form(previous):
             raise QuickstartError("The previous Claude Code entry cannot be restored through the claude CLI; "
                                   "it is kept in the private backup of the journal: restore it by hand")
-        _expect(read_entry(client, home)[1], expected_sha256)
+        _claude_guard(client, home, **({} if expected_sha256 is None else {"entry_sha256": expected_sha256}))
         return None, None
     text = _read(path)
     if client.fmt.endswith("toml"):
@@ -737,7 +776,7 @@ def remove_client_entry(client: Client, home: Path, *, run=subprocess.run, previ
     original, candidate = _removal(client, home, previous=previous, toml_appended=toml_appended,
                                    expected_sha256=expected_sha256)
     if client.fmt == "claude-user":
-        # ``_removal`` has just re-read the entry: that check is immediately before the remove.
+        # ``_removal`` has just run the guard on the expected entry: immediately before the remove.
         if _claude(["mcp", "remove", "--scope", "user", SERVER], home, run=run) != 0:
             raise QuickstartError("claude mcp remove failed; entry retained")
         if previous:
@@ -887,6 +926,15 @@ def _move_plist(plist: Path, journal_dir: Path) -> str:
     return str(target)
 
 
+def _plist_is(plist: Path, sha256: str) -> bool:
+    """The definition is still the plain single-link file with the journaled digest (never follows a link)."""
+    try:
+        data = _read_verified(plist)
+    except EntryChanged:
+        return False
+    return data is not None and hashlib.sha256(data).hexdigest() == sha256
+
+
 def stop_owned_service(service: dict, plist_sha256: str | None, journal_dir: Path, *, run,
                        stop_timeout: float = 10.0, sleep=time.sleep) -> dict:
     """Stop the job this installation owns and move its plist into ``journal_dir``.
@@ -903,10 +951,12 @@ def stop_owned_service(service: dict, plist_sha256: str | None, journal_dir: Pat
         return {"outcome": outcome, "code": STOP_CODES[outcome], **facts}
     if plist.is_symlink() or not plist.is_file():
         return {"outcome": "plist-already-absent"}
-    if plist_sha256 is None or _sha(plist) != plist_sha256:
+    if plist_sha256 is None or not _plist_is(plist, plist_sha256):
         return refused("refused-changed-since-install")
     state = _job_state(service, run=run)
     if state == "absent":  # never loaded (interrupted install): nothing to stop
+        if not _plist_is(plist, plist_sha256):  # immediately before the move
+            return refused("refused-changed-since-install")
         return {"outcome": "plist-moved-job-was-absent", "plist_moved_to": _move_plist(plist, journal_dir)}
     if state != "loaded":
         return refused("refused-job-not-attested")
@@ -925,7 +975,7 @@ def stop_owned_service(service: dict, plist_sha256: str | None, journal_dir: Pat
         waited += pause
     if state != "absent":
         return refused("stop-unconfirmed", observation="indeterminate" if state == "unknown" else "loaded")
-    if _sha(plist) != plist_sha256:
+    if not _plist_is(plist, plist_sha256):
         return refused("refused-changed-since-install")
     return {"outcome": "stopped-and-plist-moved", "plist_moved_to": _move_plist(plist, journal_dir)}
 

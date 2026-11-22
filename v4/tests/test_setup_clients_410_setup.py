@@ -1021,6 +1021,136 @@ def test_a_client_file_that_did_not_exist_is_not_created_over_a_dangling_link(ho
     assert path.is_symlink() and not (tmp_path / "nowhere").exists() and no_temporary_left(home, "cursor")
 
 
+# ---- Codex implementation review n° 6: the pre-command check of Claude Code never follows links ----
+
+OBJECTS = ["dangling-symlink", "symlink-to-a-valid-file", "hardlink", "fifo", "directory"]
+
+
+def substitute(home, tmp_path, kind):
+    """Another writer replaces ``~/.claude.json`` by another object (our name absent behind it)."""
+    path = home / PATHS["claude-code"]
+    content = path.read_bytes()
+    if kind == "hardlink":
+        os.link(path, tmp_path / "second-name.json")
+        return
+    path.unlink()
+    if kind == "dangling-symlink":
+        path.symlink_to(tmp_path / "nowhere")
+    elif kind == "symlink-to-a-valid-file":
+        (tmp_path / "valid.json").write_bytes(content)
+        path.symlink_to(tmp_path / "valid.json")
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.mkdir()
+
+
+def object_kept(home, tmp_path, kind):
+    import stat as modes
+    path = home / PATHS["claude-code"]
+    info = os.lstat(path)
+    if kind == "hardlink":
+        return modes.S_ISREG(info.st_mode) and info.st_nlink == 2
+    if kind == "dangling-symlink":
+        return path.is_symlink() and not (tmp_path / "nowhere").exists()
+    if kind == "symlink-to-a-valid-file":
+        return path.is_symlink() and "memory-os-ai" not in (tmp_path / "valid.json").read_text()
+    return modes.S_ISFIFO(info.st_mode) if kind == "fifo" else modes.S_ISDIR(info.st_mode)
+
+
+class Substituting(FakeSystem):
+    """A ``claude`` CLI after one of whose commands the config file is swapped for another object."""
+
+    def __init__(self, home, tmp_path, kind, *, after, add_fails=False):
+        super().__init__(home)
+        self.tmp_path, self.kind, self.after, self.add_fails, self.done = tmp_path, kind, after, add_fails, False
+
+    def __call__(self, argv, **kwargs):
+        argv = [str(a) for a in argv]
+        verb = argv[2] if argv[:2] == ["claude", "mcp"] else None
+        if verb == "add" and self.add_fails:
+            self.calls.append(argv)
+            result = self._done(1, stderr="refused")
+        else:
+            result = super().__call__(argv, **kwargs)
+        if verb == self.after and not self.done:
+            self.done = True
+            substitute(self.home, self.tmp_path, self.kind)
+        return result
+
+
+@pytest.mark.parametrize("kind", OBJECTS)
+def test_claude_code_replace_runs_no_add_over_an_object_substituted_after_the_remove(home, tmp_path, kind):
+    install_from(home, tmp_path, "claude-code")
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
+    assert plan["clients"][0]["action"] == "replace"
+    system = Substituting(home, tmp_path, kind, after="remove")
+    result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
+    assert [argv[2] for argv in system.calls] == ["remove"]  # no further claude command
+    assert status(result) == {"claude-code": "conflict-file-changed-since-preview"}
+    assert object_kept(home, tmp_path, kind)
+
+
+@pytest.mark.parametrize("kind", OBJECTS)
+def test_claude_code_undo_runs_no_restoring_add_over_an_object_substituted_after_the_remove(home, tmp_path, kind):
+    install_from(home, tmp_path, "claude-code")  # E1, restorable through the CLI
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
+    replaced = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal",
+                                run=FakeSystem(home))
+    system = Substituting(home, tmp_path, kind, after="remove")
+    out = qs.undo(replaced["stamp"], home=home, journal_root=tmp_path / "journal", run=system)
+    assert [argv[2] for argv in system.calls] == ["remove"]
+    assert out["results"] == [{"client": "claude-code", "undo": "refused-entry-changed-since-apply"}]
+    assert out["ok"] is False and object_kept(home, tmp_path, kind)
+
+
+@pytest.mark.parametrize("kind", OBJECTS)
+def test_claude_code_best_effort_return_runs_no_add_over_an_object_substituted_after_the_failure(home, tmp_path, kind):
+    install_from(home, tmp_path, "claude-code")
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
+    system = Substituting(home, tmp_path, kind, after="add", add_fails=True)
+    with pytest.raises(qs.QuickstartError, match="private journal retained"):
+        qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
+    assert [argv[2] for argv in system.calls] == ["remove", "add"]  # the failed add, and no second one
+    assert object_kept(home, tmp_path, kind)
+
+
+@pytest.mark.parametrize("kind", ["symlink-to-a-valid-file", "hardlink", "dangling-symlink"])
+@pytest.mark.parametrize("operation", ["replace", "create", "undo"])
+def test_claude_code_runs_no_command_at_all_over_an_object_substituted_before_the_first_one(
+        home, tmp_path, monkeypatch, kind, operation):
+    """Identical content behind a link passes every digest that follows links: only the guard sees it."""
+    if operation != "create":
+        first = install_from(home, tmp_path, "claude-code")
+    plan = qs.preview(home=home, python=PY, env=ENV, clients=("claude-code",), journal_root=tmp_path / "journal")
+    real, seen = qs._claude_guard, []
+
+    def guard(client, root, **expectation):
+        if not seen:
+            seen.append(1)
+            path = home / PATHS["claude-code"]
+            content = path.read_bytes()
+            if kind == "hardlink":
+                os.link(path, tmp_path / "second-name.json")
+            else:
+                path.unlink()
+                path.symlink_to(tmp_path / ("nowhere" if kind == "dangling-symlink" else "same.json"))
+                if kind != "dangling-symlink":
+                    (tmp_path / "same.json").write_bytes(content)  # byte-identical, our entry included
+        return real(client, root, **expectation)
+    monkeypatch.setattr(qs, "_claude_guard", guard)
+    system = FakeSystem(home)
+    if operation == "undo":
+        out = qs.undo(first["stamp"], home=home, journal_root=tmp_path / "journal", run=system)
+        assert out["results"][0]["undo"] in {"refused-entry-changed-since-apply", "refused-removal-manual"}
+    else:
+        result = qs.apply_clients(plan, home=home, python=PY, env=ENV, journal_root=tmp_path / "journal", run=system)
+        assert status(result) == {"claude-code": "conflict-file-changed-since-preview"}
+    assert seen and system.calls == []
+    path = home / PATHS["claude-code"]
+    assert (os.lstat(path).st_nlink == 2) if kind == "hardlink" else path.is_symlink()
+
+
 def test_after_a_replace_and_its_undo_a_new_replace_needs_named_consent(home, tmp_path):
     """E1 -> E2 (proven replace) -> undo puts E1 back from the backup, but its proof was consumed."""
     install_from(home, tmp_path, "cursor")  # E1

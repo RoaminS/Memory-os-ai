@@ -705,7 +705,7 @@ laisse l'inventaire de la machine inchangé.
 
 | Critère | Vérification |
 |---|---|
-| Nouveaux tests | les sept fichiers du §13 verts (629 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
+| Nouveaux tests | les sept fichiers du §13 verts (655 tests après amendements et écarts du §23 ; 482 à la v5), sans `skip` ni `xfail` |
 | Non-régression | les huit fichiers du §14 verts après les adaptations listées ; suite `v4/tests` : mêmes échecs que le relevé de G1a (`.local-baseline/v4_failures_cd83511.txt`) |
 | Zéro écriture en aperçu | tests d'inventaire (installation, désinstallation) |
 | D2 | retour arrière, désinstallation, arrêts en échec, vrai store, secrets (§13) |
@@ -717,8 +717,8 @@ laisse l'inventaire de la machine inchangé.
 
 ## 13. Tests
 
-**État après implémentation : 629 tests verts** (clients 220, cycle de vie 216, profil 62, reprise 46, outillage
-25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 100 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.8). Le reste de
+**État après implémentation : 655 tests verts** (clients 244, cycle de vie 216, profil 62, reprise 48, outillage
+25, secrets 32, SQLite 28) : les 482 de la v5, 47 d'amendements (§22 bis) et 126 d'écarts, de décisions ultérieures et de corrections de revue (§23, §23.4 à §23.9). Le reste de
 cette section décrit l'état de la v5, avant tout code.
 
 482 tests dans sept fichiers ; avant implémentation, **82 verts** (comportement de `cd83511`, à
@@ -1179,8 +1179,10 @@ l'écriture elle-même attend toujours l'empreinte des octets dont elle est cons
 
 Les contrôles de type et de nombre de liens précédaient la préparation du temporaire, et le contrôle final
 lisait la cible en suivant les liens : un lien symbolique **pendant** posé durant la préparation passait pour
-une absence (`ABSENT`) et était écrasé. Correction, pour **toute** attente et donc tout chemin de mutation du
-§23.6 (ils passent tous par `_atomic_write`) : `_verify_target`, dernière étape avant `os.replace`,
+une absence (`ABSENT`) et était écrasé. Correction, pour **toute** attente de `_atomic_write` (les chemins
+JSON, TOML et journaux ; **pas** Claude Code, qui passe par la CLI : la phrase « ils passent tous par
+`_atomic_write` » de la première version de cette section était fausse, voir §23.9) : `_verify_target`,
+dernière étape avant `os.replace`,
 
 - n'utilise que `os.lstat` : `ABSENT` exige que le nom n'existe pas (un lien pendant n'est pas une absence) ;
 - pour une empreinte : fichier ordinaire à lien unique, octets lus par un descripteur ouvert avec
@@ -1197,6 +1199,52 @@ une absence (`ABSENT`) et était écrasé. Correction, pour **toute** attente et
 | dossier ou FIFO à la place de la cible (`ABSENT` et empreinte) | `test_a_directory_or_a_fifo_appearing_during_the_preparation_is_a_conflict` (4) |
 
 Chaque test vérifie que l'objet posé est conservé, que le temporaire est nettoyé et que le conflit est rendu.
+
+### 23.9 Revue d'implémentation Codex n° 6 (`codex_verdict_setup_impl_v6.md`, sur `6d46110`) : un seul dernier regard, pour les deux familles de mutation
+
+Le contrôle avant `claude mcp add` passait par `read_entry`, qui suit les liens et lit « fichier introuvable »
+comme une absence : un lien pendant (ou une FIFO, un dossier, un lien physique) substitué à `~/.claude.json`
+entre deux commandes passait pour une absence. Correction : **une seule lecture de dernier regard**,
+`_read_verified` (`lstat` seulement ; lien pendant ≠ absence ; fichier ordinaire à lien unique lu par un
+descripteur `O_NOFOLLOW | O_NONBLOCK`, identité vérifiée avant et après), utilisée par les deux familles :
+
+**A — mutations par `_atomic_write`** (`_verify_target`, dernière étape avant `os.replace`) :
+
+| Chemin | Attente | Test |
+|---|---|---|
+| création / remplacement JSON, création TOML (`_write_client`) | empreinte des octets lus, ou `ABSENT` | §23.6, §23.8 |
+| retrait / rétablissement JSON, retrait TOML (`remove_client_entry` : `undo`, `uninstall`) | empreinte des octets lus | §23.6 |
+| révocation : réécriture d'un journal de confiance (`revoke_proofs`) | empreinte des octets lus | §23.6 |
+| journaux de l'exécution (`journal.json`, `install.json`, `uninstall.json`) | `UNGUARDED`, dossier neuf de l'exécution | §23.7 |
+
+**B — mutations par la CLI `claude`** (`_claude_guard`, immédiatement avant **chaque** commande) :
+
+| Commande | Attente évaluée sur les octets de `_read_verified` | Test |
+|---|---|---|
+| `remove` d'un remplacement (`_write_client`) | empreinte du fichier de l'aperçu **et** entrée lue | `test_claude_code_runs_no_command_at_all_over_an_object_substituted_before_the_first_one[replace-*]` (3) |
+| `add` d'une création | empreinte du fichier de l'aperçu (ou absence vraie) et notre nom absent | idem `[create-*]` (3) |
+| `add` après le `remove` d'un remplacement | notre nom absent | `test_claude_code_replace_runs_no_add_over_an_object_substituted_after_the_remove` (5 objets) |
+| `add` de retour au mieux après un `add` en échec | notre nom absent | `test_claude_code_best_effort_return_runs_no_add_over_an_object_substituted_after_the_failure` (5) |
+| `remove` d'un retour arrière ou d'une désinstallation (`remove_client_entry`) | entrée attendue | idem premier test `[undo-*]` (3) ; `test_claude_code_entry_changed_during_its_revocation…` |
+| `add` rétablissant l'entrée précédente (`undo`) | notre nom absent | `test_claude_code_undo_runs_no_restoring_add_over_an_object_substituted_after_the_remove` (5) |
+
+Les cinq objets : lien pendant, lien vers un fichier valide, lien physique, FIFO, dossier. Chaque test
+vérifie le refus, l'objet conservé et **qu'aucune commande `claude` ultérieure n'a été lancée**.
+
+**C — recherche de toute autre mutation du système de fichiers** dans `quickstart.py`, `uninstall.py`,
+`sqlite_runtime.py` (`grep` de `os.replace`, `shutil.`, `unlink`, `rename`, `write_`, `chmod`, `mkdir`,
+`os.link`, `symlink`, `write_secret_file`) — aucune ne touche un fichier client hors des familles A et B :
+
+| Mutation | Cible | Garde |
+|---|---|---|
+| `shutil.move` du plist (`_move_plist`) | plist de **notre** service → journal | ajouté ici : `_plist_is` (même `_read_verified`) immédiatement avant le déplacement, en plus des contrôles du §6 · `test_the_plist_is_not_moved_when_it_became_a_link_while_the_service_stopped` (2) |
+| `write_secret_file` (jeton, plist) | création | exclusive (`O_EXCL | O_NOFOLLOW`), jamais d'écrasement |
+| `shutil.copy2` + `chmod` (`backup_client_file`) | nouveau `*.bak` dans le dossier neuf de l'exécution | lecture seule du fichier client |
+| `mkdir` / `chmod` (`new_journal`, dossiers store et logs d'une installation neuve) | dossiers à nous | création ; racine sans lien symbolique |
+| `chmod 0600` des journaux de l'exécution | fichiers de la famille A, `UNGUARDED` | dossier neuf de l'exécution |
+| `unlink` du temporaire (`_atomic_write`) ; fichiers de la sonde WAL (`sqlite_runtime.wal_probe`) | fichiers créés par l'appel lui-même | — |
+
+Aucune autre mutation trouvée.
 
 ### 23.3 Limites résiduelles
 
