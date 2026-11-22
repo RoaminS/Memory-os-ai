@@ -87,6 +87,9 @@ FILELESS_MODULES = {  # created in memory by a native extension or by the standa
 FILELESS_FAMILIES = (  # (pattern, exact type, creator that must be loaded from a frozen file)
     (re.compile(r'_cython_\d+_\d+_\d+'), 'builtins.module', None),  # Cython shared ABI module
     (re.compile(r'torch\._C\.[A-Za-z_][\w.]*'), 'builtins.module', 'torch._C'),  # C submodules of torch._C
+    (re.compile(r'pyexpat\.(errors|model)'), 'builtins.module', 'pyexpat'),  # made by pyexpat itself
+    # the same two objects, re-registered under these names by xml/parsers/expat.py
+    (re.compile(r'xml\.parsers\.expat\.(errors|model)'), 'builtins.module', 'xml.parsers.expat'),
 )
 # In-memory modules carrying a NON-file origin: exact (type, __file__, spec origin, loader type).
 IN_MEMORY_MODULES = {

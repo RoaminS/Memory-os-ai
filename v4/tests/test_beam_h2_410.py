@@ -891,6 +891,9 @@ def test_only_the_explicit_in_memory_modules_are_accepted_without_a_frozen_file(
     assert 'no frozen file' in refused('torch._VF', type(sys)('torch._VF'))  # wrong type for this name
     assert 'creator torch._C is not a verified frozen file' in refused(
         'torch._C._nn', type(sys)('torch._C._nn'), without=('torch._C',))
+    assert 'creator pyexpat is not a verified frozen file' in refused(
+        'pyexpat.errors', type(sys)('pyexpat.errors'))
+    assert 'no frozen file' in refused('pyexpat.other', type(sys)('pyexpat.other'))
     fake_builtin = type(sys)('zlib2')
     fake_builtin.__spec__ = typed('importlib.machinery', 'ModuleSpec', origin='built-in',
                                   loader=string_loader, submodule_search_locations=None)

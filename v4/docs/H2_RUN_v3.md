@@ -111,8 +111,9 @@ invalide, 2 sur refus avant tout worker.
    de noms situé sous une racine gelée, ou inscrit dans une liste explicite : `torch.ops` et
    `torch.classes` (type et origine exacts), `_remote_module_non_scriptable` (origine `torch-git`,
    chargeur `_StringLoader` de torch), `torch._VF`, `typing.io`, `typing.re`, `cython_runtime`,
-   `swig_runtime_data4`, et deux familles créées par des extensions natives (`_cython_X_Y_Z`,
-   `torch._C.*` à condition que `torch._C` soit lui-même un fichier gelé vérifié). Tout autre module
+   `swig_runtime_data4`, et des familles créées par des extensions natives (`_cython_X_Y_Z` ;
+   `torch._C.*`, `pyexpat.errors|model` et leurs alias `xml.parsers.expat.errors|model`, à condition
+   que le module créateur soit lui-même un fichier gelé vérifié). Tout autre module
    à origine relative ou absente est refusé. Ce contrôle est fait une première fois **avant toute
    ingestion** (moteur et encodeur déjà chargés), puis à la fin du worker.
 5. **Granite lié au cache gelé.** L'environnement du worker est reconstruit : toute variable héritée
