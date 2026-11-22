@@ -1024,6 +1024,9 @@ def test_relay_matrix_and_lexical_environment():
 
 # ---------- M3, exit checks ----------
 
+IDENTITY = [1795344108, 525280]  # kernel start time of the command's process: [seconds, microseconds]
+
+
 def m3_rows(name, start, *, observation="during", command_seconds=3.0, probe_rc=0, pid=4242):
     """Rows as the chain writes them for one step: bounds of the command and of each probe, monotonic clock."""
     base = {"step": name, "free_bytes": int(15e9 - start), "swap_bytes": int(start)}
@@ -1031,6 +1034,7 @@ def m3_rows(name, start, *, observation="during", command_seconds=3.0, probe_rc=
     end = cmd_start + command_seconds + 0.5
     rows = [{**base, "phase": "before", "t": 1e9 + start, "mono": start}]
     probe = {**base, "command_pid": pid, "command_start_mono": cmd_start, "detection": "ok",
+             "command_identity": IDENTITY, "identity_verified": True,
              "post_exec_at_probe_start": observation != "none_short_command"}
     if observation == "during":
         rows.append({**probe, "phase": "during", "t": 1e9 + cmd_start + 1, "mono": cmd_start + 1.1,
@@ -1046,7 +1050,8 @@ def m3_rows(name, start, *, observation="during", command_seconds=3.0, probe_rc=
                      "alive_at_probe_start": False, "alive_at_probe_end": False,
                      "reason": "command_ended_before_first_probe"})
     rows.append({**base, "phase": "after", "t": 1e9 + end, "mono": end, "probe_rc": probe_rc, "supervisor_rc": 0,
-                 "command": {"started": True, "pid": pid, "start_mono": cmd_start, "start_t": 1e9 + cmd_start}})
+                 "command": {"started": True, "pid": pid, "identity": IDENTITY, "start_mono": cmd_start,
+                             "start_t": 1e9 + cmd_start}})
     return rows
 
 
@@ -2834,8 +2839,9 @@ def test_round3_blocker3_a_probe_that_only_saw_the_relay_before_exec_is_never_cr
     base = {"step": "full", "free_bytes": 10**10, "swap_bytes": 1}
     before = {**base, "phase": "before", "t": 1.0, "mono": 100.0}
     after = {**base, "phase": "after", "t": 4.0, "mono": 103.0, "probe_rc": 0, "supervisor_rc": 0,
-             "command": {"started": True, "pid": 4242, "start_mono": 100.4, "start_t": 1.4}}
+             "command": {"started": True, "pid": 4242, "identity": IDENTITY, "start_mono": 100.4, "start_t": 1.4}}
     on_relay = {**base, "phase": "during", "t": 2.2, "mono": 101.2, "detection": "ok", "command_pid": 4242,
+                "command_identity": IDENTITY, "identity_verified": True,
                 "command_start_mono": 100.4, "probe_start_mono": 101.0, "probe_end_mono": 101.2,
                 "alive_at_probe_start": True, "alive_at_probe_end": True}
     # As the previous probe wrote it (no notion of exec): the pid was alive at both ends, yet it was the relay.
@@ -2963,3 +2969,31 @@ def test_round3_blocker2_an_inaccessible_configuration_is_unobservable_never_abs
     source = (SCRIPTS / "qualify_install_410_helper.py").read_text()
     body = source[source.index("def observe("):source.index("def production_snapshot(")]
     assert "lexists" not in body and "os.path.isdir" not in body and "lstat_state(path)" in body
+
+
+# ---------- round 4: a reused pid is not the command ----------
+
+def test_round4_a_foreign_process_reusing_the_pid_is_never_credited():
+    """Round 4 counterexample: the command ends and is reaped; a foreign process takes the same pid and is
+    alive at both ends of a later probe: 12.6 s upper bound, during = 1 was accepted."""
+    rows = m3_rows("full", 100.0, command_seconds=12.1)
+    assert rows[-1]["mono"] - rows[-1]["command"]["start_mono"] == pytest.approx(12.6)
+    assert m3(rows)["during_samples"] == {"full": 1}                    # the genuine case: identity bound
+    foreign = [1795344120, 7]                                           # another process, same pid 4242
+    # What the previous probe wrote: pid alive at both ends, no notion of identity.
+    blind = {k: v for k, v in rows[1].items() if k not in ("command_identity", "identity_verified")}
+    refused(m3, [rows[0], blind, rows[-1]])
+    refused(m3, [rows[0], {**rows[1], "command_identity": foreign}, rows[-1]])
+    refused(m3, [rows[0], {**rows[1], "identity_verified": False}, rows[-1]])
+    # The command itself must carry the identity recorded by the relay before exec.
+    for broken in ({k: v for k, v in rows[-1]["command"].items() if k != "identity"},
+                   {**rows[-1]["command"], "identity": [0, 0]}, {**rows[-1]["command"], "identity": [1795344108]},
+                   {**rows[-1]["command"], "identity": "Sun Nov 22 10:27:01 2026"},     # second precision is not enough
+                   {**rows[-1]["command"], "identity": [1795344108, 1_000_000]}):
+        refused(m3, [rows[0], rows[1], {**rows[-1], "command": broken}])
+    # Too long for the short-command exception, and the exception rows are bound to the identity too.
+    refused(m3, [rows[0], rows[-1]])
+    short = m3_rows("lint1", 100.0, observation="none_short_command", command_seconds=0.1)
+    refused(m3, [short[0], {**short[1], "command_identity": foreign}, short[-1]])
+    overlap = m3_rows("lint1", 100.0, observation="overlap_only", command_seconds=0.1)
+    refused(m3, [overlap[0], {**overlap[1], "command_identity": foreign}, overlap[-1]])

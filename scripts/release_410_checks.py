@@ -1027,9 +1027,15 @@ def m3_summary(lines):
         require(isinstance(cmd, dict) and cmd.get("started") is True and isinstance(cmd.get("pid"), int)
                 and isinstance(cmd.get("start_mono"), number) and before["mono"] <= cmd["start_mono"] <= after["mono"],
                 "M3: command bounds missing: " + name)
+        # Process identity established by the relay BEFORE exec (kernel start time, microseconds) and kept by
+        # exec. A pid alone is not an identity: it can be reused once the command is reaped.
+        identity = cmd.get("identity")
+        require(isinstance(identity, list) and len(identity) == 2 and all(type(v) is int for v in identity)
+                and identity[0] > 0 and 0 <= identity[1] < 1_000_000, "M3: command identity missing: " + name)
 
         def bound(r):  # a probe of THIS command, started after it started, finished before the step closed
-            return (r.get("detection") == "ok" and r.get("command_pid") == cmd["pid"]
+            return (r.get("detection") == "ok" and r.get("identity_verified") is True
+                    and r.get("command_identity") == identity and r.get("command_pid") == cmd["pid"]
                     and r.get("command_start_mono") == cmd["start_mono"]
                     and isinstance(r.get("probe_start_mono"), number) and isinstance(r.get("probe_end_mono"), number)
                     and cmd["start_mono"] <= r["probe_start_mono"] <= r["probe_end_mono"] <= after["mono"])
