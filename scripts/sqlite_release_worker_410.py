@@ -50,6 +50,37 @@ LEXICAL_QUERIES = (
     "spring tide height revision",
 )
 
+# The sealed guard forks ``sysctl vm.swapusage`` at EVERY call (~1.3 ms). The candidate's backup API calls
+# its guard from SQLite progress handlers and once per inventoried row: 389,073 calls for the 154 MB cut of
+# run v8, i.e. 540 s of guard for 6 s of copy. The full check is therefore SAMPLED: at the first call, at
+# every transition (``full``), and in between at the first call made once 0.5 s have elapsed since the
+# START of the last passed check. Without a call there is no autonomous check here. It complements the parent (~1 s) and the supervisor (~2 s); thresholds are unchanged. No strict bound is
+# promised on what other processes may write between two samples.
+# Pre-existing, not changed here: a guard exception raised inside a SQLite progress handler surfaces from
+# the candidate as ``OperationalError: interrupted``; the operation still fails.
+GUARD_PERIOD_SECONDS = 0.5
+
+
+class PacedGuard:
+    """Rate-limited front of the sealed guard: same thresholds, same exception, no cached failure."""
+
+    def __init__(self, guard, period=GUARD_PERIOD_SECONDS, clock=time.monotonic):
+        if not 0 < period <= 1:
+            raise ValueError("Guard period must stay within one second")
+        self._guard, self._period, self._clock, self._passed = guard, period, clock, None
+
+    def full(self, path):
+        """Unconditional check, for transitions. Only a PASSED check opens a quiet period."""
+        self._passed = None
+        started = self._clock()  # The period runs from the START of the check, however long it takes.
+        self._guard(path)  # Raises as the sealed guard does; nothing is remembered then.
+        self._passed = started
+
+    def __call__(self, path):
+        if self._passed is not None and 0 <= self._clock() - self._passed < self._period:
+            return
+        self.full(path)
+
 
 def fixed_data_sha256():
     value = {"project": LEXICAL_PROJECT, "event_time": LEXICAL_EVENT_TIME, "at_time": LEXICAL_AT_TIME,
@@ -141,6 +172,8 @@ def lexical_store(plan, root, guard):
         return rows
 
     report = {"package_path": package, "find_spec": spec, "rankings": {}}
+    full = getattr(guard, "full", guard)  # Transitions: unconditional check, even inside a quiet period.
+    full(root)
     with MemoryV4(config=Config.lexical(data_dir=str(store))) as engine:
         added = engine.add_facts([{"text": text} for text in LEXICAL_FACTS], project=LEXICAL_PROJECT,
                                  event_time=LEXICAL_EVENT_TIME)
@@ -156,6 +189,7 @@ def lexical_store(plan, root, guard):
     settings = OpsSettings.from_env()
     load_or_create_key(settings.backup_key)
     # Online backup, writer open, as S4 does in production.
+    full(root)
     with closing(SQLiteStore(store)):
         backup = s4.backup(settings, apply=True)
         if not backup.get("ok"):
@@ -165,8 +199,10 @@ def lexical_store(plan, root, guard):
     if not drill.get("ok"):
         raise RuntimeError(drill)
     restored = root / "lexical-restored"
+    full(root)
     s4.verify_archive(settings.backup_dir / backup["archive"], s4.load_key(settings.backup_key), restored,
                       lambda: guard(root))
+    full(root)
     with MemoryV4(config=Config.lexical(data_dir=str(restored), write_mode="read_only")) as engine:
         report["rankings"]["after_restore"] = rankings(engine)
         report["restored_marker"] = engine.store.meta.get("retrieval_profile")
@@ -188,9 +224,11 @@ def main():
     if plan["format"] != PLAN_FORMAT or not (root / "copy-owner.json").is_file():
         raise ValueError("Owned private plan required")
     # Use the sealed guard as standalone tooling; never change the baseline package.
-    from qualification_guard import guard
+    from qualification_guard import guard as sealed_guard
 
-    guard(root)
+    # Same sealed check, rate-limited: the candidate calls it hundreds of thousands of times per cut.
+    guard = PacedGuard(sealed_guard)
+    guard.full(root)  # Before each worker.
     name = args.kind
 
     # No download in any worker: any IP request is a qualification failure.
@@ -242,7 +280,9 @@ def main():
         if build_identity()["commit"] != plan["source_commit"]:
             raise ValueError("Snapshot candidate build mismatch")
         # Cut through the candidate's backup API; the source is only read.
+        guard.full(root)  # Before the cut.
         logical = s4.snapshot(args.snapshot_source / s4.DB, root / "snapshot.sqlite3", lambda: guard(root))
+        guard.full(root)  # After the cut.
         (root / "snapshot.json").write_text(json.dumps(logical, indent=2) + "\n")
         return
     if name not in SEMANTIC_WORKERS:
@@ -297,6 +337,7 @@ def main():
         return value
 
     Embedder.encode = counted
+    guard.full(root)  # Before the engine start.
     started = time.monotonic()
     with MemoryV4(config=cfg) as engine:
         engine.ensure_retrieval()  # Same path as the installed --warm HTTP server.
