@@ -7,8 +7,7 @@ Connected assistants — Claude Code, Codex, Cursor, VS Code Copilot, Gemini CLI
 the same project state on your machine: dated decisions, open tasks and verifiable history.
 
 > **Status: ALPHA — macOS Apple Silicon only** (Linux/Windows planned, not qualified). Local clients on the same Mac;
-> remote/cloud agents are not qualified. Current release: **4.1.0** (in preparation, not published yet; latest
-> published release: 4.0.8).
+> remote/cloud agents are not qualified. Current release: **4.1.0**.
 > Limits and evaluation results: [see below](#limits-and-evaluations).
 
 ## Why
@@ -84,8 +83,7 @@ listed for manual removal (a Claude Desktop extension, Claude Code hooks, auxili
 environment).
 
 Measured on an isolated clean **4.0.6** install on macOS Apple Silicon (12 October 2026): **77 s** SQLite / **80 s**
-JSONL end to end (pip, model, service, demo). These are not 4.1.0 measurements, nor a user productivity study; the
-install time of the lexical profile has not been measured yet.
+JSONL end to end (pip, model, service, demo). These are not 4.1.0 measurements, nor a user productivity study.
 
 ### Add another assistant later
 
@@ -146,6 +144,8 @@ data). Interrupted writes are reported as
   not user studies. P-B uses a hash encoder and simulated relay; cursor MACs are excluded, replay defaults use the
   candidate as oracle, query-forget ranking is not independently scored, and authenticity is conditional on the local
   attested sources/runtime. At the 4.0.7 release, RC evidence transfer and installed/copy qualification of these gates were still pending.
+- 4.1.0 qualification scope: macOS Apple Silicon (arm64) with Python 3.11 only; the P-A and P-B evaluations were not
+  re-run for 4.1.0 ([release notes](#release-notes)).
 - No productivity gain is claimed: cross-assistant handoff has not been measured on users yet.
 - Local storage does not stop a cloud assistant from receiving the snippets it reads.
 - 4.0.4 / 4.0.5 fresh installs can resolve an incompatible MCP 2.x: use ≥ 4.0.6 (fully pinned dependencies).
@@ -157,15 +157,17 @@ policy, dated append-only history, compare-and-set on tasks and core blocks.
 
 ## Release notes
 
-**4.1.0** (in preparation, not published): explicit install profile — `lexical` (no embedding model) or `semantic` —
+**4.1.0**: explicit install profile — `lexical` (no embedding model) or `semantic` —
 with per-profile qualified constraints; `quickstart --profile`, loaded-SQLite check before any write, no silent
 overwrite of an existing client entry, structured diagnostics without log excerpts, `quickstart --undo --with-service`
 and `uninstall` (never deletes data). Lexical vs semantic on frozen BEAM 100K (retrospective): Recall@10 gap of −1.675
 percentage points, 95% CI [−3.747, +0.404] percentage points; the pre-registered joint parity threshold is not met,
 so semantic stays the recommended profile and lexical the light one ([details](#limits-and-evaluations)). No measured
-user-productivity gain.
+user-productivity gain. Qualification limits: 4.1.0 is qualified on macOS Apple Silicon (arm64) with Python 3.11 only;
+the P-B integrity evaluation and the P-A brief evaluation were not re-run for this release (explicitly waived by the
+maintainer; their earlier results are not claimed for 4.1.0), and P-B was not measured on the lexical profile.
 
-**4.0.9** (candidate, not published): the operator health report probes `/health` and `/ready` with a 15 s timeout (the `/ready` integrity audit takes several seconds on a large store) and reports explicit client corrections as information instead of pending reviews; more than 10 replaced targets in 24 h raise an anomaly. Publication status checked on 22 November 2026: 4.0.8 is the latest published release; 4.0.9 remains unpublished. No engine, brief, schema or encoder change. No measured user-productivity gain.
+**4.0.9** (never published separately; its changes ship in 4.1.0): the operator health report probes `/health` and `/ready` with a 15 s timeout (the `/ready` integrity audit takes several seconds on a large store) and reports explicit client corrections as information instead of pending reviews; more than 10 replaced targets in 24 h raise an anomaly. No engine, brief, schema or encoder change. No measured user-productivity gain.
 
 **4.0.8** (published on PyPI on 31 October 2026): declarative mutation authors, PEP 440 doctor support and bounded readiness audits. No schema or encoder change. No measured user-productivity gain.
 
