@@ -1452,15 +1452,15 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
                      replace_existing=replace_existing)
     if effective == 'lexical' and backend != 'sqlite':
         block('setup_profile_backend_conflict', 'setup_profile_backend_conflict: the lexical profile requires the sqlite backend')
+    detected = cell.detect()
     sqlite_report = sqlite_runtime.inspect()
+    # 4.1.1 §3: only the value read back counts; route (a) or (i), else an actionable refusal.
+    sqlite_attestation = sqlite_runtime.attestation(sqlite_report, python=python, cell_id=detected.get('cell_id'))
     if backend == 'sqlite' and not sqlite_report.get('ok'):
-        block(sqlite_report.get('code') or 'sqlite_runtime_unavailable',
-              f"{sqlite_report.get('code')}: SQLite loaded by this interpreter is unfit "
-              f"(version {sqlite_report.get('version')}, minimum {sqlite_report.get('minimum')}); nothing written")
+        block(sqlite_report.get('code') or 'sqlite_runtime_unavailable', sqlite_attestation['message'])
     identity = readiness.build_identity()
     runtime = qualified_runtime.inspect_current(profile=effective, extras=('ops', 'brief'))
     # 4.1.1: one of the retained cells, with its embedded lock for this profile; semantic stays on its cell.
-    detected = cell.detect()
     cell_acceptance = cell.acceptance(detected, profile=effective)
     if not cell_acceptance['ok']:
         block(cell_acceptance['code'], cell_acceptance['message'])
@@ -1473,7 +1473,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
               + ', '.join(sorted(runtime['mismatches']))
               + f'; install the exact qualified dependencies of the {effective} profile '
               + f'(pip install -c {constraints} "{requirement}=={__version__}"), then re-preview')
-    if not Path(python).is_file() or not os.access(python, os.X_OK) or any(s in python for s in ('/cache/uv/', 'pip-build-env', 'uvx')):
+    if not Path(python).is_file() or not os.access(python, os.X_OK) or sqlite_runtime.is_ephemeral(python):
         block('runtime_unqualified', 'absolute durable Python executable required (no uvx ephemeral runtime)')
     if importlib.util.find_spec('tiktoken') is None:
         block('runtime_unqualified', 'install memory-os-ai[ops,brief] before apply; no implicit dependency install')
@@ -1535,6 +1535,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         notices.append('Gemini CLI folder trust is a separate user choice; configuration does not prove a connection')
     return {**result, 'ok': not blockers, 'profile': effective, 'identity': identity, 'service': service,
             'blockers': blockers, 'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
+            'sqlite_attestation': sqlite_attestation,
             'disk_min_free_bytes': minimum, 'disk_required_free_bytes': required,
             'backend': backend, 'work_state': backend == 'sqlite', 'runtime_qualification': runtime,
             'cell': detected, 'cell_acceptance': cell_acceptance,
@@ -1543,9 +1544,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
 
 
 def _sqlite_triplet(value):
-    if not isinstance(value, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', value):
-        return None
-    return tuple(int(part) for part in value.split('.'))
+    return sqlite_runtime.triplet(value)
 
 
 def _ready(settings, identity, *, backend='sqlite', profile='semantic'):
@@ -1595,12 +1594,15 @@ def _ready(settings, identity, *, backend='sqlite', profile='semantic'):
             raise QuickstartError('Service profile or exact tokenizer differs', code=mismatch)
     if backend == 'sqlite':
         # The SERVER process attests the library it loaded; this interpreter's own check is not enough.
-        version = _sqlite_triplet(store.get('sqlite_version'))
-        if version is None:
+        served = sqlite_runtime.server_attestation(store.get('sqlite_version'))
+        if served['state'] == 'unattested':
             raise QuickstartError('The running server does not attest a readable SQLite version',
                                   code='sqlite_runtime_unattested')
-        if version < tuple(sqlite_runtime.MIN_VERSION):
-            raise QuickstartError('The running server loaded a SQLite older than the engine floor',
+        if not served['ok']:
+            raise QuickstartError('The running server loaded a SQLite older than the engine floor (version '
+                                  f"{served['version']}, minimum {sqlite_runtime.MIN_VERSION[0]}."
+                                  f"{sqlite_runtime.MIN_VERSION[1]}.{sqlite_runtime.MIN_VERSION[2]}); start it from "
+                                  'a durable interpreter whose loaded SQLite meets the minimum',
                                   code='sqlite_runtime_too_old')
     return response
 
@@ -1816,6 +1818,11 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
         if not ready:
             raise QuickstartError('Readiness timeout; preserve logs/plist; no client config written',
                                   code='service_startup_failed')
+        if plan['backend'] == 'sqlite' and 'sqlite_attestation' in plan:
+            # Second read-back (§3): the value published by the server process itself, next to the first.
+            store = ((ready.get('capabilities') or {}).get('store') or {}) if isinstance(ready, dict) else {}
+            progress['sqlite_attestation'] = {**plan['sqlite_attestation'], 'server':
+                                              sqlite_runtime.server_attestation(store.get('sqlite_version'))}
         leave('service_ready', start)
         failure_code = 'client_write_failed'
         started = enter('clients')
