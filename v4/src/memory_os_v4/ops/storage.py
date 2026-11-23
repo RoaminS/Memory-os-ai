@@ -10,6 +10,26 @@ import subprocess
 import sys
 
 FLOOR = 5_000_000_000
+SWAP_LIMIT_BYTES = 8_500_000_000  # one threshold for every swap guard (provision.guard, machine_guard)
+PROC_MEMINFO = Path("/proc/meminfo")
+
+
+def sys_platform():
+    return sys.platform
+
+
+def statvfs_free_bytes(path, *, statvfs=None):
+    """Bytes available to this user on the volume of ``path`` (Linux guards)."""
+    usage = (statvfs or os.statvfs)(path)
+    return usage.f_bavail * usage.f_frsize
+
+
+def linux_swap_used_bytes():
+    """Swap in use according to ``/proc/meminfo``; a value that cannot be attested is refused."""
+    rows = dict(re.findall(r"^(SwapTotal|SwapFree):\s+(\d+) kB$", PROC_MEMINFO.read_text(), re.M))
+    if len(rows) != 2 or int(rows["SwapFree"]) > int(rows["SwapTotal"]):
+        raise RuntimeError("Swap cannot be attested")
+    return (int(rows["SwapTotal"]) - int(rows["SwapFree"])) * 1024
 
 
 def nearest_existing(path):
@@ -83,7 +103,8 @@ def machine_guard(settings, *, require_nice=True):
         )
     if require_nice and os.getpriority(os.PRIO_PROCESS, 0) < 15:
         raise RuntimeError("SQLite S4 requires nice 15, concurrency 1")
-    if sys.platform == "darwin":
+    platform_name = sys_platform()
+    if platform_name == "darwin":
         proc = subprocess.run(
             ["/usr/sbin/sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, timeout=3
         )
@@ -91,15 +112,10 @@ def machine_guard(settings, *, require_nice=True):
         if proc.returncode or not match:
             raise RuntimeError("Swap cannot be attested; operation refused")
         swap = float(match[1]) * {"K": 1024, "M": 1024**2, "G": 1024**3}[match[2]]
-    elif sys.platform.startswith("linux"):
-        rows = dict(
-            re.findall(r"^(SwapTotal|SwapFree):\s+(\d+) kB$", Path("/proc/meminfo").read_text(), re.M)
-        )
-        if len(rows) != 2:
-            raise RuntimeError("Swap cannot be attested")
-        swap = (int(rows["SwapTotal"]) - int(rows["SwapFree"])) * 1024
+    elif platform_name.startswith("linux"):
+        swap = linux_swap_used_bytes()
     else:
         raise RuntimeError("Unqualified swap measurement platform")
-    if swap > 8_500_000_000:
+    if swap > SWAP_LIMIT_BYTES:
         raise RuntimeError("Swap exceeds 8.5 GB; operation refused")
     return {**space, "swap_bytes": int(swap)}

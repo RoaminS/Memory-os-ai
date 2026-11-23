@@ -27,10 +27,10 @@ import tempfile
 import time
 import re
 import uuid
-import platform
+import platform  # noqa: F401  (read through ops/cell.py; install fixtures patch qs.platform.machine)
 from pathlib import Path
 
-from . import sqlite_runtime
+from . import cell, sqlite_runtime
 from .clients import CLIENTS, SERVER, Client, classify, read_entry, relay_command, strict_loads
 
 DEFAULT_CLIENTS = ("claude-code", "codex")
@@ -1459,10 +1459,11 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
               f"(version {sqlite_report.get('version')}, minimum {sqlite_report.get('minimum')}); nothing written")
     identity = readiness.build_identity()
     runtime = qualified_runtime.inspect_current(profile=effective, extras=('ops', 'brief'))
-    if sys.version_info[:2] != (3, 11):
-        block('runtime_unqualified', 'runtime_unqualified: macOS Python 3.11 closure required for quickstart')
-    if sys.platform != 'darwin' or platform.machine().lower() not in {'arm64', 'aarch64'}:
-        block('runtime_unqualified', 'macOS Apple Silicon launchd onboarding only; other platforms remain manual')
+    # 4.1.1: one of the retained cells, with its embedded lock for this profile; semantic stays on its cell.
+    detected = cell.detect()
+    cell_acceptance = cell.acceptance(detected, profile=effective)
+    if not cell_acceptance['ok']:
+        block(cell_acceptance['code'], cell_acceptance['message'])
     if identity.get('identity_source') != 'embedded_descriptor' or not identity.get('commit') or identity.get('source_dirty'):
         block('build_unqualified', 'build_unqualified: install a qualified wheel; source/env identity is insufficient')
     if not runtime['ok']:
@@ -1536,6 +1537,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
             'blockers': blockers, 'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
             'disk_min_free_bytes': minimum, 'disk_required_free_bytes': required,
             'backend': backend, 'work_state': backend == 'sqlite', 'runtime_qualification': runtime,
+            'cell': detected, 'cell_acceptance': cell_acceptance,
             'client_env': client_env, 'client_cli': client_cli, 'replace_existing': sorted(replace_existing),
             'writes': 'none (preview)', 'stage': 'preview'}
 

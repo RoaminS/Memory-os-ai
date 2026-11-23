@@ -19,6 +19,8 @@ import urllib.parse
 import urllib.request
 import uuid
 
+from . import cell, storage
+
 CATALOG = Path(__file__).resolve().parents[1] / "resources/provision_v1.json"
 CAP = 300_000_000
 
@@ -123,26 +125,49 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
 
 
 def guard(path: Path) -> None:
+    """Disk and swap guard. macOS: unchanged. Linux: retained cell with its lock, statvfs, /proc/meminfo."""
     minimum = min_free_bytes()
     existing = path
     while not existing.exists():
         existing = existing.parent
-    free = shutil.disk_usage(existing).free
+    platform_name = sys_platform()
+    linux = platform_name.startswith("linux")
+    free = storage.statvfs_free_bytes(existing) if linux else shutil.disk_usage(existing).free
     if free < minimum:
         raise ProvisionError(f"Disk guard: {free} bytes free < effective minimum {minimum} bytes")
-    if sys_platform() == "darwin":
+    if platform_name == "darwin":
         try:
             result = subprocess.run(["/usr/sbin/sysctl", "vm.swapusage"], text=True, capture_output=True, timeout=3)
             match = re.search(r"used\s*=\s*([\d.]+)([KMGT])", result.stdout)
             if result.returncode or not match:
                 raise ProvisionError("Swap measurement unavailable")
             used = float(match[1]) * 1024 ** ("KMGT".index(match[2]) + 1)
-            if used > 8_500_000_000:
+            if used > storage.SWAP_LIMIT_BYTES:
                 raise ProvisionError("Swap guard: more than 8.5 GB")
         except (OSError, subprocess.SubprocessError) as exc:
             raise ProvisionError("Swap measurement unavailable") from exc
+    elif linux:
+        resource_gate(("cl100k",))
+        try:
+            used = storage.linux_swap_used_bytes()
+        except (OSError, RuntimeError) as exc:
+            raise ProvisionError("Swap measurement unavailable") from exc
+        if used > storage.SWAP_LIMIT_BYTES:
+            raise ProvisionError("Swap guard: more than 8.5 GB")
     else:
-        raise ProvisionError("Resource acquisition currently qualified only for macOS")
+        raise ProvisionError("Resource acquisition qualified only for macOS and the retained Linux cell")
+
+
+def resource_gate(resources) -> None:
+    """Outside macOS (unchanged), resources are acquired only on a retained cell that embeds its lock.
+
+    Granite belongs to the semantic profile, which stays limited to its own cell.
+    """
+    if sys_platform() == "darwin":
+        return
+    verdict = cell.acceptance(cell.detect(), profile="semantic" if "granite" in resources else "lexical")
+    if not verdict["ok"]:
+        raise ProvisionError(verdict["message"])
 
 
 def sys_platform():
@@ -244,6 +269,7 @@ def apply(preview: dict, *, download_approved: bool = False) -> dict:
     if expected["download_bytes"] and not download_approved:
         raise ProvisionError("Missing resources: explicit --download-approved consent required")
     cache = Path(expected["cache_dir"])
+    resource_gate(expected["resources"])
     guard(cache)
     for item in expected["files"]:
         guard(Path(item["target"]).parent)

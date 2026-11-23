@@ -15,6 +15,34 @@ PROFILE = Path(__file__).resolve().parents[1] / 'resources/qualified_runtime_v1.
 CATALOGS = {'semantic': PROFILE, 'lexical': PROFILE.parent / 'qualified_runtime_lexical_v1.json'}
 CONSTRAINTS = {'semantic': PROFILE.parent / 'qualified_runtime_constraints_v1.txt',
                'lexical': PROFILE.parent / 'qualified_runtime_constraints_lexical_v1.txt'}
+# Embedded locks per (profile, platform cell): catalog and constraints. A retained cell without an
+# entry here, or whose files are absent, is refused (ops/cell.py); the other lexical locks come with L5.
+CELL_LOCKS = {(profile, 'macos-arm64-py311'): (CATALOGS[profile], CONSTRAINTS[profile])
+              for profile in ('semantic', 'lexical')}
+
+
+def cell_lock(cell_id: str, *, profile: str = 'semantic') -> dict | None:
+    """The embedded lock of ``cell_id`` for ``profile``, or None. Read-only.
+
+    A lock counts only if both files exist and the catalog is valid and names this very cell in
+    its ``profile_id``: the lock of a neighbouring cell is never inherited.
+    """
+    # TODO(L5): this only proves that the constraints file EXISTS, not that it agrees with the
+    # catalog (check_constraints), and inspect_current()/catalog() still read the global catalog of
+    # the profile. Adding CELL_LOCKS entries is not enough: L5 must select the lock of the detected
+    # cell and attest that very lock (catalog + constraints + installed versions) end to end.
+    paths = CELL_LOCKS.get((profile, cell_id))
+    if paths is None or not all(path.is_file() for path in paths):
+        return None
+    try:
+        record = json.loads(paths[0].read_text())
+        profile_id = record['profile_id']
+        valid = record['schema_version'] == 1 and bool(record['versions']) and f'-{cell_id}-' in profile_id
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not valid:
+        return None
+    return {'catalog': str(paths[0]), 'constraints': str(paths[1]), 'profile_id': profile_id}
 
 
 def catalog(*, profile: str = 'semantic') -> dict:
