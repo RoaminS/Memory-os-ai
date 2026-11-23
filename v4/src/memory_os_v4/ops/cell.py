@@ -174,6 +174,21 @@ def detect(*, sys_platform=None, machine=None, python_version=None, implementati
             "writes": "none", "network": "none"}
 
 
+def linux_platform_retained(report: dict) -> bool:
+    """The OS side of a retained Linux cell (distribution, version, arm64, not WSL), whatever the Python minor.
+
+    Used to choose the service manager (4.1.1 L4): ``systemd --user`` is driven only where a Linux
+    cell is retained. Compared with the same fact table as ``detect``; no second constant.
+    """
+    if report.get("os") != "linux" or report.get("arch") != "arm64" or report.get("wsl"):
+        return False
+    distribution = report.get("distribution") or {}
+    if distribution.get("conflicts"):
+        return False
+    return any(facts["os"] == "linux" and facts.get("distribution_id") == distribution.get("id")
+               and facts.get("version_id") == distribution.get("version_id") for facts in _CELL_FACTS.values())
+
+
 def acceptance(cell: dict, *, profile: str, lock=None) -> dict:
     """Whether ``profile`` may be installed on ``cell``: retained, profile allowed, lock embedded.
 

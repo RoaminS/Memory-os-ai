@@ -134,7 +134,7 @@ def install_context(home, monkeypatch):
     monkeypatch.setattr(qs.sys, 'platform', 'darwin')
     monkeypatch.setattr(qs.platform, 'machine', lambda: 'arm64')
     monkeypatch.setattr(qs.shutil, 'disk_usage', lambda *a: SimpleNamespace(free=20_000_000_000))
-    monkeypatch.setattr(qs, '_port_state', lambda p: 'free')
+    monkeypatch.setattr(qs, '_port_state', lambda p, **kw: 'free')
     monkeypatch.setattr(readiness, 'build_identity', lambda: dict(identity))
     monkeypatch.setattr(provision, 'plan', lambda **kw: dict(resource))
     monkeypatch.setattr(provision, 'apply', lambda *a, **kw: dict(resource))
@@ -151,11 +151,15 @@ def install_context(home, monkeypatch):
             service = qs._service_plan(settings, home, str(python), resource['env'])
             text = f"program = {python}\narguments = {{\n" + '\n'.join(service['argv']) + '\n}\n'
             text += '\n'.join(f'{k} => {v}' for k, v in service['env'].items())
+            text += '\nstate = running\npid = 4242\n'  # the process the server answers with (D6 bis)
             return SimpleNamespace(returncode=0, stdout=text, stderr='')
         if argv[:2] == ['launchctl', 'bootstrap']:
             loaded[0] = True
+        if argv[:2] == ['launchctl', 'bootout']:
+            loaded[0] = False  # 4.1.1 L4: a stop is confirmed by observing the job absent afterwards
         return SimpleNamespace(returncode=0, stdout='', stderr='')
-    ready = {'version': __version__, 'capabilities': {'store': {'instance_id': 'synthetic'}}}
+    ready = {'version': __version__, 'capabilities': {'store': {'instance_id': 'synthetic'}},
+             'ok': True, 'server': 'memory-os-v4', 'pid': 4242}
     monkeypatch.setattr(qs, '_ready', lambda *a, **kw: ready)
     return SimpleNamespace(home=home, python=str(python), settings=settings, resource=resource,
                            identity=identity, run=run, calls=calls, loaded=loaded, ready=ready)
@@ -293,6 +297,7 @@ def test_crashing_new_service_fails_fast_with_masked_tail_and_attested_stop(
             if ownership_changed:
                 monkeypatch.setattr(qs, '_job_state', lambda *a, **k: 'foreign-or-unattested')
         if argv[:2] == ['launchctl', 'print'] and c.loaded[0]:
+            result.stdout = result.stdout.replace('\nstate = running\npid = 4242\n', '')  # this job crashes
             result.stdout += f'\nruns = {runs}\nlast exit code = 1\nstate = {process_state}\n'
             if pid:
                 result.stdout += f'pid = {pid}\n'
@@ -323,7 +328,7 @@ def test_preflight_refuses_before_any_write(install_context, monkeypatch, case):
     elif case == 'json-invalid':
         (c.home / '.cursor/mcp.json').write_text('{invalid')
     elif case == 'foreign-port':
-        monkeypatch.setattr(qs, '_port_state', lambda p: 'listening')
+        monkeypatch.setattr(qs, '_port_state', lambda p, **kw: 'listening')
     elif case == 'foreign-job':
         monkeypatch.setattr(qs, '_job_state', lambda *a, **k: 'foreign-or-unattested')
     elif case == 'foreign-plist':

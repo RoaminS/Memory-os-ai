@@ -26,7 +26,7 @@ ENV = {"MEMORY_V4_URL": "http://127.0.0.1:8765/mcp/", "MEMORY_V4_TOKEN_FILE": "/
 @pytest.fixture(autouse=True)
 def no_socket(monkeypatch):
     """The client preview also reports the service port: never probe a real one from these tests."""
-    monkeypatch.setattr(qs, "_port_state", lambda port: "free")
+    monkeypatch.setattr(qs, "_port_state", lambda port, **kw: "free")
 
 
 @pytest.fixture

@@ -283,13 +283,41 @@ def _identity(settings) -> str:
     return qs.installation_identity({"MEMORY_V4_URL": settings.url, "MEMORY_V4_TOKEN_FILE": str(settings.token_file)})
 
 
-def _service(settings, home: Path, python: str, *, run) -> dict:
-    """The service definition as this installation would write it, and whether the plist on disk is it."""
-    from . import provision
+def _service(settings, home: Path, python: str, *, run, observation: dict | None = None) -> dict:
+    """The service definition as this installation would write it, and whether the plist on disk is it.
+
+    ``loaded_state`` starts ``unknown`` and only an answer of the service manager changes it: it
+    is ``absent`` ONLY when the manager positively attests the absence of the job. No file on
+    disk, a definition vanishing while it is read, or no manager at all, never says ``absent``.
+    ``observation``, when given, receives the full answer of the manager about the job attested
+    against an OWNED definition (the same single command ``loaded_state`` comes from).
+    """
+    from . import provision, service as managers
     label = settings.service_label or "local.memory-os-v4"
-    path = home / "Library/LaunchAgents" / (label + ".plist")
-    facts = {"label": label, "path": str(path), "state": "absent", "sha256": None, "loaded_state": "absent"}
-    if not path.exists() and not path.is_symlink():
+    manager = managers.host_manager()
+    if manager is None:
+        # No usable service manager: nothing can be observed, so nothing is known about a job. The
+        # plan refuses (``plan`` below); it never reports an absent service.
+        return {"label": label, "path": None, "state": "absent", "sha256": None, "loaded_state": "unknown",
+                "manager_available": False}
+    path = manager.definition_path(label, home)
+    facts = {"label": label, "path": str(path), "state": "absent", "sha256": None, "loaded_state": "unknown",
+             **({"manager": manager.kind} if manager.kind != "launchd" else {})}
+
+    def unmatched():
+        # The absence of the FILE says nothing about the JOB: the manager is always asked (strict
+        # observation, against a plan nothing can match). ``absent`` only if the manager attests it;
+        # a job loaded under this label without a definition is ``foreign-or-unattested``, an
+        # observation that cannot be read is ``unknown``.
+        return manager.observe({"label": label, "path": str(path), "argv": [""], "env": {}}, run=run)["state"]
+    kind = qs._definition_kind(path)  # ``lstat`` alone: a link is never followed
+    if kind == "unknown":
+        # The path itself cannot be read (permission, I/O): that is not a missing definition. Nothing
+        # is concluded about the file nor about the job; the plan refuses.
+        facts["state"] = "unreadable"
+        return facts
+    if kind == "missing":
+        facts["loaded_state"] = unmatched()
         return facts
     profile = qs._installed_profile(settings, home)
     try:
@@ -307,13 +335,24 @@ def _service(settings, home: Path, python: str, *, run) -> dict:
             recorded = document.get("service") if isinstance(document.get("service"), dict) else {}
             step = document.get("steps", {}).get("service", {})
             if (qs.journal_trusted(directory) and step.get("created") is True and recorded.get("path") == str(path)
-                    and step.get("plist_sha256") == qs._sha(path) and isinstance(recorded.get("argv"), list)
-                    and isinstance(recorded.get("env"), dict)):
-                facts.update(state="owned", sha256=step["plist_sha256"], argv=recorded["argv"], env=recorded["env"],
+                    and recorded.get("manager", "launchd") == manager.kind
+                    # ``_plist_is``: the plain single-link file with the journaled digest, read without
+                    # following a link. The same bytes behind a link are not the definition we wrote.
+                    and qs._definition_sha(step) is not None and qs._plist_is(path, qs._definition_sha(step))
+                    and isinstance(recorded.get("argv"), list) and isinstance(recorded.get("env"), dict)):
+                facts.update(state="owned", sha256=qs._definition_sha(step), argv=recorded["argv"], env=recorded["env"],
                              resources=document.get("paths", {}).get("resources", {}))
                 break
     if facts["state"] == "owned":
-        facts["loaded_state"] = qs._job_state(facts, run=run)
+        if observation is None:
+            facts["loaded_state"] = qs._job_state(facts, run=run)
+        else:
+            observation.update(qs._job_observation(facts, run=run))
+            facts["loaded_state"] = observation["state"]
+    elif facts["state"] == "absent":
+        # The definition vanished between the first look and its reading: same rule as above, the
+        # manager is asked; the state of the job is never deduced from the missing file.
+        facts["loaded_state"] = unmatched()
     return facts
 
 
@@ -358,6 +397,9 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
             explicit = _destination((entry.get("env") or {}).get("MEMORY_V4_URL")) if isinstance(entry.get("env"), dict) else None
             if qs.proof_of_ownership(journal_root, client.key, entry, identity):
                 item.update(action="remove", ownership="journal")
+                if qs.created_file_record(journal_root, client.key, item["entry_sha256"], identity, path) is not None:
+                    # 4.1.1, option (b): the install created this file and nothing else was written to it.
+                    item["file_action"] = "remove-created-by-install"
             elif item["current_class"] == "relay" and (explicit is None or _verdict(explicit, port) != "none"):
                 # Relay-looking and possibly ours, but nothing proves we wrote it (or the proof was revoked).
                 consent = client.key in remove_existing
@@ -373,7 +415,12 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
     removing = {item["client"] for item in items if item["action"] == "remove"}
     remaining = remaining_dependencies(home, port, removed=removing)
     if service["state"] == "absent":
-        service["action"] = "absent"
+        # "absent" needs BOTH manager attestation AND a free port; otherwise the plan is refused below.
+        if service["loaded_state"] == "absent":
+            service["port_state"] = qs._port_state(port)
+            service["action"] = "absent" if service["port_state"] == "free" else "absence-unconfirmed"
+        else:
+            service["action"] = "none-job-not-attested-absent"
     elif remaining:
         service["action"] = "keep-clients-remaining"
     else:
@@ -382,7 +429,23 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
     # A definition that is not ours refuses everything. A loaded job that cannot be attested refuses
     # the plan only when the plan would stop it; a kept service is not touched (and a later stop
     # re-attests the job anyway, §6).
-    if service["state"] not in {"absent", "owned"} or (
+    if service.get("manager_available") is False:
+        from . import cell, service as managers
+        block("service_manager_unavailable", managers.unavailable(cell.detect()) + "; the state of a service "
+              "cannot be observed here, so it is unknown, never absent; nothing changed. What to do: (1) run "
+              "`memory-os-admin uninstall` again from a login session of this user where the service manager "
+              "answers (macOS: a user session with launchctl; Linux: console or ssh, `systemctl --user status` "
+              "must answer); or (2) remove the `memory-os-ai` entry by hand from each client file listed under "
+              "`clients[].path` of this plan, and stop the service yourself if one runs")
+    elif service["state"] == "absent" and service["loaded_state"] != "absent":
+        block("uninstall_job_without_definition", "uninstall_job_without_definition: job still loaded or not "
+              "attested while its definition is missing; nothing changed (stop that job yourself, or check the "
+              "service manager, then preview again)")
+    elif service["state"] == "absent" and service.get("port_state") != "free":
+        block("service_stop_unconfirmed", "service_stop_unconfirmed: service definition and job are absent, "
+              f"but port {port} is not attested free ({service.get('port_state')}); nothing changed "
+              "(find what holds the port, or check why it cannot be probed, then preview again)")
+    elif service["state"] not in {"absent", "owned"} or (
             service["action"] == "stop" and service["loaded_state"] in {"unknown", "foreign-or-unattested"}):
         block("uninstall_service_foreign", "uninstall_service_foreign: the service definition or the loaded job is "
               "not the one this installation owns; nothing is stopped or removed")
@@ -398,7 +461,9 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
             "python": python, "selection": None if selection is None else list(selection),
             "remove_existing": sorted(remove_existing), "selective": selection is not None,
             "clients": items, "service": service, "blockers": blockers, "blocker_codes": blocker_codes,
-            "nothing_to_do": not removing and service["state"] == "absent",
+            "nothing_to_do": (not removing and service["state"] == "absent"
+                              and service["loaded_state"] == "absent"
+                              and service.get("port_state") == "free"),
             "retained": retained, "data_deleted": False, "complete": False,
             "scope": _scope(items, service), "manual_removal_required": _manual_removal(),
             "next_steps": _next_steps(remaining)}
@@ -442,8 +507,9 @@ def _changed(plan_document: dict, current: dict) -> bool:
         service = document["service"]
         # The announced fate of the service is part of the plan: a service shown as kept is never
         # stopped because a client outside the selection vanished after the preview.
-        return (service["state"], service["sha256"], service["loaded_state"], service.get("argv"), service["path"],
-                service["action"], service["remaining_clients"], service["remaining_dependencies"])
+        return (service["state"], service["sha256"], service["loaded_state"], service.get("port_state"),
+                service.get("argv"), service["path"], service["action"],
+                service["remaining_clients"], service["remaining_dependencies"])
     return (not current["ok"] or client_view(plan_document) != client_view(current)
             or service_view(plan_document) != service_view(current))
 
@@ -473,10 +539,16 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
                              code="uninstall_changed_since_preview")
     result = {"version": 1, "ok": True, "partial": False, "selective": bool(preview.get("selective")),
               "stage": "apply", "stamp": None, "journal": None, "clients": [], "nothing_to_do": preview["nothing_to_do"],
-              "service": {"outcome": "absent", "remaining_clients": [], "remaining_dependencies": {}},
+              # Write-ahead value: nothing is said about the service before it was observed by this run.
+              "service": {"outcome": "pending", "remaining_clients": [], "remaining_dependencies": {}},
               "retained": preview["retained"], "data_deleted": False, "complete": False, "scope": preview["scope"],
               "manual_removal_required": preview["manual_removal_required"], "next_steps": []}
     if preview["nothing_to_do"]:
+        if (current["service"].get("state") != "absent" or current["service"].get("loaded_state") != "absent"
+                or current["service"].get("port_state") != "free"):
+            raise UninstallError("Service absence or free port not confirmed; nothing reported as absent",
+                                 code="service_stop_unconfirmed")
+        result["service"].update(outcome="absent", port="free")  # observed by the revalidation just above
         result["clients"] = [{"client": item["client"], "status": _kept_status(item["action"])} for item in preview["clients"]]
         return result
     journal_dir = qs.new_journal(home / JOURNAL_SUBDIR)
@@ -523,6 +595,9 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
             done["status"] = "refused-removal-manual"
             record()
             continue
+        # Option (b): the record attesting a file WE created is read before its proof is revoked.
+        created = (qs.created_file_record(journal_root, client.key, digest, _identity(settings), path)
+                   if item["ownership"] == "journal" and item.get("file_action") else None)
         # Revocation first, removal second. Revocations already written are never undone.
         revoked = []
         try:
@@ -535,9 +610,14 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
         done["status"] = "failed-entry-kept-unproven"  # write-ahead: true until the removal is verified
         record()
         try:
-            qs.remove_client_entry(client, home, run=run, toml_appended=appended, expected_sha256=digest)
+            gone = (qs.remove_created_file(created, path, home, journal_dir, f"{client.key}.created-by-install")
+                    if created is not None else None)
+            if gone is not None:
+                done.update(gone)  # the whole file left the client's directory (moved into this journal)
+            else:
+                qs.remove_client_entry(client, home, run=run, toml_appended=appended, expected_sha256=digest)
             state, entry = read_entry(client, home)
-            if state == "ok" and entry is None:
+            if (state == "ok" and entry is None) or (gone is not None and not os.path.lexists(path)):
                 done["status"] = "removed"
         except qs.EntryChanged:
             # Changed DURING the revocation: no longer the entry the plan showed; it is left alone.
@@ -551,13 +631,54 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
     service, outcome = preview["service"], result["service"]
     remaining = remaining_dependencies(home, port)
     outcome.update(remaining_clients=sorted(remaining), remaining_dependencies=dict(sorted(remaining.items())))
+    def confirm_absence():
+        """No definition at plan time: the service is said ``absent`` only on a FRESH observation.
+
+        The manager AND the port are read now, after the client removals (whether they all
+        succeeded or not). Returns the refusal code, or None when both attest the absence.
+        """
+        recheck = _service(settings, home, preview["python"], run=run)
+        port_state = qs._port_state(port)
+        if (recheck["state"] == "absent" and recheck.get("path")
+                and qs._definition_kind(Path(recheck["path"])) != "missing"):
+            # The path is read again AFTER the probes: a definition that appeared meanwhile is not "absent".
+            recheck = {**recheck, "state": "appeared"}
+        # Declared TOCTOU limit (contract rev. 5, D6 bis): nothing excludes a definition or a job
+        # appearing after these last readings.
+        if recheck["state"] == "absent" and recheck["loaded_state"] == "absent" and port_state == "free":
+            outcome.update(outcome="absent", port="free")
+            return None
+        if recheck["state"] == "absent" and recheck["loaded_state"] == "absent":
+            outcome.update(outcome="absence-unconfirmed", observation="absent", port=port_state)
+            result["next_steps"].append(
+                f"the job is absent and no definition exists, but port {port} is not attested free ({port_state}): "
+                "find what holds the port, then uninstall again")
+            return "service_stop_unconfirmed"
+        if recheck["state"] == "absent":
+            # The job is loaded, foreign, or its observation failed or timed out: never "absent".
+            outcome.update(outcome="absence-unconfirmed" if recheck["loaded_state"] == "unknown"
+                           else "refused-job-without-definition",
+                           observation="indeterminate" if recheck["loaded_state"] == "unknown"
+                           else recheck["loaded_state"], port=port_state)
+        else:
+            outcome.update(outcome="refused-service-changed", observation=recheck["loaded_state"], port=port_state)
+        result["next_steps"].append(
+            "the service state changed while removing clients (definition or job is no longer attested absent): "
+            "inspect the service manager, then preview uninstall again")
+        return "service_changed_since_install"
     if incomplete:
-        outcome["outcome"] = "kept-clients-incomplete" if service["state"] == "owned" else "absent"
         result.update(ok=False, partial=True, code="uninstall_partial")
         result["next_steps"].append("not removed: " + ", ".join(incomplete) + "; preview again (uninstall), then "
                                     "apply again; the service is kept meanwhile")
+        if service["state"] == "owned":
+            outcome["outcome"] = "kept-clients-incomplete"
+        else:
+            # Review round 10: an incomplete client removal never dispenses with the final observation.
+            confirm_absence()
     elif service["state"] != "owned":
-        outcome["outcome"] = "absent"
+        code = confirm_absence()
+        if code:
+            result.update(ok=False, partial=True, code=code)
     elif remaining:
         outcome["outcome"] = "kept-clients-remaining"
         result["next_steps"] += _next_steps(remaining)
@@ -568,13 +689,27 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
                                     "to plan the stop of the service")
     else:
         stopped = qs.stop_owned_service(service, service["sha256"], journal_dir, run=run,
-                                        stop_timeout=stop_timeout, sleep=sleep)
+                                        stop_timeout=stop_timeout, sleep=sleep, port=port)
         code = stopped.pop("code", None)
         outcome.update(stopped)
         if code:
             result.update(ok=False, partial=True, code=code)
-            result["next_steps"].append(f"the stop is not confirmed and the plist is kept: run `launchctl bootout "
-                                        f"gui/{os.getuid()}/{service['label']}` by hand, then uninstall again")
+            from . import service as managers
+            manager = managers.manager_of(service) or managers.Launchd()
+            by_hand = f"`{manager.manual_stop(service['label'])}`"
+            result["next_steps"].append({
+                "refused-job-without-definition":
+                    f"the {manager.noun} is missing while its job is loaded or cannot be read; nothing stopped: "
+                    f"check the service manager, stop the job with {by_hand} if it is yours, then uninstall again",
+                "absence-unconfirmed":
+                    f"the job is absent but its port is not attested free (listening, or unreadable); the "
+                    f"{manager.noun} is kept: find what holds the port, then uninstall again",
+                "refused-definition-not-a-file":
+                    f"a link, a directory or an unreadable object stands at the path of the {manager.noun}; nothing "
+                    "stopped, nothing moved: inspect that path, then uninstall again",
+            }.get(outcome.get("outcome"),
+                  f"the stop is not confirmed and the {manager.noun} is kept: run {by_hand} by hand, then uninstall "
+                  "again"))
     result["stage"] = "done"
     record()
     return result
@@ -591,14 +726,17 @@ def settings_from_service(settings, home: Path):
     A fresh shell rarely carries the variables the install chose; the plist does. Only path-like
     text values are taken, and ownership is still decided by ``plan``.
     """
-    import plistlib
     from dataclasses import replace
+    from . import service as managers
     label = settings.service_label or "local.memory-os-v4"
-    path = home / "Library/LaunchAgents" / (label + ".plist")
+    manager = managers.host_manager()
+    if manager is None:
+        return settings
+    path = manager.definition_path(label, home)
     try:
         if path.is_symlink() or not path.is_file():
             return settings
-        env = plistlib.loads(path.read_bytes()).get("EnvironmentVariables", {})
+        env = manager.read_environment(path)
         if not isinstance(env, dict):
             return settings
         changes = {}
@@ -609,5 +747,5 @@ def settings_from_service(settings, home: Path):
             if isinstance(env.get(name), str) and os.path.isabs(env[name]):
                 changes[field] = Path(env[name])
         return replace(settings, service_label=label, **changes)
-    except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
+    except (OSError, ValueError, AttributeError):
         return settings

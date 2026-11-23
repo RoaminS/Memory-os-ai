@@ -85,7 +85,7 @@ def test_every_preflight_refusal_has_a_stable_code_and_writes_nothing(c, monkeyp
     elif case == "foreign-entry":
         set_entry(c.home, "cursor", EXISTING["other"])
     elif case == "port":
-        monkeypatch.setattr(qs, "_port_state", lambda port: "listening")
+        monkeypatch.setattr(qs, "_port_state", lambda port, **kw: "listening")
     elif case == "foreign-plist":
         path = c.home / PLIST
         path.parent.mkdir(parents=True)

@@ -41,22 +41,50 @@ def settings(tmp_path: Path) -> OpsSettings:
 
 
 def _no_service(monkeypatch, loaded: bool = False, bootout_rc: int = 0, stopped: bool = True,
-                writers: bool = False, port_open: bool = False):
+                writers: bool = False, port_open: bool = False, status_after: str | None = None):
     calls: list[tuple] = []
+    bootstrapped = [False]
 
     def fake(*args):
         calls.append(args)
         if args[0] == "print":
-            return 0 if loaded else 113
+            return 0 if (loaded or bootstrapped[0]) else 113
         if args[0] == "bootout":
             return bootout_rc
+        if args[0] == "bootstrap":
+            bootstrapped[0] = True
+            return 0
         return 0
 
     monkeypatch.setattr(backup, "_launchctl", fake)
+    # 4.1.1 L4: the job is attested ours before any bootout (tested in test_service_411); here it is ours.
+    # After our stop command the attestation is asked again (4.1.1 L4 round 8): ``status_after`` is what
+    # it then says ("stopped", "running", or "unknown": it cannot be established). Once ``bootstrap``
+    # succeeds, the post-restart attestation (round 9) observes the service active again. Never a real manager.
+    after = status_after or ("stopped" if stopped else "unknown")
+    asked = []
+
+    def attested(settings, manager):
+        asked.append(1)
+        # ``running``: a process of the attested job exists (round 10); here a loaded job has one.
+        if len(asked) == 1:
+            return {"active": loaded, "running": loaded, "pid": 4242 if loaded else None, "unit_file_state": None}
+        if bootstrapped[0]:
+            return {"active": True, "running": True, "pid": 4242, "unit_file_state": None}
+        if after == "unknown":
+            raise backup.BackupError("state cannot be read")
+        return {"active": after == "running", "running": after == "running",
+                "pid": 4242 if after == "running" else None, "unit_file_state": None}
+    monkeypatch.setattr(backup, "_attested_state", attested)
+    monkeypatch.setattr(backup, "_definition_digest", lambda settings, manager: "0" * 64)
+    monkeypatch.setattr(backup, "_manager", lambda: __import__("memory_os_v4.ops.service", fromlist=["Launchd"]).Launchd())
     monkeypatch.setattr(backup, "_wait_stopped", lambda *a, **k: stopped)
+    monkeypatch.setattr(backup, "_service_status", lambda label, **kw: after)  # never the real ``launchctl``
     monkeypatch.setattr(backup, "_wait_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(backup, "_writer_processes", lambda: ["4242 python -m memory_os_v4.server"] if writers else [])
-    monkeypatch.setattr(backup, "_port_open", lambda port: port_open)
+    monkeypatch.setattr(backup, "_responder_pid", lambda settings: 4242)  # the job's own process answers
+    monkeypatch.setattr(backup, "_writer_processes",
+                        lambda **kw: ["4242 python -m memory_os_v4.server"] if writers else [])
+    monkeypatch.setattr(backup, "_port_state", lambda port, **kw: "listening" if port_open else "free")
     return calls
 
 
@@ -122,18 +150,31 @@ def test_unproven_stop_is_refused_without_archive(settings, monkeypatch):
     assert not any(c[0] in ("bootout", "bootstrap") for c in calls)  # nothing stopped, nothing restarted
 
 
-def test_failed_bootout_is_refused_and_not_restarted(settings, monkeypatch):
-    calls = _no_service(monkeypatch, loaded=True, bootout_rc=5)
+@pytest.mark.parametrize("status_after, restarted", [("running", False), ("unknown", False), ("stopped", True)])
+def test_failed_bootout_is_refused_and_restarted_only_if_observed_stopped(settings, monkeypatch, status_after, restarted):
+    """A failed stop command proves nothing either way: the manager is asked; only "stopped" is put back."""
+    calls = _no_service(monkeypatch, loaded=True, bootout_rc=5, status_after=status_after)
     rec = backup.backup(settings)
-    assert rec["ok"] is False and "bootout failed" in rec["error"]
-    assert not any(c[0] == "bootstrap" for c in calls)
+    assert rec["ok"] is False and "bootout failed" in rec["error"] and rec["stop_confirmed"] is False
+    assert any(c[0] == "bootstrap" for c in calls) is restarted
+    assert rec["restart"] == {"running": "not-needed-service-still-running", "unknown": "not-attempted-state-unknown",
+                              "stopped": "after-manager-attested-stopped"}[status_after]
 
 
-def test_surviving_writer_after_bootout_is_refused_and_service_restarted(settings, monkeypatch):
-    calls = _no_service(monkeypatch, loaded=True, stopped=False)
+@pytest.mark.parametrize("status_after, restart, restarted", [
+    ("stopped", "after-manager-attested-stopped", True),   # the manager positively says stopped: put back
+    ("running", "not-needed-service-still-running", False),
+    ("unknown", "not-attempted-state-unknown", False),      # 4.1.1 L4: the zero code of the stop founds nothing
+])
+def test_unconfirmed_stop_is_refused_and_the_restart_follows_an_observation(settings, monkeypatch, status_after,
+                                                                           restart, restarted):
+    calls = _no_service(monkeypatch, loaded=True, stopped=False, status_after=status_after)
     rec = backup.backup(settings)
-    assert rec["ok"] is False and "still alive" in rec["error"]
-    assert any(c[0] == "bootstrap" for c in calls)  # we stopped it, we restart it
+    assert rec["ok"] is False and rec["qualified"] is False and "stop not confirmed" in rec["error"]
+    assert rec["stop_confirmed"] is False and rec["restart"] == restart
+    assert any(c[0] == "bootstrap" for c in calls) is restarted and ("restart_rc" in rec) is restarted
+    assert ("restart_manual" in rec) is (status_after == "unknown")
+    assert not settings.backup_dir.exists() or not list(settings.backup_dir.iterdir())
 
 
 def test_verified_bootout_gives_qualified_verified_backup(settings, monkeypatch):

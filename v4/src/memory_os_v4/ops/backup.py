@@ -20,7 +20,6 @@ import hashlib
 import io
 import json
 import os
-import socket
 import stat
 import subprocess
 import tarfile
@@ -192,34 +191,324 @@ def verify_manifest(root: Path) -> tuple[dict, list[str]]:
 
 # ---------------------------------------------------------------------------------------------- service control
 def _launchctl(*args: str) -> int:
-    return subprocess.run(["launchctl", *args], capture_output=True, check=False).returncode
+    try:
+        return subprocess.run(["launchctl", *args], capture_output=True, check=False, timeout=120).returncode
+    except (OSError, subprocess.SubprocessError):
+        return -1  # a command that did not answer is a failure, never a success
+
+
+def _manager():
+    """The service manager of this machine (``ops/service.py``); launchd where there is none, as before 4.1.1."""
+    from . import service
+    return service.host_manager() or service.Launchd()
+
+
+def _command(argv: list) -> int:
+    """Return code of one manager command; launchd commands keep going through ``_launchctl``."""
+    if argv[0] == "launchctl":
+        return _launchctl(*argv[1:])
+    try:
+        return subprocess.run(argv, capture_output=True, check=False, timeout=120).returncode
+    except (OSError, subprocess.SubprocessError):
+        return -1
+
+
+def _service_status(label: str, *, timeout: float = 5.0) -> str:
+    """``running`` | ``stopped`` | ``unknown``, used only to WAIT for the stop this backup already sent,
+    never to decide a stop nor a restart (those need the attested state, ``_attested_state``).
+
+    ``stopped`` needs a positive answer of the manager (``status`` of ``ops/service.py``):
+    launchd's documented absence (return code 113 AND "Could not find service"), or a complete
+    and valid ``systemctl show`` saying stopped. Anything else is indeterminate: it keeps the
+    wait going, then fails it.
+    """
+    try:
+        return _manager().status(label, run=subprocess.run, timeout=timeout)
+    except Exception:  # an observation that fails is indeterminate, whatever the failure
+        return "unknown"
 
 
 def _service_loaded(label: str) -> bool:
-    return _launchctl("print", f"gui/{os.getuid()}/{label}") == 0
+    """True unless the manager positively says stopped (an indeterminate answer counts as loaded)."""
+    return _service_status(label) != "stopped"
 
 
-def _writer_processes() -> list[str]:
-    out = subprocess.run(["pgrep", "-fl", "memory_os_v4.server|memory-os-(ai|v4) .*--transport"],
-                         capture_output=True, text=True, check=False).stdout
-    return [line for line in out.splitlines() if line.strip() and str(os.getpid()) != line.split()[0]]
+def _attested_state(settings: OpsSettings, manager) -> dict:
+    """Attested state of OUR service before (and, for systemd, after) a backup; refuses whatever is not established.
 
+    The reference is INDEPENDENT of the definition being attested: the definition on disk must
+    be the one ``render`` produces for the settings of this command (program = the Python
+    running it, arguments, whole environment, log; for a unit, compared by the closed parser,
+    which refuses any directive or section ``render`` does not write), or the file whose digest
+    the trusted install journal recorded when it created it (``uninstall._service``, the rule
+    the uninstall already applies). There is no other way in: a definition written by hand
+    (``setup --write-launchd``) is refused, whatever it contains. The manager must then attest
+    that the loaded job is that very definition (program, arguments, token file, store:
+    ``observe``, as quickstart does).
+    Indeterminate or foreign is a refusal raised BEFORE any mutation: nothing is stopped.
+    Returns ``{"active", "running", "pid", "unit_file_state"}`` (the last is None with launchd;
+    ``pid`` is the process of the attested job, launchd ``pid`` / systemd ``MainPID``, else None).
+    ``active``: the job is loaded / the unit is not in a terminal stopped state, so it must be
+    stopped before the copy. ``running``: a PROCESS of that attested job exists now (launchd: PID
+    > 0 and ``state = running``; systemd: ``ActiveState=active``, ``SubState=running``, ``MainPID``
+    > 0). Only ``running`` may ever be reported as a service that runs or was put back.
+    """
+    import sys
 
-def _port_open(port: int) -> bool:
+    from . import uninstall
+    label = settings.service_label
+    home = Path.home()
+    seen: dict = {}  # the FULL observation of the job attested against the owned definition (one command)
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-            return True
-    except OSError:
-        return False
+        facts = uninstall._service(settings, home, str(Path(sys.executable).absolute()), run=subprocess.run,
+                                   observation=seen)
+    except Exception:  # an unreadable definition or journal establishes nothing
+        raise BackupError("the service definition of this installation cannot be established; nothing stopped") from None
+    path = manager.definition_path(label, home)
+    launchd = manager.kind == "launchd"
+    if facts.get("state") == "absent" or facts.get("path") is None:
+        # No definition of ours: the name must be free too, else something else runs under it.
+        observed = manager.observe({"label": label, "path": str(path), "argv": [""], "env": {}}, run=subprocess.run)
+        if observed["state"] != "absent":
+            raise BackupError("a service of this label exists but this installation has no definition, or its "
+                              "state cannot be read; nothing stopped")
+        return {"active": False, "running": False, "pid": None, "unit_file_state": None if launchd else "not-found"}
+    if facts["state"] != "owned":
+        raise BackupError(f"{manager.noun} not written by this installation; nothing stopped; reinstall with "
+                          "quickstart or stop the service yourself (the definition on disk is neither the one "
+                          "quickstart writes for these settings nor one an install journal attests)")
+    if facts["env"].get("MEMORY_V4_DIR") != str(settings.store_dir):
+        raise BackupError("the service does not serve the store being backed up; nothing stopped")
+    observed = seen if seen.get("state") == facts.get("loaded_state") else {"state": "unknown"}
+    if observed["state"] == "absent":
+        return {"active": False, "running": False, "pid": None, "unit_file_state": None if launchd else "disabled"}
+    if observed["state"] != "loaded":
+        raise BackupError("the running service cannot be attested as the one of this installation ("
+                          + str(observed["state"]) + "); nothing stopped")
+    running = observed.get("running") is True
+    pid = observed.get("pid") if running and isinstance(observed.get("pid"), int) else None
+    if launchd:
+        return {"active": True, "running": running, "pid": pid, "unit_file_state": None}
+    return {"active": bool(observed["active"]), "running": running, "pid": pid,
+            "unit_file_state": observed["unit_file_state"]}
+
+
+def _definition_digest(settings: OpsSettings, manager) -> str | None:
+    """SHA-256 of the service definition read WITHOUT following a link (plain single-link file), else None.
+
+    Taken when the service is attested before the stop and compared right before a restart: the
+    definition started again must be, byte for byte, the one that was attested.
+    """
+    from . import quickstart
+    try:
+        data = quickstart._read_verified(manager.definition_path(settings.service_label, Path.home()))
+    except Exception:  # a link, a directory, an unreadable path: not the attested file
+        return None
+    return None if data is None else sha256_bytes(data)
+
+
+def _same_service(after, before) -> bool:
+    """Same attested activity and activation (the PID and the ``running`` fact are judged apart)."""
+    return (isinstance(after, dict) and isinstance(before, dict)
+            and after.get("active") == before.get("active")
+            and after.get("unit_file_state") == before.get("unit_file_state"))
+
+
+def _restart_decision(settings: OpsSettings, manager, before: dict, digest_before, stop_confirmed: bool) -> str:
+    """What to do about the service after OUR stop command, decided on observations only.
+
+    Never from the return code of the stop, and never from the unattested ``status``: the
+    definition must still be the attested file (same bytes, no link), the complete attestation
+    (``_attested_state``: definition ours, job observed by the strict ``observe``) must succeed
+    again, and a fresh writer/port check (``_no_writer``) must positively return ``none`` — even
+    when the earlier stop had been confirmed (a writer or port listener may have appeared during
+    the snapshot). A substituted/foreign definition, a live writer/port, or any failed/indeterminate
+    observation forbids the restart. Returns the ``restart`` value of the record; only the two
+    ``after-…`` values allow the start command.
+
+    Order: definition and attestation are read first (a cheap refusal, and the only way to say
+    "still running"), then the writer and port probes, which may be long. EVERYTHING that
+    authorises the start is then read AGAIN, after those probes: the attestation, and last the
+    bytes of the definition. An ``after-…`` value is returned only by the statement that follows
+    this second reading; the caller sends the start command immediately after it and never
+    starts a definition that was not revalidated at that moment.
+    """
+    def identity():
+        """Bytes then attestation of the definition, now; a refusal value, or None with the attested state."""
+        if digest_before is None or _definition_digest(settings, manager) != digest_before:
+            return "not-restarted-definition-changed", None
+        try:
+            after = _attested_state(settings, manager)
+        except Exception:  # foreign, unattested or unreadable: nothing is started
+            return "not-attempted-state-unknown", None
+        if after.get("active"):
+            # Exact wording (review round 11): "still running" only with a process of the attested job; a
+            # job that is loaded, starting or waiting for a restart is neither running nor restartable here.
+            return ("not-needed-service-still-running" if after.get("running") is True
+                    else "not-restarted-service-not-running"), None
+        if after.get("unit_file_state") != before.get("unit_file_state"):
+            return "not-restarted-definition-changed", None  # the activation is no longer the attested one
+        return None, after
+    refusal, _ = identity()
+    if refusal:
+        return refusal
+    writers = _no_writer(settings)
+    if writers == "alive":
+        return "not-restarted-writer-alive"
+    if writers != "none":
+        return "not-restarted-writer-unknown"
+    # The probes above took time: what they found says nothing about the definition NOW.
+    refusal, _ = identity()
+    if refusal:
+        return refusal
+    # Declared TOCTOU limit (contract rev. 5, D6 bis): a writer appearing, or the definition being
+    # replaced, between these last readings and the start command is not excluded; there is no
+    # atomic transaction over the manager, the port and the file. The readings are as late as possible.
+    if _definition_digest(settings, manager) != digest_before:  # last look, right before the start
+        return "not-restarted-definition-changed"
+    return "after-confirmed-stop" if stop_confirmed else "after-manager-attested-stopped"
+
+
+def _restoration(settings: OpsSettings, manager, before: dict, digest_before) -> tuple:
+    """``(attested state now | None, restored)``: THE final proof of a service put back, read LAST.
+
+    Called after the health wait, never before it: whatever happened while waiting (the service
+    vanished, its definition was replaced) is seen here. ``restored`` needs the definition to be
+    the attested bytes before AND after a complete attestation, that attestation to say the same
+    activity and activation as ``before``, a PROCESS of the attested job to exist now
+    (``running``), AND the HTTP responder to BE that process: ``/health`` must say ``ok``, name
+    itself ``memory-os-v4`` and give the very PID the manager attests (``_responder_pid``). A
+    loaded job, a unit that is starting or waiting for a restart, an attested process that does
+    not serve the port yet, or an HTTP 200 of any other process is never a service put back.
+    """
+    if digest_before is None or _definition_digest(settings, manager) != digest_before:
+        attested = None
+        try:
+            attested = _attested_state(settings, manager)
+        except Exception:
+            pass
+        return attested, False
+    try:
+        attested = _attested_state(settings, manager)
+    except Exception:
+        return None, False
+    unchanged = _definition_digest(settings, manager) == digest_before
+    proven = bool(unchanged and attested.get("running") is True and _same_service(attested, before))
+    if proven:
+        pid = attested.get("pid")
+        proven = isinstance(pid, int) and pid > 0 and _responder_pid(settings) == pid
+    return attested, proven
+
+
+def _responder_pid(settings: OpsSettings) -> int | None:
+    """PID announced by the ``memory-os-v4`` server answering ``/health`` now, or None (``ops/auth.py``)."""
+    from .auth import health_responder_pid
+    try:
+        return health_responder_pid(settings)
+    except Exception:  # an identification that fails identifies nobody
+        return None
+
+
+def _service_stop(label: str) -> int:
+    manager = _manager()
+    # systemd: ``stop`` / ``start`` leave the activation (enabled or disabled) exactly as it was.
+    return _command(manager.stop_argv(label) if manager.kind == "launchd" else manager.pause_argv(label))
+
+
+def _service_start(settings: OpsSettings) -> int:
+    manager = _manager()
+    if manager.kind != "launchd":
+        return _command(manager.resume_argv(settings.service_label))
+    return _command(manager.start_argv(settings.service_label, manager.definition_path(settings.service_label, Path.home())))
+
+
+WRITER_PATTERN = "memory_os_v4.server|memory-os-(ai|v4) .*--transport"
+
+
+def _writer_processes(*, timeout: float = 10.0) -> list[str] | None:
+    """Lines of the writer processes seen by ``pgrep``; ``[]`` when it says there is none; None when
+    the observation failed.
+
+    ``pgrep`` documents its return codes: 0 (at least one match), 1 (no match), 2 (syntax error),
+    3 (fatal error). ``[]`` is ONLY return code 1 with no line printed. Code 0 gives the lines
+    (each must start with a process number). Any other code, a line of another shape, a timeout
+    or a command that cannot be run is None: indeterminate, never "no writer".
+    """
+    try:
+        result = subprocess.run(["pgrep", "-fl", WRITER_PATTERN], capture_output=True, text=True, check=False,
+                                timeout=timeout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    if result.returncode == 1:
+        return [] if not lines else None
+    if result.returncode != 0 or not lines or any(not line.split()[0].isdigit() for line in lines):
+        return None
+    return [line for line in lines if line.split()[0] != str(os.getpid())]
+
+
+def _port_state(port: int, *, timeout: float = 0.5) -> str:
+    """``listening`` | ``free`` | ``unknown`` (``ops/service.py``): ``free`` is only a refused connection;
+    a timeout, a permission error or any other failure is ``unknown``, never a closed port."""
+    from . import service
+    return service.port_state(port, timeout=timeout)
+
+
+def _no_writer(settings: OpsSettings, *, timeout: float | None = None) -> str:
+    """``none`` | ``alive`` | ``unknown``: writer processes and port of the service, read strictly.
+
+    ``none`` needs BOTH observations to succeed and to be negative: ``pgrep`` answering "no
+    match" and the port refusing the connection. ``alive`` is a positive sighting (a process, or
+    a listening port). Everything else is ``unknown``. When ``timeout`` is given, ONE shared
+    monotonic deadline bounds BOTH observations together (never applied twice).
+    """
+    try:
+        if timeout is None:
+            writers = _writer_processes()
+            if writers:
+                return "alive"
+            port = _port_state(settings.port)
+        else:
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            writers = _writer_processes(timeout=max(0.05, min(10.0, deadline - time.monotonic())))
+            if writers:
+                return "alive"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "unknown"
+            port = _port_state(settings.port, timeout=min(0.5, remaining))
+    except Exception:
+        return "unknown"
+    if writers or port == "listening":
+        return "alive"
+    return "none" if writers == [] and port == "free" else "unknown"
 
 
 def _wait_stopped(settings: OpsSettings, label: str, timeout: float = 30.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not _service_loaded(label) and not _writer_processes() and not _port_open(settings.port):
-            return True
-        time.sleep(1)
-    return False
+    """True only when, in one round that ENDS before ``timeout`` (monotonic clock), the manager says
+    stopped AND no writer process is seen AND the port refuses the connection.
+
+    ``timeout`` is the total time. Each observation is limited by what remains of it (never
+    below 0.05 s, the smallest limit a command can be given), no round starts at or after the
+    deadline except the first one, and a round that ends after the deadline is never a
+    success, whatever it saw. An observation that fails, times out or is incomplete never ends
+    the wait with True.
+    """
+    deadline = time.monotonic() + timeout
+
+    def left():
+        return max(0.05, deadline - time.monotonic())
+    while True:
+        stopped = _service_status(label, timeout=min(5.0, left())) == "stopped"
+        confirmed = stopped and _no_writer(settings, timeout=left()) == "none"
+        remaining = deadline - time.monotonic()
+        if confirmed:
+            return remaining >= 0  # seen in time; a success obtained after the deadline is refused
+        if remaining <= 0:
+            return False
+        time.sleep(min(1.0, remaining))
+        if deadline - time.monotonic() <= 0:
+            return False
 
 
 def _try_writer_lock(store: Path):
@@ -246,35 +535,73 @@ def backup(settings: OpsSettings | None = None, *, stop_service: bool = True, no
     settings = settings or OpsSettings.from_env()
     key = load_or_create_key(settings.backup_key)
     stamp = (now or dt.datetime.now()).strftime("%Y%m%d-%H%M%S")
-    record: dict = {"stamp": stamp, "qualified": False, "verified": False, "ok": False}
-    stopped_by_us = False
+    record: dict = {"stamp": stamp, "qualified": False, "verified": False, "archive_ok": False, "ok": False}
+    stop_sent = False       # our stop command was sent (whatever it returned): NOT a stop
+    stop_confirmed = False  # the stop was observed (manager, processes, port): the only "stopped by us"
+    systemd_before = None
+    before = digest_before = None
     lock = None
     try:
         files = None
         if stop_service:
-            label, plist = settings.service_label, settings.launchd_plist
-            if not label or plist is None:
+            label = settings.service_label
+            if not label:
                 raise BackupError("a qualified backup needs MEMORY_V4_SERVICE_LABEL")
             # A free writer.lock is NOT proof: a legacy 4.0.0 writer ignores it (A6 R1b). Establish the service
             # state first; a loaded service is always stopped and verified gone; an already-stopped one keeps its
             # state and must show no writer process and a closed port.
-            if _service_loaded(label):
-                if _launchctl("bootout", f"gui/{os.getuid()}/{label}") != 0:
-                    raise BackupError("launchctl bootout failed")
-                stopped_by_us = True
-                if not _wait_stopped(settings, label):
-                    raise BackupError("service, writer process or port still alive after bootout")
+            manager = _manager()
+            # Identity and state attested first, on both managers; indeterminate or foreign is raised here,
+            # before any mutation (4.1.1: a loaded launchd job is attested ours before any bootout).
+            # The bytes are read BEFORE and AFTER the attestation: what was attested is exactly the file
+            # whose digest the restart will require (a file replaced in between is refused here).
+            digest_first = _definition_digest(settings, manager)
+            before = _attested_state(settings, manager)
+            digest_before = _definition_digest(settings, manager)  # the bytes attested, for the restart
+            if digest_before != digest_first:
+                raise BackupError("the service definition changed while it was being attested; nothing stopped")
+            if manager.kind != "launchd":
+                systemd_before = before
+                record["service_state_before"] = before
+            running = before["active"]
+            if running:
+                # Set BEFORE the command: a stop that fails or does not answer may still have taken
+                # effect, so what follows it is decided by observing the manager, never by its code.
+                stop_sent = True
+                if _service_stop(label) != 0:
+                    raise BackupError("launchctl bootout failed" if manager.kind == "launchd"
+                                      else "systemctl --user stop failed")
+                stop_confirmed = bool(_wait_stopped(settings, label))
+                if not stop_confirmed:
+                    raise BackupError("stop not confirmed after bootout: the service, a writer process or the "
+                                      "port is still alive, or their state could not be observed")
                 evidence = "verified_bootout"
             else:
-                if _writer_processes() or _port_open(settings.port):
+                writers = _no_writer(settings)
+                if writers == "alive":
                     raise BackupError("service not loaded but a writer process or the port is alive: cannot prove "
                                       "that no writer is running; use the attested offline maintenance backup")
+                if writers != "none":
+                    raise BackupError("service not loaded but the writer processes or the port could not be "
+                                      "observed (pgrep or the connection failed): an observation that fails is "
+                                      "not the absence of a writer; nothing qualified")
                 evidence = "verified_no_writer"
             lock = _try_writer_lock(settings.store_dir)
             if lock == "busy":
                 raise BackupError("writer.lock is held although no managed writer runs")
             record["evidence"] = evidence + ("+writer_lock" if lock else "")
             files = snapshot(settings.store_dir)
+            # The absence of a writer must hold over the WHOLE copy (D6 bis): processes and port are
+            # probed again AFTER it. A writer seen, or a probe that fails, qualifies nothing: no
+            # archive is published, so nothing enters the rotation nor ``verified_archives``.
+            writers_after = _no_writer(settings)
+            if writers_after != "none":
+                files = None
+                raise BackupError(
+                    "a writer process or the port is alive after the copy: the snapshot may not be consistent; "
+                    "nothing qualified" if writers_after == "alive" else
+                    "the writer processes or the port could not be observed after the copy (an observation "
+                    "that fails is not the absence of a writer); nothing qualified")
             record["qualified"] = True
         else:
             files = snapshot(settings.store_dir)
@@ -290,9 +617,39 @@ def backup(settings: OpsSettings | None = None, *, stop_service: bool = True, no
     finally:
         if lock not in (None, "busy"):
             lock.close()
-        if stopped_by_us:
-            record["restart_rc"] = _launchctl("bootstrap", f"gui/{os.getuid()}", str(settings.launchd_plist))
-            record["server_restarted_healthy"] = _wait_healthy(settings)
+        if stop_sent:
+            # The restart is founded on OBSERVATIONS (``_restart_decision``), never on the return
+            # code of the stop (zero or not) nor on an unattested status: the definition is still
+            # the attested file, byte for byte, the complete attestation succeeds again, the
+            # service is seen stopped, and a fresh check confirms no writer process or listening
+            # port. In every other case nothing is started, and the report says why, with the
+            # command to run by hand. A service put back is ATTESTED, after the health wait
+            # (``_restoration``): definition unchanged, attestation equal to ``before``, and a
+            # process of our job (never a loaded job or an HTTP answer alone).
+            record["stop_confirmed"] = stop_confirmed
+            manager = _manager()
+            manual_cmd = (manager.manual_start(settings.service_label) if manager.kind == "launchd"
+                          else " ".join(manager.resume_argv(settings.service_label)))
+            record["restart"] = _restart_decision(settings, manager, before or {}, digest_before, stop_confirmed)
+            if record["restart"].startswith("after-"):
+                # Sent right after the revalidation that ends ``_restart_decision``: nothing in between.
+                record["restart_rc"] = _service_start(settings)
+                healthy = (_wait_healthy(settings) if record["restart_rc"] == 0
+                           else _wait_healthy(settings, timeout=10.0))
+            else:
+                healthy = _wait_healthy(settings, timeout=10.0)
+            record["server_restarted_healthy"] = healthy
+            # Final proof, read AFTER the health wait in every branch (restarted or found still
+            # running): definition unchanged, attestation equal to ``before``, a process of OUR job.
+            attested_after, proven = _restoration(settings, manager, before or {}, digest_before)
+            if systemd_before is not None:
+                record["service_state_after"] = attested_after
+                record["service_state_restored"] = proven
+            expected = (record.get("restart_rc") == 0 if record["restart"].startswith("after-")
+                        else record["restart"] == "not-needed-service-still-running")  # never "…-not-running"
+            record["service_restored"] = bool(expected and healthy is True and proven)
+            if not record["service_restored"]:
+                record["restart_manual"] = manual_cmd
     if items is None:
         _log(settings, "backup.jsonl", record)
         return record
@@ -318,7 +675,12 @@ def backup(settings: OpsSettings | None = None, *, stop_service: bool = True, no
     except Exception as exc:
         record["error"] = f"{type(exc).__name__}: {exc}"
         record["verified"] = False
-    record["ok"] = bool(record["verified"] and record.get("server_restarted_healthy", True) is not False)
+    # Archive validity (``archive_ok``) is separated from operational restoration of the service
+    # (``service_restored``): a qualified, verified archive stays eligible in ``verified_archives``
+    # even when the service failed to restart afterward, while ``ok`` requires BOTH so an
+    # un-restored service never passes as an overall success.
+    record["archive_ok"] = bool(record["qualified"] and record["verified"])
+    record["ok"] = bool(record["verified"] and record.get("service_restored", True))
     _log(settings, "backup.jsonl", record)
     return record
 
@@ -355,8 +717,22 @@ def _wait_healthy(settings: OpsSettings, timeout: float = 90.0) -> bool:
     return False
 
 
+def archive_valid(rec: dict) -> bool:
+    """THE validity of a logged archive, for every reader (rotation, health, doctor).
+
+    ``archive_ok`` when the record has it (4.1.1: the archive itself, whatever happened to the
+    service afterwards); records without it (older ones, SQLite snapshots) keep ``ok``.
+    """
+    return rec.get("archive_ok") is True if "archive_ok" in rec else bool(rec.get("ok"))
+
+
 def verified_archives(settings: OpsSettings) -> dict[str, tuple[str, str]]:
-    """{archive name: (sha256, stamp)} for archives logged as ok, qualified and verified."""
+    """{archive name: (sha256, stamp)} for archives logged as qualified and verified.
+
+    Archive validity (``archive_ok``) is separate from post-backup service restoration: a qualified,
+    verified archive stays eligible for rotation/restore even if restarting the service afterward
+    failed (``ok=False``). Legacy/SQLite records without ``archive_ok`` keep requiring ``ok``.
+    """
     out: dict[str, tuple[str, str]] = {}
     log = settings.ops_dir / "logs/backup.jsonl"
     if not log.exists():
@@ -366,7 +742,9 @@ def verified_archives(settings: OpsSettings) -> dict[str, tuple[str, str]]:
             rec = json.loads(line)
         except ValueError:
             continue
-        if (isinstance(rec, dict) and rec.get("ok") and rec.get("qualified") and rec.get("verified")
+        if not isinstance(rec, dict):
+            continue
+        if (archive_valid(rec) and rec.get("qualified") and rec.get("verified")
                 and isinstance(rec.get("archive"), str) and isinstance(rec.get("archive_sha256"), str)):
             out[rec["archive"]] = (rec["archive_sha256"], str(rec.get("stamp", "")))
     return out

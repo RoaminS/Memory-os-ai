@@ -19,7 +19,6 @@ import hashlib
 import json
 import os
 import shutil
-import socket
 import stat
 import subprocess
 import sys
@@ -31,6 +30,7 @@ import platform  # noqa: F401  (read through ops/cell.py; install fixtures patch
 from pathlib import Path
 
 from . import cell, sqlite_runtime
+from . import service as managers
 from .clients import CLIENTS, SERVER, Client, classify, read_entry, relay_command, strict_loads
 
 DEFAULT_CLIENTS = ("claude-code", "codex")
@@ -123,10 +123,13 @@ def installation_identity(env: dict) -> str:
     return hashlib.sha256(json.dumps(document, sort_keys=True).encode()).hexdigest()
 
 
-def _port_state(port: int) -> str:
-    with socket.socket() as s:
-        s.settimeout(0.5)
-        return "listening" if s.connect_ex(("127.0.0.1", port)) == 0 else "free"
+def _port_state(port: int, *, timeout: float = 0.5) -> str:
+    """``listening`` | ``free`` | ``unknown`` (``ops/service.py``: ``free`` is only a refused connection).
+
+    A timeout, a permission error or any other failure of the probe is ``unknown``: it is never
+    a free port, so it never lets an install start nor a stop be called confirmed.
+    """
+    return managers.port_state(port, timeout=timeout)
 
 
 # ---------- recognised form, destination identity, proof of ownership (SETUP_4_1_0.md §5.2) ----------
@@ -456,6 +459,13 @@ JOURNAL_FILES = frozenset({"journal.json", "install.json", "uninstall.json"})
 _FRESH_JOURNALS: set[str] = set()   # directories created by new_journal() in this process; only ever added to
 
 
+class RemovalUnconfirmed(QuickstartError):
+    """The ``claude`` CLI returned zero but the file read back does not hold the expected state."""
+
+    def __init__(self, message: str = "claude CLI returned zero but the expected entry state is not confirmed"):
+        super().__init__(message)
+
+
 class EntryChanged(QuickstartError):
     """The target is no longer the one the caller was authorised to change; nothing was written."""
 
@@ -636,7 +646,7 @@ def _claude_add(client: Client, home: Path, entry: dict, *, run, file_sha256=_UN
 
 
 def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run,
-                  expected_file_sha256=_ANY) -> str:
+                  expected_file_sha256=_ANY, produced: list | None = None) -> str:
     """Write OUR entry; the target is verified immediately before each mutation.
 
     JSON / TOML: the candidate is built from the bytes read here, whose digest must be
@@ -682,6 +692,8 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
         candidate = _toml_candidate(client, raw or "", entry)
         if candidate is None:
             raise QuickstartError("TOML structure cannot be extended safely; apply the snippet by hand")
+        if produced is not None:  # digest of the bytes WE produce, taken before they are written
+            produced.append(hashlib.sha256(candidate[0].encode("utf-8")).hexdigest())
         _atomic_write(path, candidate[0], expected=_expected_of(built_from))
         return "toml-append"
     if raw is not None and _json_has_duplicate_keys(raw):
@@ -692,6 +704,8 @@ def _write_client(client: Client, home: Path, entry: dict, *, run=subprocess.run
         raise QuickstartError("Unexpected server table or entry; edit the file by hand")
     servers[SERVER] = entry
     text = _dump_json(data, raw)
+    if produced is not None:  # digest of the bytes WE produce, taken before they are written
+        produced.append(hashlib.sha256(text.encode("utf-8")).hexdigest())
     _atomic_write(path, text, expected=_expected_of(built_from))
     return "json-merge"
 
@@ -798,10 +812,107 @@ def remove_client_entry(client: Client, home: Path, *, run=subprocess.run, previ
             # Revalidated immediately before the restoring add: our name must be absent.
             if _claude_add(client, home, previous, run=run) != 0:
                 raise QuickstartError("claude mcp add failed; previous entry kept in the private backup")
+        # A zero return code is not the state: the file is read back, and only the expected state
+        # (our entry gone, or exactly ``previous`` back) is a removal or a restoration.
+        state, now = read_entry(client, home)
+        gone = previous is None and now is None and state in {"ok", "missing-config"}
+        back = (previous is not None and state == "ok" and isinstance(now, dict)
+                and _entry_hash(now) == _entry_hash(previous))
+        if not (gone or back):
+            raise RemovalUnconfirmed()
         return
     path = client.config_path(home)
     # Prepare first, verify last: the target must still be the bytes the candidate was built from.
     _atomic_write(path, candidate, expected=hashlib.sha256(original.encode("utf-8")).hexdigest())
+
+
+def _missing_parents(path: Path, home: Path) -> list:
+    """Directories below HOME that do not exist yet on the way to ``path``, deepest first."""
+    missing = []
+    for parent in path.parents:
+        if parent == home or not parent.is_relative_to(home):
+            break
+        try:
+            os.lstat(parent)
+        except FileNotFoundError:
+            missing.append(str(parent))
+        except OSError:
+            break
+        else:
+            break
+    return missing
+
+
+def created_file(record, path: Path) -> str | None:
+    """Digest of the client file THIS record created, when the file on disk is still exactly that file.
+
+    Undo option (b), 4.1.1: a client file is removed only when the install journal attests both
+    facts: the file did not exist before the install (``file_absent_before``, written before the
+    write) and the bytes on disk are the bytes the install itself PRODUCED
+    (``file_created_sha256``: computed from the text before it was written, journaled only if
+    the file read back after the write was exactly that text). A file that existed before, a
+    record of an older journal, a file written by the ``claude`` CLI, a file changed by anyone
+    since our write: None, and the entry is removed semantically as before, the file staying
+    in place.
+    """
+    if not isinstance(record, dict) or record.get("status") != "applied" or record.get("file_absent_before") is not True:
+        return None
+    if record.get("method") not in {"json-merge", "toml-append"}:
+        return None  # only a file whose every byte this code produced
+    digest = record.get("file_created_sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest) or record.get("path") != str(path):
+        return None
+    return digest if _plist_is(path, digest) else None
+
+
+def remove_created_file(record, path: Path, home: Path, journal_dir: Path, name: str) -> dict | None:
+    """Take the client file this record created out of the client's directory; None when it is not removable.
+
+    The file is MOVED into the private journal (same last look and rename as a service
+    definition: plain single-link file with the journaled digest, not following a link), so
+    it is gone for the client and its bytes are kept. The directories the install created for
+    it are removed when, and only when, they are empty real directories.
+
+    Residual window, declared: the digest is checked by path and the rename follows it, as two
+    system calls. A writer that replaces the file between that check and the rename has its
+    file moved into the journal (recoverable there, not destroyed). This is the same window as
+    for a service definition; it is narrowed, not closed.
+    """
+    digest = created_file(record, path)
+    if digest is None:
+        return None
+    try:
+        _safe_path(path, home)
+    except QuickstartError:
+        return None
+    moved = _move_plist(path, journal_dir, digest, name)
+    if moved is None:
+        return None
+    removed = []
+    recorded = record.get("dirs_absent_before")
+    for index, text in enumerate(recorded if isinstance(recorded, list) else []):
+        expected = path.parents[index] if index < len(path.parents) else None
+        if not isinstance(text, str) or expected is None or text != str(expected) or expected == home \
+                or not expected.is_relative_to(home):
+            break  # only the chain of parents of this very file, below HOME
+        try:
+            info = os.lstat(expected)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                break
+            os.rmdir(expected)  # refuses a directory that is not empty: whatever was added since stays
+        except OSError:
+            break
+        removed.append(text)
+    return {"file": "removed-created-by-install", "file_moved_to": moved, "dirs_removed": removed}
+
+
+def created_file_record(journal_root: Path, client_key: str, digest: str, identity: str, path: Path):
+    """The trusted, unrevoked journal record proving this entry AND attesting the file as created by us."""
+    for _, document in _trusted_journals(journal_root):
+        for record in document["records"]:
+            if _record_proves(record, client_key, digest, identity) and created_file(record, path) is not None:
+                return record
+    return None
 
 
 def backup_client_file(path: Path, backup: Path) -> str:
@@ -861,6 +972,15 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
             rec["backup"] = str(backup)
             rec["backup_sha256"] = backup_client_file(path, backup)
             rec["backup_may_hold_secrets"] = True
+        elif client.fmt != "claude-user":
+            # 4.1.1, undo option (b): the file does not exist before this install writes it. Journaled
+            # BEFORE the write, with the directories the write will create. The digest added after
+            # the write is the digest of the bytes THIS code produced, not of whatever is on disk.
+            # Claude Code is excluded: ``~/.claude.json`` is written by the ``claude`` CLI, the
+            # provenance of its whole content is not established here, so it keeps the semantic
+            # removal (``claude mcp remove``) and is not taken away as a file.
+            rec["file_absent_before"] = True
+            rec["dirs_absent_before"] = _missing_parents(path, home)
         want = desired_entry(client, python, env)
         if before is not None:
             rec["previous_class"] = classify(before)
@@ -892,9 +1012,17 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
             # The file must still be the one the preview showed, on the bytes the write is built from:
             # a writer that slipped in since the last check (during the revocation of a replace
             # included) keeps its entry; this client is a conflict, the others are still handled.
-            rec["method"] = _write_client(client, home, want, run=run, expected_file_sha256=item["file_sha256"])
+            produced = []
+            rec["method"] = _write_client(client, home, want, run=run, expected_file_sha256=item["file_sha256"],
+                                          produced=produced)
             state, after = read_entry(client, home)
             rec["status"] = "applied" if state == "ok" and _same(after, want) else f"verify-failed:{state}"
+            if (rec["status"] == "applied" and rec.get("file_absent_before") is True and len(produced) == 1
+                    and _plist_is(path, produced[0])):
+                # The proof of creation is the digest of the bytes we produced, and it is journaled only
+                # if the file read back right after the write is exactly those bytes. A file that
+                # another writer already changed carries no proof: its entry is removed semantically.
+                rec["file_created_sha256"] = produced[0]
         except EntryChanged:
             rec["status"] = "conflict-file-changed-since-preview"
             persist()
@@ -927,6 +1055,13 @@ def new_journal(root: Path) -> Path:
 STOP_CODES = {"stop-failed": "service_stop_failed", "stop-timeout": "service_stop_timeout",
               "stop-unconfirmed": "service_stop_unconfirmed",
               "refused-changed-since-install": "service_changed_since_install",
+              # The definition is no longer the plain file the install wrote: a link, a directory or any
+              # other object stands in its place, or it is gone while its job is loaded or cannot be read.
+              "refused-definition-not-a-file": "service_changed_since_install",
+              "refused-job-without-definition": "service_changed_since_install",
+              # The manager attests the absence of the job but the port is not attested free: nothing
+              # was stopped by this run, and nothing is moved nor reported as finished.
+              "absence-unconfirmed": "service_stop_unconfirmed",
               "refused-job-not-attested": "service_changed_since_install"}
 
 
@@ -942,16 +1077,17 @@ def _free_name(journal_dir: Path, name: str) -> Path:
         target = journal_dir / f"{name}.{index}"
 
 
-def _move_plist(plist: Path, journal_dir: Path, sha256: str) -> str | None:
+def _move_plist(plist: Path, journal_dir: Path, sha256: str, name: str | None = None) -> str | None:
     """The definition is MOVED into the private journal, never deleted; None when it is no longer ours.
 
     Order: the destination is chosen FIRST (private directory, unused name); the check of the
     definition (``_plist_is``: plain single-link file with the journaled digest, never following
-    a link) is the LAST step; then the rename, with no other I/O in between.
+    a link) is the LAST step; then the rename, with no other I/O in between. The same move takes
+    a systemd unit, and a client file this installation created (4.1.1, undo option (b)).
     """
     if journal_dir.is_symlink() or not _private(journal_dir, 0o700, directory=True):
         return None
-    target = _free_name(journal_dir, plist.name)
+    target = _free_name(journal_dir, name or plist.name)
     if not _plist_is(plist, sha256):
         return None
     try:
@@ -970,51 +1106,179 @@ def _plist_is(plist: Path, sha256: str) -> bool:
     return data is not None and hashlib.sha256(data).hexdigest() == sha256
 
 
+def _definition_kind(path: Path) -> str:
+    """``file`` | ``missing`` | ``other`` | ``unknown`` by ``lstat`` alone (a link is never followed).
+
+    ``missing`` is only the name not existing at all; a symbolic link (dangling or not), a
+    directory or any special file is ``other``; an ``lstat`` that fails otherwise is ``unknown``.
+    """
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return "missing"
+    except (OSError, ValueError):
+        return "unknown"
+    return "file" if stat.S_ISREG(mode) else "other"
+
+
+def _service_port(service) -> int | None:
+    """The TCP port the planned command listens on (``--port N`` of its arguments), or None."""
+    argv = service.get("argv") if isinstance(service, dict) else None
+    if not isinstance(argv, list) or argv.count("--port") != 1:
+        return None
+    index = argv.index("--port") + 1
+    value = argv[index] if index < len(argv) else None
+    if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,4}", value) or int(value) > 65535:
+        return None
+    return int(value)
+
+
+def _await_stop(service, port, *, run, stop_timeout, sleep, clock) -> tuple:
+    """THE confirmation of a stop, shared by every path: ``(job state, port state)`` as last observed.
+
+    Confirmed means, in ONE round of observation: the manager attests the absence by its strict
+    predicate AND the port is ``free`` (a refused connection, nothing else). The wait is bounded
+    by ``clock`` (monotonic): ``stop_timeout`` is the TOTAL time, observations included, not a
+    sum of pauses. No round starts after the deadline, and each observation gets what remains as
+    its own limit (at most 5 s for the manager, 0.5 s for the port). A round that started is
+    completed, so both facts always come from the same round: the port probe keeps at least
+    0.1 s, the only overrun of a wait longer than a second. One complete round is always made,
+    even with a zero ``stop_timeout`` (limits then: 1 s for the manager, 0.1 s for the port).
+    """
+    deadline = clock() + max(0.0, float(stop_timeout))
+    state, port_state, first = 'unknown', 'unknown', True
+    while True:
+        remaining = deadline - clock()
+        if not first and remaining <= 0:
+            break
+        state = _job_state(service, run=run, timeout=min(5.0, max(remaining, 1.0) if first else remaining))
+        port_state = _port_state(port, timeout=min(0.5, max(deadline - clock(), 0.1)))
+        first = False
+        if state == 'absent' and port_state == 'free':
+            break
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        sleep(min(0.25, remaining))
+    return state, port_state
+
+
 def stop_owned_service(service: dict, plist_sha256: str | None, journal_dir: Path, *, run,
-                       stop_timeout: float = 10.0, sleep=time.sleep) -> dict:
+                       stop_timeout: float = 10.0, sleep=time.sleep, port: int | None = None,
+                       clock=None) -> dict:
     """Stop the job this installation owns and move its plist into ``journal_dir``.
 
     Sequence: the plist still has the journaled digest; the loaded job is re-attested (program,
     arguments, token file, directory) right before the stop; ONE ``launchctl bootout``, no retry,
-    no forced kill; the job is observed absent within ``stop_timeout``; only then the plist moves.
-    Only an explicit "Could not find service" is absence: an error or a timeout of the
-    observation is indeterminate, never absent. Returns ``{"outcome": ..., ["code"], ...}``.
+    no forced kill; the stop is CONFIRMED within ``stop_timeout`` (``_await_stop``: the job
+    attested absent AND the port free, total time on a monotonic clock); only then the plist
+    moves. Only an explicit "Could not find service" is absence: an error or a timeout of an
+    observation is indeterminate, never absent, never a free port. Returns
+    ``{"outcome": ..., ["code"], ...}``.
+
+    EVERY successful outcome rests on the same confirmation (``_await_stop``: in one round, the
+    manager attests the absence AND the port refuses the connection), whatever stands at the
+    path of the definition and whether or not this run sent a stop:
+    - a symbolic link, a directory or any object that is not a plain file: refusal
+      (``refused-definition-not-a-file``), nothing stopped, nothing moved;
+    - no file at all: ``<noun>-already-absent`` only after that confirmation; a job still
+      loaded, foreign or unreadable is ``refused-job-without-definition``;
+    - the file is ours and the job is already absent (interrupted install, or a second run
+      after a ``stop-unconfirmed``): the definition moves only after that confirmation;
+    - job absent but port listening or unreadable: ``absence-unconfirmed`` (with what was
+      seen): nothing moves, the caller fails, it never reports a finished rollback.
+    A stop command that fails or does not answer is not retried, and it is no proof that
+    nothing stopped: the state is observed once and reported with the refusal (``observation``,
+    ``port``); it stays a refusal, the definition stays in place.
+
+    4.1.1: the same sequence through the service interface (``ops/service.py``). With
+    ``systemd --user`` the stop is ONE ``systemctl --user disable --now``, absence is read from
+    ``systemctl --user show`` and the outcomes say ``unit`` where launchd says ``plist``.
+    ``port`` is the port of the service (default: ``--port`` of the planned command); a plan
+    naming no port cannot be confirmed stopped, so nothing is stopped.
     """
-    plist = Path(service["path"])
+    manager = managers.manager_of(service)
+    noun = manager.noun if manager else "plist"
+    clock = clock or time.monotonic
 
     def refused(outcome, **facts):
         return {"outcome": outcome, "code": STOP_CODES[outcome], **facts}
-    if plist.is_symlink() or not plist.is_file():
-        return {"outcome": "plist-already-absent"}
+
+    def seen(state):
+        return "indeterminate" if state == "unknown" else state
+    if manager is None or not isinstance(service.get("path"), str):
+        return refused("refused-job-not-attested")  # a manager this build does not know: nothing is stopped
+    if port is None:
+        port = _service_port(service)
+    if not isinstance(port, int) or isinstance(port, bool):
+        return refused("refused-job-not-attested")  # no port to confirm a stop with: nothing is stopped
+    plist = Path(service["path"])
+    kind = _definition_kind(plist)
+    if kind not in {"file", "missing"}:
+        return refused("refused-definition-not-a-file")
+    def one_round():
+        # One complete round of THE confirmation (manager AND port), without any wait.
+        return _await_stop(service, port, run=run, stop_timeout=0, sleep=sleep, clock=clock)
+    if kind == "missing":
+        # The absence of the FILE says nothing about the JOB nor about the port: both are observed.
+        state, port_state = one_round()
+        if state != "absent":
+            return refused("refused-job-without-definition", observation=seen(state), port=port_state)
+        if port_state != "free":
+            return refused("absence-unconfirmed", observation="absent", port=port_state)
+        if _definition_kind(plist) != "missing":
+            # The path is read again AFTER the probes: a definition that appeared meanwhile is not "absent".
+            return refused("refused-changed-since-install", observation="absent", port=port_state)
+        # Declared TOCTOU limit (contract rev. 5, D6 bis): nothing excludes a definition or a job
+        # appearing after this last look.
+        return {"outcome": f"{noun}-already-absent"}
     if plist_sha256 is None or not _plist_is(plist, plist_sha256):
         return refused("refused-changed-since-install")
     state = _job_state(service, run=run)
-    if state == "absent":  # never loaded (interrupted install): nothing to stop
+    if state == "absent":  # never loaded (interrupted install), or stopped by an earlier, unconfirmed run
+        state, port_state = one_round()
+        if state != "absent" or port_state != "free":
+            return refused("absence-unconfirmed", observation=seen(state), port=port_state)
         moved = _move_plist(plist, journal_dir, plist_sha256)
         if moved is None:
             return refused("refused-changed-since-install")
-        return {"outcome": "plist-moved-job-was-absent", "plist_moved_to": moved}
+        # Declared TOCTOU limit (contract rev. 5, D6 bis): the absence was observed BEFORE the move and
+        # before ``after_remove`` (systemd ``daemon-reload``); a job reappearing during them is not seen.
+        return {"outcome": f"{noun}-moved-job-was-absent", f"{noun}_moved_to": moved,
+                **manager.after_remove(service, run=run)}
     if state != "loaded":
         return refused("refused-job-not-attested")
+    if not _plist_is(plist, plist_sha256):
+        # Read again AFTER the attestation (an observation takes time), right before the stop: the
+        # job attested above is stopped only while its definition is still the journaled file.
+        return refused("refused-changed-since-install")
+    # Declared TOCTOU limit (contract rev. 5, D6 bis): between this re-reading and the stop command
+    # a substitution is not excluded (no atomic transaction over the file and the manager).
     stop = _bootout(service, run=run)
-    if stop == "timeout":
-        return refused("stop-timeout")
     if stop != "ok":
-        return refused("stop-failed")
-    waited = 0.0
-    while True:
-        state = _job_state(service, run=run)
-        if state == "absent" or waited >= stop_timeout:
-            break
-        pause = min(0.25, stop_timeout - waited)
-        sleep(pause)
-        waited += pause
-    if state != "absent":
-        return refused("stop-unconfirmed", observation="indeterminate" if state == "unknown" else "loaded")
+        # Not retried, and no proof that nothing stopped: observed once, reported, still refused.
+        state, port_state = one_round()
+        return refused("stop-timeout" if stop == "timeout" else "stop-failed",
+                       observation=seen(state), port=port_state)
+    state, port_state = _await_stop(service, port, run=run, stop_timeout=stop_timeout, sleep=sleep, clock=clock)
+    if state != "absent" or port_state != "free":
+        # The definition stays in place: the job may still run, or something still holds the port.
+        return refused("stop-unconfirmed", observation=seen(state), port=port_state)
     moved = _move_plist(plist, journal_dir, plist_sha256)
     if moved is None:
         return refused("refused-changed-since-install")
-    return {"outcome": "stopped-and-plist-moved", "plist_moved_to": moved}
+    # Declared TOCTOU limit (contract rev. 5, D6 bis): the stop was confirmed BEFORE the move and
+    # before ``after_remove`` (systemd ``daemon-reload``); a job reappearing during them is not seen.
+    return {"outcome": f"stopped-and-{noun}-moved", f"{noun}_moved_to": moved,
+            **manager.after_remove(service, run=run)}
+
+
+def _definition_sha(step) -> str | None:
+    """Digest of the service definition an install journal recorded (plist or systemd unit)."""
+    if not isinstance(step, dict):
+        return None
+    value = step.get("plist_sha256") or step.get("unit_sha256")
+    return value if isinstance(value, str) else None
 
 
 def _created_service(installed) -> bool:
@@ -1063,6 +1327,11 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
     Clients: semantic removal of our entry (never the backup put back). The proof that
     authorised the removal is revoked first, durably. Service: only with ``with_service`` and
     only the one THIS install created, through ``stop_owned_service``. Data: never touched.
+
+    4.1.1, option (b): a client file this install CREATED (absent before, still the bytes the
+    install left; both attested by this journal) leaves the client's directory instead of
+    staying there as an empty shell: it is moved into this journal. A file that existed before,
+    or was changed since, keeps the semantic removal above.
     """
     if not re.fullmatch(r"[0-9]{8}-[0-9]{6}-[a-f0-9]{32}", stamp):
         raise QuickstartError("Invalid journal stamp")
@@ -1088,7 +1357,9 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
             continue
         digest = _record_digest(rec)
         state, current = read_entry(client, home)
-        if state == "ok" and current is None and rec.get("revoked"):
+        file_gone = (state == "missing-config" and isinstance(rec.get("file_created_sha256"), str)
+                     and not os.path.lexists(client.config_path(home)))  # option (b): the file we created has left
+        if (state == "ok" or file_gone) and current is None and rec.get("revoked"):
             # Already removed by an earlier undo or uninstall (the proof is revoked, the entry is gone):
             # a second run has nothing to do here, so a rollback whose stop failed can be finished later.
             out.append({"client": client.key, "undo": "nothing-to-undo"})
@@ -1127,12 +1398,25 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
         except (OSError, ValueError, QuickstartError, RecursionError):
             out.append({"client": client.key, "undo": "refused-removal-manual"})
             continue
+        # Undo option (b): attested BEFORE the revocation rewrites the journal (the record in hand is kept).
+        ours_alone = created_file(rec, path) is not None
+        file_facts = {}
+        if rec.get("file_absent_before") is True and not ours_alone:
+            # Changed since, or not proven to be only our bytes: the file stays, our entry leaves.
+            file_facts = {"file": "kept-not-proven-ours-alone"}
         try:
             # Revocation first, removal second: a failed removal leaves the entry unproven, never removable by default.
             revoke_proofs(journal_root, client.key, digest, stamp)
         except (OSError, ValueError, QuickstartError):
             out.append({"client": client.key, "undo": "revocation-failed-entry-untouched"})
             continue
+        if ours_alone:
+            # The file holds nothing but what this install wrote: it leaves the client's directory whole.
+            gone = remove_created_file(rec, path, home, directory, f"{client.key}.created-by-install")
+            if gone is not None:
+                out.append({"client": client.key, "undo": "restored", **gone})
+                continue
+            file_facts = {"file": "kept-not-proven-ours-alone"}  # changed at the last look: semantic removal
         try:
             remove_client_entry(client, home, run=run, previous=previous, toml_appended=rec.get("toml_appended"),
                                 expected_sha256=digest)
@@ -1140,10 +1424,14 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
             # Changed DURING the revocation: it is someone else's entry now, and it is left alone.
             out.append({"client": client.key, "undo": "refused-entry-changed-since-apply"})
             continue
+        except RemovalUnconfirmed:
+            # The CLI said zero and the file read back is not the expected one: never "restored".
+            out.append({"client": client.key, "undo": "unconfirmed-entry-state-after-claude-cli"})
+            continue
         except (OSError, ValueError, KeyError, QuickstartError, subprocess.SubprocessError):
             out.append({"client": client.key, "undo": "failed-entry-kept-unproven"})
             continue
-        out.append({"client": client.key, "undo": "restored"})
+        out.append({"client": client.key, "undo": "restored", **file_facts})
     clients_done = all(item["undo"] in {"restored", "nothing-to-undo"} for item in out)
     result = {"stamp": stamp, "ok": clients_done, "results": out, "data_restored_from_copy": False}
     if not clients_done:
@@ -1170,8 +1458,8 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
             result["service"] = {"undo": "kept-clients-remaining", "remaining_clients": sorted(remaining),
                                  "remaining_dependencies": dict(sorted(remaining.items()))}
         else:
-            stopped = stop_owned_service(installed["service"], installed["steps"]["service"].get("plist_sha256"),
-                                         directory, run=run, stop_timeout=stop_timeout, sleep=sleep)
+            stopped = stop_owned_service(installed["service"], _definition_sha(installed["steps"]["service"]),
+                                         directory, run=run, stop_timeout=stop_timeout, sleep=sleep, port=port)
             code = stopped.pop("code", None)
             result["service"] = {"undo": stopped.pop("outcome"), **stopped}
             if code:
@@ -1218,13 +1506,15 @@ def _selected_backend(settings, home, requested=None):
         if requested not in {'sqlite', 'jsonl'}:
             raise QuickstartError('Select sqlite or jsonl')
         return requested
-    import plistlib
+    manager = managers.host_manager()
+    if manager is None:
+        return 'sqlite'  # no service manager here: no definition to read (the preflight refuses the install)
     label = settings.service_label or 'local.memory-os-v4'
-    path = home / 'Library/LaunchAgents' / (label + '.plist')
+    path = manager.definition_path(label, home)
     _safe_path(path, home)
     if path.exists():
         try:
-            value = plistlib.loads(path.read_bytes()).get('EnvironmentVariables', {}).get('MEMORY_V4_STORE_BACKEND')
+            value = manager.read_environment(path).get('MEMORY_V4_STORE_BACKEND')
             if value in {'sqlite_s1', 'jsonl'}:
                 return 'sqlite' if value == 'sqlite_s1' else 'jsonl'
         except (ValueError, AttributeError):
@@ -1239,9 +1529,10 @@ def settings_for_install(settings, *, backend=None, home=None):
     chosen = _selected_backend(settings, home, backend)
     legacy = home / '.memory-os-v4'
     label = settings.service_label or 'local.memory-os-v4'
-    existing_plist = home / 'Library/LaunchAgents' / (label + '.plist')
+    manager = managers.host_manager()
+    existing = manager is not None and manager.definition_path(label, home).exists()
     if (chosen == 'sqlite' and settings.store_dir == legacy and 'MEMORY_V4_DIR' not in os.environ
-            and not existing_plist.exists() and not legacy.exists()):
+            and not existing and not legacy.exists()):
         settings = replace(settings, store_dir=home / '.local/share/memory-os/store')
     return settings, chosen
 
@@ -1260,10 +1551,19 @@ PROFILE_INSTALL = {
 }
 
 
-def _service_plan(settings, home, python, resource_env, *, backend=None, profile='semantic'):
+_HOST = _Sentinel("HOST")  # "the manager of this machine": distinct from None, which is "no manager"
+
+
+def _service_plan(settings, home, python, resource_env, *, backend=None, profile='semantic', manager=_HOST):
     """Service definition of one profile. ``semantic`` is the frozen 4.0.9 definition, byte for byte;
-    ``lexical`` is that definition minus the encoder variables, plus the profile selector."""
-    from .cli import _plist
+    ``lexical`` is that definition minus the encoder variables, plus the profile selector.
+
+    The definition is rendered by the service manager of this machine (plist or systemd unit;
+    same program, arguments and environment). Without a manager the plan describes the service
+    and has no definition (``state: unsupported``): nothing can be installed.
+    """
+    if manager is _HOST:
+        manager = managers.host_manager()
     if profile not in PROFILES:
         raise QuickstartError('Unknown install profile', code='setup_profile_unknown')
     label = settings.service_label or "local.memory-os-v4"
@@ -1289,33 +1589,37 @@ def _service_plan(settings, home, python, resource_env, *, backend=None, profile
         env["MEMORY_V4_RETRIEVAL_PROFILE"] = "lexical"
     argv = [python, "-m", "memory_os_v4.server", "--transport", "http", "--host", "127.0.0.1",
             "--port", str(settings.port), "--warm"]
-    xml = _plist(label, argv, env=env, keepalive=True, log=settings.ops_dir / "logs/server.err")
-    path = home / "Library/LaunchAgents" / (label + ".plist")
+    if manager is None:
+        return {"label": label, "path": None, "argv": argv, "env": env, "state": "unsupported", "sha256": None,
+                "manager": None}
+    try:
+        xml = manager.render(label, argv, env, log=settings.ops_dir / "logs/server.err")
+    except ValueError as exc:
+        raise QuickstartError(f"The service definition cannot be written safely: {exc}") from None
+    path = manager.definition_path(label, home)
+    if not path.absolute().is_relative_to(home.absolute()):
+        # Declared limit (4.1.1 L4): e.g. an absolute XDG_CONFIG_HOME outside the HOME. Nothing is written there.
+        raise QuickstartError("The service definition directory is outside the selected HOME (XDG_CONFIG_HOME "
+                              "outside HOME is not supported); nothing written", code="service_definition_outside_home")
     _safe_path(path, home)
-    import plistlib
-    state = "absent"
-    if path.exists():
-        try:
-            current = plistlib.loads(path.read_bytes())
-            expected = plistlib.loads(xml.encode())
-            state = "owned" if current == expected else "foreign-or-different"
-        except (ValueError, plistlib.InvalidFileException):
-            state = "invalid"
-    return {"label": label, "path": str(path), "argv": argv, "env": env, "plist": xml,
-            "state": state, "sha256": _sha(path)}
+    state = manager.state(path, xml)
+    return {"label": label, "path": str(path), "argv": argv, "env": env, manager.text_key: xml,
+            "state": state, "sha256": _sha(path), **manager.plan_extras(label)}
 
 
 def _installed_profile(settings, home):
     """Profile recorded by an existing service definition (absent variable = semantic); None without one."""
-    import plistlib
+    manager = managers.host_manager()
+    if manager is None:
+        return None
     label = settings.service_label or 'local.memory-os-v4'
-    path = home / 'Library/LaunchAgents' / (label + '.plist')
+    path = manager.definition_path(label, home)
     try:
         if path.is_symlink() or not path.is_file():
             return None
-        env = plistlib.loads(path.read_bytes()).get('EnvironmentVariables', {})
+        env = manager.read_environment(path)
         value = env.get('MEMORY_V4_RETRIEVAL_PROFILE', 'semantic') if isinstance(env, dict) else None
-    except (OSError, ValueError, AttributeError, plistlib.InvalidFileException):
+    except (OSError, ValueError, AttributeError):
         return None
     return value if value in PROFILES else None
 
@@ -1325,45 +1629,19 @@ def _job_run(argv, *, run, timeout):
 
     Callers only ever copy the command name and its return code into what we produce (§8).
     """
-    try:
-        result = run(argv, capture_output=True, text=True, timeout=timeout)
-    except (subprocess.SubprocessError, OSError):
-        return None, '', ''
-    return result.returncode, result.stdout or '', result.stderr or ''
+    return managers.job_run(argv, run=run, timeout=timeout)
 
 
-def _job_observation(service, *, run):
-    code, stdout, stderr = _job_run(["launchctl", "print", f"gui/{os.getuid()}/{service['label']}"], run=run, timeout=5)
-    if code is None:
-        return {'state': 'unknown'}  # a timeout is never evidence of absence
-    if code == 0:
-        # A plist on disk alone cannot attest the currently loaded launchd job.
-        # Check the launchctl output's program and first argument, not just a label.
-        program = re.search(r"(?m)^\s*program = (.+?)\s*$", stdout)
-        args = re.search(r"arguments = \{\s*\n([\s\S]*?)\n\s*\}", stdout)
-        def unquote(text):
-            return text.strip().strip('"')
-        actual_args = [unquote(line) for line in args.group(1).splitlines() if line.strip()] if args else []
-        if not program or not args or unquote(program.group(1)) != service['argv'][0] or actual_args != service['argv']:
-            return {'state': 'foreign-or-unattested'}
-        for key in ('MEMORY_V4_TOKEN_FILE', 'MEMORY_V4_DIR'):
-            match = re.search(r"(?m)^\s*" + re.escape(key) + r" => (.+?)\s*$", stdout)
-            if not match or unquote(match.group(1)) != service['env'][key]:
-                return {'state': 'foreign-or-unattested'}
-        def number(key):
-            match = re.search(r'(?m)^\s*' + re.escape(key) + r' = (-?\d+)\s*$', stdout)
-            return int(match[1]) if match else None
-        # A closed shape only (launchd states are lowercase words): never free text of the output (§8).
-        process_state = re.search(r'(?m)^\s*state = ([a-z][a-z -]{0,31})\s*$', stdout)
-        return {'state': 'loaded', 'runs': number('runs'), 'last_exit_code': number('last exit code'),
-                'pid': number('pid'), 'process_state': process_state[1] if process_state else None}
-    if "Could not find service" in (stdout + stderr):
-        return {'state': 'absent'}
-    return {'state': 'unknown'}  # permissions/syntax/IPC failures are not evidence of absence
+def _job_observation(service, *, run, timeout: float = 5):
+    """Attested state of the job of a service plan, through its manager (launchd when the plan names none)."""
+    manager = managers.manager_of(service)
+    if manager is None:
+        return {'state': 'unknown'}
+    return manager.observe(service, run=run, timeout=timeout)
 
 
-def _job_state(service, *, run):
-    return _job_observation(service, run=run)['state']
+def _job_state(service, *, run, timeout: float = 5):
+    return _job_observation(service, run=run, timeout=timeout)['state']
 
 
 def _startup_failure(observed, settings, home):
@@ -1436,6 +1714,9 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     def block(code, message):
         blocker_codes.append(code)
         blockers.append(message)
+    # 4.1.1 L4: the service manager comes from the detected cell (launchd, systemd --user, or none).
+    host = cell.detect()
+    manager = managers.select(host)
     installed = _installed_profile(settings, home)
     effective = profile or installed or NEW_INSTALL_DEFAULT_PROFILE
     if effective is None:
@@ -1451,11 +1732,13 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     def resources_for(name):
         return provision.plan(resources=('cl100k',)) if name == 'lexical' else provision.plan()
     resource_plan = resources_for(effective)
-    service = _service_plan(settings, home, python, resource_plan['env'], backend=backend, profile=effective)
+    service = _service_plan(settings, home, python, resource_plan['env'], backend=backend, profile=effective,
+                            manager=manager)
     if service['state'] == 'foreign-or-different' and installed and installed != effective:
         # The existing definition may be ours under ITS profile: a conversion request, not a foreign service.
         other_plan = resources_for(installed)
-        other = _service_plan(settings, home, python, other_plan['env'], backend=backend, profile=installed)
+        other = _service_plan(settings, home, python, other_plan['env'], backend=backend, profile=installed,
+                              manager=manager)
         if other['state'] == 'owned':
             block('setup_profile_conflict', f'setup_profile_conflict: this installation is {installed}; '
                   f'--profile {effective} is refused (a profile is read, never converted)')
@@ -1533,12 +1816,18 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     if result['disk_free_bytes'] < required:
         block('disk_guard', f'disk guard: {result["disk_free_bytes"]} bytes free < required {required} bytes '
               f'(effective minimum {minimum} bytes; provisioning peak + 1000000000 bytes margin)')
-    loaded = _job_state(service, run=run) if sys.platform == 'darwin' else 'unsupported'
+    loaded = _job_state(service, run=run) if manager is not None else 'unsupported'
     service['loaded_state'] = loaded
-    if service['state'] not in {'absent', 'owned'} or loaded in {'unknown', 'foreign-or-unattested'}:
+    if manager is None:
+        # No launchd and no usable systemd --user: said as such, never as an occupied port or label.
+        block('service_manager_unavailable', managers.unavailable(host) + '; nothing written')
+    elif service['state'] not in {'absent', 'owned'} or loaded in {'unknown', 'foreign-or-unattested'}:
         block('service_foreign', 'foreign/different/unattested service: no repair, stop or overwrite')
     if service['state'] == 'absent' and (loaded != 'absent' or result['port_state'] != 'free'):
-        block('port_or_label_occupied', 'port or launchd label occupied; nothing activated')
+        # A port that could not be probed is not a free port: same refusal, said as what it is.
+        block('port_or_label_occupied', manager.occupied + (
+            ' (the port could not be probed: its state is unknown, which is never a free port)'
+            if result['port_state'] == 'unknown' else ''))
     if service['state'] == 'owned' and loaded == 'absent':
         # An interrupted install (plist written, job never loaded) is said here, not discovered at apply.
         stamp = next((directory.name for directory, document in _install_journals(home / JOURNAL_SUBDIR)
@@ -1565,6 +1854,8 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         notices.append('Project .mcp.json can override user scope; inspect it before claiming a connection')
     if 'gemini-cli' in clients:
         notices.append('Gemini CLI folder trust is a separate user choice; configuration does not prove a connection')
+    if manager is not None:
+        notices += manager.notices(service['label'])
     return {**result, 'ok': not blockers, 'profile': effective, 'identity': identity, 'service': service,
             'blockers': blockers, 'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
             'sqlite_attestation': sqlite_attestation,
@@ -1700,19 +1991,45 @@ async def _relay_probe(python, env, *, demo=False, expected=None):
 
 
 def _bootout(service, *, run):
-    """One ``launchctl bootout``; returns 'ok', 'failed' (non-zero code) or 'timeout'. Output is never kept."""
-    try:
-        result = run(['launchctl', 'bootout', f"gui/{os.getuid()}/{service['label']}"],
-                     capture_output=True, text=True, timeout=15)
-    except subprocess.TimeoutExpired:
-        return 'timeout'
-    except (subprocess.SubprocessError, OSError):
-        return 'failed'
-    return 'ok' if result.returncode == 0 else 'failed'
+    """One ``launchctl bootout``; returns 'ok', 'failed' (non-zero code) or 'timeout'. Output is never kept.
+
+    Through the manager of the plan: ONE ``systemctl --user disable --now`` with ``systemd --user``.
+    """
+    manager = managers.manager_of(service)
+    return manager.stop(service, run=run) if manager else 'failed'
+
+
+def _confirmed_stop(service, port, *, run, stop_timeout=10.0, sleep=None, clock=None) -> dict:
+    """ONE stop of our attested job, then a BOUNDED confirmation: ``{"stopped": bool, "outcome": ...}``.
+
+    A zero return code of the stop command is not a stop. ``stopped`` is true only when, within
+    ``stop_timeout``, the manager attests the absence by its strict predicate (launchd: return
+    code 113 AND "Could not find service"; systemd: a complete, valid ``show`` with no main
+    process, no activity and no activation, which is also how "no process" is read) AND the
+    port of the service is ``free``: a refused connection. A port that cannot be read (timeout,
+    permission, any other error) is ``unknown`` and confirms nothing. ``stop_timeout`` is the
+    total time of the confirmation on a monotonic clock, observations included (``_await_stop``,
+    the same confirmation as ``stop_owned_service``). Outcomes: ``confirmed``, ``stop-failed``,
+    ``stop-timeout``, ``stop-not-confirmed`` (with what was last seen). No retry, no forced kill.
+    """
+    sent = _bootout(service, run=run)
+    if sent != 'ok':
+        # A stop command that failed or did not answer proves nothing either way: the state is
+        # observed once and reported; it is never a confirmed stop (no retry, no second command).
+        state, port_state = _await_stop(service, port, run=run, stop_timeout=0, sleep=sleep or time.sleep,
+                                        clock=clock or time.monotonic)
+        return {'stopped': False, 'outcome': 'stop-timeout' if sent == 'timeout' else 'stop-failed',
+                'observation': 'indeterminate' if state == 'unknown' else state, 'port': port_state}
+    state, port_state = _await_stop(service, port, run=run, stop_timeout=stop_timeout,
+                                    sleep=sleep or time.sleep, clock=clock or time.monotonic)
+    if state == 'absent' and port_state == 'free':
+        return {'stopped': True, 'outcome': 'confirmed'}
+    return {'stopped': False, 'outcome': 'stop-not-confirmed',
+            'observation': 'indeterminate' if state == 'unknown' else state, 'port': port_state}
 
 
 def apply_install(plan, settings, *, download_approved=False, demo=False, home=None, run=subprocess.run,
-                  probe=None, doctor_run=None, timeout=180, clock=time.monotonic):
+                  probe=None, doctor_run=None, timeout=180, clock=time.monotonic, stop_timeout=10.0):
     """Explicit apply. Journal every stage; failure preserves evidence, never repairs a foreign job.
 
     Stages: sqlite (WAL probe) -> resources -> token -> service -> service_ready -> clients -> checks
@@ -1721,7 +2038,7 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
     """
     from dataclasses import replace
     from . import provision, doctor
-    from .auth import create_token, read_token
+    from .auth import create_token, read_token, responder_pid
     from .diagnostics import exception_label
     import anyio
     home = home or Path.home()
@@ -1756,7 +2073,8 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
                 'installation_identity': installation_identity(plan['client_env']),
                 'service': {'label': service['label'], 'path': service['path'], 'argv': service['argv'],
                             'env': {key: service['env'][key] for key in ('MEMORY_V4_TOKEN_FILE', 'MEMORY_V4_DIR')},
-                            'state_at_preview': service['state']},
+                            'state_at_preview': service['state'],
+                            **({'manager': service['manager']} if service.get('manager') else {})},
                 'paths': {'store': str(settings.store_dir), 'backups': str(settings.backup_dir),
                           'backup-key': str(settings.backup_key), 'token': str(settings.token_file),
                           'resources': {key: plan['provision']['env'][key]
@@ -1804,6 +2122,9 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
         leave('token', started, created=created)
         failure_code = 'service_bootstrap_failed'
         started = enter('service')
+        manager = managers.manager_of(service)
+        if manager is None:  # a plan without a manager never passes the preflight; kept as a last guard
+            raise QuickstartError('No service manager; nothing activated', code='service_manager_unavailable')
         plist = Path(service['path'])
         if service['state'] == 'absent':
             if _sha(plist) != service['sha256'] or _port_state(settings.port) != 'free' or _job_state(service, run=run) != 'absent':
@@ -1814,14 +2135,17 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
             (settings.ops_dir / 'logs').mkdir(parents=True, exist_ok=True, mode=0o700)
             # No previous plist exists: create exclusively, never replace a race winner.
             from .auth import write_secret_file
-            write_secret_file(plist, service['plist'].encode())
-            progress['steps']['service'] = {'created': True, 'plist_sha256': _sha(plist)}
+            write_secret_file(plist, service[manager.text_key].encode())
+            progress['steps']['service'] = {'created': True, manager.step_key: _sha(plist)}
             record()
-            code, _, _ = _job_run(['launchctl', 'bootstrap', f'gui/{os.getuid()}', str(plist)], run=run, timeout=15)
-            if code != 0:
-                raise QuickstartError('launchd bootstrap failed; plist/journal retained; no automatic repair '
-                                      f'(roll back with quickstart --undo {journal.name} --with-service)',
-                                      code='service_bootstrap_failed')
+            if _sha(plist) != hashlib.sha256(service[manager.text_key].encode()).hexdigest():
+                # Read again right before the start: only the definition this run produced is started.
+                raise QuickstartError('Service definition changed before its start; nothing activated',
+                                      code='preflight_changed')
+            # Declared TOCTOU limit (contract rev. 5, D6 bis): a substitution between this reading and the
+            # start (systemd: also during ``daemon-reload``, which precedes ``enable --now``) is not excluded.
+            if manager.start(service, run=run) != 0:
+                raise QuickstartError(manager.start_failed(journal.name), code='service_bootstrap_failed')
         leave('service', started)
         failure_code = 'service_startup_failed'
         start = enter('service')  # the stage stays "service" until the service answers ready
@@ -1832,13 +2156,30 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
             try:
                 provision.guard(home)
             except provision.ProvisionError:
-                if (service['state'] == 'absent' and _sha(plist) == progress['steps']['service']['plist_sha256']
-                        and _job_state(service, run=run) == 'loaded'):
-                    # Only our newly created, still attested job is stopped on a resource breach.
-                    progress['guard_stop'] = {'attempted': True, 'stopped': _bootout(service, run=run) == 'ok'}
+                if (service['state'] == 'absent' and _job_state(service, run=run) == 'loaded'
+                        and _sha(plist) == _definition_sha(progress['steps']['service'])):
+                    # Only our newly created, still attested job is stopped on a resource breach. The
+                    # digest is read AFTER the attestation, right before the stop; what remains between
+                    # it and the command is the declared TOCTOU limit (contract rev. 5, D6 bis).
+                    # ``stopped`` is a CONFIRMED stop (job attested absent and port free, bounded wait).
+                    progress['guard_stop'] = {'attempted': True, **_confirmed_stop(
+                        service, settings.port, run=run, stop_timeout=stop_timeout)}
                 raise
             ready = _ready(settings, plan['identity'], backend=plan['backend'], profile=profile)
             if ready:
+                # A ready answer proves an application, not that OUR job provides it (D6 bis): the
+                # responder must be the process the manager attests for the installed job (launchd
+                # pid / systemd MainPID), say ``ok`` and name itself ``memory-os-v4``.
+                serving = _job_observation(service, run=run)
+                answered = responder_pid(ready)
+                if (serving['state'] != 'loaded' or serving.get('running') is not True
+                        or not isinstance(serving.get('pid'), int) or answered != serving['pid']):
+                    progress['responder'] = {'job_state': serving['state'], 'job_running': serving.get('running') is True,
+                                             'identified': answered is not None,
+                                             'same_process': False}
+                    raise QuickstartError('Readiness was answered, but not by the attested process of the installed '
+                                          'service (no running job, or another process holds the port); no client '
+                                          'config written', code='service_startup_failed')
                 break
             observed = _job_observation(service, run=run)
             if (observed['state'] == 'loaded' and (observed.get('runs') or 0) >= 1
@@ -1847,14 +2188,27 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
                          (not observed.get('pid') and observed.get('process_state') != 'running'))):
                 progress['startup_failure'] = _startup_failure(observed, settings, home)
                 # Only our new, unchanged plist and re-attested job can be stopped.
-                if (service['state'] == 'absent' and _sha(plist) == progress['steps']['service']['plist_sha256']
-                        and _job_state(service, run=run) == 'loaded'):
+                # Digest read AFTER the attestation, right before the stop (declared TOCTOU limit beyond
+                # that: contract rev. 5, D6 bis).
+                if (service['state'] == 'absent' and _job_state(service, run=run) == 'loaded'
+                        and _sha(plist) == _definition_sha(progress['steps']['service'])):
                     progress['startup_failure']['stop_attempted'] = True
-                    progress['startup_failure']['stopped'] = _bootout(service, run=run) == 'ok'
+                    confirmed = _confirmed_stop(service, settings.port, run=run, stop_timeout=stop_timeout)
+                    progress['startup_failure']['stopped'] = confirmed['stopped']
+                    progress['startup_failure']['stop_outcome'] = confirmed['outcome']
+                    if 'observation' in confirmed:
+                        progress['startup_failure']['stop_observation'] = confirmed['observation']
+                    if 'port' in confirmed:
+                        progress['startup_failure']['stop_port'] = confirmed['port']
+                unconfirmed = progress['startup_failure'].get('stop_attempted') and not progress['startup_failure']['stopped']
                 raise QuickstartError('Server startup failed: ' + str(observed.get('runs')) +
                                       ' runs, last exit code ' + str(observed.get('last_exit_code')) +
                                       '; private server log kept, content not copied: ' +
-                                      progress['startup_failure']['log_path'], code='service_startup_failed')
+                                      progress['startup_failure']['log_path'] +
+                                      ('; stop not confirmed (' + progress['startup_failure']['stop_outcome'] +
+                                       '): the service may still run, roll back with quickstart --undo ' +
+                                       journal.name + ' --with-service' if unconfirmed else ''),
+                                      code='service_startup_failed')
             time.sleep(.25)
         if not ready:
             raise QuickstartError('Readiness timeout; preserve logs/plist; no client config written',

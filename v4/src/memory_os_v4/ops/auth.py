@@ -131,6 +131,34 @@ def health_ok(settings: OpsSettings | None = None, timeout: float = 2.0) -> bool
         return False
 
 
+SERVER_NAME = "memory-os-v4"
+
+
+def responder_pid(payload) -> int | None:
+    """PID of the process that produced a ``/health`` or ``/ready`` answer, or None.
+
+    Only for an answer that says ``ok`` is true and names itself ``memory-os-v4`` with an integer
+    ``pid`` > 0. Anything else (another server, an older build without ``pid``, a body that is
+    not an object) identifies nobody: None, which never equals an attested process.
+    """
+    if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("server") != SERVER_NAME:
+        return None
+    pid = payload.get("pid")
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+
+def health_responder_pid(settings: OpsSettings | None = None, timeout: float = 2.0) -> int | None:
+    """``responder_pid`` of ``GET /health`` (HTTP 200 only); None when unreachable or unidentified."""
+    import json
+
+    settings = settings or OpsSettings.from_env()
+    try:
+        status, body = http_get(settings.health_url, settings, timeout)
+        return responder_pid(json.loads(body)) if status == 200 else None
+    except (SecretFileError, ValueError, TypeError, RecursionError):
+        return None
+
+
 async def call_tool(name: str, arguments: dict, settings: OpsSettings | None = None) -> dict:
     """One authenticated MCP tool call; returns the decoded JSON payload."""
     import json

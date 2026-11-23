@@ -65,7 +65,17 @@ class OpsSettings:
     def launchd_plist(self) -> Path | None:
         if not self.service_label:
             return None
-        return Path.home() / "Library/LaunchAgents" / f"{self.service_label}.plist"
+        from .service import Launchd
+        return Launchd().definition_path(self.service_label, Path.home())
+
+    @property
+    def service_definition(self) -> Path | None:
+        """Definition of the service under the manager of THIS machine (plist or systemd unit); None without one."""
+        if not self.service_label:
+            return None
+        from .service import host_manager
+        manager = host_manager()
+        return manager.definition_path(self.service_label, Path.home()) if manager else None
 
     @classmethod
     def from_env(cls) -> "OpsSettings":

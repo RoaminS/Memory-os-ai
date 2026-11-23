@@ -19,7 +19,7 @@ from setup_fixture_410 import (
 PLIST = "Library/LaunchAgents/test.memory-os.plist"
 STATE = ".local/state/memory-os"
 STARTUP_FAILURE_KEYS = {"state", "runs", "last_exit_code", "pid", "process_state", "exception_types",
-                        "log_path", "log_bytes", "stop_attempted", "stopped"}
+                        "log_path", "log_bytes", "stop_attempted", "stopped", "stop_outcome"}
 
 
 @pytest.fixture

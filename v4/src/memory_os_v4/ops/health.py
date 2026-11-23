@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from .auth import SecretFileError, http_get
-from .backup import SQLITE_MARKERS, sha256
+from .backup import SQLITE_MARKERS, archive_valid, sha256
 from .settings import OpsSettings
 
 DISK_MIN_GIB = 5.0
@@ -200,7 +200,10 @@ def last_good_backup_age(settings: OpsSettings) -> float | None:
             rec = json.loads(line)
         except ValueError:
             continue
-        if not (isinstance(rec, dict) and rec.get("ok") and rec.get("qualified") and rec.get("verified")):
+        # Same rule as ``backup.verified_archives``: the validity of the ARCHIVE (``archive_ok``) is not
+        # the restoration of the service (``ok`` needs both); older and SQLite records have no
+        # ``archive_ok`` and keep the ``ok`` filter.
+        if not (isinstance(rec, dict) and archive_valid(rec) and rec.get("qualified") and rec.get("verified")):
             continue
         archive = settings.backup_dir / str(rec.get("archive", ""))
         if not archive.is_file() or sha256(archive) != rec.get("archive_sha256"):

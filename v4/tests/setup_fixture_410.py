@@ -145,6 +145,16 @@ class FakeSystem:
         self.noise = ""               # appended to the stdout/stderr of every command
         self.clock = None             # FakeClock advanced by commands that "take time"
         self.hooks: dict = {}         # (tool, verb) -> callable run before the command
+        # systemd --user only (4.1.1 L4)
+        self.enabled = False          # activation (``UnitFileState``), distinct from ``loaded`` (activity)
+        self.drop_ins = ""            # ``DropInPaths`` reported by ``systemctl show``
+        self.need_reload = "no"       # ``NeedDaemonReload``
+        self.reload_fails = False     # ``daemon-reload`` returns 1
+        self.show_extra = ""          # raw text appended to the ``show`` output (closed-form checks)
+        # 4.1.1 L4, D6 bis: the process of the job, compared with the PID the server answers with
+        self.pid = 4242               # launchd ``pid`` / systemd ``MainPID`` of the running job
+        self.process = True           # False: the job is loaded and has no process
+        self.claude_noop = False      # ``claude mcp add/remove`` return 0 and change nothing
 
     def _done(self, returncode=0, stdout="", stderr=""):
         return SimpleNamespace(returncode=returncode, stdout=stdout + self.noise, stderr=stderr + self.noise)
@@ -167,6 +177,8 @@ class FakeSystem:
             text += "\n".join(f"{k} => {v}" for k, v in self.service["env"].items())
             if self.crashing:
                 text += f"\nruns = {self.crashing[0]}\nlast exit code = {self.crashing[1]}\nstate = spawn scheduled\n"
+            elif self.process:
+                text += f"\nstate = running\npid = {self.pid}\n"
             return self._done(0, stdout=text)
         if argv[:2] == ["launchctl", "bootstrap"]:
             if self.bootstrap_fails:
@@ -182,6 +194,8 @@ class FakeSystem:
             if self.bootout_mode == "ok":
                 self.loaded = False
             return self._done()
+        if argv[:2] == ["systemctl", "--user"]:
+            return self._systemctl(argv, kwargs)
         if argv[:2] == ["pgrep", "-x"]:
             return self._done(0 if self.desktop_running else 1)
         if argv[:2] == ["claude", "mcp"]:
@@ -190,6 +204,8 @@ class FakeSystem:
                 self.clock.advance(40)
             if self.claude_fails:
                 return self._done(1, stderr="refused")
+            if self.claude_noop:
+                return self._done()
             path = self.home / ".claude.json"
             data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             table = data.setdefault("mcpServers", {})
@@ -208,7 +224,101 @@ class FakeSystem:
         raise AssertionError(f"unexpected system command: {argv}")
 
     def verbs(self, tool: str = "launchctl") -> list[str]:
+        if tool == "systemctl":  # ``systemctl --user <verb> …``
+            return [argv[2] for argv in self.calls if argv[0] == tool]
         return [argv[1] for argv in self.calls if argv[0] == tool]
+
+    def _systemctl(self, argv, kwargs):
+        """4.1.1 L4: fake ``systemctl --user``. ``show`` prints a FROZEN text (``SYSTEMD_SHOW_*`` below),
+        in systemd's own order, whatever properties are requested; only literal fields are filled in.
+
+        Activity (``loaded``: a process runs, ``ActiveState``) and activation (``enabled``:
+        ``UnitFileState``) are two separate switches: ``enable --now`` / ``disable --now`` move
+        both, ``start`` / ``stop`` move the activity only.
+        """
+        verb = argv[2]
+        unit = None if self.service is None else self.service["label"] + ".service"
+        if verb == "show":
+            assert argv[4] == "--no-pager" and argv[5].startswith("--property="), argv
+            if self.stop_sent and self.observe_after_stop == "timeout":
+                raise subprocess.TimeoutExpired(argv, 5, output=self.noise, stderr=self.noise)
+            if self.stop_sent and self.observe_after_stop == "error":
+                return self._done(1, stderr="Failed to connect to bus: No medium found")
+            path = None if self.service is None else Path(self.service["path"])
+            on_disk = path is not None and path.is_file()
+            if argv[3] != unit or not (self.loaded or self.enabled or on_disk):
+                text = SYSTEMD_SHOW_NOT_FOUND
+            else:
+                running = self.loaded and not self.crashing and self.process
+                text = systemd_show(
+                    python="/foreign/bin/other-server" if self.job_replaced else self.service["argv"][0],
+                    port=self.service["argv"][self.service["argv"].index("--port") + 1],
+                    store=self.service["env"]["MEMORY_V4_DIR"], token=self.service["env"]["MEMORY_V4_TOKEN_FILE"],
+                    label=self.service["label"], unit=str(path),
+                    active="active" if running else "activating" if self.loaded else "inactive",
+                    sub="running" if running else "auto-restart" if self.loaded else "dead",
+                    pid=str(self.pid) if running else "0", enabled="enabled" if self.enabled else "disabled",
+                    restarts=str(max(0, self.crashing[0] - 1)) if self.crashing else "0",
+                    code="1" if self.crashing else "0", status=str(self.crashing[1]) if self.crashing else "0",
+                    drop_ins=self.drop_ins, reload=self.need_reload)
+            return SimpleNamespace(returncode=0, stderr=self.noise, stdout=text + self.show_extra)
+        if verb == "daemon-reload":
+            return self._done(1, stderr="Failed to reload daemon") if self.reload_fails else self._done()
+        if verb == "enable":
+            assert argv[3:] == ["--now", unit], argv
+            if self.bootstrap_fails:
+                return self._done(1, stderr="Failed to enable unit: Unit file does not exist")
+            self.loaded = self.enabled = True
+            return self._done()
+        if verb == "disable":
+            assert argv[3:] == ["--now", unit], argv
+            self.stop_sent = True
+            if self.bootout_mode == "timeout":
+                raise subprocess.TimeoutExpired(argv, 15, output=self.noise, stderr=self.noise)
+            if self.bootout_mode == "fail":
+                return self._done(1, stderr="Failed to disable unit: Access denied")
+            if self.bootout_mode == "ok":
+                self.loaded = self.enabled = False
+            return self._done()
+        if verb in ("stop", "start"):
+            assert argv[3:] == [unit], argv
+            self.loaded = verb == "start"
+            return self._done()
+        raise AssertionError(f"unexpected systemctl command: {argv}")
+
+
+# Frozen ``systemctl --user show`` texts (4.1.1 L4), written from the systemd documentation and kept
+# as literal text: they are NOT derived from the code that reads them. Order and extra detail
+# (timestamps, ``code=(null)``) are systemd's. ``@NAME@`` fields are plain substitutions.
+SYSTEMD_SHOW_NOT_FOUND = (
+    "MainPID=0\nNRestarts=0\nExecMainCode=0\nExecMainStatus=0\nEnvironment=\nLoadState=not-found\n"
+    "ActiveState=inactive\nSubState=dead\nFragmentPath=\nUnitFileState=\nDropInPaths=\nNeedDaemonReload=no\n")
+SYSTEMD_SHOW_LOADED = (
+    "MainPID=@PID@\n"
+    "NRestarts=@RESTARTS@\n"
+    "ExecMainCode=@CODE@\n"
+    "ExecMainStatus=@STATUS@\n"
+    "ExecStart={ path=@PYTHON@ ; argv[]=@PYTHON@ -m memory_os_v4.server --transport http --host 127.0.0.1 "
+    "--port @PORT@ --warm ; ignore_errors=no ; start_time=[Mon 2026-11-23 17:02:11 CET] ; stop_time=[n/a] ; "
+    "pid=@PID@ ; code=(null) ; status=0/0 }\n"
+    "Environment=MEMORY_V4_DIR=@STORE@ MEMORY_V4_TOKEN_FILE=@TOKEN@ MEMORY_V4_SERVICE_LABEL=@LABEL@ "
+    "TOKENIZERS_PARALLELISM=false\n"
+    "LoadState=loaded\n"
+    "ActiveState=@ACTIVE@\n"
+    "SubState=@SUB@\n"
+    "FragmentPath=@UNIT@\n"
+    "UnitFileState=@ENABLED@\n"
+    "DropInPaths=@DROP_INS@\n"
+    "NeedDaemonReload=@RELOAD@\n")
+
+
+def systemd_show(**fields) -> str:
+    text = SYSTEMD_SHOW_LOADED
+    for name, value in fields.items():
+        text = text.replace("@" + name.upper() + "@", value)
+    import re
+    assert not re.search(r"@[A-Z_]+@", text), text
+    return text
 
 
 class FakeClock:
@@ -269,7 +379,9 @@ def setup_context(tmp_path: Path, monkeypatch) -> SimpleNamespace:
         seen.runtime_calls.append(kwargs)
         return {"ok": True, "state": "qualified", "mismatches": {}, "profile_id": "synthetic"}
 
-    ready = {"version": __version__, "capabilities": {"store": {"instance_id": "synthetic"}}}
+    # ``pid``: the server answers with its own PID (D6 bis); here the process of the fake job.
+    ready = {"version": __version__, "capabilities": {"store": {"instance_id": "synthetic"}},
+             "ok": True, "server": "memory-os-v4", "pid": 4242}
 
     def fake_ready(*args, **kwargs):
         seen.ready_calls.append(kwargs)
@@ -279,7 +391,7 @@ def setup_context(tmp_path: Path, monkeypatch) -> SimpleNamespace:
     monkeypatch.setattr(qs.sys, "platform", "darwin")
     monkeypatch.setattr(qs.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(qs.shutil, "disk_usage", lambda *a: SimpleNamespace(free=20_000_000_000))
-    monkeypatch.setattr(qs, "_port_state", lambda port: "free")
+    monkeypatch.setattr(qs, "_port_state", lambda port, **kw: "free")
     monkeypatch.setattr(qs, "_ready", fake_ready)
     monkeypatch.setattr(readiness, "build_identity", lambda: dict(identity))
     monkeypatch.setattr(provision, "plan", fake_plan)

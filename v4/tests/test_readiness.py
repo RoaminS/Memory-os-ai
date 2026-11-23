@@ -145,3 +145,15 @@ def test_invalid_build_commit_rejected_at_startup(app_engine, monkeypatch):
     monkeypatch.setenv("MEMORY_V4_BUILD_COMMIT", "not-a-commit")
     with pytest.raises(ValueError, match="complete"):
         server._build_http_app("127.0.0.1", 8765)
+
+
+@pytest.mark.asyncio
+async def test_health_and_ready_name_the_process_that_answers(app_engine):
+    """4.1.1 (contract rev. 5, D6 bis): the operator tools compare this PID with the process the
+    service manager attests; an HTTP 200 of another process then proves nothing."""
+    import os
+    app, _ = app_engine
+    health = (await response(app, "/health")).json()
+    ready = (await response(app)).json()
+    for answer in (health, ready):
+        assert answer["pid"] == os.getpid() and answer["server"] == "memory-os-v4" and answer["ok"] is True

@@ -166,30 +166,39 @@ def _get_without_token(url: str) -> int:
 
 
 def _service(settings: OpsSettings) -> Check:
+    """State of the service through the service interface (launchd or systemd --user); read-only."""
+    from . import service as managers
+
+    manager = managers.host_manager()
+    name = "systemd" if manager is not None and manager.kind == "systemd-user" else "launchd"
     if not settings.service_label:
         return Check(
             "service",
             "WARN",
-            "MEMORY_V4_SERVICE_LABEL not set: launchd state not checked",
+            f"MEMORY_V4_SERVICE_LABEL not set: {name} state not checked",
             "export MEMORY_V4_SERVICE_LABEL=<label> (needed for qualified backups)",
         )
-    try:
-        rc = subprocess.run(
-            ["launchctl", "print", f"gui/{os.getuid()}/{settings.service_label}"],
-            capture_output=True,
-            check=False,
-            timeout=5,
-        ).returncode
-    except (OSError, subprocess.TimeoutExpired):
-        return Check("service", "WARN", "launchd status unavailable (platform or timeout)")
+    if manager is None:
+        manager = managers.Launchd()  # as before on a platform without a manager: the command is absent, WARN
+    state, word = manager.status_detail(settings.service_label, run=subprocess.run, timeout=5)
+    if state not in {"running", "stopped"} or not word:
+        # Anything that is not a complete, positive answer of the manager: never "loaded", never "not loaded".
+        return Check("service", "WARN", f"{name} status unavailable (platform or timeout)")
+    what = "unit" if name == "systemd" else "job"
+    # The word is the manager's own fact: "not loaded" only when the manager knows no such job or
+    # unit; a systemd unit that is loaded and inactive (or failed) is said "loaded but inactive".
+    if state == "running" and word == "loaded but not running":
+        # Starting, stopping or waiting for a restart, with no main process: never a healthy service.
+        return Check("service", "WARN", f"{name} {what} {settings.service_label} {word}",
+                     "no main process (starting, stopping or restarting): check the server log, then run doctor again")
     return (
-        Check("service", "PASS", f"launchd job {settings.service_label} loaded")
-        if rc == 0
+        Check("service", "PASS", f"{name} {what} {settings.service_label} {word}")
+        if state == "running"
         else Check(
             "service",
             "FAIL",
-            f"launchd job {settings.service_label} not loaded",
-            "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist",
+            f"{name} {what} {settings.service_label} {word}",
+            manager.manual_start(settings.service_label),
         )
     )
 

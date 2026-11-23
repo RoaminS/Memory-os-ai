@@ -920,7 +920,9 @@ def _build_http_app(host: str, port: int):
         await session_manager.handle_request(scope, receive, send)
 
     async def health(request):
-        return JSONResponse({"ok": True, "server": "memory-os-v4", "transport": "http",
+        # ``pid``: the process that ANSWERS (4.1.1, D6 bis): the operator tools compare it with the
+        # process the service manager attests, so that an HTTP 200 of another process proves nothing.
+        return JSONResponse({"ok": True, "server": "memory-os-v4", "transport": "http", "pid": os.getpid(),
                              "engine_loaded": _engine is not None,
                              "writes": _engine.write_status() if _engine is not None else WritePolicy(Config.from_env().write_mode).status(),
                              **identity})
@@ -936,7 +938,8 @@ def _build_http_app(host: str, port: int):
         return JSONResponse({"ok": ok, "ready": ok, "reason": reason,
                              "encoding_profile": capabilities["encoding"]["profile"] if ok else None,
                              "capabilities": capabilities if ok else None,
-                             "server": "memory-os-v4", **current}, status_code=200 if ok else 503)
+                             "server": "memory-os-v4", "pid": os.getpid(), **current},
+                            status_code=200 if ok else 503)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
