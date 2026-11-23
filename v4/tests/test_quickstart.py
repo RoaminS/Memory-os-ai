@@ -139,6 +139,8 @@ def install_context(home, monkeypatch):
     monkeypatch.setattr(provision, 'plan', lambda **kw: dict(resource))
     monkeypatch.setattr(provision, 'apply', lambda *a, **kw: dict(resource))
     monkeypatch.setattr(provision, 'guard', lambda *args: None)
+    # 4.1.1 L3: the synthetic target interpreter is never executed; it answers like this process.
+    monkeypatch.setattr(qs.sqlite_runtime, 'probe_target', lambda python, **kw: qs.sqlite_runtime.inspect())
     loaded = [False]
     calls = []
     def run(argv, **kwargs):

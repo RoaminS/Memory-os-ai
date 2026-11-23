@@ -57,6 +57,7 @@ def cmd_provision(args, s: OpsSettings) -> int:
 def cmd_quickstart(args, s: OpsSettings) -> int:
     from . import quickstart
     from .provision import ProvisionError
+    plan = None
     try:
         if args.undo:
             result = quickstart.undo(args.undo, home=Path.home(), with_service=bool(getattr(args, 'with_service', False)))
@@ -76,7 +77,9 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
                           'configured': [r['client'] for r in result.get('clients', {}).get('records', [])
                                          if r['status'] in {'applied', 'unchanged'}],
                           'relay_connected': result.get('relay', {}).get('connected', False),
-                          'real_client_usage': 'unmeasured'}
+                          'real_client_usage': 'unmeasured',
+                          **({'sqlite_attestation': quickstart.attestation_summary(result['sqlite_attestation'])}
+                             if result.get('sqlite_attestation') else {})}
         else:
             result = {**quickstart.report(plan), 'ok': plan['ok'], 'stage': 'preview',
                       'writes': 'none', 'blockers': plan['blockers'],
@@ -87,8 +90,20 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
         # Only our own messages are printed; a foreign exception is reduced to a listed class name (§8).
         from .diagnostics import exception_label
         ours = isinstance(exc, (quickstart.QuickstartError, ProvisionError))
+        # 4.1.1 §3: a refusal raised after the preflight still reports both SQLite read-back values.
+        attested = quickstart.attestation_summary((plan or {}).get('sqlite_attestation'))
+        if attested is None and not args.undo:
+            # ``prepare`` itself failed: the report still says what THIS interpreter reads back
+            # (in-memory check, no process, no write); the target and the server are not known.
+            try:
+                from . import sqlite_runtime
+                attested = quickstart.attestation_summary(
+                    sqlite_runtime.attestation(sqlite_runtime.inspect(), python=sys.executable))
+            except Exception:
+                attested = None
         _print_json({'ok': False, 'code': getattr(exc, 'code', None) if isinstance(exc, quickstart.QuickstartError)
-                     else 'quickstart_refused', 'error': str(exc) if ours else exception_label(exc)})
+                     else 'quickstart_refused', 'error': str(exc) if ours else exception_label(exc),
+                     **({'sqlite_attestation': attested} if attested else {})})
         return 1
 
 

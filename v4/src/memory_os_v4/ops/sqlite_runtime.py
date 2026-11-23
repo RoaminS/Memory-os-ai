@@ -9,8 +9,12 @@ running command; the running server publishes its own ``capabilities.store.sqlit
 """
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 import re
+import shlex
+import subprocess
 import sys
 import sysconfig
 
@@ -29,15 +33,54 @@ STANDALONE_BUILD = "20261110"
 STANDALONE_SOURCE = "python-build-standalone " + STANDALONE_BUILD + " (github.com/astral-sh/python-build-standalone), via uv"
 STANDALONE_SQLITE_DECLARED = "3.53.1"  # declared by the build, to be read back after installation
 # One named acquisition per cell that has a route (i). The reference cell uses route (a) only.
+# ``request`` is the complete uv key (implementation, exact version, system, architecture, libc):
+# never a bare minor that a later uv could resolve to another interpreter. uv has no request
+# syntax for the build itself (uv 0.13.9 help): the build is pinned by naming it here and by
+# CHECKING it after installation (``standalone_check``), never by trusting what uv picked.
 STANDALONE_CPYTHON = {
-    "macos-arm64-py312": {"python": "3.12.16", "megabytes": 25.4},
-    "macos-arm64-py313": {"python": "3.13.18", "megabytes": 25.6},
-    "ubuntu2404-arm64-py311": {"python": "3.11.18", "megabytes": 49.5},
+    "macos-arm64-py312": {"python": "3.12.16", "megabytes": 25.4, "request": "cpython-3.12.16-macos-aarch64-none"},
+    "macos-arm64-py313": {"python": "3.13.18", "megabytes": 25.6, "request": "cpython-3.13.18-macos-aarch64-none"},
+    "ubuntu2404-arm64-py311": {"python": "3.11.18", "megabytes": 49.5,
+                               "request": "cpython-3.11.18-linux-aarch64-gnu"},
 }
 DEFAULT_VENV = "~/.memory-os/venv"
 # "/cache/uv/" alone (4.1.0) missed the real uv cache, ~/.cache/uv: its two default spellings are named.
 EPHEMERAL_MARKERS = ("/cache/uv/", "/.cache/uv/", "/Caches/uv/", "pip-build-env", "uvx")
 READBACK = 'import sqlite3; print(sqlite3.sqlite_version)'
+# Run BY the target interpreter (``probe_target``): the same checks as ``inspect`` plus what
+# identifies the interpreter. Standard library only, in-memory database only, one JSON line.
+PROBE_SCRIPT = r"""
+import json, os, platform, sys, sysconfig
+out = {"executable": sys.executable, "base_prefix": sys.base_prefix, "python": list(sys.version_info[:3]),
+       "implementation": platform.python_implementation().lower(), "sys_version": sys.version,
+       "standalone": bool(sysconfig.get_config_var("PYTHON_BUILD_STANDALONE")), "build": None,
+       "sqlite": None, "json1": False, "wal_compiled": False, "fts5": False, "loaded": False}
+try:
+    with open(os.path.join(sys.base_prefix, "BUILD"), encoding="utf-8") as handle:
+        out["build"] = handle.read(64).strip() or None
+except OSError:
+    pass
+try:
+    import sqlite3
+    connection = sqlite3.connect(":memory:")
+    out["loaded"] = True
+    out["sqlite"] = list(sqlite3.sqlite_version_info[:3])
+    try:
+        out["json1"] = connection.execute("SELECT json_extract(?, '$.a')", ('{"a": 7}',)).fetchone()[0] == 7
+    except Exception:
+        pass
+    try:
+        options = {str(row[0]).upper() for row in connection.execute("PRAGMA compile_options")}
+        out["wal_compiled"] = "OMIT_WAL" not in options
+        out["fts5"] = "ENABLE_FTS5" in options
+    except Exception:
+        pass
+    connection.close()
+except Exception:
+    pass
+print(json.dumps(out))
+"""
+PROBE_TIMEOUT = 30
 
 
 def _dotted(version) -> str:
@@ -159,29 +202,102 @@ def uv_version(text) -> dict:
 
 
 def standalone_plan(cell_id, *, venv=DEFAULT_VENV, uv="uv"):
-    """Route (i) for ``cell_id``: what would be acquired and the exact commands. Pure; runs nothing.
+    """Route (i) for ``cell_id``: what would be acquired and the exact commands. Runs nothing.
 
     None when the cell has no named standalone CPython. The first command is the only download and
     is launched by the user; the venv creation forbids any further interpreter download.
+    ``commands`` are argument lists: no shell reads them, so ``~`` is expanded here (``venv`` and
+    ``uv`` keep the spelling of the caller for display); ``command_lines`` are the same commands
+    quoted for a POSIX shell, so a path with spaces can be pasted as is.
     """
     record = STANDALONE_CPYTHON.get(cell_id)
     if record is None:
         return None
-    version, python = record["python"], f"{venv}/bin/python"
-    commands = [[uv, "python", "install", version],
-                [uv, "venv", "--python", version, "--managed-python", "--no-python-downloads", venv],
+    version, request = record["python"], record["request"]
+    venv_path, uv_path = os.path.expanduser(str(venv)), os.path.expanduser(str(uv))
+    python = venv_path + "/bin/python"
+    commands = [[uv_path, "python", "install", request],
+                [uv_path, "venv", "--python", request, "--managed-python", "--no-python-downloads", venv_path],
                 [python, "-c", READBACK]]
-    text = [f"{uv} python install {version}",
-            f"{uv} venv --python {version} --managed-python --no-python-downloads {venv}",
-            f'{python} -c "{READBACK}"']
     return {"route": "i", "cell_id": cell_id, "download": True, "implicit_download": False,
-            "uv_minimum": _dotted(UV_MINIMUM), "venv": venv, "python": python, "commands": commands,
-            "command_lines": text, "minimum": _dotted(MIN_VERSION),
+            "uv_minimum": _dotted(UV_MINIMUM), "venv": venv, "venv_path": venv_path, "python": python,
+            "request": request, "build": STANDALONE_BUILD, "commands": commands,
+            "command_lines": [shlex.join(command) for command in commands], "minimum": _dotted(MIN_VERSION),
             "sqlite_declared": STANDALONE_SQLITE_DECLARED, "sqlite_attested": None,
             "acquisitions": [{"object": "CPython " + version, "source": STANDALONE_SOURCE, "version": version,
                               "megabytes": record["megabytes"], "destination": "uv managed Python directory"}],
             "limits": "declared SQLite version only: the cell stays untested until the venv reads back "
-                      f">= {_dotted(MIN_VERSION)}; uv flags checked against uv 0.10.8 help, not {_dotted(UV_MINIMUM)}"}
+                      f">= {_dotted(MIN_VERSION)}; the build {STANDALONE_BUILD} is named, then checked after "
+                      "installation (standalone_check), because uv has no request syntax for a build; "
+                      f"uv flags checked against the help of uv {_dotted(UV_MINIMUM)}, never executed here"}
+
+
+def probe_target(python, *, run=subprocess.run, timeout=PROBE_TIMEOUT) -> dict:
+    """``inspect`` for ANOTHER interpreter: ``python`` is executed and reads back its own SQLite.
+
+    The report has the shape of ``inspect`` plus ``target`` (what the interpreter says of itself).
+    An interpreter that cannot be run or answers anything else is ``sqlite_runtime_unattested``:
+    never assumed conformant, never described with the library of the running command. The child
+    runs isolated (``-I -S``: no PYTHON* variable, no user site, ``site`` not imported, hence no
+    ``.pth`` file and no sitecustomize of the target), writes no bytecode and opens an in-memory
+    database only.
+    """
+    report = {"ok": False, "code": "sqlite_runtime_unattested", "version": None, "minimum": _dotted(MIN_VERSION),
+              "checks": {"loaded": False, "version": False, "json1": False, "wal_compiled": False}, "fts5": False,
+              "writes": "none", "probed": str(python), "target": None}
+    try:
+        result = run([str(python), "-I", "-S", "-B", "-c", PROBE_SCRIPT], capture_output=True, text=True, timeout=timeout,
+                     env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        if result.returncode != 0:
+            return report
+        target = json.loads((result.stdout or "").strip().splitlines()[-1])
+        version = None if target["sqlite"] is None else tuple(int(part) for part in target["sqlite"])
+        python_version = tuple(int(part) for part in target["python"])
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
+        return report
+    if not isinstance(target, dict) or len(python_version) != 3 or (version is not None and len(version) != 3):
+        return report
+    checks = report["checks"]
+    checks.update(loaded=target.get("loaded") is True, version=version is not None and version >= tuple(MIN_VERSION),
+                  json1=target.get("json1") is True, wal_compiled=target.get("wal_compiled") is True)
+    report.update(version=_dotted(version) if version else None, fts5=target.get("fts5") is True,
+                  target={"executable": target.get("executable"), "base_prefix": target.get("base_prefix"),
+                          "python": _dotted(python_version), "implementation": target.get("implementation"),
+                          "standalone": target.get("standalone") is True, "build": target.get("build"),
+                          "sys_version": target.get("sys_version")})
+    report["code"] = next((code for name, code in (("loaded", "sqlite_runtime_unavailable"),
+                                                   ("version", "sqlite_runtime_too_old"),
+                                                   ("json1", "sqlite_json_missing"),
+                                                   ("wal_compiled", "sqlite_wal_unavailable")) if not checks[name]), None)
+    report["ok"] = report["code"] is None
+    return report
+
+
+def standalone_check(report, cell_id) -> dict:
+    """After installation: is the probed interpreter the standalone CPython named for ``cell_id``?
+
+    ``report`` comes from ``probe_target``. The Python version must be the named one exactly and
+    the SQLite read back must meet the floor. The build: uv writes the python-build-standalone
+    release into ``BUILD`` at the root of a managed installation; when that file is readable it
+    must say ``STANDALONE_BUILD``. Anything else REFUSES, an unreadable file included
+    (``standalone_build_unattested``): an exact Python version does not identify a build, and an
+    unproven build is never accepted as the named one.
+    """
+    record, target = STANDALONE_CPYTHON.get(cell_id), (report or {}).get("target") or {}
+    if record is None:
+        return {"ok": False, "code": "standalone_not_named", "cell_id": cell_id, "python": None, "sqlite": None,
+                "build": None, "build_state": "unattested", "expected": None}
+    build = target.get("build")
+    state = "unattested" if not build else "attested" if build == STANDALONE_BUILD else "mismatch"
+    facts = {"python": target.get("python") == record["python"], "sqlite": bool((report or {}).get("ok")),
+             "standalone": target.get("standalone") is True, "build": state == "attested"}
+    code = None if all(facts.values()) else ("standalone_python_mismatch" if not facts["python"] else
+                                             (report or {}).get("code") or "sqlite_runtime_unattested"
+                                             if not facts["sqlite"] else "standalone_build_" + state
+                                             if not facts["build"] else "standalone_not_python_build_standalone")
+    return {"ok": code is None, "code": code, "cell_id": cell_id, "python": target.get("python"),
+            "sqlite": (report or {}).get("version"), "build": build, "build_state": state, "checks": facts,
+            "expected": {"python": record["python"], "build": STANDALONE_BUILD, "sqlite_minimum": _dotted(MIN_VERSION)}}
 
 
 def server_attestation(value, *, running=True) -> dict:
@@ -199,10 +315,18 @@ def server_attestation(value, *, running=True) -> dict:
 def attestation(report, *, python, cell_id=None, server=None, built_by=None, executable=None) -> dict:
     """Both read-back values and the route, from an ``inspect`` report. Pure: nothing is executed.
 
-    ``interpreter`` is the library loaded by the interpreter running this command; ``server`` is the
-    value published by the service once it runs. Route ``a``: durable interpreter, conformant
-    library; ``i``: the same on a standalone CPython; ``none``: refused, with ``message``.
+    ``interpreter`` is the library read back by the interpreter that ``report`` describes: the one
+    running this command (``inspect``), or the target itself when it is another one
+    (``probe_target``, whose report says so in ``probed``; the provider and the executable are
+    then the target's, never those of the running command). ``server`` is the value published by
+    the service once it runs. Route ``a``: durable interpreter, conformant library; ``i``: the
+    same on a standalone CPython; ``none``: refused, with ``message``.
     """
+    target = report.get("target") if report.get("probed") else None
+    if report.get("probed"):
+        executable = executable or (target or {}).get("executable") or report["probed"]
+        if built_by is None:
+            built_by = "unknown" if target is None else "python-build-standalone" if target["standalone"] else "other"
     built_by = provider() if built_by is None else built_by
     durable = not is_ephemeral(python)
     conformant = bool(report.get("ok"))
@@ -212,7 +336,10 @@ def attestation(report, *, python, cell_id=None, server=None, built_by=None, exe
     result = {"minimum": _dotted(MIN_VERSION), "route": route, "ok": route != "none", "code": code,
               "durable": durable, "provider": built_by,
               "interpreter": {"version": report.get("version"), "ok": conformant, "code": report.get("code"),
-                              "executable": executable or sys.executable, "target_python": str(python)},
+                              "executable": executable or sys.executable, "target_python": str(python),
+                              "read_by": "target" if report.get("probed") else "command",
+                              "python": (target or {}).get("python") if report.get("probed")
+                              else _dotted(sys.version_info[:3])},
               "server": server or server_attestation(None, running=False),
               "remedy": remedy, "message": None, "journal_modes": "WAL only (no DELETE fallback)"}
     if not conformant:
@@ -223,8 +350,11 @@ def attestation(report, *, python, cell_id=None, server=None, built_by=None, exe
 def refusal_message(report, *, cell_id=None, remedy=None) -> str:
     """Actionable refusal of an unfit library; names every download, launches none."""
     code = report.get("code") or "sqlite_runtime_unavailable"
-    message = (f"{code}: SQLite loaded by this interpreter is unfit (version {report.get('version')}, "
-               f"minimum {report.get('minimum')}); nothing written; no other journal mode and no implicit "
+    # A probed report speaks for the target interpreter, named by its path; never for this command.
+    subject = f"the target interpreter {report['probed']}" if report.get("probed") else "this interpreter"
+    unfit = ("could not be read back by executing it" if code == "sqlite_runtime_unattested" else
+             f"is unfit (version {report.get('version')}, minimum {report.get('minimum')})")
+    message = (f"{code}: SQLite loaded by {subject} {unfit}; nothing written; no other journal mode and no implicit "
                "download. Route (a): run quickstart from any durable Python of this cell whose loaded SQLite "
                f"meets the minimum (check: python -c \"{READBACK}\")")
     if remedy is None:

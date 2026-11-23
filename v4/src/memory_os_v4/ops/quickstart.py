@@ -1183,6 +1183,17 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
     return result
 
 
+def attestation_summary(attestation: dict | None) -> dict | None:
+    """Both SQLite read-back values without any path: what every report carries, failures included."""
+    if not attestation:
+        return None
+    interpreter, server = attestation.get('interpreter') or {}, attestation.get('server') or {}
+    return {'minimum': attestation.get('minimum'), 'route': attestation.get('route'), 'ok': attestation.get('ok'),
+            'code': attestation.get('code'),
+            'interpreter': {key: interpreter.get(key) for key in ('version', 'ok', 'code', 'read_by', 'python')},
+            'server': {key: server.get(key) for key in ('version', 'ok', 'state', 'code')}}
+
+
 def report(plan: dict) -> dict:
     """Q5: anonymized report (paths relative to HOME, entries masked, no foreign configuration)."""
     home = str(Path.home())
@@ -1190,6 +1201,8 @@ def report(plan: dict) -> dict:
         return x.replace(home, "~") if isinstance(x, str) else x
     return {"platform": plan["platform"], "port_state": plan["port_state"], "token": plan["token"]["state"],
             "backend": plan.get('backend'), "work_state": plan.get('work_state'),
+            **({"sqlite_attestation": attestation_summary(plan['sqlite_attestation'])}
+               if plan.get('sqlite_attestation') else {}),
             "runtime_qualified": plan.get('runtime_qualification', {}).get('ok'),
             "disk_free_gb": round(plan["disk_free_bytes"] / 1e9, 1), "downloads_required_bytes": plan["downloads_required_bytes"],
             **{key: plan[key] for key in ('disk_min_free_bytes', 'disk_required_free_bytes') if key in plan},
@@ -1452,12 +1465,31 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
                      replace_existing=replace_existing)
     if effective == 'lexical' and backend != 'sqlite':
         block('setup_profile_backend_conflict', 'setup_profile_backend_conflict: the lexical profile requires the sqlite backend')
-    detected = cell.detect()
     sqlite_report = sqlite_runtime.inspect()
-    # 4.1.1 §3: only the value read back counts; route (a) or (i), else an actionable refusal.
-    sqlite_attestation = sqlite_runtime.attestation(sqlite_report, python=python, cell_id=detected.get('cell_id'))
-    if backend == 'sqlite' and not sqlite_report.get('ok'):
-        block(sqlite_report.get('code') or 'sqlite_runtime_unavailable', sqlite_attestation['message'])
+    # 4.1.1 §3: only the value read back BY THE INTERPRETER OF THE VENV counts. When ``python`` is
+    # not the interpreter running this command, it is executed to read back its own library (and
+    # its own version, hence its own cell): this command never answers for another interpreter.
+    target_report, target_facts = sqlite_report, {}
+    if (os.path.abspath(python) != os.path.abspath(sys.executable) and Path(python).is_file()
+            and os.access(python, os.X_OK) and not sqlite_runtime.is_ephemeral(python)):
+        target_report = sqlite_runtime.probe_target(python)
+        probed = target_report.get('target')
+        if probed:
+            target_facts = {'python_version': tuple(int(part) for part in probed['python'].split('.')),
+                            'implementation': probed['implementation'] or 'unknown',
+                            'sqlite_version': target_report.get('version')}
+    detected = cell.detect(**target_facts)
+    # Route (a) or (i), else an actionable refusal.
+    sqlite_attestation = sqlite_runtime.attestation(target_report, python=python, cell_id=detected.get('cell_id'))
+    sqlite_attestation['command_interpreter'] = {'version': sqlite_report.get('version'), 'ok': bool(sqlite_report.get('ok')),
+                                                 'code': sqlite_report.get('code'), 'executable': sys.executable}
+    if backend == 'sqlite' and not target_report.get('ok'):
+        block(target_report.get('code') or 'sqlite_runtime_unavailable', sqlite_attestation['message'])
+    elif backend == 'sqlite' and not sqlite_report.get('ok'):
+        # The target is fit but this command (which runs the WAL probe and the checks) is not.
+        block(sqlite_report.get('code') or 'sqlite_runtime_unavailable', sqlite_runtime.refusal_message(
+            sqlite_report, cell_id=detected.get('cell_id'),
+            remedy=sqlite_runtime.standalone_plan(detected.get('cell_id'))))
     identity = readiness.build_identity()
     runtime = qualified_runtime.inspect_current(profile=effective, extras=('ops', 'brief'))
     # 4.1.1: one of the retained cells, with its embedded lock for this profile; semantic stays on its cell.
@@ -1536,6 +1568,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     return {**result, 'ok': not blockers, 'profile': effective, 'identity': identity, 'service': service,
             'blockers': blockers, 'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
             'sqlite_attestation': sqlite_attestation,
+            **({'sqlite_runtime_target': target_report} if target_report is not sqlite_report else {}),
             'disk_min_free_bytes': minimum, 'disk_required_free_bytes': required,
             'backend': backend, 'work_state': backend == 'sqlite', 'runtime_qualification': runtime,
             'cell': detected, 'cell_acceptance': cell_acceptance,
@@ -1595,15 +1628,19 @@ def _ready(settings, identity, *, backend='sqlite', profile='semantic'):
     if backend == 'sqlite':
         # The SERVER process attests the library it loaded; this interpreter's own check is not enough.
         served = sqlite_runtime.server_attestation(store.get('sqlite_version'))
+        refusal = None
         if served['state'] == 'unattested':
-            raise QuickstartError('The running server does not attest a readable SQLite version',
-                                  code='sqlite_runtime_unattested')
-        if not served['ok']:
-            raise QuickstartError('The running server loaded a SQLite older than the engine floor (version '
-                                  f"{served['version']}, minimum {sqlite_runtime.MIN_VERSION[0]}."
-                                  f"{sqlite_runtime.MIN_VERSION[1]}.{sqlite_runtime.MIN_VERSION[2]}); start it from "
-                                  'a durable interpreter whose loaded SQLite meets the minimum',
-                                  code='sqlite_runtime_too_old')
+            refusal = QuickstartError('The running server does not attest a readable SQLite version',
+                                      code='sqlite_runtime_unattested')
+        elif not served['ok']:
+            refusal = QuickstartError('The running server loaded a SQLite older than the engine floor (version '
+                                      f"{served['version']}, minimum {sqlite_runtime.MIN_VERSION[0]}."
+                                      f"{sqlite_runtime.MIN_VERSION[1]}.{sqlite_runtime.MIN_VERSION[2]}); start it "
+                                      'from a durable interpreter whose loaded SQLite meets the minimum',
+                                      code='sqlite_runtime_too_old')
+        if refusal is not None:
+            refusal.sqlite_server = served  # the value read back travels with the refusal, into the report
+            raise refusal
     return response
 
 
@@ -1729,6 +1766,10 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
                 'ops_env': {**service['env'], 'MEMORY_V4_BACKUP_DIR': str(settings.backup_dir),
                             'MEMORY_V4_BACKUP_KEY': str(settings.backup_key)},
                 'ops_notice': 'Use ops_env for doctor/health/backup in a fresh shell; quickstart never changes shell defaults.'}
+    if 'sqlite_attestation' in plan:
+        # §3: both values in EVERY report, a failed one included. The server value stays
+        # ``not_running`` until the service itself publishes it (service_ready below).
+        progress['sqlite_attestation'] = dict(plan['sqlite_attestation'])
     def record():
         _atomic_write(journal / 'install.json', json.dumps(progress, indent=1), expected=UNGUARDED)
         (journal / 'install.json').chmod(0o600)
@@ -1871,6 +1912,14 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
         progress['error'] = str(exc) if ours else exception_label(exc)
         code = getattr(exc, 'code', None) if isinstance(exc, QuickstartError) else None
         progress['code'] = code if code and code != 'quickstart_refused' else failure_code
+        attested = progress.get('sqlite_attestation')
+        if (attested and progress['code'] in ('sqlite_runtime_too_old', 'sqlite_runtime_unattested')
+                and progress['stage'] == 'service' and attested['server'].get('state') == 'not_running'):
+            # The readiness check refused the value published by the server: the report keeps the very
+            # value that was read back (version included), never "not running".
+            served = getattr(exc, 'sqlite_server', None)
+            progress['sqlite_attestation'] = {**attested, 'server': dict(served) if isinstance(served, dict) else {
+                'version': None, 'ok': False, 'state': 'unattested', 'code': progress['code']}}
     finally:
         steps = progress['steps']
         progress['timing'] = {'profile': profile, 'download_bytes': plan['provision']['download_bytes'],

@@ -286,6 +286,9 @@ def setup_context(tmp_path: Path, monkeypatch) -> SimpleNamespace:
     monkeypatch.setattr(provision, "apply", fake_apply)
     monkeypatch.setattr(provision, "guard", lambda *a: None)
     monkeypatch.setattr(qualified_runtime, "inspect_current", fake_runtime)
+    # 4.1.1 L3: the target interpreter is probed by executing it; the synthetic one is never executed
+    # and answers like the library of the test process (late-bound: a patched ``inspect`` is followed).
+    monkeypatch.setattr(qs.sqlite_runtime, "probe_target", lambda python, **kw: qs.sqlite_runtime.inspect())
     return SimpleNamespace(root=tmp_path, home=home, python=str(python), settings=settings,
                            identity=identity, system=system, seen=seen, ready=ready, clock=clock)
 

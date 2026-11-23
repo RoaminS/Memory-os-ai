@@ -150,7 +150,9 @@ def test_uv_version_is_parsed_from_text_given_by_the_caller(text, version, ok, c
 @pytest.mark.parametrize("cell_id,version,megabytes", [("macos-arm64-py312", "3.12.16", 25.4),
                                                        ("macos-arm64-py313", "3.13.18", 25.6),
                                                        ("ubuntu2404-arm64-py311", "3.11.18", 49.5)])
-def test_standalone_plan_names_the_acquisition_and_the_exact_commands(cell_id, version, megabytes):
+def test_standalone_plan_names_the_acquisition_and_the_exact_commands(cell_id, version, megabytes, monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/someone")
+    request = sqlite_runtime.STANDALONE_CPYTHON[cell_id]["request"]
     plan = sqlite_runtime.standalone_plan(cell_id)
     assert plan == sqlite_runtime.standalone_plan(cell_id)  # pure
     assert plan["route"] == "i" and plan["download"] is True and plan["implicit_download"] is False
@@ -159,11 +161,15 @@ def test_standalone_plan_names_the_acquisition_and_the_exact_commands(cell_id, v
         "object": "CPython " + version, "version": version, "megabytes": megabytes,
         "source": "python-build-standalone 20261110 (github.com/astral-sh/python-build-standalone), via uv",
         "destination": "uv managed Python directory"}]
+    # L3 (Codex reservations on L2): the request is the complete uv key, the build is named, and no
+    # argument list keeps a "~" that only a shell would expand.
+    assert request.startswith(f"cpython-{version}-") and plan["build"] == "20261110"
     assert plan["commands"] == [
-        ["uv", "python", "install", version],
-        ["uv", "venv", "--python", version, "--managed-python", "--no-python-downloads", "~/.memory-os/venv"],
-        ["~/.memory-os/venv/bin/python", "-c", "import sqlite3; print(sqlite3.sqlite_version)"]]
-    assert plan["command_lines"][0] == f"uv python install {version}"
+        ["uv", "python", "install", request],
+        ["uv", "venv", "--python", request, "--managed-python", "--no-python-downloads",
+         "/Users/someone/.memory-os/venv"],
+        ["/Users/someone/.memory-os/venv/bin/python", "-c", "import sqlite3; print(sqlite3.sqlite_version)"]]
+    assert plan["command_lines"][0] == f"uv python install {request}"
     assert plan["sqlite_declared"] == "3.53.1" and plan["sqlite_attested"] is None  # declared is not attested
     assert not any("uvx" in part for command in plan["commands"] for part in command)
     assert sum("install" in command for command in plan["commands"]) == 1  # one download step, the first
@@ -186,13 +192,15 @@ def test_no_standalone_cpython_is_named_outside_the_three_cells(cell_id):
 
 @pytest.mark.parametrize("cell_id,version", [("macos-arm64-py312", "3.12.16"), ("macos-arm64-py313", "3.13.18"),
                                              ("ubuntu2404-arm64-py311", "3.11.18")])
-def test_refusal_names_the_uv_commands_and_says_it_is_a_download(cell_id, version):
+def test_refusal_names_the_uv_commands_and_says_it_is_a_download(cell_id, version, monkeypatch):
+    monkeypatch.setenv("HOME", "/Users/someone")
+    request = sqlite_runtime.STANDALONE_CPYTHON[cell_id]["request"]
     result = sqlite_runtime.attestation(inspected("3.50.4"), python=DURABLE, cell_id=cell_id, built_by="other")
     message = result["message"]
     assert message.startswith("sqlite_runtime_too_old: SQLite loaded by this interpreter is unfit "
                               "(version 3.50.4, minimum 3.51.3); nothing written")
-    assert f"uv python install {version} && uv venv --python {version} --managed-python --no-python-downloads " \
-           "~/.memory-os/venv" in message
+    assert f"uv python install {request} && uv venv --python {request} --managed-python --no-python-downloads " \
+           "/Users/someone/.memory-os/venv" in message
     assert "a DOWNLOAD you launch yourself" in message and f"CPython {version}" in message
     assert "python-build-standalone 20261110" in message and "uv >= 0.13.9" in message
     assert "no implicit download" in message and "no other journal mode" in message
@@ -256,7 +264,7 @@ def test_quickstart_refusal_is_actionable_on_a_cell_with_a_standalone_route(c, m
     plan = prepare(c, profile="lexical")
     assert plan["ok"] is False and plan["blocker_codes"] == ["sqlite_runtime_too_old"]
     version = sqlite_runtime.STANDALONE_CPYTHON[cell_id]["python"]
-    assert f"uv python install {version}" in plan["blockers"][0] and "DOWNLOAD" in plan["blockers"][0]
+    assert f"uv python install cpython-{version}-" in plan["blockers"][0] and "DOWNLOAD" in plan["blockers"][0]
     assert plan["sqlite_attestation"]["route"] == "none"
     assert plan["sqlite_attestation"]["remedy"]["acquisitions"][0]["version"] == version
     with pytest.raises(qs.QuickstartError, match="Preflight refused"):
@@ -311,6 +319,8 @@ def test_the_real_readiness_check_refuses_a_server_below_the_floor(c, monkeypatc
     assert isinstance(outcome, qs.QuickstartError) and outcome.code == code
     if value is not None:
         assert value in str(outcome) and "3.51.3" in str(outcome)
+    # L3: the value read back travels with the refusal, so that the failure report keeps it.
+    assert outcome.sqlite_server == sqlite_runtime.server_attestation(value)
 
 
 REAL_READY = qs._ready  # captured at import, before any fixture replaces it
