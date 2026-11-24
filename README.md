@@ -6,8 +6,8 @@
 Connected assistants — Claude Code, Codex, Cursor, VS Code Copilot, Gemini CLI, Grok, Zed… — can read and update
 the same project state on your machine: dated decisions, open tasks and verifiable history.
 
-> **Status: ALPHA — macOS Apple Silicon only** (Linux/Windows planned, not qualified). Local clients on the same Mac;
-> remote/cloud agents are not qualified. Current release: **4.1.0**.
+> **Status: ALPHA.** Four [platform cells](#platform-cells) are retained; every other platform is refused. Local
+> clients on the same machine; remote/cloud agents are not qualified. Current release: **4.1.1**.
 > Limits and evaluation results: [see below](#limits-and-evaluations).
 
 ## Why
@@ -27,12 +27,36 @@ no embedding model, no ML stack), the light profile. A retrospective retrieval c
 pre-registered joint parity threshold ([numbers and limits](#limits-and-evaluations)).
 No account, no telemetry, no cloud service of ours.
 
+## Platform cells
+
+A cell is a system, an architecture and a Python minor version. 4.1.1 retains these cells:
+
+| Cell | Install profiles |
+|---|---|
+| macOS Apple Silicon (arm64), Python 3.11 | semantic and lexical |
+| macOS Apple Silicon (arm64), Python 3.12 or 3.13 | lexical only |
+| Ubuntu 24.04 arm64, Python 3.11 | lexical only; the service runs under `systemd --user` |
+
+Every other platform is refused before anything is written: macOS on Intel, another Linux distribution or version,
+Linux on x86_64, WSL, Windows, another Python version or a Python that is not CPython. The semantic profile stays
+limited to macOS arm64 with Python 3.11.
+
+This table is a scope, not a result. The proof state of each cell (a state and the means used to establish it) is
+written neither in this README nor in the package: it is published next to the release, in the **P9 manifest**, bound
+to the SHA-256 of the exact wheel. The bootstrap preview reads that manifest from a local file (`--p9-manifest`) and
+never fetches it; without a manifest that names this exact wheel, the detected cell and its lock, it reports
+`non testé` ("not tested"). The manifest is not signed: the preview reports what the file declares.
+
 ## Install on macOS
 
 Prerequisites: Apple Silicon, **Python 3.11** (e.g. Homebrew) and a 5 GB free-disk safety reserve. Check the SQLite
 library of that Python: `python3.11 -c 'import sqlite3; print(sqlite3.sqlite_version)'`. SQLite ≥ 3.51.3 is required
 for the SQLite backend; check the library linked to this Python interpreter, not the sqlite3 command-line tool
 (`quickstart` and `doctor` check it too, before anything is written).
+
+The two `pip` commands below are the path for macOS with Python 3.11. They also apply to any other retained cell
+whose Python loads SQLite ≥ 3.51.3, with that Python in place of `python3.11` and the lexical profile only. When no
+such Python is at hand, use the [bootstrap](#install-with-the-bootstrap-any-retained-cell).
 
 Choose **one install profile**. It is explicit (`--profile` has no default for a new install), it is never guessed
 from the installed packages, and an existing installation keeps its profile: there is no in-place conversion.
@@ -64,34 +88,90 @@ $V/memory-os-admin quickstart --profile semantic --clients claude-code,codex --a
 ```
 
 The first `pip` command installs the package alone so that `memory-os-constraints` can name the constraints file of
-your profile; the second installs the dependencies at exactly the qualified versions. `quickstart` refuses a runtime
-whose installed versions differ from that lock.
+your profile and of the detected cell; the second installs the dependencies at exactly the versions of that lock.
+`quickstart` refuses a runtime whose installed versions differ from that lock.
 
-`quickstart` installs a local background service (launchd, `127.0.0.1` only, private 0600 token file), downloads only
-what your profile needs and only with `--download-approved`, configures the assistants you chose (backup + `--undo` of
-each config file) and proves the connection with a save/search demo. An existing `memory-os-ai` entry that the tool
+### Install with the bootstrap (any retained cell)
+
+`scripts/memory_os_bootstrap.py` is one script that uses the standard library only. It drives
+[`uv`](https://docs.astral.sh/uv/) to create the same durable environment, `~/.memory-os/venv`. It is the path when no
+suitable Python is at hand: the system Python that Ubuntu 24.04 ships loads SQLite 3.45.1, below the required 3.51.3.
+
+- **Source and digest.** The bootstrap and the P9 manifest are published with the release, each with its SHA-256.
+  Neither a URL nor a digest is written here: they exist only once the release is published. Check the digest of the
+  script before running it (`shasum -a 256 memory_os_bootstrap.py` on macOS, `sha256sum memory_os_bootstrap.py` on
+  Ubuntu). The copy in the source repository is a template: it previews and refuses to apply.
+- **`uv` ≥ 0.13.9**, given by an explicit path with `--uv`. The bootstrap never looks `uv` up on PATH, never downloads
+  it and refuses `uvx`.
+- **The first pass is a preview**: the bootstrap writes nothing and opens no connection. It reports the system, the
+  Python and the SQLite that Python loads, the service manager, the version of `uv`, the cell and its proof state,
+  the lock, and every acquisition (object, source, version, size, destination).
+- **`--apply` is a named option.** It creates the environment from binary wheels only, under the exact hashed
+  constraints of the cell, checks the installed package against the digest the bootstrap pins, then runs the
+  `quickstart` preview from that environment. It never runs `quickstart --apply` and never starts a service: it
+  prints the command that you then launch yourself.
+- **SQLite ≥ 3.51.3, two routes.** (a) An existing Python whose loaded SQLite meets the minimum: `--python
+  /path/to/python` (default: the Python running the script). (i) The standalone CPython named for the cell
+  (python-build-standalone 20261110, installed through `uv`): `--cpython 3.12` or `--cpython 3.13` on macOS,
+  `--cpython 3.11` on Ubuntu 24.04. That interpreter is downloaded only with the consent `--apply --acquire-cpython`,
+  and its SQLite is read back from the environment before anything is installed.
+
+On Ubuntu 24.04 arm64:
+
+```bash
+python3 memory_os_bootstrap.py --uv /path/to/uv --profile lexical --cpython 3.11         # preview: writes nothing
+python3 memory_os_bootstrap.py --uv /path/to/uv --profile lexical --cpython 3.11 --apply --acquire-cpython
+```
+
+The second command creates `~/.memory-os/venv` and prints the `quickstart` command to launch next; add
+`--p9-manifest /path/to/manifest` to either command to read the published proof state of your cell.
+
+Limit: the bootstrap does not pass `XDG_CONFIG_HOME` to the `quickstart` preview it runs, which therefore resolves the
+systemd unit and the Zed configuration under `~/.config`. With a custom `XDG_CONFIG_HOME` under your home directory,
+run `memory-os-admin quickstart` directly from the environment afterwards.
+
+### What quickstart does
+
+`quickstart` installs a local background service (launchd on macOS, `systemd --user` on Ubuntu 24.04; `127.0.0.1`
+only, private 0600 token file), downloads only what your profile needs and only with `--download-approved`,
+configures the assistants you chose (backup + `--undo` of
+each config file) and checks the connection through the relay; with `--demo` it also runs a save/search
+demonstration in a separate demo project. An existing `memory-os-ai` entry that the tool
 cannot prove it wrote is never overwritten silently: name the client with `--replace-existing <client>`, or edit it by
 hand. New installs use SQLite with shared tasks; `--backend jsonl` (semantic profile only) keeps a plain-file store
 without tasks. Existing installations are never migrated implicitly: back up and qualify an upgrade on a copy first.
 
+On Ubuntu 24.04 the service is the unit `<label>.service` under `~/.config/systemd/user/` (or under
+`$XDG_CONFIG_HOME/systemd/user/`), started with `systemctl --user daemon-reload` then `enable --now`. It needs a real
+login session of your user with a running systemd user manager: a session without that manager is refused.
+Containers are not supported; the tool does not detect them, it only checks that systemd and the user manager are
+present.
+`loginctl enable-linger` is never run by the tool: the command is shown as an option, with its effect (without it the
+service runs only while a session of your user is open).
+
 **Roll back / uninstall.** `quickstart --undo <stamp>` restores our entry in each client config;
-`--undo <stamp> --with-service` also stops the service that install created. `memory-os-admin uninstall` (preview),
+`--undo <stamp> --with-service` also stops the service that install created (launchd job or systemd unit).
+`memory-os-admin uninstall` (preview),
 then `uninstall --apply`, removes the client entries our journal proves we wrote and stops our service once no client
 entry depends, or may depend, on it. `uninstall` never deletes your data: store, backups, backup key, token,
 downloaded resources, journals and logs stay where they are, and there is no purge option. What it cannot see is
-listed for manual removal (a Claude Desktop extension, Claude Code hooks, auxiliary launchd jobs, the Python
-environment).
+listed for manual removal (a Claude Desktop extension, Claude Code hooks, the Python environment and, on macOS only,
+the auxiliary launchd jobs).
 
 Measured on an isolated clean **4.0.6** install on macOS Apple Silicon (12 October 2026): **77 s** SQLite / **80 s**
-JSONL end to end (pip, model, service, demo). These are not 4.1.0 measurements, nor a user productivity study.
+JSONL end to end (pip, model, service, demo). These are not 4.1.0 or 4.1.1 measurements, nor a user productivity
+study.
 
 ### Add another assistant later
 
-Recommended: `~/.memory-os/venv/bin/memory-os-admin quickstart --clients cursor,vscode` (preview), then `--apply`;
-it reuses the qualified interpreter with absolute paths and the profile of the existing installation.
+Recommended, on macOS: `~/.memory-os/venv/bin/memory-os-admin quickstart --clients cursor,vscode` (preview), then
+`--apply`. On Linux, where VS Code is refused, name clients of the Linux column below, for example
+`--clients cursor,zed`. The command reuses the interpreter of the installation with absolute paths and the profile
+of the existing installation.
 
 One-click alternatives (they add only the **relay**; the service, token and tokenizer table must already be installed;
-they need [`uv`](https://docs.astral.sh/uv/) on the PATH of the app and reinstall the package in uv's own environment):
+they need [`uv`](https://docs.astral.sh/uv/) on the PATH of the app and reinstall the package in uv's own environment,
+under a Python 3.11 that `uv` must already find, whatever the Python of the service environment):
 
 [![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp/install?name=memory-os-ai&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLXB5dGhvbiIsIjMuMTEiLCItLW5vLXB5dGhvbi1kb3dubG9hZHMiLCItLWZyb20iLCJtZW1vcnktb3MtYWlbb3BzLGJyaWVmXT09NC4xLjEiLCJtZW1vcnktb3MtcmVsYXkiXX0%3D)
 [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_memory--os--ai-0098FF)](https://vscode.dev/redirect/mcp/install?name=memory-os-ai&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--python%22%2C%223.11%22%2C%22--no-python-downloads%22%2C%22--from%22%2C%22memory-os-ai%5Bops%2Cbrief%5D%3D%3D4.1.1%22%2C%22memory-os-relay%22%5D%7D)
@@ -103,6 +183,34 @@ VS Code fallback: `code --add-mcp '{"name":"memory-os-ai","command":"uvx","args"
 | Claude Code, Cursor, VS Code (Copilot), Claude Desktop, Gemini CLI, Antigravity, Devin, Windsurf | writes its MCP entry (backup + undo) | Claude Desktop: quit the app first; Gemini CLI: trusted folder |
 | Codex, Grok CLI | adds an absent MCP entry to a valid TOML file | replacing an existing entry requires manual editing; an unchanged entry is kept |
 | Zed | plain JSON supported | existing JSONC requires manual editing |
+
+Where each client is configured, per system (`--clients` name in the first column):
+
+| Client | macOS | Linux (Ubuntu 24.04 cell) |
+|---|---|---|
+| `claude-code` | `~/.claude.json`, through `claude mcp add --scope user` | same |
+| `codex` | `~/.codex/config.toml` | same |
+| `cursor` | `~/.cursor/mcp.json` | same |
+| `antigravity` | `~/.gemini/config/mcp_config.json` | same |
+| `gemini-cli` | `~/.gemini/settings.json` | same |
+| `grok` | `~/.grok/config.toml` | same |
+| `zed` | `~/.config/zed/settings.json` | same, or `$XDG_CONFIG_HOME/zed/settings.json` |
+| `devin` | `~/.config/devin/mcp_config.json` | same |
+| `vscode` | `~/Library/Application Support/Code/User/mcp.json` | refused in 4.1.1 |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | refused in 4.1.1 |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` | refused in 4.1.1 |
+
+- **Refused on Linux in 4.1.1**: VS Code, Windsurf and Claude Desktop. The refusal is explicit
+  (`client_unsupported_on_os`): no path is guessed and nothing is written.
+- **Zed on Linux** follows `XDG_CONFIG_HOME` only when it is an absolute path under your home directory, without `..`
+  and without a symbolic link on the way; otherwise the configuration is refused.
+- **Relocated clients.** When `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME` or `GROK_HOME` is present in the
+  environment, even empty, automatic configuration of the client concerned (Claude Code, Codex, Gemini CLI, Grok CLI)
+  is refused (`client_env_override`): unset the variable or configure that client by hand.
+- **Gemini CLI**: `/etc/gemini-cli/settings.json`, when it exists, takes precedence over the user configuration; the
+  preview warns about it.
+- **Grok CLI also reads `~/.claude.json`**: with both Claude Code and Grok configured, Grok can show the
+  `memory-os-ai` entry twice; the preview says how to disable that import.
 
 "Configured" ≠ "connected" ≠ "used": restart the client, check that `memory-os-ai` tools are listed, then save and
 search once.
@@ -129,8 +237,17 @@ data). Interrupted writes are reported as
 
 ## Limits and evaluations
 
-- macOS Apple Silicon only; local clients on the same Mac.
-- Lexical vs semantic profile (4.1.0 engine), frozen BEAM 100K: this retrospective measurement covers 400 questions
+- Platforms: only the four [platform cells](#platform-cells); local clients on the same machine. The proof state of
+  each cell is published in the P9 manifest, outside the package, and that manifest is not signed.
+- Linux durability: the store opens only when `fullfsync` and `checkpoint_fullfsync` are read back as enabled; what
+  these settings actually guarantee is established on macOS only.
+- Residual race windows: between a check and the action that follows it (for example during
+  `systemctl --user daemon-reload`), a short window remains; see the 4.1.1 release notes (`docs/releases/v4.1.1.md`).
+- Linux clients: VS Code, Windsurf and Claude Desktop are refused in 4.1.1.
+- Package metadata: 4.1.1 carries no `Operating System :: POSIX :: Linux` classifier (decision of 24 November 2026;
+  planned for 4.1.2).
+- Lexical vs semantic profile, measured for 4.1.0 in November 2026 (manifest frozen on 22 November 2026; not
+  re-measured for 4.1.1), frozen BEAM 100K: this retrospective measurement covers 400 questions
   executed per arm, 355 of them scored, in 20 conversations. Mean Recall@10 is 44.089% for lexical and 45.764% for
   semantic: a lexical − semantic gap of −1.675 percentage points, 95% bootstrap CI by conversation
   [−3.747, +0.404] percentage points. The pre-registered joint parity threshold (lexical ≥ semantic − 2 percentage
@@ -145,7 +262,7 @@ data). Interrupted writes are reported as
   candidate as oracle, query-forget ranking is not independently scored, and authenticity is conditional on the local
   attested sources/runtime. At the 4.0.7 release, RC evidence transfer and installed/copy qualification of these gates were still pending.
 - 4.1.0 qualification scope: macOS Apple Silicon (arm64) with Python 3.11 only; the P-A and P-B evaluations were not
-  re-run for 4.1.0 ([release notes](#release-notes)).
+  re-run for 4.1.0 ([release notes](#release-notes)). Their earlier results are not claimed for 4.1.1 either.
 - No productivity gain is claimed: cross-assistant handoff has not been measured on users yet.
 - Local storage does not stop a cloud assistant from receiving the snippets it reads.
 - 4.0.4 / 4.0.5 fresh installs can resolve an incompatible MCP 2.x: use ≥ 4.0.6 (fully pinned dependencies).
@@ -156,6 +273,16 @@ Loopback-only service, bearer token in a 0600 file (never written into client co
 policy, dated append-only history, compare-and-set on tasks and core blocks.
 
 ## Release notes
+
+**4.1.1**: platform scope and installation; retrieval, SQLite schema and encoder are unchanged. Four retained
+platform cells (macOS arm64 with Python 3.11, 3.12 or 3.13; Ubuntu 24.04 arm64 with Python 3.11), every other platform
+refused; the semantic profile stays on macOS arm64 with Python 3.11. Lexical locks per cell, each with a frozen
+manifest of the admitted wheels; two routes to SQLite ≥ 3.51.3; a standard-library bootstrap (preview first, `--apply`
+as a named option, durable environment through `uv`); one service interface with two implementations, launchd and
+`systemd --user`; Linux configuration paths for eight clients, with VS Code, Windsurf and Claude Desktop refused on
+Linux. These notes describe a scope and announce no result: the proof state of each cell is published separately, in
+the P9 manifest, bound to the SHA-256 of the wheel. No measured gain is claimed, and the P-A and P-B evaluations are
+not claimed for 4.1.1. Declared limits: [above](#limits-and-evaluations) and `docs/releases/v4.1.1.md`.
 
 **4.1.0**: explicit install profile — `lexical` (no embedding model) or `semantic` —
 with per-profile qualified constraints; `quickstart --profile`, loaded-SQLite check before any write, no silent

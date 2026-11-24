@@ -243,7 +243,7 @@ def _lock_problem(cell_id: str, profile: str, lock) -> str | None:
     if cell_id not in CELLS or profile not in PROFILES:
         return f"{cell_id}/{profile} is not a retained cell and profile"
     if profile == "semantic" and cell_id not in SEMANTIC_CELLS:
-        return f"the semantic profile is not qualified on {cell_id}"
+        return f"the semantic profile is not available on {cell_id}"
     if not isinstance(lock, dict) or not isinstance(lock.get("constraints"), list) \
             or not isinstance(lock.get("artifacts"), list) or not lock["constraints"]:
         return f"{cell_id}/{profile}: constraints and artifacts lists are required"
@@ -827,9 +827,9 @@ def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None
     if (route == "i" and standalone is None) or (route == "a" and not interpreter["ok"]):
         pass  # already refused above: the cell cannot be named
     elif not target["retained"]:
-        block("cell_not_retained", f"{target['refusal']}; qualified cells: {', '.join(CELLS)}; give a Python of a "
-              "retained cell with --python /path/to/python" + offer + "; other platforms remain manual and "
-              "unqualified; nothing written")
+        block("cell_not_retained", f"{target['refusal']}; retained cells: {', '.join(CELLS)}; give a Python of a "
+              "retained cell with --python /path/to/python" + offer + "; other platforms remain manual; "
+              "nothing written")
     cell_id = target["cell_id"]
 
     # ---- pin, lock, proof
@@ -838,7 +838,7 @@ def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None
         block(pin["code"], pin["message"])
     elif cell_id and profile:
         if profile == "semantic" and cell_id not in SEMANTIC_CELLS:
-            block("profile_not_qualified_on_cell", f"the semantic profile is qualified only on "
+            block("profile_not_qualified_on_cell", f"the semantic profile is available only on "
                   f"{', '.join(SEMANTIC_CELLS)}; cell {cell_id} accepts --profile lexical only; nothing written")
         else:
             lock = (pin["cells"].get(cell_id) or {}).get(profile)

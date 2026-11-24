@@ -509,7 +509,7 @@ def main(argv: list[str] | None = None) -> int:
     jp.add_argument('--before',required=True)
     jp.add_argument('--apply',action='store_true')
     jp.add_argument('--request-id',default=None)
-    qs = sub.add_parser('quickstart', help='macOS onboarding: preview by default; explicit apply/download/demo')
+    qs = sub.add_parser('quickstart', help='onboarding (macOS launchd or Linux systemd --user): preview by default; explicit apply/download/demo')
     qs.add_argument('--clients', help='comma-separated chosen clients (default: claude-code,codex)')
     qs.add_argument('--backend', choices=('sqlite', 'jsonl'), default=None,
                     help='new installs: sqlite + tasks by default; existing backend is preserved; never migrates')
@@ -522,8 +522,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument('--apply', action='store_true')
     mode.add_argument('--undo', metavar='STAMP')
     qs.add_argument('--with-service', action='store_true',
-                    help='with --undo: also stop the service THAT install created (confirmed stop, plist moved '
-                         'into its journal); data is never touched')
+                    help='with --undo: also stop the service THAT install created (confirmed stop, launchd plist or '
+                         'systemd unit moved into its journal); data is never touched')
     qs.add_argument('--download-approved', action='store_true')
     qs.add_argument('--demo', action='store_true', help='opt-in save/search through relay in a unique demo project')
     qs.add_argument('--report', action='store_true', help='anonymized diagnostic summary')

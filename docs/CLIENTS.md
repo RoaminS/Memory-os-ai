@@ -1,6 +1,7 @@
 # Connecting your assistants to Memory OS AI
 
-Applies to releases **4.0.6 and later** (current release: **4.0.9**); `quickstart` is covered by synthetic tests.
+Applies to releases **4.0.6 and later** (current release: **4.1.1**). At its introduction in 4.0.6 (October 2026),
+`quickstart` was covered by synthetic tests; this sentence says nothing about 4.1.1.
 New quickstart installations default to SQLite + tasks; `--backend jsonl` is available.
 An existing service/store is never migrated by quickstart. Relay configurations stay the same for both backends.
 Claude draft integrated after Codex review, 2026-10-11.
@@ -39,6 +40,8 @@ args    = []
 
 ## Recipes
 
+The paths of this table are the macOS ones; the Linux paths of 4.1.1 are in [the next section](#linux-411).
+
 | Assistant | File | Key / command | Pitfall |
 |---|---|---|---|
 | Claude Code | `claude mcp add --scope user memory-os-ai -- <relay>` | `~/.claude.json` | a project `.mcp.json` takes precedence over the user scope |
@@ -62,6 +65,47 @@ args    = []
 command = "/ABS/PATH/memory-os-relay"
 args = []
 ```
+
+## Linux (4.1.1)
+
+**4.1.1 (in preparation, not published).** These paths apply to the one Linux cell that 4.1.1 retains, Ubuntu 24.04
+arm64 with Python 3.11 (lexical profile, `systemd --user` service). This section describes where `quickstart` writes;
+it announces no result. The proof state of the cell is published separately, in the P9 manifest of the release.
+
+| Assistant (`--clients` name) | File on Linux | Refused when this variable is present |
+|---|---|---|
+| Claude Code (`claude-code`) | `~/.claude.json`, through `claude mcp add --scope user` | `CLAUDE_CONFIG_DIR` |
+| Codex (`codex`) | `~/.codex/config.toml` | `CODEX_HOME` |
+| Cursor (`cursor`) | `~/.cursor/mcp.json` | |
+| Antigravity (`antigravity`) | `~/.gemini/config/mcp_config.json` | |
+| Gemini CLI (`gemini-cli`) | `~/.gemini/settings.json` | `GEMINI_CLI_HOME` |
+| Grok CLI (`grok`) | `~/.grok/config.toml` | `GROK_HOME` |
+| Zed (`zed`) | `~/.config/zed/settings.json`, or `$XDG_CONFIG_HOME/zed/settings.json` | |
+| Devin Desktop (`devin`) | `~/.config/devin/mcp_config.json` | |
+
+Keys and formats are those of the table above.
+
+- **Not supported on Linux in 4.1.1: VS Code, Windsurf and Claude Desktop.** `quickstart` refuses them with
+  `client_unsupported_on_os`: no path is guessed and nothing is written. They are to be re-evaluated in 4.1.2.
+- **Relocating variables.** The presence of `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME` or `GROK_HOME` in the
+  environment, even with an empty value, refuses the automatic configuration of that client (`client_env_override`),
+  on macOS as on Linux: unset the variable or configure the client by hand. The bootstrap detects the same variables
+  itself; for a client that is not selected it only reports a notice.
+- **Zed and `XDG_CONFIG_HOME`.** On Linux, Zed follows `XDG_CONFIG_HOME` only when it is an absolute path under the
+  home directory, without `..` and without a symbolic link on the way. A relative value or control characters are
+  refused with `client_xdg_invalid`; a path outside the home directory, `..` or a symbolic link with
+  `client_xdg_outside_home`. No other client follows `XDG_CONFIG_HOME`.
+- **Bootstrap limit.** `scripts/memory_os_bootstrap.py` does not pass `XDG_CONFIG_HOME` to the `quickstart` preview it
+  runs: that preview resolves Zed (and the systemd unit) under `~/.config`. With a custom `XDG_CONFIG_HOME`, run
+  `memory-os-admin quickstart` directly from the installed environment.
+- **Gemini CLI.** `/etc/gemini-cli/settings.json`, when it exists, takes precedence over `~/.gemini/settings.json`;
+  the same holds for a file named by `GEMINI_CLI_SYSTEM_SETTINGS_PATH`. The preview warns in both cases: check that
+  the system file does not override `memory-os-ai`.
+- **Grok CLI also reads `~/.claude.json`.** With both Claude Code and Grok configured, Grok can show the
+  `memory-os-ai` entry twice. The compatibility import is disabled in `~/.grok/config.toml` with
+  `[compat.claude] mcps = false`.
+- **Claude Code** is configured only through the `claude` CLI: when it is not on PATH, `quickstart` refuses
+  (`client_cli_missing`).
 
 ## Three levels of verification
 

@@ -1,5 +1,47 @@
 # Changelog
 
+## 4.1.1 — en préparation (branche feature/4.1.1, 2026-11-24) ; non publiée / non déployée / non qualifiée
+
+- Documents figés avant la construction du paquet : ils décrivent un périmètre et n'annoncent aucun résultat.
+  L'état de preuve de chaque cellule est publié à part, dans le manifeste P9 (non signé), lié au SHA-256 du wheel.
+  Aucun gain mesuré ; P-A et P-B non revendiqués pour la 4.1.1.
+- Cellules de plateforme retenues : macOS arm64 / CPython 3.11, 3.12, 3.13 et Ubuntu 24.04 arm64 / CPython 3.11
+  (`ops/cell.py`). Toute autre cellule est refusée (`runtime_unqualified`, motif `cell_not_retained`). Profil
+  sémantique limité à macOS arm64 / CPython 3.11 (`profile_not_qualified_on_cell` ailleurs).
+- Verrous lexicaux par cellule : catalogue, contraintes et manifeste d'artefacts figé (36 paquets, roues admises
+  avec URL `files.pythonhosted.org`, SHA-256 et taille ; aucune sdist), empreintes ancrées dans le code ; un verrou
+  absent ou altéré donne `cell_lock_missing`. Verrou sémantique inchangé (65 paquets). `memory-os-constraints
+  {lexical|semantic} [--cell CELL_ID]` rend le fichier de la cellule détectée.
+- SQLite ≥ 3.51.3 : voie (a), un Python existant dont la SQLite chargée est conforme ; voie (i), le CPython autonome
+  nommé pour la cellule (python-build-standalone 20261110, par `uv`). Valeur relue par l'interpréteur de
+  l'environnement, refus explicite sinon.
+- Amorce `scripts/memory_os_bootstrap.py` (bibliothèque standard seule, publiée à côté du wheel avec son SHA-256) :
+  aperçu sans écriture par défaut ; `--apply` crée un environnement durable par `uv` ≥ 0.13.9 donné par `--uv`
+  (jamais `uvx`), roues binaires sous contraintes hachées ; `--acquire-cpython` consent au téléchargement du CPython
+  autonome ; `--p9-manifest` lit l'état de preuve dans un fichier local, `non testé` sinon. L'amorce ne lance jamais
+  `quickstart --apply` et ne démarre aucun service.
+- Service : une interface (`ops/service.py`), deux implémentations, `launchd` (inchangé) et `systemd --user`
+  (`daemon-reload`, `enable --now` / `disable --now`, attestation par `systemctl --user show`). Sans gestionnaire
+  utilisable : `service_manager_unavailable`. `loginctl enable-linger` jamais lancé, seulement affiché.
+  `quickstart --undo --with-service`, `uninstall`, `backup` et `doctor` passent par cette interface ;
+  `setup --write-launchd` est refusé hors macOS.
+- Retour arrière : un fichier de configuration cliente créé par l'installation et resté tel quel est déplacé dans
+  le journal au lieu de rester vide.
+- Clients sous Linux : chemins établis pour `claude-code`, `codex`, `cursor`, `antigravity`, `gemini-cli`, `grok`,
+  `zed` (`XDG_CONFIG_HOME` absolu et sous le HOME seulement) et `devin`. `vscode`, `windsurf` et `claude-desktop`
+  refusés sous Linux (`client_unsupported_on_os`). Présence de `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`
+  ou `GROK_HOME` : `client_env_override`. Avertissements : `/etc/gemini-cli/settings.json`, lecture de
+  `~/.claude.json` par Grok. Règle unique pour `--clients` (découpage exact, sans retrait d'espaces).
+- Métadonnées : version 4.1.1 ; classifieurs Python 3.12 et 3.13. Pas de classifieur
+  `Operating System :: POSIX :: Linux` en 4.1.1 (décision du 2026-11-24), prévu en 4.1.2.
+- Limites déclarées (détail dans `docs/releases/v4.1.1.md`) : fenêtres de concurrence résiduelles entre une
+  vérification et l'action ; limites du confinement de qualification sous macOS ; effet réel de `fullfsync` établi
+  sur macOS seulement ; l'amorce ne transmet pas `XDG_CONFIG_HOME` à son aperçu ; curseur base64 non canonique de
+  `changes.py` reporté en 4.1.2.
+- Serveur : `/health` et `/ready` rendent le `pid` du processus qui répond ; « installation réussie » et « service
+  rétabli » exigent que ce processus soit celui que le gestionnaire de service atteste, pas seulement un HTTP 200.
+- Inchangés : récupération (deux profils), schéma SQLite 8, encodeur, cache d'embeddings.
+
 ## 4.1.0 — en développement (branche feature/4.1.0-lexical, 2026-11-21) ; non publiée / non déployée / non qualifiée
 
 - Profil de récupération explicite : `semantic` (défaut de `Config`, moteur inchangé ; aucun défaut pour une nouvelle installation via `quickstart`) ou `lexical` (politique `lex-4.1.0-v1`,

@@ -635,7 +635,7 @@ def test_granite_is_refused_outside_the_semantic_cell(monkeypatch):
     as_cell(monkeypatch, linux())
     lock_everything(monkeypatch)
     provision.resource_gate(("cl100k",))
-    with pytest.raises(provision.ProvisionError, match="semantic profile is qualified only on macos-arm64-py311"):
+    with pytest.raises(provision.ProvisionError, match="semantic profile is available only on macos-arm64-py311"):
         provision.resource_gate(("granite", "cl100k"))
     monkeypatch.setattr(provision, "sys_platform", lambda: "darwin")  # macOS: unchanged, no cell lookup
     monkeypatch.setattr(cell, "detect", lambda **kw: (_ for _ in ()).throw(AssertionError("no cell lookup")))

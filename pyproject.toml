@@ -19,8 +19,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: MacOS :: MacOS X",
-    # 4.1.1, decision D2: to activate only on Romain's decision (the SQLite attestation of the
-    # Ubuntu 24.04 arm64 cell exists in the VM only).
+    # Linux classifier: not announced in 4.1.1 (decision D2, 2026-11-24); planned for 4.1.2.
     # "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",

@@ -207,12 +207,12 @@ def acceptance(cell: dict, *, profile: str, lock=None) -> dict:
 
     if not cell.get("retained"):
         return refuse("cell_not_retained",
-                      f"{cell.get('refusal') or 'unknown platform cell'}; quickstart is qualified only on "
-                      f"{retained}; other platforms remain manual and unqualified; nothing written")
+                      f"{cell.get('refusal') or 'unknown platform cell'}; quickstart accepts only the retained cells: "
+                      f"{retained}; other platforms remain manual; nothing written")
     cell_id = cell["cell_id"]
     if profile == "semantic" and cell_id not in SEMANTIC_CELLS:
         return refuse("profile_not_qualified_on_cell",
-                      f"the semantic profile is qualified only on {', '.join(SEMANTIC_CELLS)}; cell {cell_id} "
+                      f"the semantic profile is available only on {', '.join(SEMANTIC_CELLS)}; cell {cell_id} "
                       "accepts the lexical profile only (--profile lexical); nothing written")
     found = lock(cell_id, profile=profile)
     if found is None:

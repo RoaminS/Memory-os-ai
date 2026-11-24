@@ -609,7 +609,8 @@ def test_a_cell_that_is_not_retained_is_refused_and_never_announced_supported(m,
     before = tree(m.home)
     code, report = m.main("--profile", "lexical", "--apply")
     assert code == 1 and report["blocker_codes"] == ["cell_not_retained"] and report["cell"]["cell_id"] is None
-    assert label in report["blockers"][0] and "unqualified" in report["blockers"][0]
+    assert label in report["blockers"][0] and "remain manual" in report["blockers"][0]
+    assert "qualified" not in report["blockers"][0] and "supported" not in report["blockers"][0]
     assert report["cell"]["proof"]["state"] == "non testé" and report["lock"] is None
     assert m.verbs() == ["--version"] and tree(m.home) == before
 
