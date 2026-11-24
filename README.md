@@ -45,8 +45,8 @@ tokenizer table (with `--download-approved`); nothing is fetched from a model hu
 ```bash
 python3.11 -m venv ~/.memory-os/venv
 V=~/.memory-os/venv/bin
-$V/pip install --no-deps "memory-os-ai==4.1.0"
-$V/pip install -c "$($V/memory-os-constraints lexical)" "memory-os-ai[ops,brief]==4.1.0"
+$V/pip install --no-deps "memory-os-ai==4.1.1"
+$V/pip install -c "$($V/memory-os-constraints lexical)" "memory-os-ai[ops,brief]==4.1.1"
 $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex          # preview: writes nothing
 $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --apply --download-approved --demo
 ```
@@ -57,8 +57,8 @@ $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --ap
 ```bash
 python3.11 -m venv ~/.memory-os/venv
 V=~/.memory-os/venv/bin
-$V/pip install --no-deps "memory-os-ai==4.1.0"
-$V/pip install -c "$($V/memory-os-constraints semantic)" "memory-os-ai[ops,brief,semantic]==4.1.0"
+$V/pip install --no-deps "memory-os-ai==4.1.1"
+$V/pip install -c "$($V/memory-os-constraints semantic)" "memory-os-ai[ops,brief,semantic]==4.1.1"
 $V/memory-os-admin quickstart --profile semantic --clients claude-code,codex         # preview: writes nothing
 $V/memory-os-admin quickstart --profile semantic --clients claude-code,codex --apply --download-approved --demo
 ```
@@ -93,10 +93,10 @@ it reuses the qualified interpreter with absolute paths and the profile of the e
 One-click alternatives (they add only the **relay**; the service, token and tokenizer table must already be installed;
 they need [`uv`](https://docs.astral.sh/uv/) on the PATH of the app and reinstall the package in uv's own environment):
 
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp/install?name=memory-os-ai&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLXB5dGhvbiIsIjMuMTEiLCItLW5vLXB5dGhvbi1kb3dubG9hZHMiLCItLWZyb20iLCJtZW1vcnktb3MtYWlbb3BzLGJyaWVmXT09NC4xLjAiLCJtZW1vcnktb3MtcmVsYXkiXX0%3D)
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_memory--os--ai-0098FF)](https://vscode.dev/redirect/mcp/install?name=memory-os-ai&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--python%22%2C%223.11%22%2C%22--no-python-downloads%22%2C%22--from%22%2C%22memory-os-ai%5Bops%2Cbrief%5D%3D%3D4.1.0%22%2C%22memory-os-relay%22%5D%7D)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp/install?name=memory-os-ai&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLXB5dGhvbiIsIjMuMTEiLCItLW5vLXB5dGhvbi1kb3dubG9hZHMiLCItLWZyb20iLCJtZW1vcnktb3MtYWlbb3BzLGJyaWVmXT09NC4xLjEiLCJtZW1vcnktb3MtcmVsYXkiXX0%3D)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_memory--os--ai-0098FF)](https://vscode.dev/redirect/mcp/install?name=memory-os-ai&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--python%22%2C%223.11%22%2C%22--no-python-downloads%22%2C%22--from%22%2C%22memory-os-ai%5Bops%2Cbrief%5D%3D%3D4.1.1%22%2C%22memory-os-relay%22%5D%7D)
 
-VS Code fallback: `code --add-mcp '{"name":"memory-os-ai","command":"uvx","args":["--python","3.11","--no-python-downloads","--from","memory-os-ai[ops,brief]==4.1.0","memory-os-relay"]}'`
+VS Code fallback: `code --add-mcp '{"name":"memory-os-ai","command":"uvx","args":["--python","3.11","--no-python-downloads","--from","memory-os-ai[ops,brief]==4.1.1","memory-os-relay"]}'`
 
 | Client | quickstart | Notes |
 |---|---|---|

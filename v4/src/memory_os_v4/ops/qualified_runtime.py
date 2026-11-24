@@ -12,6 +12,7 @@ outside the attested lock is installed.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 from importlib import metadata
@@ -88,22 +89,22 @@ CELL_LOCK_DIGESTS: dict[tuple[str, str], tuple[str, str, str | None]] = {
     ('lexical', 'macos-arm64-py311'): (
         '4d3f236b06c825655bb0da90c5624d91bb48e065bca352df69f8a24abef77925',
         '17967671d2f143083c56d241fb6ad1c0ce5cb8a8ecd5b92ad706257e21860321',
-        'ec6e8e1ca2c1212c17915ff1e8fcb01fc7b3399c697a43dd4dfae233eacdb1e2',
+        'e8a8d795174db157110138791c4558ece00d27ca066f9320abcda10bbffe59d7',
     ),
     ('lexical', 'macos-arm64-py312'): (
-        '0f7ea330dec0b968b3a0b478b3ce5c904c40d71a69a3e5e2f6a572789af01567',
+        'ec4625ccbe897985cef57ac490b0ffa1e365d1f69608a40cef5959c434589632',
         '769ba2f9a4020549a976a06406e2a387772c50d33531de966a27110eea8db5cc',
-        '3792510120f312337dd4ad984cb8ea26fda01222f47b2c42c3b83a08e1249922',
+        'ae0a3a9e5b7a2faeba0478320586a0e6c337ea0ea7ae16ba1a1fbbe06d775e17',
     ),
     ('lexical', 'macos-arm64-py313'): (
-        'ff31b51824e821e02a2682ed40fd390aceb7f4656e32768a4c327cb0ba7e33a9',
+        '062eeb2d84d9f90833a186e243820189e82a5f2b227590b0c3a9e3f41aa333d7',
         'f7068c427ab1de814fa891afa8875e092d82a842e6532b28f532ee257fd9d8eb',
-        '72a82d4e44ea2731d2a7516db508a06b31b4266018155c4f0b111effc0041ccb',
+        'a0d6e20f8a3d9895114ec72e4da2976940349af74eaf92d56c2bd59a43d39f6a',
     ),
     ('lexical', 'ubuntu2404-arm64-py311'): (
-        '164a4763baae640e6678caea2ae76ff693f6cce7490948880b4d1612f824c7bd',
+        'b9670a31c57aa7849096c12d4fe311e3b3c1f67908d8ee11d190918bc3cb407b',
         'ce22752cb9ee6ac527c12aa87264db8f0b8c2437ebcae9983f7e20f21efe194d',
-        '7312889b7b01a08f6806ebdc465aedc9925101e11302ebd02575225e6757f3ea',
+        '637c902934a9bb83c297740b34694a2f7716a4ba79afd739d4226265b9a01e3a',
     ),
 }
 # END GENERATED CELL_LOCK_DIGESTS
@@ -257,6 +258,20 @@ def _constraints_match(lines: list[str], wanted_canon: dict[str, str]) -> dict:
 
 _WHEEL_TAG = re.compile(r'[A-Za-z0-9_.]+')  # distribution, python tag, abi tag, platform tag
 _WHEEL_BUILD_TAG = re.compile(r'[0-9][A-Za-z0-9_.]*')  # optional; starts with a digit
+_WHEEL_VERSION = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.!+]*')  # no dash; first character alphanumeric
+_ISO_DATE = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
+_ISO_UTC_SECOND = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+
+# Frozen artifact manifest (4.1.1 step 3): the only manifest schema the runtime accepts. The
+# ``preliminary`` schema 1 (bare SHA-256 lists, ``url: null``) of lot L5 is no longer embedded and
+# is refused like every other unknown schema.
+MANIFEST_SCHEMA_VERSION = 2
+_MANIFEST_KEYS = frozenset({
+    'artifacts', 'cell_id', 'constraints_sha256', 'exclude_newer', 'lock_state', 'profile',
+    'profile_id', 'pylock_sha256', 'resolved_at', 'schema_version', 'source',
+})
+_ARTIFACT_KEYS = frozenset({'name', 'version', 'wheels'})
+_WHEEL_KEYS = frozenset({'filename', 'sha256', 'size', 'url'})
 
 
 def valid_artifact_url(value: object, *, name: str | None = None, version: str | None = None) -> bool:
@@ -265,19 +280,24 @@ def valid_artifact_url(value: object, *, name: str | None = None, version: str |
         return False
     if any(ord(ch) <= 32 or ord(ch) == 127 for ch in value):
         return False
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
     if parsed.scheme != 'https':
         return False
     if not parsed.hostname or parsed.hostname.lower() not in ALLOWED_ARTIFACT_HOSTS:
         return False
-    if parsed.username is not None or parsed.password is not None or parsed.port is not None:
+    if parsed.username is not None or parsed.password is not None or port is not None:
         return False
-    if parsed.query or parsed.fragment:
+    if parsed.query or parsed.fragment or '?' in value or '#' in value:
         return False
     path = parsed.path
-    if not path or not path.startswith('/') or '//' in path or '/..' in path or path.endswith('/'):
+    if not path or not path.startswith('/') or '//' in path or path.endswith('/'):
         return False
-    # No percent-encoding (encoded traversal), no backslash, no ``.``/``..`` path segment.
+    # No percent-encoding (encoded traversal), no backslash, no ``.``/``..`` path segment. The
+    # segment test is the whole traversal rule: a name such as ``/..cache/`` is a plain directory.
     if '%' in path or '\\' in path or any(segment in ('.', '..') for segment in path.split('/')):
         return False
     filename = path.rsplit('/', 1)[-1]
@@ -285,9 +305,11 @@ def valid_artifact_url(value: object, *, name: str | None = None, version: str |
         return False
     # PEP 427: {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform tag}.whl
     parts = filename[:-4].split('-')
-    if len(parts) not in (5, 6) or any(not p for p in parts):
+    if len(parts) not in (5, 6) or any(not p or '..' in p for p in parts):
         return False
     if not _WHEEL_TAG.fullmatch(parts[0]) or not all(_WHEEL_TAG.fullmatch(tag) for tag in parts[-3:]):
+        return False
+    if not _WHEEL_VERSION.fullmatch(parts[1]):
         return False
     if len(parts) == 6 and not _WHEEL_BUILD_TAG.fullmatch(parts[2]):
         return False
@@ -296,6 +318,63 @@ def valid_artifact_url(value: object, *, name: str | None = None, version: str |
     if version is not None and parts[1] != version:
         return False
     return True
+
+
+# Explicit, frozen installation target of each retained cell: (system, CPython minor). The admitted
+# wheel tags are computed with ``packaging.tags`` (the logic pip and uv share) for THIS target, never
+# for the host that happens to run the check:
+# - macOS cells: macOS 11.0 on arm64 (``MACOS_TARGET``), i.e. ``macosx_11_0_arm64`` and the
+#   ``universal2`` tags up to 11.0; a wheel requiring a later macOS is refused;
+# - Ubuntu 24.04 arm64: glibc up to 2.39 (``LINUX_GLIBC_MAX``), i.e. ``manylinux_2_17`` ..
+#   ``manylinux_2_39`` on aarch64 plus the ``manylinux2014_aarch64`` alias; no ``linux_aarch64``,
+#   no ``musllinux``.
+CELL_WHEEL_TARGETS: dict[str, tuple[str, int]] = {
+    'macos-arm64-py311': ('macos', 11),
+    'macos-arm64-py312': ('macos', 12),
+    'macos-arm64-py313': ('macos', 13),
+    'ubuntu2404-arm64-py311': ('linux', 11),
+}
+MACOS_TARGET = ((11, 0), 'arm64')
+LINUX_GLIBC_MAX = (2, 39)  # Ubuntu 24.04
+_LINUX_GLIBC_MIN_MINOR = 17  # manylinux2014: the first glibc with aarch64 manylinux wheels
+
+
+@functools.lru_cache(maxsize=None)
+def cell_wheel_tags(cell_id: str) -> frozenset:
+    """The ``packaging.tags.Tag`` set a wheel may carry to be installable on the retained ``cell_id``."""
+    from packaging import tags
+
+    system, minor = CELL_WHEEL_TARGETS[cell_id]
+    if system == 'macos':
+        platforms = list(tags.mac_platforms(*MACOS_TARGET))
+    else:
+        glibc_major, glibc_minor = LINUX_GLIBC_MAX
+        platforms = [f'manylinux_{glibc_major}_{m}_aarch64'
+                     for m in range(glibc_minor, _LINUX_GLIBC_MIN_MINOR - 1, -1)] + ['manylinux2014_aarch64']
+    interpreter = f'cp3{minor}'
+    return frozenset((
+        *tags.cpython_tags(python_version=(3, minor), abis=[interpreter], platforms=platforms),
+        *tags.compatible_tags(python_version=(3, minor), interpreter=interpreter, platforms=platforms),
+    ))
+
+
+def wheel_compatible_with_cell(filename: object, cell_id: object) -> bool:
+    """True when the wheel ``filename`` can be installed on the retained cell ``cell_id``.
+
+    One rule for the runtime attestation, the lock generator and its ``--check``: the tags of the
+    file name (``packaging.utils.parse_wheel_filename``, compound tags expanded) must intersect
+    ``cell_wheel_tags(cell_id)``. A name that cannot be parsed, or an unknown cell, is refused.
+    """
+    from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+    from packaging.version import InvalidVersion
+
+    if not isinstance(cell_id, str) or cell_id not in CELL_WHEEL_TARGETS or not isinstance(filename, str):
+        return False
+    try:
+        wheel_tags = parse_wheel_filename(filename)[3]
+    except (InvalidWheelFilename, InvalidVersion, ValueError):
+        return False
+    return not wheel_tags.isdisjoint(cell_wheel_tags(cell_id))
 
 
 def _manifest_valid(
@@ -307,46 +386,77 @@ def _manifest_valid(
     constraints_sha: str,
     expected_canon: dict[str, str],
 ) -> bool:
-    if not isinstance(manifest, dict) or manifest.get('schema_version') != 1:
+    """Frozen manifest only: every package lists its admitted wheels ``{filename, url, sha256, size}``.
+
+    Refused: an unknown schema or key, a state other than ``frozen``, a package without wheel, a
+    null or invalid URL, a ``filename`` that is not the last URL segment (or not the wheel of this
+    package and version), a wheel whose tags do not fit the cell (``wheel_compatible_with_cell``),
+    a malformed SHA-256 or size, any duplicate (package, filename, URL or
+    SHA-256), wheels not sorted by ``filename``, and a package/version set other than the catalog's.
+    """
+    if not isinstance(manifest, dict) or set(manifest) != _MANIFEST_KEYS:
         return False
-    if (manifest.get('cell_id') != cell_id or manifest.get('profile') != profile
-            or manifest.get('profile_id') != profile_id
-            or manifest.get('constraints_sha256') != constraints_sha):
+    schema = manifest['schema_version']
+    if isinstance(schema, bool) or schema != MANIFEST_SCHEMA_VERSION:
         return False
-    lock_state = manifest.get('lock_state')
-    if lock_state not in ('preliminary', 'frozen'):
+    if (manifest['cell_id'] != cell_id or manifest['profile'] != profile
+            or manifest['profile_id'] != profile_id
+            or manifest['constraints_sha256'] != constraints_sha):
         return False
-    urls_status = manifest.get('urls_status')
-    if lock_state == 'frozen' and urls_status != 'complete':
+    if manifest['lock_state'] != 'frozen':
         return False
-    if lock_state == 'preliminary' and urls_status not in ('to_fill_at_step_3', 'complete'):
+    pylock_sha, resolved_at, exclude_newer, source = (
+        manifest['pylock_sha256'], manifest['resolved_at'], manifest['exclude_newer'], manifest['source'])
+    if not isinstance(pylock_sha, str) or _HEX64.fullmatch(pylock_sha) is None:
         return False
-    require_urls = lock_state == 'frozen' or urls_status == 'complete'
-    artifacts = manifest.get('artifacts')
+    if not isinstance(resolved_at, str) or _ISO_DATE.fullmatch(resolved_at) is None:
+        return False
+    if not isinstance(exclude_newer, str) or _ISO_UTC_SECOND.fullmatch(exclude_newer) is None:
+        return False
+    if not isinstance(source, str) or not source.strip():
+        return False
+    artifacts = manifest['artifacts']
     if not isinstance(artifacts, list) or not artifacts:
         return False
     seen: dict[str, str] = {}
+    seen_files: set[str] = set()
+    seen_urls: set[str] = set()
+    seen_hashes: set[str] = set()
     for item in artifacts:
-        if not isinstance(item, dict) or 'url' not in item:
+        if not isinstance(item, dict) or set(item) != _ARTIFACT_KEYS:
             return False
-        name, version, hashes, url = item.get('name'), item.get('version'), item.get('sha256'), item['url']
+        name, version, wheels = item['name'], item['version'], item['wheels']
         if not isinstance(name, str) or not name.strip() or not isinstance(version, str) or not version.strip():
-            return False
-        if require_urls:
-            if not valid_artifact_url(url, name=name, version=version):
-                return False
-        elif url is not None:
-            return False
-        if not isinstance(hashes, list) or not hashes:
-            return False
-        if any(not isinstance(h, str) or _HEX64.fullmatch(h) is None for h in hashes):
-            return False
-        if len(hashes) != len(set(hashes)):
             return False
         key = _canon(name)
         if key in seen:
             return False
         seen[key] = version
+        if not isinstance(wheels, list) or not wheels:
+            return False
+        previous = None
+        for wheel in wheels:
+            if not isinstance(wheel, dict) or set(wheel) != _WHEEL_KEYS:
+                return False
+            filename, url, digest, size = wheel['filename'], wheel['url'], wheel['sha256'], wheel['size']
+            if not valid_artifact_url(url, name=name, version=version):
+                return False
+            if not isinstance(filename, str) or filename != url.rsplit('/', 1)[-1]:
+                return False
+            if not wheel_compatible_with_cell(filename, cell_id):
+                return False
+            if not isinstance(digest, str) or _HEX64.fullmatch(digest) is None:
+                return False
+            if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                return False
+            if previous is not None and filename <= previous:
+                return False
+            previous = filename
+            if filename in seen_files or url in seen_urls or digest in seen_hashes:
+                return False
+            seen_files.add(filename)
+            seen_urls.add(url)
+            seen_hashes.add(digest)
     return seen == expected_canon
 
 
@@ -541,9 +651,10 @@ def cell_lock(cell_id: str, *, profile: str = 'semantic') -> dict | None:
       may appear;
     - constraints file contains exact marker-free ``==`` pins matching the catalog 1-to-1;
     - artifact manifest (mandatory for ``lexical``) matches ``cell_id``, ``profile``, ``profile_id``,
-      ``constraints_sha256``, ``lock_state``/``urls_status``, and covers the exact package/version
-      set with valid SHA-256 digests and ``url`` fields (``None`` while preliminary, ``https://``
-      once frozen at step 3).
+      ``constraints_sha256`` and the frozen schema (``schema_version`` 2, ``lock_state`` ``frozen``),
+      and covers the exact package/version set, each package listing its admitted wheels
+      (``filename``, ``https://files.pythonhosted.org`` ``url``, ``sha256``, ``size``). The
+      ``preliminary`` schema of lot L5 is refused.
     The lock of a neighbouring cell is never inherited.
     """
     loaded = _load_attested_lock(cell_id, profile=profile)

@@ -13,10 +13,10 @@
     },
     "ops": {}
   },
-  "limits": "Exact lock of the lexical retrieval profile for macOS arm64 CPython 3.12 (macos-arm64-py312). Lock state: preliminary (re-frozen at step 3 before build). No encoder, no vector index: the ML closure is neither required nor inspected.",
-  "lock_state": "preliminary",
+  "limits": "Exact lock of the lexical retrieval profile for macOS arm64 CPython 3.12 (macos-arm64-py312). Lock state: frozen (resolved 2026-11-24, exclude-newer 2026-11-24T00:00:00Z). No encoder, no vector index: the ML closure is neither required nor inspected.",
+  "lock_state": "frozen",
   "profile_id": "lexical-macos-arm64-py312-v1",
-  "recorded_at": "2026-11-23",
+  "recorded_at": "2026-11-24",
   "schema_version": 1,
   "versions": {
     "annotated-types": "0.7.0",

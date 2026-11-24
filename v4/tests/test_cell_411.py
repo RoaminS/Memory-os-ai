@@ -325,10 +325,14 @@ def test_a_lock_counts_only_if_catalog_constraints_and_manifest_agree_for_the_ce
     constraints.write_text("tiktoken==0.12.0\n")
     assert qualified_runtime.cell_lock(key[1], profile="lexical") is None             # manifest absent
     manifest_doc = {
-        "schema_version": 1, "cell_id": key[1], "profile": "lexical", "profile_id": document["profile_id"],
-        "lock_state": "preliminary", "urls_status": "to_fill_at_step_3",
+        "schema_version": 2, "cell_id": key[1], "profile": "lexical", "profile_id": document["profile_id"],
+        "lock_state": "frozen", "source": "test", "resolved_at": "2026-11-24",
+        "exclude_newer": "2026-11-24T00:00:00Z", "pylock_sha256": "b" * 64,
         "constraints_sha256": hashlib.sha256(constraints.read_bytes()).hexdigest(),
-        "artifacts": [{"name": "tiktoken", "version": "0.12.0", "url": None, "sha256": ["a" * 64]}],
+        "artifacts": [{"name": "tiktoken", "version": "0.12.0", "wheels": [{
+            "filename": "tiktoken-0.12.0-py3-none-any.whl", "sha256": "a" * 64, "size": 1,
+            "url": "https://files.pythonhosted.org/packages/ab/cd/tiktoken-0.12.0-py3-none-any.whl",
+        }]}],
     }
     manifest.write_text(json.dumps(manifest_doc))
     # Without matching anchored SHA-256 digests, even internally consistent files are refused.

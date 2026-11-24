@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Offline generator/verifier for 4.1.1 per-cell lexical locks, artifact manifests, and L3 test pins.
+"""Offline generator/verifier for 4.1.1 per-cell lexical locks, frozen artifact manifests, and L3 test pins.
 
-Reads pre-resolved ``uv pip compile --generate-hashes`` files (binary wheels only, zero network)
-and writes flat packaged resources under ``v4/src/memory_os_v4/resources/`` (required because
-``pyproject.toml`` package-data ``resources/*.json`` / ``resources/*.txt`` is non-recursive).
+Reads, with zero network, the frozen resolution of each retained cell (contract §6, step 3):
+``<cell>.txt`` (``uv pip compile --generate-hashes``, binary wheels only) and ``pylock.<cell>.toml``
+(PEP 751, read with ``tomllib``), and writes flat packaged resources under
+``v4/src/memory_os_v4/resources/`` (required because ``pyproject.toml`` package-data
+``resources/*.json`` / ``resources/*.txt`` is non-recursive).
 
-At step 3 of the 4.1.1 contract, re-run this script against the re-frozen lock files (with
-``--lock-state frozen`` and real wheel metadata when producing the release bootstrap pin).
+Every manifest is ``frozen`` (schema 2): each package lists the wheels admitted for the cell,
+``{filename, url, sha256, size}``. The ``preliminary`` state of lot L5 is no longer produced.
+
+    generate_cell_locks_411.py --input-dir ~/memory-os-local/tools/411/locks-figes-20261124 [--check]
 """
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RESOURCES = ROOT / "v4" / "src" / "memory_os_v4" / "resources"
@@ -68,13 +73,22 @@ RETAINED_CELLS = (
     "macos-arm64-py313",
     "ubuntu2404-arm64-py311",
 )
-# Mapping from preliminary lock filenames (~/memory-os-local/tools/411/locks-preliminaires/) to cells.
-DEFAULT_INPUT_FILES = {
-    "macos-arm64-py311": "cellule_1-controle.txt",
-    "macos-arm64-py312": "cellule_2a.txt",
-    "macos-arm64-py313": "cellule_2b.txt",
-    "ubuntu2404-arm64-py311": "cellule_3.txt",
+# Frozen input filenames per cell, inside ``--input-dir``: (requirements with hashes, PEP 751 lock).
+FROZEN_INPUT_FILES = {cell_id: (f"{cell_id}.txt", f"pylock.{cell_id}.toml") for cell_id in RETAINED_CELLS}
+# Resolution target of each cell: (``--python-version``, ``--python-platform``).
+CELL_RESOLUTION = {
+    "macos-arm64-py311": ("3.11", "aarch64-apple-darwin"),
+    "macos-arm64-py312": ("3.12", "aarch64-apple-darwin"),
+    "macos-arm64-py313": ("3.13", "aarch64-apple-darwin"),
+    "ubuntu2404-arm64-py311": ("3.11", "aarch64-manylinux_2_28"),
 }
+RESOLVER = "uv 0.13.9"
+DEFAULT_RESOLVED_AT = "2026-11-24"
+DEFAULT_EXCLUDE_NEWER = "2026-11-24T00:00:00Z"
+MANIFEST_SCHEMA_VERSION = 2
+_PYLOCK_TOP_KEYS = frozenset({"lock-version", "created-by", "requires-python", "packages"})
+_PYLOCK_PACKAGE_KEYS = frozenset({"name", "version", "wheels"})
+_PYLOCK_WHEEL_KEYS = frozenset({"name", "url", "upload-time", "size", "hashes"})
 CELL_LABELS = {
     "macos-arm64-py311": "macOS arm64 CPython 3.11",
     "macos-arm64-py312": "macOS arm64 CPython 3.12",
@@ -108,6 +122,9 @@ CELL_RESOURCE_NAMES = {
 REQUIRED_TIKTOKEN_VERSION = "0.12.0"
 _PIN_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*)$")
 _HASH_RE = re.compile(r"^--hash=sha256:([0-9a-f]{64})$")
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
+_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_UTC_SECOND_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 
 
 def canonical_name(name: str) -> str:
@@ -197,30 +214,108 @@ def _valid_https_url(value: object, *, name: str | None = None, version: str | N
     return _load_qualified_runtime().valid_artifact_url(value, name=name, version=version)
 
 
+def frozen_input_files(input_dir: Path) -> dict[str, tuple[Path, Path]]:
+    """``{cell_id: (<cell>.txt, pylock.<cell>.toml)}`` inside one frozen input directory."""
+    return {cell_id: (input_dir / txt, input_dir / lock) for cell_id, (txt, lock) in FROZEN_INPUT_FILES.items()}
+
+
+def parse_pylock(text: str) -> list[dict]:
+    """Parse one PEP 751 ``pylock.<cell>.toml`` strictly; binary wheels on the allowed host only.
+
+    Returns a list sorted by name of ``{"name": <canonical>, "version", "wheels": [...]}``, each
+    wheel being ``{"filename", "sha256", "size", "url"}``, sorted by ``filename``. Refused: a sdist
+    (or any other source), a marker or any unknown key, a package without wheel, an invalid URL, a
+    wheel ``name`` that is not the last URL segment, a SHA-256 that is not 64 lowercase hexadecimal
+    characters, a non-positive size, and every duplicate (package, filename, URL or SHA-256).
+    """
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"unparsable pylock: {exc}") from None
+    unknown_top = sorted(set(doc) - _PYLOCK_TOP_KEYS)
+    if unknown_top:
+        raise ValueError(f"unsupported pylock keys: {', '.join(unknown_top)}")
+    if doc.get("lock-version") != "1.0":
+        raise ValueError(f"unsupported pylock lock-version: {doc.get('lock-version')!r}")
+    packages = doc.get("packages")
+    if not isinstance(packages, list) or not packages:
+        raise ValueError("pylock contains no packages")
+    entries: dict[str, dict] = {}
+    seen_files: set[str] = set()
+    seen_urls: set[str] = set()
+    seen_hashes: set[str] = set()
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ValueError("pylock package is not a table")
+        raw_name, version = package.get("name"), package.get("version")
+        if not isinstance(raw_name, str) or not _PIN_RE.fullmatch(f"{raw_name}=={version}"):
+            raise ValueError(f"pylock package lacks an exact name and version: {raw_name!r} {version!r}")
+        name = canonical_name(raw_name)
+        if "sdist" in package:
+            raise ValueError(f"sdist forbidden in pylock (binary wheels only): {name}")
+        unknown = sorted(set(package) - _PYLOCK_PACKAGE_KEYS)
+        if unknown:
+            raise ValueError(f"unsupported pylock package keys for {name}: {', '.join(unknown)}")
+        if name in entries:
+            raise ValueError(f"duplicate package in pylock: {name}")
+        raw_wheels = package.get("wheels")
+        if not isinstance(raw_wheels, list) or not raw_wheels:
+            raise ValueError(f"pylock package without wheel: {name}")
+        wheels = []
+        for wheel in raw_wheels:
+            if not isinstance(wheel, dict):
+                raise ValueError(f"pylock wheel of {name} is not a table")
+            unknown = sorted(set(wheel) - _PYLOCK_WHEEL_KEYS)
+            if unknown:
+                raise ValueError(f"unsupported pylock wheel keys for {name}: {', '.join(unknown)}")
+            url = wheel.get("url")
+            if not _valid_https_url(url, name=name, version=version):
+                raise ValueError(f"invalid wheel artifact URL for {name}: {url!r}")
+            filename = url.rsplit("/", 1)[-1]
+            if wheel.get("name", filename) != filename:
+                raise ValueError(f"wheel filename of {name} is not the last URL segment: {wheel.get('name')!r}")
+            hashes = wheel.get("hashes")
+            digest = hashes.get("sha256") if isinstance(hashes, dict) else None
+            if not isinstance(digest, str) or not _HEX64_RE.fullmatch(digest) or set(hashes) != {"sha256"}:
+                raise ValueError(f"wheel {filename} needs exactly one sha256 of 64 lowercase hexadecimal characters")
+            size = wheel.get("size")
+            if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+                raise ValueError(f"wheel {filename} needs a positive integer size")
+            if filename in seen_files or url in seen_urls or digest in seen_hashes:
+                raise ValueError(f"duplicate wheel filename, URL or sha256 in pylock: {filename}")
+            seen_files.add(filename)
+            seen_urls.add(url)
+            seen_hashes.add(digest)
+            wheels.append({"filename": filename, "sha256": digest, "size": size, "url": url})
+        entries[name] = {"name": name, "version": version, "wheels": sorted(wheels, key=lambda w: w["filename"])}
+    return [entries[name] for name in sorted(entries)]
+
+
 def build_cell_lock_files(
     cell_id: str,
     compiled_text: str,
+    pylock_bytes: bytes,
     *,
     reference_catalog: dict,
     ml_packages: set[str],
-    recorded_at: str = "2026-11-23",
-    lock_state: str = "preliminary",
+    resolved_at: str = DEFAULT_RESOLVED_AT,
+    exclude_newer: str = DEFAULT_EXCLUDE_NEWER,
     existing_constraints_bytes: bytes | None = None,
-    artifact_urls: dict[str, str] | None = None,
 ) -> tuple[dict, str, dict]:
     """Produce ``(catalog_dict, constraints_text, manifest_dict)`` for one retained lexical cell.
 
-    ``artifact_urls`` maps canonical package names to their verified ``https://`` wheel URLs
-    (contract §6). When ``lock_state == 'preliminary'`` and ``artifact_urls`` is omitted, each
-    artifact carries ``"url": None`` and the manifest carries ``"urls_status": "to_fill_at_step_3"``.
-    When ``lock_state == 'frozen'``, ``artifact_urls`` is mandatory for every artifact.
+    ``compiled_text`` is ``<cell>.txt`` and ``pylock_bytes`` the bytes of ``pylock.<cell>.toml``.
+    Both must describe the same packages and versions, and every admitted wheel SHA-256 must be one
+    of the hashes of its package in ``<cell>.txt``; the constraints follow the same set exactly.
+    Every wheel must also fit the cell (``qualified_runtime.wheel_compatible_with_cell``: the lock
+    of another cell is refused).
     """
     if cell_id not in RETAINED_CELLS:
         raise ValueError(f"not a retained cell: {cell_id}")
-    if lock_state not in ("preliminary", "frozen"):
-        raise ValueError(f"invalid lock_state: {lock_state!r}")
-    if lock_state == "frozen" and artifact_urls is None:
-        raise ValueError(f"{cell_id}: frozen lock manifests require artifact_urls (step 3 PyPI metadata)")
+    if not isinstance(resolved_at, str) or not _DATE_RE.fullmatch(resolved_at):
+        raise ValueError(f"invalid resolved_at (YYYY-MM-DD): {resolved_at!r}")
+    if not isinstance(exclude_newer, str) or not _UTC_SECOND_RE.fullmatch(exclude_newer):
+        raise ValueError(f"invalid exclude_newer (YYYY-MM-DDTHH:MM:SSZ): {exclude_newer!r}")
     artifacts = parse_uv_compiled_lock(compiled_text)
     by_name = {item["name"]: item["version"] for item in artifacts}
     if by_name.get("tiktoken") != REQUIRED_TIKTOKEN_VERSION:
@@ -232,29 +327,25 @@ def build_cell_lock_files(
     if leaked_ml:
         raise ValueError(f"{cell_id}: ML packages forbidden in lexical lock: {', '.join(leaked_ml)}")
 
-    canon_urls: dict[str, str] | None = None
-    if artifact_urls is not None:
-        canon_urls = {}
-        for raw_name, url in artifact_urls.items():
-            key = canonical_name(raw_name)
-            expected_ver = by_name.get(key)
-            if not _valid_https_url(url, name=key, version=expected_ver):
-                raise ValueError(f"{cell_id}: invalid wheel artifact URL for {raw_name}: {url!r}")
-            canon_urls[key] = url
-        missing_urls = sorted(set(by_name) - set(canon_urls))
-        if missing_urls:
-            raise ValueError(f"{cell_id}: missing artifact URLs for: {', '.join(missing_urls)}")
-
-    manifest_artifacts = []
-    for item in artifacts:
-        url = None if canon_urls is None else canon_urls[item["name"]]
-        manifest_artifacts.append({
-            "name": item["name"],
-            "sha256": item["sha256"],
-            "url": url,
-            "version": item["version"],
-        })
-    urls_status = "complete" if canon_urls is not None else "to_fill_at_step_3"
+    try:
+        locked = parse_pylock(pylock_bytes.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError(f"{cell_id}: pylock is not UTF-8") from None
+    except ValueError as exc:
+        raise ValueError(f"{cell_id}: {exc}") from None
+    locked_versions = {item["name"]: item["version"] for item in locked}
+    if locked_versions != by_name:
+        differing = sorted(
+            name for name in set(locked_versions) | set(by_name) if locked_versions.get(name) != by_name.get(name)
+        )
+        raise ValueError(f"{cell_id}: pylock packages or versions disagree with the constraints: {', '.join(differing)}")
+    admitted = {item["name"]: set(item["sha256"]) for item in artifacts}
+    for item in locked:
+        for wheel in item["wheels"]:
+            if not _load_qualified_runtime().wheel_compatible_with_cell(wheel["filename"], cell_id):
+                raise ValueError(f"{cell_id}: wheel {wheel['filename']} is not compatible with the cell")
+            if wheel["sha256"] not in admitted[item["name"]]:
+                raise ValueError(f"{cell_id}: wheel {wheel['filename']} sha256 is not a hash of the compiled lock")
 
     brief_keys = {canonical_name(k) for k in reference_catalog.get("extra_versions", {}).get("brief", {})}
     versions = {name: by_name[name] for name in sorted(by_name) if name not in brief_keys}
@@ -280,12 +371,12 @@ def build_cell_lock_files(
         },
         "limits": (
             f"Exact lock of the lexical retrieval profile for {label} ({cell_id}). "
-            f"Lock state: {lock_state} (re-frozen at step 3 before build). "
+            f"Lock state: frozen (resolved {resolved_at}, exclude-newer {exclude_newer}). "
             "No encoder, no vector index: the ML closure is neither required nor inspected."
         ),
-        "lock_state": lock_state,
+        "lock_state": "frozen",
         "profile_id": profile_id,
-        "recorded_at": recorded_at,
+        "recorded_at": resolved_at,
         "schema_version": 1,
         "versions": versions,
     }
@@ -313,23 +404,24 @@ def build_cell_lock_files(
         constraints_text = header + "".join(f"{name}=={by_name[name]}\n" for name in sorted(by_name))
         constraints_sha = _sha256_bytes(constraints_text.encode("utf-8"))
 
-    source_note = (
-        f"uv pip compile --generate-hashes ({lock_state}, binary wheels only; "
-        "artifact URLs filled from PyPI metadata)"
-        if urls_status == "complete"
-        else f"uv pip compile --generate-hashes ({lock_state}, binary wheels only; "
-        "artifact URLs to fill at step 3 from PyPI metadata under the locks GO)"
-    )
+    python_version, python_platform = CELL_RESOLUTION[cell_id]
     manifest_doc = {
-        "artifacts": manifest_artifacts,
+        "artifacts": locked,
         "cell_id": cell_id,
         "constraints_sha256": constraints_sha,
-        "lock_state": lock_state,
+        "exclude_newer": exclude_newer,
+        "lock_state": "frozen",
         "profile": "lexical",
         "profile_id": profile_id,
-        "schema_version": 1,
-        "source": source_note,
-        "urls_status": urls_status,
+        "pylock_sha256": _sha256_bytes(pylock_bytes),
+        "resolved_at": resolved_at,
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "source": (
+            f"{RESOLVER}: uv pip compile entree_lexical.txt --python-version {python_version} "
+            f"--python-platform {python_platform} --only-binary :all: --no-header "
+            f"--exclude-newer {exclude_newer} --format pylock.toml -o pylock.{cell_id}.toml "
+            f"(resolved {resolved_at}; binary wheels only; every wheel admitted for the cell is listed)"
+        ),
     }
     return catalog_doc, constraints_text, manifest_doc
 
@@ -349,28 +441,23 @@ def build_bootstrap_cell_entry(
     constraints_path: Path,
     manifest_path: Path,
     profile: str = "lexical",
-    artifacts_metadata: dict[str, dict] | None = None,
     test_values: bool = False,
 ) -> dict:
     """Produce one ``cells.<cell_id>.<profile>`` block for ``scripts/memory_os_bootstrap.py``.
 
-    When ``test_values=True`` (L5 offline testing before step-3 wheel downloads), synthetic
-    ``example.invalid`` URLs, wheel filenames and positive test sizes are attached to the real
-    pinned SHA-256 digests from ``manifest_path``. When ``artifacts_metadata`` is supplied (step 3),
-    each entry provides ``{"filename", "url", "size", "sha256"}`` and its ``sha256`` must appear
-    in the admitted digests of ``manifest_path``.
+    By default every wheel admitted by the frozen manifest is listed with its real ``filename``,
+    ``url``, ``sha256`` and ``size``. With ``test_values=True`` (offline tests) one synthetic
+    ``example.invalid`` URL, wheel filename and test size per package is attached to the first
+    admitted SHA-256 of ``manifest_path``.
     """
     if cell_id not in RETAINED_CELLS:
         raise ValueError(f"not a retained cell: {cell_id}")
-    if not test_values and artifacts_metadata is None:
-        raise ValueError("either artifacts_metadata (step 3) or test_values=True (tests only) is required")
-    if test_values and artifacts_metadata is not None:
-        raise ValueError("pass either artifacts_metadata or test_values=True, not both")
 
     constraints_bytes = constraints_path.read_bytes()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != 1 or manifest.get("cell_id") != cell_id or manifest.get("profile") != profile:
-        raise ValueError(f"manifest {manifest_path} does not match {cell_id}/{profile}")
+    if (manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION or manifest.get("lock_state") != "frozen"
+            or manifest.get("cell_id") != cell_id or manifest.get("profile") != profile):
+        raise ValueError(f"manifest {manifest_path} is not the frozen manifest of {cell_id}/{profile}")
     if manifest.get("constraints_sha256") != _sha256_bytes(constraints_bytes):
         raise ValueError(f"manifest {manifest_path} constraints_sha256 disagrees with {constraints_path}")
 
@@ -389,33 +476,25 @@ def build_bootstrap_cell_entry(
     for item in manifest["artifacts"]:
         name = canonical_name(item["name"])
         version = item["version"]
-        admitted = set(item["sha256"])
         if test_values:
-            dist_norm = name.replace("-", "_")
-            filename = f"{dist_norm}-{version}-py3-none-any.whl"
-            url = f"https://example.invalid/test-only/{cell_id}/{filename}"
-            digest = item["sha256"][0]
-            size = 1024
+            filename = f"{name.replace('-', '_')}-{version}-py3-none-any.whl"
+            wheels = [{
+                "filename": filename,
+                "url": f"https://example.invalid/test-only/{cell_id}/{filename}",
+                "sha256": item["wheels"][0]["sha256"],
+                "size": 1024,
+            }]
         else:
-            meta = artifacts_metadata.get(name)
-            if not isinstance(meta, dict):
-                raise ValueError(f"{cell_id}: missing wheel metadata for {name}")
-            digest = meta.get("sha256")
-            if digest not in admitted:
-                raise ValueError(f"{cell_id}: wheel sha256 for {name} is not in manifest admitted digests")
-            filename = meta["filename"]
-            url = meta["url"]
-            if item.get("url") is not None and url != item["url"]:
-                raise ValueError(f"{cell_id}: wheel url for {name} disagrees with manifest url")
-            size = meta["size"]
-        artifacts.append({
-            "name": name,
-            "version": version,
-            "filename": filename,
-            "url": url,
-            "sha256": digest,
-            "size": size,
-        })
+            wheels = item["wheels"]
+        for wheel in wheels:
+            artifacts.append({
+                "name": name,
+                "version": version,
+                "filename": wheel["filename"],
+                "url": wheel["url"],
+                "sha256": wheel["sha256"],
+                "size": wheel["size"],
+            })
 
     entry = {"constraints": constraints, "artifacts": artifacts}
     entry["lock_sha256"] = bootstrap.lock_fingerprint(cell_id, profile, entry)
@@ -633,20 +712,20 @@ def validate_all_triplets_on_disk(
 
 
 def generate_all(
-    input_files: dict[str, Path],
+    input_files: dict[str, tuple[Path, Path]],
     output_dir: Path,
     *,
-    recorded_at: str = "2026-11-23",
-    lock_state: str = "preliminary",
+    resolved_at: str = DEFAULT_RESOLVED_AT,
+    exclude_newer: str = DEFAULT_EXCLUDE_NEWER,
     check_only: bool = False,
-    artifact_urls_by_cell: dict[str, dict[str, str]] | None = None,
     qualified_runtime_path: Path | None = None,
     constraints_script_path: Path | None = None,
 ) -> dict[str, list[str]]:
     """Generate (or verify with ``check_only=True``) flat per-cell lexical lock resources and anchored digests.
 
-    Validates all 5 lock triplets (including historical semantic and Cell-1 lexical files) with
-    ``qualified_runtime`` before writing anything and again during ``--check``.
+    ``input_files`` maps each retained cell to ``(<cell>.txt, pylock.<cell>.toml)``. Validates all
+    5 lock triplets (including historical semantic and Cell-1 lexical files) with
+    ``qualified_runtime`` before writing anything, after writing, and during ``--check``.
     """
     qr = _load_qualified_runtime()
     base_dir = output_dir.absolute()
@@ -678,25 +757,31 @@ def generate_all(
 
     for cell_id in RETAINED_CELLS:
         if cell_id not in input_files:
-            raise ValueError(f"missing input compiled lock for {cell_id}")
-        compiled_text = input_files[cell_id].read_text(encoding="utf-8")
+            raise ValueError(f"missing frozen input lock for {cell_id}")
+        compiled_path, pylock_path = input_files[cell_id]
         cat_name, con_name, man_name = CELL_RESOURCE_NAMES[cell_id]
         cat_path, con_path, man_path = base_dir / cat_name, base_dir / con_name, base_dir / man_name
 
         # Cell 1 preserves the historical catalog and constraints files byte-for-byte.
         preserve_historical = cell_id == "macos-arm64-py311"
         existing_con = con_path.read_bytes() if preserve_historical else None
-        cell_urls = None if artifact_urls_by_cell is None else artifact_urls_by_cell.get(cell_id)
-        catalog_doc, constraints_text, manifest_doc = build_cell_lock_files(
-            cell_id,
-            compiled_text,
-            reference_catalog=reference_catalog,
-            ml_packages=ml_packages,
-            recorded_at=recorded_at,
-            lock_state=lock_state,
-            existing_constraints_bytes=existing_con,
-            artifact_urls=cell_urls,
-        )
+        try:
+            catalog_doc, constraints_text, manifest_doc = build_cell_lock_files(
+                cell_id,
+                compiled_path.read_text(encoding="utf-8"),
+                pylock_path.read_bytes(),
+                reference_catalog=reference_catalog,
+                ml_packages=ml_packages,
+                resolved_at=resolved_at,
+                exclude_newer=exclude_newer,
+                existing_constraints_bytes=existing_con,
+            )
+        except (OSError, ValueError) as exc:
+            if not check_only:
+                raise
+            # --check reports an invalid or unreadable input as a mismatch, never as a traceback.
+            mismatches.append(f"input:lexical:{cell_id} ({exc})")
+            continue
         man_bytes = (json.dumps(manifest_doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
         if preserve_historical:
             cat_bytes = qr._read_plain_file(cat_path)
@@ -786,24 +871,11 @@ def generate_all(
     return {"written": written, "mismatches": mismatches}
 
 
-def _load_urls_json(path: Path) -> dict[str, dict[str, str]]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError(f"invalid urls JSON in {path}: expected object")
-    if set(raw) & set(RETAINED_CELLS):
-        return {cell_id: dict(mapping) for cell_id, mapping in raw.items()}
-    return {cell_id: dict(raw) for cell_id in RETAINED_CELLS}
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--input-dir", type=Path,
-        help="Directory holding cellule_1-controle.txt, cellule_2a.txt, cellule_2b.txt, cellule_3.txt",
-    )
-    parser.add_argument(
-        "--cell", action="append", default=[], metavar="CELL=PATH",
-        help="Explicit cell_id=compiled_lock_path mapping (overrides --input-dir)",
+        help="Frozen input directory holding <cell>.txt and pylock.<cell>.toml for the four retained cells",
     )
     parser.add_argument("--output-dir", type=Path, default=RESOURCES)
     parser.add_argument(
@@ -814,12 +886,8 @@ def main(argv: list[str] | None = None) -> int:
         "--constraints-script", type=Path, default=CONSTRAINTS_SCRIPT_PY,
         help="Path to memory_os_constraints.py whose CELL_CONSTRAINTS_DIGESTS constant is generated/verified",
     )
-    parser.add_argument(
-        "--urls-json", type=Path, default=None,
-        help="Optional JSON mapping {cell_id: {package: https_url}} or {package: https_url} (required for --lock-state frozen)",
-    )
-    parser.add_argument("--recorded-at", default="2026-11-23")
-    parser.add_argument("--lock-state", choices=("preliminary", "frozen"), default="preliminary")
+    parser.add_argument("--resolved-at", default=DEFAULT_RESOLVED_AT, help="Resolution date (YYYY-MM-DD)")
+    parser.add_argument("--exclude-newer", default=DEFAULT_EXCLUDE_NEWER, help="uv --exclude-newer of the resolution")
     parser.add_argument("--check", action="store_true", help="Verify existing files, anchored digests and runtime invariants without writing")
     parser.add_argument(
         "--emit-test-pin", type=Path, default=None,
@@ -827,26 +895,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    input_files: dict[str, Path] = {}
     if args.input_dir is not None:
-        for cell_id, filename in DEFAULT_INPUT_FILES.items():
-            input_files[cell_id] = args.input_dir / filename
-    for spec in args.cell:
-        if "=" not in spec:
-            parser.error(f"invalid --cell argument (expected CELL=PATH): {spec}")
-        cell_id, raw_path = spec.split("=", 1)
-        input_files[cell_id] = Path(raw_path)
-
-    artifact_urls_by_cell = _load_urls_json(args.urls_json) if args.urls_json is not None else None
-
-    if input_files:
         result = generate_all(
-            input_files,
+            frozen_input_files(args.input_dir),
             args.output_dir,
-            recorded_at=args.recorded_at,
-            lock_state=args.lock_state,
+            resolved_at=args.resolved_at,
+            exclude_newer=args.exclude_newer,
             check_only=args.check,
-            artifact_urls_by_cell=artifact_urls_by_cell,
             qualified_runtime_path=args.qualified_runtime,
             constraints_script_path=args.constraints_script,
         )
@@ -863,8 +918,8 @@ def main(argv: list[str] | None = None) -> int:
         args.emit_test_pin.write_text(json.dumps(pin, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"TEST_PIN_WRITTEN: {args.emit_test_pin}")
 
-    if not input_files and args.emit_test_pin is None:
-        parser.error("provide --input-dir/--cell and/or --emit-test-pin")
+    if args.input_dir is None and args.emit_test_pin is None:
+        parser.error("provide --input-dir and/or --emit-test-pin")
     return 0
 
 

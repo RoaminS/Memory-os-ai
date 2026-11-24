@@ -64,6 +64,42 @@ def load_script(name: str):
     return module
 
 
+def synthetic_wheel(name: str, version: str, tags: str = "py3-none-any") -> dict:
+    """One synthetic admitted wheel ``{filename, sha256, size, url}`` (frozen manifest schema)."""
+    filename = f"{name.replace('-', '_')}-{version}-{tags}.whl"
+    return {
+        "filename": filename,
+        "sha256": hashlib.sha256(f"{name}:{version}:{tags}".encode()).hexdigest(),
+        "size": 1024,
+        "url": f"https://files.pythonhosted.org/packages/ab/cd/{filename}",
+    }
+
+
+def synthetic_frozen_texts(expected: dict[str, str]) -> tuple[str, str]:
+    """Synthetic ``(<cell>.txt, pylock.<cell>.toml)`` texts for one package/version set (no network)."""
+    compiled, packages = [], []
+    for name, version in sorted(expected.items()):
+        wheel = synthetic_wheel(name, version)
+        compiled.append(f"{name}=={version} \\\n    --hash=sha256:{wheel['sha256']}")
+        packages.append(
+            f'[[packages]]\nname = "{name}"\nversion = "{version}"\n'
+            f'wheels = [{{ url = "{wheel["url"]}", upload-time = 2026-01-01T00:00:00Z, '
+            f'size = {wheel["size"]}, hashes = {{ sha256 = "{wheel["sha256"]}" }} }}]\n'
+        )
+    header = 'lock-version = "1.0"\ncreated-by = "test"\nrequires-python = ">=3.11"\n\n'
+    return "\n".join(compiled) + "\n", header + "\n".join(packages)
+
+
+def write_synthetic_frozen_inputs(gen, in_dir: Path, expected: dict[str, str]) -> dict:
+    compiled, pylock = synthetic_frozen_texts(expected)
+    in_dir.mkdir()
+    inputs = gen.frozen_input_files(in_dir)
+    for txt_path, pylock_path in inputs.values():
+        txt_path.write_text(compiled, encoding="utf-8")
+        pylock_path.write_text(pylock, encoding="utf-8")
+    return inputs
+
+
 @pytest.fixture
 def c(tmp_path, monkeypatch):
     return setup_context(tmp_path, monkeypatch)
@@ -94,6 +130,23 @@ def test_all_embedded_cell_locks_are_flat_under_resources_and_match_package_data
             assert man is not None and len(lock["manifest_sha256"]) == 64
 
 
+# SHA-256 of the frozen ``pylock.<cell>.toml`` inputs (tools/411/locks-figes-20261124/LISEZMOI.md).
+FROZEN_PYLOCK_SHA256 = {
+    "macos-arm64-py311": "99426580511687bafb85268f3917b0ba2b3c5e56ed304144ba1db8b88ce10fa6",
+    "macos-arm64-py312": "8c86454108dc054678b17a0eec7f48db20abf2214dc63b1519a78c5cd7151a85",
+    "macos-arm64-py313": "8258c4649414795df0e0132ea8d71808b3cd767f7ad5c7c213daa9561ebc96c2",
+    "ubuntu2404-arm64-py311": "2d005f03c54bf251d67edad36939f592ed0331e27a1ce5cae2b4c0a08bde1d30",
+}
+FROZEN_WHEEL_COUNTS = {
+    "macos-arm64-py311": 39, "macos-arm64-py312": 39, "macos-arm64-py313": 39, "ubuntu2404-arm64-py311": 40,
+}
+_MAC_MULTI = {"charset-normalizer", "cryptography", "regex"}
+FROZEN_MULTI_WHEEL_PACKAGES = {
+    "macos-arm64-py311": _MAC_MULTI, "macos-arm64-py312": _MAC_MULTI, "macos-arm64-py313": _MAC_MULTI,
+    "ubuntu2404-arm64-py311": {"charset-normalizer", "cryptography"},
+}
+
+
 @pytest.mark.parametrize("cell_id", RETAINED_CELLS)
 def test_each_retained_cell_lexical_lock_attests_catalog_constraints_manifest_and_tiktoken(cell_id):
     lock = qualified_runtime.cell_lock(cell_id, profile="lexical")
@@ -113,10 +166,22 @@ def test_each_retained_cell_lexical_lock_attests_catalog_constraints_manifest_an
     assert manifest["cell_id"] == cell_id and manifest["profile"] == "lexical"
     assert manifest["profile_id"] == cat["profile_id"]
     assert manifest["constraints_sha256"] == lock["constraints_sha256"]
-    assert manifest["lock_state"] == "preliminary"
-    assert manifest["urls_status"] == "to_fill_at_step_3"
+    assert manifest["schema_version"] == 2 and manifest["lock_state"] == "frozen"
+    assert manifest["resolved_at"] == "2026-11-24" and manifest["exclude_newer"] == "2026-11-24T00:00:00Z"
+    assert manifest["pylock_sha256"] == FROZEN_PYLOCK_SHA256[cell_id]
+    assert "urls_status" not in manifest and "uv pip compile" in manifest["source"]
     assert len(manifest["artifacts"]) == 36
-    assert all("url" in item and item["url"] is None for item in manifest["artifacts"])
+    wheels = [(item, wheel) for item in manifest["artifacts"] for wheel in item["wheels"]]
+    assert len(wheels) == FROZEN_WHEEL_COUNTS[cell_id]
+    multi = {item["name"] for item in manifest["artifacts"] if len(item["wheels"]) > 1}
+    assert multi == FROZEN_MULTI_WHEEL_PACKAGES[cell_id]
+    for item, wheel in wheels:
+        assert set(wheel) == {"filename", "url", "sha256", "size"}
+        assert qualified_runtime.valid_artifact_url(wheel["url"], name=item["name"], version=item["version"]) is True
+        assert wheel["url"].endswith("/" + wheel["filename"]) and wheel["size"] > 0 and len(wheel["sha256"]) == 64
+    assert all(item["wheels"] == sorted(item["wheels"], key=lambda w: w["filename"]) for item in manifest["artifacts"])
+    catalog_doc = json.loads(Path(lock["catalog"]).read_text(encoding="utf-8"))
+    assert catalog_doc.get("lock_state", "frozen") == "frozen"   # cell 1 keeps its historical catalog
 
 
 def test_anchored_digests_refuse_tampered_manifest_hashes_and_byte_drift(tmp_path, monkeypatch):
@@ -135,7 +200,7 @@ def test_anchored_digests_refuse_tampered_manifest_hashes_and_byte_drift(tmp_pat
 
     # 1. Replace an artifact's sha256 with syntactically valid zeros: refused by anchored digest.
     mdoc = json.loads(man.read_text(encoding="utf-8"))
-    mdoc["artifacts"][0]["sha256"] = ["0" * 64]
+    mdoc["artifacts"][0]["wheels"][0]["sha256"] = "0" * 64
     man.write_text(json.dumps(mdoc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     assert qualified_runtime.cell_lock(cell_id, profile="lexical") is None
     with pytest.raises(ValueError):
@@ -244,7 +309,7 @@ def test_symlink_parent_dir_and_hardlinks_are_refused(tmp_path, monkeypatch):
 
 
 def test_manifest_url_schema_enforces_step3_frozen_urls_and_refuses_malformed_urls(tmp_path, monkeypatch):
-    """Contract §6 + L5-r1 #4: 'url' field is mandatory; None while preliminary, https:// when frozen."""
+    """Contract §6 + L5-r1 #4, step 3: every admitted wheel carries a strict https PyPI ``.whl`` URL."""
     gen = load_script("generate_cell_locks_411")
     cell_id = "ubuntu2404-arm64-py311"
     expected = qualified_runtime.expected_versions(profile="lexical", extras=("ops", "brief"), cell_id=cell_id)
@@ -263,29 +328,37 @@ def test_manifest_url_schema_enforces_step3_frozen_urls_and_refuses_malformed_ur
         monkeypatch.setattr(qualified_runtime, "CELL_LOCKS", {**qualified_runtime.CELL_LOCKS, ("lexical", cell_id): (cat, con, man)})
         monkeypatch.setattr(qualified_runtime, "CELL_LOCK_DIGESTS", {**qualified_runtime.CELL_LOCK_DIGESTS, ("lexical", cell_id): digests})
 
+    def refused(mdoc) -> bool:
+        man.write_text(json.dumps(mdoc), encoding="utf-8")
+        bind()
+        return qualified_runtime.cell_lock(cell_id, profile="lexical") is None
+
+    # 0. The untouched frozen manifest is accepted once re-bound.
+    assert refused(json.loads(src_man.read_text(encoding="utf-8"))) is False
+
     # 1. Missing 'url' key -> refused even with synced digests.
     mdoc = json.loads(src_man.read_text(encoding="utf-8"))
-    del mdoc["artifacts"][0]["url"]
-    man.write_text(json.dumps(mdoc), encoding="utf-8")
-    bind()
-    assert qualified_runtime.cell_lock(cell_id, profile="lexical") is None
+    del mdoc["artifacts"][0]["wheels"][0]["url"]
+    assert refused(mdoc)
 
-    # 2. Preliminary with urls_status='to_fill_at_step_3' but non-null url -> refused.
+    # 2. Null URL (the preliminary placeholder) -> refused.
     mdoc = json.loads(src_man.read_text(encoding="utf-8"))
-    mdoc["artifacts"][0]["url"] = "https://files.pythonhosted.org/packages/example.whl"
-    man.write_text(json.dumps(mdoc), encoding="utf-8")
-    bind()
-    assert qualified_runtime.cell_lock(cell_id, profile="lexical") is None
+    mdoc["artifacts"][0]["wheels"][0]["url"] = None
+    assert refused(mdoc)
 
-    # 3. Frozen manifest without real https URLs -> refused.
+    # 3. The preliminary L5 manifest (schema 1, bare SHA-256 lists, url null) is no longer accepted.
     mdoc = json.loads(src_man.read_text(encoding="utf-8"))
-    mdoc["lock_state"] = "frozen"
-    mdoc["urls_status"] = "complete"
-    man.write_text(json.dumps(mdoc), encoding="utf-8")
-    bind()
-    assert qualified_runtime.cell_lock(cell_id, profile="lexical") is None
+    preliminary = {
+        "artifacts": [{"name": item["name"], "version": item["version"], "url": None,
+                       "sha256": sorted(w["sha256"] for w in item["wheels"])} for item in mdoc["artifacts"]],
+        "cell_id": cell_id, "constraints_sha256": mdoc["constraints_sha256"], "lock_state": "preliminary",
+        "profile": "lexical", "profile_id": mdoc["profile_id"], "schema_version": 1,
+        "source": "preliminary", "urls_status": "to_fill_at_step_3",
+    }
+    assert refused(preliminary)
+    assert refused({**preliminary, "lock_state": "frozen", "urls_status": "complete"})
 
-    # 4. Frozen manifest with malformed / non-PyPI / non-wheel URLs -> refused (incl. https:///x).
+    # 4. Malformed / non-PyPI / non-wheel URLs -> refused (incl. https:///x).
     for bad_url in (
         "https:///x",
         "https://files.pythonhosted.org/",
@@ -295,25 +368,23 @@ def test_manifest_url_schema_enforces_step3_frozen_urls_and_refuses_malformed_ur
         "http://files.pythonhosted.org/packages/annotated_types-0.7.0-py3-none-any.whl",
         "https://user@files.pythonhosted.org/packages/annotated_types-0.7.0-py3-none-any.whl",
         "https://files.pythonhosted.org:443/packages/annotated_types-0.7.0-py3-none-any.whl",
+        "https://files.pythonhosted.org:x/packages/annotated_types-0.7.0-py3-none-any.whl",
         "https://files.pythonhosted.org/packages/annotated_types-0.7.0-py3-none-any.whl?x=1",
+        "https://files.pythonhosted.org/packages/annotated_types-0.7.0-py3-none-any.whl?",
         "https://files.pythonhosted.org/packages/annotated_types-0.7.0-py3-none-any.whl#frag",
+        "https://files.pythonhosted.org/packages/annotated_types-0.7.0-py3-none-any.whl#",
         "https://files.pythonhosted.org/packages/../annotated_types-0.7.0-py3-none-any.whl",
         "https://files.pythonhosted.org/packages/other_pkg-0.7.0-py3-none-any.whl",
         "https://files.pythonhosted.org/packages/annotated_types-9.9.9-py3-none-any.whl",
     ):
         assert qualified_runtime.valid_artifact_url(bad_url, name="annotated-types", version="0.7.0") is False
         mdoc = json.loads(src_man.read_text(encoding="utf-8"))
-        mdoc["lock_state"] = "frozen"
-        mdoc["urls_status"] = "complete"
-        for item in mdoc["artifacts"]:
-            dist = item["name"].replace("-", "_")
-            item["url"] = f"https://files.pythonhosted.org/packages/ab/cd/{dist}-{item['version']}-py3-none-any.whl"
-        mdoc["artifacts"][0]["url"] = bad_url
-        man.write_text(json.dumps(mdoc), encoding="utf-8")
-        bind()
-        assert qualified_runtime.cell_lock(cell_id, profile="lexical") is None, f"bad URL must be refused: {bad_url}"
+        assert mdoc["artifacts"][0]["name"] == "annotated-types"
+        mdoc["artifacts"][0]["wheels"][0]["url"] = bad_url
+        mdoc["artifacts"][0]["wheels"][0]["filename"] = bad_url.rsplit("/", 1)[-1]
+        assert refused(mdoc), f"bad URL must be refused: {bad_url}"
 
-    # 5. Frozen manifest generated with complete PEP 427 https://files.pythonhosted.org/*.whl URLs -> accepted.
+    # 5. Manifest generated offline from a frozen PEP 751 lock -> accepted.
     assert qualified_runtime.valid_artifact_url(
         "https://files.pythonhosted.org/packages/ab/cd/typing_extensions-4.15.0-py3-none-any.whl",
         name="typing-extensions", version="4.15.0",
@@ -322,22 +393,15 @@ def test_manifest_url_schema_enforces_step3_frozen_urls_and_refuses_malformed_ur
         "https://files.pythonhosted.org/packages/ab/cd/numpy-2.4.2-1-cp311-cp311-manylinux_2_17_aarch64.whl",
         name="numpy", version="2.4.2",
     ) is True
-    compiled = "\n".join(
-        f"{name}=={ver} \\\n    --hash=sha256:{hashlib.sha256(f'{name}:{ver}'.encode()).hexdigest()}"
-        for name, ver in sorted(expected.items())
-    ) + "\n"
+    compiled, pylock = synthetic_frozen_texts(expected)
     ref_cat = json.loads((RESOURCES / "qualified_runtime_lexical_v1.json").read_text(encoding="utf-8"))
     ml_pkgs = gen._ml_closure_names(RESOURCES)
-    with pytest.raises(ValueError, match="artifact_urls"):
-        gen.build_cell_lock_files(cell_id, compiled, reference_catalog=ref_cat, ml_packages=ml_pkgs, lock_state="frozen")
-    urls = {
-        name: f"https://files.pythonhosted.org/packages/ab/cd/{name.replace('-', '_')}-{ver}-py3-none-any.whl"
-        for name, ver in expected.items()
-    }
     f_cat, f_con, f_man = gen.build_cell_lock_files(
-        cell_id, compiled, reference_catalog=ref_cat, ml_packages=ml_pkgs, lock_state="frozen", artifact_urls=urls,
+        cell_id, compiled, pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=ml_pkgs,
     )
-    assert f_man["urls_status"] == "complete" and all(a["url"].startswith("https://files.pythonhosted.org/") for a in f_man["artifacts"])
+    assert f_man["schema_version"] == 2 and f_man["lock_state"] == "frozen" and f_cat["lock_state"] == "frozen"
+    assert f_man["pylock_sha256"] == hashlib.sha256(pylock.encode("utf-8")).hexdigest()
+    assert all(w["url"].startswith("https://files.pythonhosted.org/") for a in f_man["artifacts"] for w in a["wheels"])
     cat.write_text(json.dumps(f_cat, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     con.write_text(f_con, encoding="utf-8")
     man.write_text(json.dumps(f_man, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -366,6 +430,33 @@ def test_manifest_url_schema_enforces_step3_frozen_urls_and_refuses_malformed_ur
     "manifest-missing-artifact",
     "manifest-extra-artifact",
     "manifest-version-mismatch",
+    "manifest-url-null",
+    "manifest-url-missing",
+    "manifest-url-other-host",
+    "manifest-no-wheel",
+    "manifest-wheels-missing",
+    "manifest-duplicate-package",
+    "manifest-duplicate-wheel",
+    "manifest-duplicate-url-other-package",
+    "manifest-filename-mismatch",
+    "manifest-filename-other-package",
+    "manifest-wheels-unsorted",
+    "manifest-size-zero",
+    "manifest-size-bool",
+    "manifest-size-string",
+    "manifest-schema-1",
+    "manifest-schema-3",
+    "manifest-schema-true",
+    "manifest-schema-string",
+    "manifest-state-preliminary",
+    "manifest-unknown-top-key",
+    "manifest-unknown-artifact-key",
+    "manifest-unknown-wheel-key",
+    "manifest-missing-pylock-sha",
+    "manifest-bad-pylock-sha",
+    "manifest-bad-resolved-at",
+    "manifest-bad-exclude-newer",
+    "manifest-empty-source",
     "manifest-missing-for-lexical",
     "symlink-constraints",
 ])
@@ -410,7 +501,7 @@ def test_tampered_or_neighbor_cell_lock_is_refused(tmp_path, monkeypatch, tamper
         con.write_text(con.read_text() + "torch==2.10.0\n")
         mdoc = json.loads(man.read_text())
         mdoc["constraints_sha256"] = hashlib.sha256(con.read_bytes()).hexdigest()
-        mdoc["artifacts"].append({"name": "torch", "version": "2.10.0", "url": None, "sha256": ["a" * 64]})
+        mdoc["artifacts"].append({"name": "torch", "version": "2.10.0", "wheels": [synthetic_wheel("torch", "2.10.0")]})
         man.write_text(json.dumps(mdoc))
     elif tamper == "constraints-marker-added":
         con.write_text(con.read_text().replace("numpy==2.4.2", 'numpy==2.4.2; sys_platform == "linux"'))
@@ -446,20 +537,19 @@ def test_tampered_or_neighbor_cell_lock_is_refused(tmp_path, monkeypatch, tamper
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-bad-hex-hash":
         mdoc = json.loads(man.read_text())
-        mdoc["artifacts"][0]["sha256"] = ["not-a-sha256"]
+        mdoc["artifacts"][0]["wheels"][0]["sha256"] = "not-a-sha256"
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-uppercase-hash":
         mdoc = json.loads(man.read_text())
-        mdoc["artifacts"][0]["sha256"] = ["A" * 64]
+        mdoc["artifacts"][0]["wheels"][0]["sha256"] = "A" * 64
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-empty-hashes":
         mdoc = json.loads(man.read_text())
-        mdoc["artifacts"][0]["sha256"] = []
+        mdoc["artifacts"][0]["wheels"][0]["sha256"] = ""
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-duplicate-hash":
         mdoc = json.loads(man.read_text())
-        h = mdoc["artifacts"][0]["sha256"][0]
-        mdoc["artifacts"][0]["sha256"] = [h, h]
+        mdoc["artifacts"][1]["wheels"][0]["sha256"] = mdoc["artifacts"][0]["wheels"][0]["sha256"]
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-missing-artifact":
         mdoc = json.loads(man.read_text())
@@ -467,11 +557,74 @@ def test_tampered_or_neighbor_cell_lock_is_refused(tmp_path, monkeypatch, tamper
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-extra-artifact":
         mdoc = json.loads(man.read_text())
-        mdoc["artifacts"].append({"name": "extra-pkg", "version": "1.0.0", "url": None, "sha256": ["b" * 64]})
+        mdoc["artifacts"].append({"name": "extra-pkg", "version": "1.0.0", "wheels": [synthetic_wheel("extra-pkg", "1.0.0")]})
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-version-mismatch":
         mdoc = json.loads(man.read_text())
         mdoc["artifacts"][0]["version"] = "9.9.9"
+        man.write_text(json.dumps(mdoc))
+    elif tamper.startswith("manifest-") and tamper != "manifest-missing-for-lexical":
+        mdoc = json.loads(man.read_text())
+        first = mdoc["artifacts"][0]
+        multi = next(item for item in mdoc["artifacts"] if len(item["wheels"]) > 1)
+        if tamper == "manifest-url-null":
+            first["wheels"][0]["url"] = None
+        elif tamper == "manifest-url-missing":
+            del first["wheels"][0]["url"]
+        elif tamper == "manifest-url-other-host":
+            first["wheels"][0]["url"] = first["wheels"][0]["url"].replace("files.pythonhosted.org", "pypi.org")
+        elif tamper == "manifest-no-wheel":
+            first["wheels"] = []
+        elif tamper == "manifest-wheels-missing":
+            del first["wheels"]
+        elif tamper == "manifest-duplicate-package":
+            mdoc["artifacts"].append(json.loads(json.dumps(first)))
+        elif tamper == "manifest-duplicate-wheel":
+            first["wheels"].append(dict(first["wheels"][0]))
+        elif tamper == "manifest-duplicate-url-other-package":
+            mdoc["artifacts"][1]["wheels"][0]["url"] = first["wheels"][0]["url"]
+        elif tamper == "manifest-filename-mismatch":
+            first["wheels"][0]["filename"] = "x" + first["wheels"][0]["filename"]
+        elif tamper == "manifest-filename-other-package":
+            other = mdoc["artifacts"][1]["wheels"][0]
+            first["wheels"][0]["filename"] = other["filename"]
+            first["wheels"][0]["url"] = other["url"].rsplit("/", 1)[0] + "/x/" + other["filename"]
+        elif tamper == "manifest-wheels-unsorted":
+            multi["wheels"].reverse()
+        elif tamper == "manifest-size-zero":
+            first["wheels"][0]["size"] = 0
+        elif tamper == "manifest-size-bool":
+            first["wheels"][0]["size"] = True
+        elif tamper == "manifest-size-string":
+            first["wheels"][0]["size"] = "13643"
+        elif tamper == "manifest-schema-1":
+            mdoc["schema_version"] = 1
+        elif tamper == "manifest-schema-3":
+            mdoc["schema_version"] = 3
+        elif tamper == "manifest-schema-true":
+            mdoc["schema_version"] = True
+        elif tamper == "manifest-schema-string":
+            mdoc["schema_version"] = "2"
+        elif tamper == "manifest-state-preliminary":
+            mdoc["lock_state"] = "preliminary"
+        elif tamper == "manifest-unknown-top-key":
+            mdoc["urls_status"] = "complete"
+        elif tamper == "manifest-unknown-artifact-key":
+            first["sdist"] = {"url": "https://files.pythonhosted.org/packages/ab/cd/annotated_types-0.7.0.tar.gz"}
+        elif tamper == "manifest-unknown-wheel-key":
+            first["wheels"][0]["path"] = "./local.whl"
+        elif tamper == "manifest-missing-pylock-sha":
+            del mdoc["pylock_sha256"]
+        elif tamper == "manifest-bad-pylock-sha":
+            mdoc["pylock_sha256"] = "Z" * 64
+        elif tamper == "manifest-bad-resolved-at":
+            mdoc["resolved_at"] = "24/11/2026"
+        elif tamper == "manifest-bad-exclude-newer":
+            mdoc["exclude_newer"] = "2026-11-24"
+        elif tamper == "manifest-empty-source":
+            mdoc["source"] = " "
+        else:
+            raise AssertionError(tamper)
         man.write_text(json.dumps(mdoc))
     elif tamper == "manifest-missing-for-lexical":
         entry = (cat, con, None)
@@ -638,30 +791,20 @@ def test_lock_generator_parses_refuses_bad_input_and_builds_valid_bootstrap_test
     out_dir = tmp_path / "resources"
     shutil.copytree(RESOURCES, out_dir)
     expected = qualified_runtime.expected_versions(profile="lexical", extras=("ops", "brief"), cell_id="macos-arm64-py311")
-    synthetic_compiled = "\n".join(
-        f"{name}=={ver} \\\n    --hash=sha256:{hashlib.sha256(f'{name}:{ver}'.encode()).hexdigest()}"
-        for name, ver in sorted(expected.items())
-    ) + "\n"
-    in_dir = tmp_path / "inputs"
-    in_dir.mkdir()
-    inputs = {}
-    for cid, fname in gen.DEFAULT_INPUT_FILES.items():
-        p = in_dir / fname
-        p.write_text(synthetic_compiled, encoding="utf-8")
-        inputs[cid] = p
+    inputs = write_synthetic_frozen_inputs(gen, tmp_path / "inputs", expected)
     qr_copy = tmp_path / "qualified_runtime.py"
     con_copy = tmp_path / "memory_os_constraints.py"
     shutil.copy2(ROOT / "v4/src/memory_os_v4/ops/qualified_runtime.py", qr_copy)
     shutil.copy2(ROOT / "v4/src/memory_os_constraints.py", con_copy)
     written = gen.generate_all(
-        inputs, out_dir, recorded_at="2026-11-23", lock_state="preliminary",
+        inputs, out_dir,
         qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
     )
     assert len(written["written"]) == 12
     assert "qualified_runtime.py:CELL_LOCK_DIGESTS" in written["written"]
     assert "memory_os_constraints.py:CELL_CONSTRAINTS_DIGESTS" in written["written"]
     checked = gen.generate_all(
-        inputs, out_dir, recorded_at="2026-11-23", lock_state="preliminary", check_only=True,
+        inputs, out_dir, check_only=True,
         qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
     )
     assert checked["mismatches"] == []
@@ -673,7 +816,7 @@ def test_lock_generator_parses_refuses_bad_input_and_builds_valid_bootstrap_test
     flipped = "0" if qr_text[tampered_idx] != "0" else "1"
     qr_copy.write_text(qr_text[:tampered_idx] + flipped + qr_text[tampered_idx + 1:], encoding="utf-8")
     drifted = gen.generate_all(
-        inputs, out_dir, recorded_at="2026-11-23", lock_state="preliminary", check_only=True,
+        inputs, out_dir, check_only=True,
         qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
     )
     assert "qualified_runtime.py:CELL_LOCK_DIGESTS" in drifted["mismatches"]
@@ -687,7 +830,7 @@ def test_lock_generator_parses_refuses_bad_input_and_builds_valid_bootstrap_test
     cflipped = "0" if con_text[ctampered] != "0" else "1"
     con_copy.write_text(con_text[:ctampered] + cflipped + con_text[ctampered + 1:], encoding="utf-8")
     cdrifted = gen.generate_all(
-        inputs, out_dir, recorded_at="2026-11-23", lock_state="preliminary", check_only=True,
+        inputs, out_dir, check_only=True,
         qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
     )
     assert "memory_os_constraints.py:CELL_CONSTRAINTS_DIGESTS" in cdrifted["mismatches"]
@@ -717,23 +860,13 @@ def test_generator_and_check_refuse_impostor_historical_catalog_even_after_ancho
     out_dir = tmp_path / "resources"
     shutil.copytree(RESOURCES, out_dir)
     expected = qualified_runtime.expected_versions(profile="lexical", extras=("ops", "brief"), cell_id="macos-arm64-py311")
-    synthetic_compiled = "\n".join(
-        f"{name}=={ver} \\\n    --hash=sha256:{hashlib.sha256(f'{name}:{ver}'.encode()).hexdigest()}"
-        for name, ver in sorted(expected.items())
-    ) + "\n"
-    in_dir = tmp_path / "inputs"
-    in_dir.mkdir()
-    inputs = {}
-    for cid, fname in gen.DEFAULT_INPUT_FILES.items():
-        p = in_dir / fname
-        p.write_text(synthetic_compiled, encoding="utf-8")
-        inputs[cid] = p
+    inputs = write_synthetic_frozen_inputs(gen, tmp_path / "inputs", expected)
     qr_copy = tmp_path / "qualified_runtime.py"
     con_copy = tmp_path / "memory_os_constraints.py"
     shutil.copy2(ROOT / "v4/src/memory_os_v4/ops/qualified_runtime.py", qr_copy)
     shutil.copy2(ROOT / "v4/src/memory_os_constraints.py", con_copy)
     gen.generate_all(
-        inputs, out_dir, recorded_at="2026-11-23", lock_state="preliminary",
+        inputs, out_dir,
         qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
     )
 
@@ -746,7 +879,7 @@ def test_generator_and_check_refuse_impostor_historical_catalog_even_after_ancho
     # 1. Attempting generation refuses BEFORE writing anything.
     with pytest.raises(ValueError, match="runtime attestation"):
         gen.generate_all(
-            inputs, out_dir, recorded_at="2026-11-23", lock_state="preliminary",
+            inputs, out_dir,
             qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
         )
 
@@ -754,7 +887,7 @@ def test_generator_and_check_refuse_impostor_historical_catalog_even_after_ancho
     gen.sync_qualified_runtime_digests(qr_copy, out_dir, check_only=False)
     gen.sync_constraints_script_digests(con_copy, out_dir, check_only=False)
     checked = gen.generate_all(
-        inputs, out_dir, recorded_at="2026-11-23", lock_state="preliminary", check_only=True,
+        inputs, out_dir, check_only=True,
         qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
     )
     assert expected_failure in checked["mismatches"]
@@ -1086,7 +1219,8 @@ def test_duplicate_json_keys_in_catalog_or_manifest_are_refused(tmp_path, monkey
     shutil.copy2(src_cat, cat)
     # Duplicate key in manifest JSON: refused even if digests match.
     raw_man = man.read_text(encoding="utf-8")
-    man.write_text(raw_man.replace('"schema_version": 1,', '"schema_version": 99, "schema_version": 1,'), encoding="utf-8")
+    assert '"schema_version": 2,' in raw_man
+    man.write_text(raw_man.replace('"schema_version": 2,', '"schema_version": 99, "schema_version": 2,'), encoding="utf-8")
     bind()
     assert qualified_runtime.cell_lock(cell_id, profile="lexical") is None
 
@@ -1223,3 +1357,589 @@ def test_cli_quickstart_and_uninstall_use_the_shared_clients_rule(monkeypatch, v
     assert cli.cmd_quickstart(args, SimpleNamespace()) == 1
     assert cli.cmd_uninstall(args, SimpleNamespace()) == 1
     assert seen == {"quickstart": qs.parse_clients_arg(value), "uninstall": qs.parse_clients_arg(value, None)}
+
+
+# ===================================================================== 7. Step 3, part 2: frozen locks
+
+@pytest.mark.parametrize("bad_url", [
+    PYPI + "pkg-1.0-py3..py2-none-any.whl",                # '..' inside a wheel name element
+    PYPI + "pkg-1.0-py3-none..x-any.whl",
+    PYPI + "pkg-1.0-py3-none-any..x.whl",
+    PYPI + "pkg-1.0-1..2-py3-none-any.whl",
+    PYPI + "p..kg-1.0-py3-none-any.whl",
+    PYPI + "pkg-1..0-py3-none-any.whl",                    # version: no '..'
+    PYPI + "pkg-.1.0-py3-none-any.whl",                    # version: first character alphanumeric
+    PYPI + "pkg-_1.0-py3-none-any.whl",
+    PYPI + "pkg-+1.0-py3-none-any.whl",
+    PYPI + "pkg-1.0~rc1-py3-none-any.whl",                 # version outside [A-Za-z0-9_.!+]
+    PYPI + "pkg-1.0$-py3-none-any.whl",
+    PYPI + "pkg-1.0@x-py3-none-any.whl",
+    PYPI + "pkg-1.0;x-py3-none-any.whl",
+])
+def test_artifact_url_refuses_double_dot_in_wheel_name_and_bad_version_syntax(bad_url):
+    """Codex E3-r1 point 1: no '..' inside any wheel name element; strict version syntax."""
+    gen = load_script("generate_cell_locks_411")
+    version = bad_url.rsplit("/", 1)[-1].split("-")[1]
+    assert qualified_runtime.valid_artifact_url(bad_url) is False
+    assert qualified_runtime.valid_artifact_url(bad_url, name="pkg", version=version) is False
+    assert gen._valid_https_url(bad_url, name="pkg", version=version) is False
+
+
+@pytest.mark.parametrize("good_url, name, version", [
+    ("https://files.pythonhosted.org/..cache/pkg-1.0-py3-none-any.whl", "pkg", "1.0"),   # a plain directory name
+    ("https://files.pythonhosted.org/packages/..x/pkg-1.0-py3-none-any.whl", "pkg", "1.0"),
+    ("https://files.pythonhosted.org/packages/a..b/pkg-1.0-py3-none-any.whl", "pkg", "1.0"),
+    (PYPI + "pkg-1!2.0+local.1_x-py3-none-any.whl", "pkg", "1!2.0+local.1_x"),
+    (PYPI + "pkg-2026.2.28-cp311-cp311-macosx_11_0_arm64.whl", "pkg", "2026.2.28"),
+    (PYPI + "pkg-0.0.22-py3-none-any.whl", "pkg", "0.0.22"),
+])
+def test_artifact_url_accepts_dotted_directory_names_and_valid_versions(good_url, name, version):
+    """Codex E3-r1 point 1: the per-segment '.'/'..' rule is the whole traversal rule ('/..cache/' is fine)."""
+    assert qualified_runtime.valid_artifact_url(good_url, name=name, version=version) is True
+    for segment in ("/../", "/./"):
+        assert qualified_runtime.valid_artifact_url(good_url.replace("/pkg-", segment + "pkg-"), name=name, version=version) is False
+
+
+def _pylock(packages: str) -> str:
+    return 'lock-version = "1.0"\ncreated-by = "test"\nrequires-python = ">=3.11"\n\n' + packages
+
+
+def _pylock_package(name="pkg", version="1.0", wheels=None, extra="") -> str:
+    if wheels is None:
+        wheel = synthetic_wheel(name, version)
+        wheels = f'[{{ url = "{wheel["url"]}", size = 1024, hashes = {{ sha256 = "{wheel["sha256"]}" }} }}]'
+    return f'[[packages]]\nname = "{name}"\nversion = "{version}"\nwheels = {wheels}\n{extra}\n'
+
+
+def test_pylock_parser_reads_admitted_wheels_and_refuses_everything_else():
+    gen = load_script("generate_cell_locks_411")
+    one, two = synthetic_wheel("pkg", "1.0"), synthetic_wheel("pkg", "1.0", "cp311-abi3-macosx_10_9_universal2")
+    entry = lambda w, more="": f'{{ url = "{w["url"]}", size = {w["size"]}, hashes = {{ sha256 = "{w["sha256"]}" }}{more} }}'  # noqa: E731
+    parsed = gen.parse_pylock(_pylock(
+        _pylock_package(wheels=f'[{entry(one)}, {entry(two, more=", name = " + json.dumps(two["filename"]))}]')
+        + _pylock_package("Other_Pkg", "2.0")
+    ))
+    assert [item["name"] for item in parsed] == ["other-pkg", "pkg"]
+    assert parsed[1] == {"name": "pkg", "version": "1.0", "wheels": sorted([one, two], key=lambda w: w["filename"])}
+
+    sha = one["sha256"]
+    sdist = 'sdist = { url = "https://files.pythonhosted.org/packages/ab/cd/pkg-1.0.tar.gz", hashes = { sha256 = "' + sha + '" } }'
+    refusals = {
+        "sdist": _pylock(_pylock_package(extra=sdist)),
+        "sdist-only": _pylock('[[packages]]\nname = "pkg"\nversion = "1.0"\n' + sdist + "\n"),
+        "no-wheel": _pylock(_pylock_package(wheels="[]")),
+        "wheels-absent": _pylock('[[packages]]\nname = "pkg"\nversion = "1.0"\n'),
+        "marker": _pylock(_pylock_package(extra='marker = "sys_platform == \'linux\'"')),
+        "vcs": _pylock(_pylock_package(extra='vcs = { type = "git", url = "https://example.invalid/x.git" }')),
+        "directory": _pylock(_pylock_package(extra='directory = { path = "." }')),
+        "bad-host": _pylock(_pylock_package(
+            wheels="[" + entry({**one, "url": one["url"].replace("files.pythonhosted.org", "evil.example")}) + "]")),
+        "http": _pylock(_pylock_package(wheels="[" + entry({**one, "url": one["url"].replace("https://", "http://")}) + "]")),
+        "other-package-wheel": _pylock(_pylock_package(wheels="[" + entry(synthetic_wheel("other", "1.0")) + "]")),
+        "other-version-wheel": _pylock(_pylock_package(wheels="[" + entry(synthetic_wheel("pkg", "1.1")) + "]")),
+        "tar.gz-as-wheel": _pylock(_pylock_package(wheels="[" + entry({**one, "url": PYPI + "pkg-1.0.tar.gz"}) + "]")),
+        "filename-mismatch": _pylock(_pylock_package(wheels="[" + entry(one, more=', name = "pkg-1.0-py2-none-any.whl"') + "]")),
+        "sha-short": _pylock(_pylock_package(wheels="[" + entry({**one, "sha256": sha[:63]}) + "]")),
+        "sha-uppercase": _pylock(_pylock_package(wheels="[" + entry({**one, "sha256": sha.upper()}) + "]")),
+        "sha-not-hex": _pylock(_pylock_package(wheels="[" + entry({**one, "sha256": "g" * 64}) + "]")),
+        "no-sha256": _pylock(_pylock_package(wheels='[{ url = "' + one["url"] + '", size = 1, hashes = { md5 = "' + "a" * 32 + '" } }]')),
+        "extra-hash-algorithm": _pylock(_pylock_package(
+            wheels='[{ url = "' + one["url"] + '", size = 1, hashes = { sha256 = "' + sha + '", md5 = "' + "a" * 32 + '" } }]')),
+        "size-zero": _pylock(_pylock_package(wheels="[" + entry({**one, "size": 0}) + "]")),
+        "size-absent": _pylock(_pylock_package(wheels='[{ url = "' + one["url"] + '", hashes = { sha256 = "' + sha + '" } }]')),
+        "wheel-path": _pylock(_pylock_package(wheels="[" + entry(one, more=', path = "./pkg.whl"') + "]")),
+        "duplicate-package": _pylock(_pylock_package() + _pylock_package(name="PKG")),
+        "duplicate-wheel": _pylock(_pylock_package(wheels=f"[{entry(one)}, {entry(one)}]")),
+        "duplicate-sha": _pylock(_pylock_package(wheels=f"[{entry(one)}, {entry({**two, 'sha256': sha})}]")),
+        "loose-version": _pylock(_pylock_package(version=">=1.0")),
+        "lock-version": _pylock(_pylock_package()).replace('lock-version = "1.0"', 'lock-version = "2.0"'),
+        "unknown-top-key": _pylock(_pylock_package()).replace("created-by", 'environments = ["x"]\ncreated-by'),
+        "no-packages": _pylock(""),
+        "not-toml": "lock-version = ",
+        "duplicate-toml-key": _pylock(_pylock_package(extra='version = "1.0"')),
+    }
+    for label, text in refusals.items():
+        with pytest.raises(ValueError):
+            gen.parse_pylock(text)
+            pytest.fail(f"pylock must be refused: {label}")
+
+
+def test_frozen_builder_refuses_any_disagreement_between_pylock_compiled_lock_and_constraints():
+    gen = load_script("generate_cell_locks_411")
+    cell_id = "macos-arm64-py312"
+    expected = qualified_runtime.expected_versions(profile="lexical", extras=("ops", "brief"), cell_id=cell_id)
+    ref_cat = json.loads((RESOURCES / "qualified_runtime_lexical_v1.json").read_text(encoding="utf-8"))
+    ml_pkgs = gen._ml_closure_names(RESOURCES)
+    compiled, pylock = synthetic_frozen_texts(expected)
+
+    def build(compiled_text=compiled, pylock_text=pylock, **kwargs):
+        return gen.build_cell_lock_files(
+            cell_id, compiled_text, pylock_text.encode("utf-8"), reference_catalog=ref_cat, ml_packages=ml_pkgs, **kwargs,
+        )
+
+    catalog_doc, constraints_text, manifest = build()
+    assert catalog_doc["lock_state"] == "frozen" and catalog_doc["recorded_at"] == "2026-11-24"
+    assert constraints_text.encode("utf-8") == qualified_runtime.CELL_LOCKS[("lexical", cell_id)][1].read_bytes()
+    assert set(manifest) == qualified_runtime._MANIFEST_KEYS
+    assert manifest["schema_version"] == qualified_runtime.MANIFEST_SCHEMA_VERSION == gen.MANIFEST_SCHEMA_VERSION == 2
+    assert "--python-version 3.12 --python-platform aarch64-apple-darwin --only-binary :all:" in manifest["source"]
+    assert "--exclude-newer 2026-11-24T00:00:00Z" in manifest["source"]
+
+    numpy_wheel = synthetic_wheel("numpy", expected["numpy"])
+    extra = synthetic_wheel("extra-pkg", "1.0")
+    cases = {
+        # a package the constraints do not know
+        "package-absent-from-constraints": (compiled, pylock + "\n" + _pylock_package("extra-pkg", "1.0")),
+        # a package of the constraints without any locked wheel
+        "package-missing-from-pylock": (compiled, synthetic_frozen_texts({k: v for k, v in expected.items() if k != "numpy"})[1]),
+        # another version than the constraints
+        "version-differs": (compiled, synthetic_frozen_texts({**expected, "numpy": "2.4.3"})[1]),
+        # a wheel whose SHA-256 is not one of the hashes of the compiled lock
+        "sha-unknown-to-compiled-lock": (compiled, pylock.replace(numpy_wheel["sha256"], "f" * 64)),
+        "compiled-has-extra-package": (compiled + f"extra-pkg==1.0 --hash=sha256:{extra['sha256']}\n", pylock),
+    }
+    for label, (compiled_text, pylock_text) in cases.items():
+        with pytest.raises(ValueError):
+            build(compiled_text, pylock_text)
+            pytest.fail(f"must be refused: {label}")
+    with pytest.raises(ValueError, match="sdist"):
+        build(pylock_text=pylock.replace(
+            'name = "numpy"\n', 'name = "numpy"\nsdist = { url = "https://files.pythonhosted.org/packages/ab/cd/numpy-2.4.2.tar.gz" }\n'))
+    with pytest.raises(ValueError, match="resolved_at"):
+        build(resolved_at="24/11/2026")
+    with pytest.raises(ValueError, match="exclude_newer"):
+        build(exclude_newer="2026-11-24")
+    # Cell 1: the preserved historical constraints must agree with the frozen lock.
+    with pytest.raises(ValueError, match="preserved constraints"):
+        gen.build_cell_lock_files(
+            "macos-arm64-py311", compiled, pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=ml_pkgs,
+            existing_constraints_bytes=b"numpy==2.4.3\n",
+        )
+
+
+def test_frozen_generation_refuses_bad_pylock_before_writing_and_check_detects_drift(tmp_path):
+    gen = load_script("generate_cell_locks_411")
+    out_dir = tmp_path / "resources"
+    shutil.copytree(RESOURCES, out_dir)
+    expected = qualified_runtime.expected_versions(profile="lexical", extras=("ops", "brief"), cell_id="macos-arm64-py311")
+    inputs = write_synthetic_frozen_inputs(gen, tmp_path / "inputs", expected)
+    qr_copy = tmp_path / "qualified_runtime.py"
+    con_copy = tmp_path / "memory_os_constraints.py"
+    shutil.copy2(ROOT / "v4/src/memory_os_v4/ops/qualified_runtime.py", qr_copy)
+    shutil.copy2(ROOT / "v4/src/memory_os_constraints.py", con_copy)
+    snapshot = {path.name: path.read_bytes() for path in out_dir.iterdir()}
+    snapshot_code = (qr_copy.read_bytes(), con_copy.read_bytes())
+
+    def run(check_only=False):
+        return gen.generate_all(
+            inputs, out_dir, check_only=check_only, qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
+        )
+
+    # A sdist in the LAST cell's pylock: nothing at all is written, for any cell.
+    last_pylock = inputs["ubuntu2404-arm64-py311"][1]
+    good = last_pylock.read_text(encoding="utf-8")
+    last_pylock.write_text(good.replace(
+        'name = "numpy"\n', 'name = "numpy"\nsdist = { url = "https://files.pythonhosted.org/packages/ab/cd/numpy-2.4.2.tar.gz" }\n',
+    ), encoding="utf-8")
+    with pytest.raises(ValueError, match="sdist"):
+        run()
+    assert {path.name: path.read_bytes() for path in out_dir.iterdir()} == snapshot
+    assert (qr_copy.read_bytes(), con_copy.read_bytes()) == snapshot_code
+    last_pylock.write_text(good, encoding="utf-8")
+
+    written = run()
+    assert len(written["written"]) == 12 and run(check_only=True)["mismatches"] == []
+    # The historical cell-1 catalog and constraints, and the constraints of every cell, are byte-identical.
+    for name, payload in snapshot.items():
+        if "constraints" in name or name in {"qualified_runtime_lexical_v1.json", "qualified_runtime_v1.json"}:
+            assert (out_dir / name).read_bytes() == payload, name
+    assert con_copy.read_bytes() == snapshot_code[1]
+
+    # --check sees a pylock that no longer matches the embedded manifest (its SHA-256 is recorded).
+    last_pylock.write_text(good + "\n", encoding="utf-8")
+    drift = run(check_only=True)["mismatches"]
+    assert drift == ["qualified_runtime_manifest_lexical_ubuntu2404-arm64-py311_v1.json"]
+    last_pylock.write_text(good, encoding="utf-8")
+    # --check runs the runtime attestation on disk: a manifest edited by hand is caught twice.
+    man_path = out_dir / "qualified_runtime_manifest_lexical_macos-arm64-py313_v1.json"
+    mdoc = json.loads(man_path.read_text(encoding="utf-8"))
+    mdoc["artifacts"][0]["wheels"][0]["url"] = None
+    man_path.write_text(json.dumps(mdoc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    drift = run(check_only=True)["mismatches"]
+    assert man_path.name in drift and "attestation:lexical:macos-arm64-py313" in drift
+    # A missing cell input is refused.
+    with pytest.raises(ValueError, match="missing frozen input"):
+        gen.generate_all({k: v for k, v in inputs.items() if k != "macos-arm64-py313"}, out_dir)
+
+
+def test_generator_cli_takes_the_frozen_input_dir_and_no_longer_knows_preliminary(tmp_path, capsys):
+    gen = load_script("generate_cell_locks_411")
+    out_dir = tmp_path / "resources"
+    shutil.copytree(RESOURCES, out_dir)
+    expected = qualified_runtime.expected_versions(profile="lexical", extras=("ops", "brief"), cell_id="macos-arm64-py311")
+    write_synthetic_frozen_inputs(gen, tmp_path / "inputs", expected)
+    qr_copy = tmp_path / "qualified_runtime.py"
+    con_copy = tmp_path / "memory_os_constraints.py"
+    shutil.copy2(ROOT / "v4/src/memory_os_v4/ops/qualified_runtime.py", qr_copy)
+    shutil.copy2(ROOT / "v4/src/memory_os_constraints.py", con_copy)
+    common = ["--input-dir", str(tmp_path / "inputs"), "--output-dir", str(out_dir),
+              "--qualified-runtime", str(qr_copy), "--constraints-script", str(con_copy)]
+    assert gen.main([*common, "--check"]) == 1 and "MISMATCH" in capsys.readouterr().err   # synthetic != embedded
+    assert gen.main(common) == 0 and "WRITTEN" in capsys.readouterr().out
+    assert gen.main([*common, "--check"]) == 0 and capsys.readouterr().out.startswith("OK")
+    for removed in (["--lock-state", "preliminary"], ["--urls-json", "x.json"], ["--recorded-at", "2026-11-23"]):
+        with pytest.raises(SystemExit):
+            gen.main([*common, *removed])
+        capsys.readouterr()
+    assert not hasattr(gen, "DEFAULT_INPUT_FILES")
+
+
+def test_bootstrap_cell_entry_lists_every_admitted_wheel_of_the_frozen_manifest():
+    gen = load_script("generate_cell_locks_411")
+    for cell_id in RETAINED_CELLS:
+        _, con, man = qualified_runtime.CELL_LOCKS[("lexical", cell_id)]
+        entry = gen.build_bootstrap_cell_entry(cell_id, constraints_path=con, manifest_path=man)
+        assert len(entry["constraints"]) == 36 and len(entry["artifacts"]) == FROZEN_WHEEL_COUNTS[cell_id]
+        assert all(item["url"].startswith("https://files.pythonhosted.org/packages/") for item in entry["artifacts"])
+        synthetic = gen.build_bootstrap_cell_entry(cell_id, constraints_path=con, manifest_path=man, test_values=True)
+        assert len(synthetic["artifacts"]) == 36 and all("example.invalid" in item["url"] for item in synthetic["artifacts"])
+    _, con, man = qualified_runtime.CELL_LOCKS[("lexical", "macos-arm64-py312")]
+    with pytest.raises(ValueError, match="frozen manifest"):
+        gen.build_bootstrap_cell_entry("macos-arm64-py313", constraints_path=con, manifest_path=man)
+
+
+def test_classifiers_declare_python_312_313_and_keep_linux_pending_the_decision():
+    """Contract §10 D2: 3.12/3.13 are declared (frozen locks, attested SQLite); Linux waits for Romain."""
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads(text)["project"]
+    classifiers = project["classifiers"]
+    for minor in ("3.11", "3.12", "3.13"):
+        assert f"Programming Language :: Python :: {minor}" in classifiers
+    assert "Operating System :: MacOS :: MacOS X" in classifiers
+    assert not any("Linux" in item or "POSIX" in item for item in classifiers)
+    assert '    # "Operating System :: POSIX :: Linux",\n' in text     # prepared, commented out
+    import memory_os_ai
+    import memory_os_v4
+    assert project["version"] == memory_os_v4.__version__ == memory_os_ai.__version__ == "4.1.1"
+
+
+# ===================================================================== 8. Codex E3-gel-r1: wheels bound to the cell
+
+MAC_CELLS = ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313")
+UBUNTU_CELL = "ubuntu2404-arm64-py311"
+
+
+def embedded_manifest(cell_id: str) -> dict:
+    return json.loads(qualified_runtime.CELL_LOCKS[("lexical", cell_id)][2].read_text(encoding="utf-8"))
+
+
+def frozen_texts_from_manifest(manifest: dict) -> tuple[str, str]:
+    """``(<cell>.txt, pylock.<cell>.toml)`` texts carrying exactly the wheels of one manifest."""
+    compiled, packages = [], []
+    for item in manifest["artifacts"]:
+        hashes = " ".join(f"--hash=sha256:{wheel['sha256']}" for wheel in item["wheels"])
+        compiled.append(f"{item['name']}=={item['version']} {hashes}")
+        wheels = ", ".join(
+            f'{{ url = "{w["url"]}", size = {w["size"]}, hashes = {{ sha256 = "{w["sha256"]}" }} }}' for w in item["wheels"]
+        )
+        packages.append(f'[[packages]]\nname = "{item["name"]}"\nversion = "{item["version"]}"\nwheels = [{wheels}]\n')
+    return "\n".join(compiled) + "\n", _pylock("\n".join(packages))
+
+
+@pytest.mark.parametrize("cell_id", RETAINED_CELLS)
+def test_every_frozen_wheel_fits_its_cell_and_no_neighbor_lock_fits_another_cell(cell_id):
+    names = [wheel["filename"] for item in embedded_manifest(cell_id)["artifacts"] for wheel in item["wheels"]]
+    assert len(names) == FROZEN_WHEEL_COUNTS[cell_id]
+    assert all(qualified_runtime.wheel_compatible_with_cell(name, cell_id) for name in names)
+    for other in RETAINED_CELLS:
+        if other != cell_id:
+            assert not all(qualified_runtime.wheel_compatible_with_cell(name, other) for name in names), other
+
+
+@pytest.mark.parametrize("filename, admitted_by", [
+    ("pkg-1.0-py3-none-any.whl", RETAINED_CELLS),
+    ("pkg-1.0-py2.py3-none-any.whl", RETAINED_CELLS),
+    ("pkg-1.0-1-py3-none-any.whl", RETAINED_CELLS),                                        # build tag
+    ("pkg-1.0-py311-none-any.whl", RETAINED_CELLS),                                        # py3X up to the cell
+    ("pkg-1.0-py312-none-any.whl", ("macos-arm64-py312", "macos-arm64-py313")),
+    ("pkg-1.0-py313-none-any.whl", ("macos-arm64-py313",)),
+    ("pkg-1.0-cp312-none-any.whl", ("macos-arm64-py312",)),
+    ("pkg-1.0-cp311-cp311-macosx_11_0_arm64.whl", ("macos-arm64-py311",)),
+    ("pkg-1.0-cp312-cp312-macosx_11_0_arm64.whl", ("macos-arm64-py312",)),               # cp312 not on py313
+    ("pkg-1.0-cp313-cp313-macosx_10_13_universal2.whl", ("macos-arm64-py313",)),
+    ("pkg-1.0-cp312-none-macosx_11_0_arm64.whl", ("macos-arm64-py312",)),
+    ("pkg-1.0-cp311-none-macosx_11_0_arm64.whl", ("macos-arm64-py311",)),
+    ("pkg-1.0-py3-none-macosx_11_0_arm64.whl", MAC_CELLS),
+    ("pkg-1.0-cp38-abi3-macosx_10_9_universal2.whl", MAC_CELLS),
+    ("pkg-1.0-cp311-abi3-macosx_10_9_universal2.whl", MAC_CELLS),
+    ("pkg-1.0-cp312-abi3-macosx_11_0_arm64.whl", ("macos-arm64-py312", "macos-arm64-py313")),
+    ("pkg-1.0-cp313-abi3-macosx_11_0_arm64.whl", ("macos-arm64-py313",)),
+    ("pkg-1.0-cp312-cp312-macosx_12_0_arm64.macosx_11_0_arm64.whl", ("macos-arm64-py312",)),   # one triple fits
+    ("pkg-1.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", (UBUNTU_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", (UBUNTU_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_39_aarch64.whl", (UBUNTU_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_40_aarch64.manylinux_2_39_aarch64.whl", (UBUNTU_CELL,)),
+    ("pkg-1.0-cp38-abi3-manylinux_2_28_aarch64.whl", (UBUNTU_CELL,)),
+    ("pkg-1.0-cp311-none-manylinux_2_17_aarch64.whl", (UBUNTU_CELL,)),
+    # --- refused everywhere
+    ("pkg-1.0-cp312-cp312-macosx_26_0_arm64.whl", ()),                                    # macOS above the 11.0 target
+    ("pkg-1.0-cp312-cp312-macosx_12_0_arm64.whl", ()),
+    ("pkg-1.0-cp311-cp311-macosx_26_0_arm64.whl", ()),
+    ("pkg-1.0-cp313-cp313-macosx_12_0_universal2.whl", ()),
+    ("pkg-1.0-cp38-abi3-macosx_15_0_arm64.whl", ()),
+    ("pkg-1.0-cp311-cp311-any.whl", ()),                                                   # cpXY ABI needs a platform
+    ("pkg-1.0-cp312-cp312-any.whl", ()),
+    ("pkg-1.0-cp312-abi3-any.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux_2_40_aarch64.whl", ()),                               # glibc above 2.39
+    ("pkg-1.0-cp311-cp311-manylinux_3_0_aarch64.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux_2_16_aarch64.whl", ()),
+    ("pkg-1.0-cp311-cp311-musllinux_1_2_aarch64.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux_2_28_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux2014_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-macosx_11_0_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-macosx_10_9_intel.whl", ()),
+    ("pkg-1.0-cp311-cp311-win_amd64.whl", ()),
+    ("pkg-1.0-cp311-cp311-win_arm64.whl", ()),
+    ("pkg-1.0-cp311-cp311-linux_aarch64.whl", ()),
+    ("pkg-1.0-cp313-cp313t-macosx_11_0_arm64.whl", ()),                                   # free-threaded ABI
+    ("pkg-1.0-cp313t-cp313t-macosx_11_0_arm64.whl", ()),
+    ("pkg-1.0-cp312-cp311-macosx_11_0_arm64.whl", ()),
+    ("pkg-1.0-py3-abi3-any.whl", ()),
+    ("pkg-1.0-py2-none-any.whl", ()),
+    ("pkg-1.0-py314-none-any.whl", ()),
+    ("pkg-1.0-pp311-pypy311_pp73-macosx_11_0_arm64.whl", ()),
+    ("pkg-1.0-cp211-cp211-any.whl", ()),
+    ("pkg-1.0-py3-none.whl", ()),                                                          # not parsable
+    ("pkg-1.0-abc-py3-none-any.whl", ()),
+    ("pkg-not_a_version-py3-none-any.whl", ()),
+    ("pkg-1.0.tar.gz", ()),
+    ("", ()),
+])
+def test_wheel_tags_are_bound_to_the_cell(filename, admitted_by):
+    """Codex E3-gel-r2: the admitted tags are those of ``packaging.tags`` for the frozen target of the cell."""
+    for cell_id in RETAINED_CELLS:
+        assert qualified_runtime.wheel_compatible_with_cell(filename, cell_id) is (cell_id in admitted_by), cell_id
+    assert qualified_runtime.wheel_compatible_with_cell(filename, "debian-x86_64-py311") is False
+    assert qualified_runtime.wheel_compatible_with_cell(None, "macos-arm64-py311") is False
+
+
+def test_cell_wheel_tags_are_the_packaging_tags_of_an_explicit_frozen_target():
+    from packaging import tags
+
+    assert qualified_runtime.MACOS_TARGET == ((11, 0), "arm64") and qualified_runtime.LINUX_GLIBC_MAX == (2, 39)
+    mac = list(tags.mac_platforms((11, 0), "arm64"))
+    assert mac[:2] == ["macosx_11_0_arm64", "macosx_11_0_universal2"] and "macosx_10_9_universal2" in mac
+    linux = [f"manylinux_2_{m}_aarch64" for m in range(39, 16, -1)] + ["manylinux2014_aarch64"]
+    for cell_id, minor, platforms in (("macos-arm64-py311", 11, mac), ("macos-arm64-py312", 12, mac),
+                                      ("macos-arm64-py313", 13, mac), (UBUNTU_CELL, 11, linux)):
+        expected = frozenset((
+            *tags.cpython_tags(python_version=(3, minor), abis=[f"cp3{minor}"], platforms=platforms),
+            *tags.compatible_tags(python_version=(3, minor), interpreter=f"cp3{minor}", platforms=platforms),
+        ))
+        assert qualified_runtime.cell_wheel_tags(cell_id) == expected
+        platforms_seen = {tag.platform for tag in expected}
+        assert platforms_seen == {*platforms, "any"}
+        assert not any("musllinux" in p or p == "linux_aarch64" or "x86_64" in p for p in platforms_seen)
+    assert set(qualified_runtime.CELL_WHEEL_TARGETS) == set(RETAINED_CELLS)
+
+
+@pytest.mark.parametrize("source_cell, target_cell", [
+    (UBUNTU_CELL, "macos-arm64-py312"),            # Codex counter-example: the Ubuntu lock given to a macOS cell
+    ("macos-arm64-py311", "macos-arm64-py312"),    # the py311 lock given to py312
+    ("macos-arm64-py312", "macos-arm64-py313"),    # cp312 wheels in the py313 cell
+    ("macos-arm64-py311", UBUNTU_CELL),
+])
+def test_lock_of_another_cell_is_refused_by_generator_check_and_runtime(tmp_path, monkeypatch, capsys, source_cell, target_cell):
+    gen = load_script("generate_cell_locks_411")
+    ref_cat = json.loads((RESOURCES / "qualified_runtime_lexical_v1.json").read_text(encoding="utf-8"))
+    ml_pkgs = gen._ml_closure_names(RESOURCES)
+    foreign_compiled, foreign_pylock = frozen_texts_from_manifest(embedded_manifest(source_cell))
+    own_compiled, own_pylock = frozen_texts_from_manifest(embedded_manifest(target_cell))
+
+    # The own lock of the cell rebuilds the embedded manifest artifacts exactly.
+    _, _, own_manifest = gen.build_cell_lock_files(
+        target_cell, own_compiled, own_pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=ml_pkgs)
+    assert own_manifest["artifacts"] == embedded_manifest(target_cell)["artifacts"]
+
+    # 1. Generator: refused.
+    with pytest.raises(ValueError, match="not compatible with the cell"):
+        gen.build_cell_lock_files(
+            target_cell, foreign_compiled, foreign_pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=ml_pkgs)
+
+    # 2. Generation and --check with the foreign lock as input of the cell: refused, nothing written.
+    out_dir = tmp_path / "resources"
+    shutil.copytree(RESOURCES, out_dir)
+    in_dir = tmp_path / "inputs"
+    in_dir.mkdir()
+    inputs = gen.frozen_input_files(in_dir)
+    for cell_id, (txt_path, pylock_path) in inputs.items():
+        compiled, pylock = frozen_texts_from_manifest(embedded_manifest(source_cell if cell_id == target_cell else cell_id))
+        txt_path.write_text(compiled, encoding="utf-8")
+        pylock_path.write_text(pylock, encoding="utf-8")
+    qr_copy = tmp_path / "qualified_runtime.py"
+    con_copy = tmp_path / "memory_os_constraints.py"
+    shutil.copy2(ROOT / "v4/src/memory_os_v4/ops/qualified_runtime.py", qr_copy)
+    shutil.copy2(ROOT / "v4/src/memory_os_constraints.py", con_copy)
+    snapshot = {path.name: path.read_bytes() for path in out_dir.iterdir()}
+    common = ["--input-dir", str(in_dir), "--output-dir", str(out_dir),
+              "--qualified-runtime", str(qr_copy), "--constraints-script", str(con_copy)]
+    with pytest.raises(ValueError, match="not compatible with the cell"):
+        gen.main(common)
+    # --check: reported as a MISMATCH with exit code 1, never as a traceback.
+    capsys.readouterr()
+    assert gen.main([*common, "--check"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.startswith("MISMATCH: ")
+    assert f"input:lexical:{target_cell} (" in captured.err and "not compatible with the cell" in captured.err
+    assert {path.name: path.read_bytes() for path in out_dir.iterdir()} == snapshot
+
+    # 3. A manifest written by hand with the foreign wheels, anchors regenerated to match:
+    #    --check (runtime attestation on disk) and the runtime itself both refuse it.
+    cat, con, man = (out_dir / path.name for path in qualified_runtime.CELL_LOCKS[("lexical", target_cell)])
+    forged = {**embedded_manifest(target_cell), "artifacts": embedded_manifest(source_cell)["artifacts"]}
+    man.write_text(json.dumps(forged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    gen.sync_qualified_runtime_digests(qr_copy, out_dir, check_only=False)
+    gen.sync_constraints_script_digests(con_copy, out_dir, check_only=False)
+    anchored = gen._parse_generated_dict(qr_copy, gen.DIGESTS_BEGIN, gen.DIGESTS_END)
+    assert f"attestation:lexical:{target_cell}" in gen.validate_all_triplets_on_disk(out_dir, expected_digests_map=anchored)
+    assert qualified_runtime.validate_lock_files(
+        target_cell, profile="lexical", catalog_path=cat, constraints_path=con, manifest_path=man,
+        expected_digests=anchored[("lexical", target_cell)], resources_dir=out_dir,
+    ) is None
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCKS", {**qualified_runtime.CELL_LOCKS, ("lexical", target_cell): (cat, con, man)})
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCK_DIGESTS", {**qualified_runtime.CELL_LOCK_DIGESTS, **anchored})
+    assert qualified_runtime.cell_lock(target_cell, profile="lexical") is None
+    assert qualified_runtime.inspect_current(profile="lexical", extras=("ops", "brief"), cell_id=target_cell)["state"] == "lock_unavailable"
+    # Control: the authentic manifest, same anchoring path, is accepted.
+    man.write_bytes(snapshot[man.name])
+    gen.sync_qualified_runtime_digests(qr_copy, out_dir, check_only=False)
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCK_DIGESTS", {
+        **qualified_runtime.CELL_LOCK_DIGESTS, **gen._parse_generated_dict(qr_copy, gen.DIGESTS_BEGIN, gen.DIGESTS_END)})
+    assert qualified_runtime.cell_lock(target_cell, profile="lexical") is not None
+
+
+@pytest.mark.parametrize("cell_id, tags", [
+    (UBUNTU_CELL, "cp311-cp311-musllinux_1_2_aarch64"),
+    (UBUNTU_CELL, "cp311-cp311-manylinux_2_28_x86_64"),
+    (UBUNTU_CELL, "cp311-cp311-manylinux_2_40_aarch64"),
+    (UBUNTU_CELL, "cp311-cp311-macosx_11_0_arm64"),
+    (UBUNTU_CELL, "cp312-cp312-manylinux_2_28_aarch64"),
+    (UBUNTU_CELL, "cp311-cp311-linux_aarch64"),
+    (UBUNTU_CELL, "cp311-cp311-any"),
+    ("macos-arm64-py313", "cp312-cp312-macosx_11_0_arm64"),
+    ("macos-arm64-py313", "cp313-cp313t-macosx_11_0_arm64"),
+    ("macos-arm64-py313", "cp313-cp313-macosx_26_0_arm64"),
+    ("macos-arm64-py313", "cp313-cp313-macosx_12_0_arm64"),
+    ("macos-arm64-py312", "cp311-cp311-macosx_11_0_arm64"),
+    ("macos-arm64-py312", "cp312-cp312-macosx_11_0_x86_64"),
+    ("macos-arm64-py312", "cp312-cp312-macosx_26_0_arm64"),          # Codex E3-gel-r2: macOS version ignored
+    ("macos-arm64-py312", "cp312-cp312-macosx_12_0_arm64"),
+    ("macos-arm64-py312", "cp312-cp312-any"),                        # Codex E3-gel-r2: refused by installers
+    ("macos-arm64-py311", "cp311-cp311-macosx_26_0_arm64"),
+    ("macos-arm64-py311", "cp311-cp311-macosx_12_0_arm64"),
+    ("macos-arm64-py311", "cp311-cp311-win_amd64"),
+    ("macos-arm64-py311", "cp311-cp311-manylinux_2_28_aarch64"),
+])
+def test_single_incompatible_wheel_is_refused_by_generator_and_runtime(tmp_path, monkeypatch, cell_id, tags):
+    gen = load_script("generate_cell_locks_411")
+    manifest = embedded_manifest(cell_id)
+    first = manifest["artifacts"][0]
+    bad = synthetic_wheel(first["name"], first["version"], tags)
+    first["wheels"] = [bad]
+    compiled, pylock = frozen_texts_from_manifest(manifest)
+    ref_cat = json.loads((RESOURCES / "qualified_runtime_lexical_v1.json").read_text(encoding="utf-8"))
+    with pytest.raises(ValueError, match="not compatible with the cell"):
+        gen.build_cell_lock_files(
+            cell_id, compiled, pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=gen._ml_closure_names(RESOURCES))
+
+    src_cat, src_con, src_man = qualified_runtime.CELL_LOCKS[("lexical", cell_id)]
+    cat, con, man = tmp_path / src_cat.name, tmp_path / src_con.name, tmp_path / src_man.name
+    shutil.copy2(src_cat, cat)
+    shutil.copy2(src_con, con)
+
+    def locked(document) -> bool:
+        man.write_text(json.dumps(document), encoding="utf-8")
+        digests = tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in (cat, con, man))
+        monkeypatch.setattr(qualified_runtime, "CELL_LOCKS", {**qualified_runtime.CELL_LOCKS, ("lexical", cell_id): (cat, con, man)})
+        monkeypatch.setattr(qualified_runtime, "CELL_LOCK_DIGESTS", {**qualified_runtime.CELL_LOCK_DIGESTS, ("lexical", cell_id): digests})
+        return qualified_runtime.cell_lock(cell_id, profile="lexical") is not None
+
+    assert locked(manifest) is False
+    first["wheels"] = [synthetic_wheel(first["name"], first["version"])]   # py3-none-any: the same edit, compatible
+    assert locked(manifest) is True
+
+
+@pytest.mark.parametrize("cell_id, tags", [
+    ("macos-arm64-py312", "cp312-none-macosx_11_0_arm64"),          # Codex E3-gel-r2: valid, was refused
+    ("macos-arm64-py312", "py312-none-any"),
+    ("macos-arm64-py312", "cp38-abi3-macosx_10_9_universal2"),
+    ("macos-arm64-py312", "cp312-cp312-macosx_10_13_universal2"),
+    ("macos-arm64-py311", "cp311-none-macosx_11_0_arm64"),
+    ("macos-arm64-py313", "cp313-cp313-macosx_11_0_arm64"),
+    (UBUNTU_CELL, "cp311-cp311-manylinux_2_39_aarch64"),
+    (UBUNTU_CELL, "cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64"),
+    (UBUNTU_CELL, "cp38-abi3-manylinux_2_28_aarch64"),
+])
+def test_single_compatible_wheel_is_accepted_by_generator_and_runtime(tmp_path, monkeypatch, cell_id, tags):
+    gen = load_script("generate_cell_locks_411")
+    manifest = embedded_manifest(cell_id)
+    first = manifest["artifacts"][0]
+    first["wheels"] = [synthetic_wheel(first["name"], first["version"], tags)]
+    compiled, pylock = frozen_texts_from_manifest(manifest)
+    ref_cat = json.loads((RESOURCES / "qualified_runtime_lexical_v1.json").read_text(encoding="utf-8"))
+    _, _, built = gen.build_cell_lock_files(
+        cell_id, compiled, pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=gen._ml_closure_names(RESOURCES))
+    assert built["artifacts"] == manifest["artifacts"]
+
+    src_cat, src_con, src_man = qualified_runtime.CELL_LOCKS[("lexical", cell_id)]
+    cat, con, man = tmp_path / src_cat.name, tmp_path / src_con.name, tmp_path / src_man.name
+    shutil.copy2(src_cat, cat)
+    shutil.copy2(src_con, con)
+    man.write_text(json.dumps(manifest), encoding="utf-8")
+    digests = tuple(hashlib.sha256(path.read_bytes()).hexdigest() for path in (cat, con, man))
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCKS", {**qualified_runtime.CELL_LOCKS, ("lexical", cell_id): (cat, con, man)})
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCK_DIGESTS", {**qualified_runtime.CELL_LOCK_DIGESTS, ("lexical", cell_id): digests})
+    assert qualified_runtime.cell_lock(cell_id, profile="lexical") is not None
+
+
+def test_check_reports_invalid_or_missing_inputs_as_mismatches_without_traceback(tmp_path, capsys):
+    gen = load_script("generate_cell_locks_411")
+    out_dir = tmp_path / "resources"
+    shutil.copytree(RESOURCES, out_dir)
+    in_dir = tmp_path / "inputs"
+    in_dir.mkdir()
+    inputs = gen.frozen_input_files(in_dir)
+    for cell_id, (txt_path, pylock_path) in inputs.items():
+        compiled, pylock = frozen_texts_from_manifest(embedded_manifest(cell_id))
+        txt_path.write_text(compiled, encoding="utf-8")
+        pylock_path.write_text(pylock, encoding="utf-8")
+    qr_copy = tmp_path / "qualified_runtime.py"
+    con_copy = tmp_path / "memory_os_constraints.py"
+    shutil.copy2(ROOT / "v4/src/memory_os_v4/ops/qualified_runtime.py", qr_copy)
+    shutil.copy2(ROOT / "v4/src/memory_os_constraints.py", con_copy)
+    common = ["--input-dir", str(in_dir), "--output-dir", str(out_dir),
+              "--qualified-runtime", str(qr_copy), "--constraints-script", str(con_copy), "--check"]
+    # These inputs carry the embedded wheels but another pylock text: only the manifests differ (pylock_sha256).
+    assert gen.main(common) == 1
+    assert "input:" not in capsys.readouterr().err
+
+    txt_path, pylock_path = inputs["macos-arm64-py313"]
+    good = pylock_path.read_text(encoding="utf-8")
+    snapshot = {path.name: path.read_bytes() for path in out_dir.iterdir()}
+    for label, text in {
+        "sdist": good.replace('name = "numpy"\n', 'name = "numpy"\nsdist = { url = "https://files.pythonhosted.org/packages/ab/cd/numpy-2.4.2.tar.gz" }\n'),
+        "macos-26": good.replace("macosx_11_0_arm64", "macosx_26_0_arm64"),
+        "not-toml": "lock-version = ",
+        "missing-file": None,
+    }.items():
+        if text is None:
+            pylock_path.unlink()
+        else:
+            assert text != good, label
+            pylock_path.write_text(text, encoding="utf-8")
+        assert gen.main(common) == 1, label
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err.startswith("MISMATCH: "), label
+        assert "input:lexical:macos-arm64-py313 (" in captured.err and "Traceback" not in captured.err, label
+        assert "input:lexical:macos-arm64-py312" not in captured.err, label
+    assert {path.name: path.read_bytes() for path in out_dir.iterdir()} == snapshot
