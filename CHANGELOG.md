@@ -3,7 +3,8 @@
 ## 4.1.1 — en préparation (branche feature/4.1.1, 2026-11-24) ; non publiée / non déployée / non qualifiée
 
 - Documents figés avant la construction du paquet : ils décrivent un périmètre et n'annoncent aucun résultat.
-  L'état de preuve de chaque cellule est publié à part, dans le manifeste P9 (non signé), lié au SHA-256 du wheel.
+  L'état de preuve d'une cellule n'est écrit ni dans ces documents ni dans le paquet : l'aperçu de l'amorce ne le
+  lit que dans un manifeste P9 local (non signé), lié au SHA-256 du wheel, et affiche `non testé` sans lui.
   Aucun gain mesuré ; P-A et P-B non revendiqués pour la 4.1.1.
 - Cellules de plateforme retenues : macOS arm64 / CPython 3.11, 3.12, 3.13 et Ubuntu 24.04 arm64 / CPython 3.11
   (`ops/cell.py`). Toute autre cellule est refusée (`runtime_unqualified`, motif `cell_not_retained`). Profil
@@ -15,7 +16,10 @@
 - SQLite ≥ 3.51.3 : voie (a), un Python existant dont la SQLite chargée est conforme ; voie (i), le CPython autonome
   nommé pour la cellule (python-build-standalone 20261110, par `uv`). Valeur relue par l'interpréteur de
   l'environnement, refus explicite sinon.
-- Amorce `scripts/memory_os_bootstrap.py` (bibliothèque standard seule, publiée à côté du wheel avec son SHA-256) :
+- Installation : `pip` en deux commandes sous contraintes pour toutes les cellules retenues, avec un Python dont la
+  SQLite chargée est ≥ 3.51.3 (installable par l'utilisateur, par exemple `uv python install 3.11`).
+- Amorce `scripts/memory_os_bootstrap.py` (bibliothèque standard seule ; la copie du sdist est un gabarit qui fait
+  l'aperçu et refuse d'appliquer, `release_pin_unfilled`) :
   aperçu sans écriture par défaut ; `--apply` crée un environnement durable par `uv` ≥ 0.13.9 donné par `--uv`
   (jamais `uvx`), roues binaires sous contraintes hachées ; `--acquire-cpython` consent au téléchargement du CPython
   autonome ; `--p9-manifest` lit l'état de preuve dans un fichier local, `non testé` sinon. L'amorce ne lance jamais

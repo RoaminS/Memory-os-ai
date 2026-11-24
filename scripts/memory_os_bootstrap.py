@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Memory OS AI bootstrap (4.1.1, contract section 4): ONE script, standard library only.
 
-It is published NEXT TO the wheel (never inside it: it pins the SHA-256 of that wheel) and is
-identified by its own SHA-256. Getting it is a declared acquisition: one command, one source, one
-published digest. It never imports ``memory_os_ai`` or ``memory_os_v4``: nothing is installed yet.
+A pinned copy never travels inside the wheel (it pins the SHA-256 of that wheel) and is identified
+by its own SHA-256, which every report states. It never imports ``memory_os_ai`` or
+``memory_os_v4``: nothing is installed yet.
 
     python3 memory_os_bootstrap.py --uv /path/to/uv --profile lexical            # PREVIEW (default)
     python3 memory_os_bootstrap.py --uv /path/to/uv --profile lexical --apply    # named option
@@ -287,8 +287,9 @@ def load_pin(text: str | None = None) -> dict:
         result["state"] = state
         if state == "template":
             result.update(code="release_pin_unfilled", message="release_pin_unfilled: this copy of the bootstrap "
-                          "is the repository template; it pins no wheel and no lock. Use the bootstrap published "
-                          "next to the wheel (compare its SHA-256 with the published one); nothing written")
+                          "is a template; it pins no wheel and no lock: the preview stays possible, --apply is refused. To "
+                          "install, use the two pip commands of the README, with a Python whose loaded SQLite "
+                          "is >= 3.51.3; nothing written")
             return result
         wheel, version = pin["wheel"], pin["version"]
         if not isinstance(version, str) or not re.fullmatch(r"[0-9]+(\.[0-9]+)*([a-z]+[0-9]+|\.dev[0-9]+)?", version):
@@ -322,8 +323,8 @@ def render_pin_block(pin: dict) -> str:
 def fill_pin(source: str, pin: dict) -> str:
     """``source`` (the text of this script) with its pin block replaced by ``pin``. Pure.
 
-    The release tooling calls it once the wheel is built and the locks are frozen, then publishes
-    the result with its SHA-256. A pin that does not validate is refused: nothing half-filled.
+    The release tooling calls it once the wheel is built and the locks are frozen; the result is
+    identified by its SHA-256. A pin that does not validate is refused: nothing half-filled.
     """
     block = render_pin_block(pin)
     checked = load_pin(json.dumps(pin))
@@ -879,14 +880,15 @@ def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None
                       f"{pin['wheel']['sha256']}; nothing written")
 
     # ---- acquisitions: everything named, nothing implicit
-    acquisitions = [{"object": "bootstrap (this script)", "source": "published next to the wheel, with its SHA-256",
+    acquisitions = [{"object": "bootstrap (this script)", "source": "this script (its own SHA-256 is reported)",
                      "version": f"format {BOOTSTRAP_FORMAT}", "size": _own("size"), "destination": _own("path"),
                      "sha256": _own("sha256"), "when": "already acquired"}]
     acquisitions.append({"object": "uv", "source": "given by --uv (astral-sh/uv release or equivalent); never "
                          "downloaded by the bootstrap", "version": uv["version"], "size": uv["size"],
                          "destination": uv["path"], "sha256": uv["sha256"], "when": "already acquired"})
     if proof["manifest"]:
-        acquisitions.append({"object": "P9 manifest", "source": "published next to the bootstrap, with its SHA-256",
+        acquisitions.append({"object": "P9 manifest",
+                             "source": "a local file given with --p9-manifest (not fetched, not signed)",
                              "version": None, "size": None, "destination": proof["manifest"]["path"],
                              "sha256": proof["manifest"]["sha256"], "when": "already acquired"})
     if route == "i" and standalone:

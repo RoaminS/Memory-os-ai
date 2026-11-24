@@ -9,6 +9,10 @@ the same project state on your machine: dated decisions, open tasks and verifiab
 > **Status: ALPHA.** Four [platform cells](#platform-cells) are retained; every other platform is refused. Local
 > clients on the same machine; remote/cloud agents are not qualified. Current release: **4.1.1**.
 > Limits and evaluation results: [see below](#limits-and-evaluations).
+>
+> **Source of 4.1.1.** The GitHub repository `romainsantoli-web/Memory-os-ai` is frozen at `v3.2.0`. PyPI serves the
+> wheel and the sdist only; the sdist (`.tar.gz`) is the reference source of 4.1.1. It contains the bootstrap
+> template (`scripts/memory_os_bootstrap.py`), which previews and refuses to apply (`release_pin_unfilled`).
 
 ## Why
 
@@ -42,21 +46,26 @@ Linux on x86_64, WSL, Windows, another Python version or a Python that is not CP
 limited to macOS arm64 with Python 3.11.
 
 This table is a scope, not a result. The proof state of each cell (a state and the means used to establish it) is
-written neither in this README nor in the package: it is published next to the release, in the **P9 manifest**, bound
-to the SHA-256 of the exact wheel. The bootstrap preview reads that manifest from a local file (`--p9-manifest`) and
-never fetches it; without a manifest that names this exact wheel, the detected cell and its lock, it reports
-`non testé` ("not tested"). The manifest is not signed: the preview reports what the file declares.
+written neither in this README nor in the package. The bootstrap preview reads it only from a local **P9 manifest**
+(`--p9-manifest`), which it never fetches and which is not signed: the preview reports what the file declares, and
+only when the file names the exact wheel the bootstrap pins, the detected cell and its lock. Without such a manifest
+it reports `non testé` ("not tested").
 
-## Install on macOS
+## Install on macOS and Ubuntu 24.04
 
-Prerequisites: Apple Silicon, **Python 3.11** (e.g. Homebrew) and a 5 GB free-disk safety reserve. Check the SQLite
-library of that Python: `python3.11 -c 'import sqlite3; print(sqlite3.sqlite_version)'`. SQLite ≥ 3.51.3 is required
+Prerequisites: one of the [platform cells](#platform-cells), a Python of that cell (**Python 3.11**, e.g. Homebrew, on
+macOS) and a 5 GB free-disk safety reserve. Check the SQLite library of that Python: `python3.11 -c 'import sqlite3; print(sqlite3.sqlite_version)'`. SQLite ≥ 3.51.3 is required
 for the SQLite backend; check the library linked to this Python interpreter, not the sqlite3 command-line tool
 (`quickstart` and `doctor` check it too, before anything is written).
 
-The two `pip` commands below are the path for macOS with Python 3.11. They also apply to any other retained cell
-whose Python loads SQLite ≥ 3.51.3, with that Python in place of `python3.11` and the lexical profile only. When no
-such Python is at hand, use the [bootstrap](#install-with-the-bootstrap-any-retained-cell).
+The two `pip` commands below are the install path of every retained cell. They are written for Python 3.11; on macOS
+with Python 3.12 or 3.13, use that Python in place of `python3.11`. Outside macOS with Python 3.11, only the lexical
+profile applies.
+The system Python that Ubuntu 24.04 ships loads SQLite 3.45.1, below the minimum. When no suitable Python is at hand,
+you can install one yourself, for example with [`uv`](https://docs.astral.sh/uv/): `uv python install 3.11`, then
+`"$(uv python find --system --managed-python 3.11)" -m venv ~/.memory-os/venv` in place of the first line below. Run the SQLite check above with
+that interpreter first: the SQLite a Python carries depends on its build. `quickstart` refuses an interpreter that
+lives in `uv`'s cache or is run through `uvx`; an environment created as above is a durable one.
 
 Choose **one install profile**. It is explicit (`--profile` has no default for a new install), it is never guessed
 from the installed packages, and an existing installation keeps its profile: there is no in-place conversion.
@@ -91,40 +100,34 @@ The first `pip` command installs the package alone so that `memory-os-constraint
 your profile and of the detected cell; the second installs the dependencies at exactly the versions of that lock.
 `quickstart` refuses a runtime whose installed versions differ from that lock.
 
-### Install with the bootstrap (any retained cell)
+### The bootstrap template (preview only)
 
-`scripts/memory_os_bootstrap.py` is one script that uses the standard library only. It drives
-[`uv`](https://docs.astral.sh/uv/) to create the same durable environment, `~/.memory-os/venv`. It is the path when no
-suitable Python is at hand: the system Python that Ubuntu 24.04 ships loads SQLite 3.45.1, below the required 3.51.3.
+The sdist contains `scripts/memory_os_bootstrap.py`, one script that uses the standard library only. That copy is a
+**template**: it pins no wheel and no lock, so its preview names the blocker `release_pin_unfilled`, `--apply` installs
+nothing and the proof state it shows is always `non testé`. To install, use the two `pip` commands above. What follows
+describes the script itself; `--apply` works only in a copy whose release pin is filled, which the sdist copy is not.
 
-- **Source and digest.** The bootstrap and the P9 manifest are published with the release, each with its SHA-256.
-  Neither a URL nor a digest is written here: they exist only once the release is published. Check the digest of the
-  script before running it (`shasum -a 256 memory_os_bootstrap.py` on macOS, `sha256sum memory_os_bootstrap.py` on
-  Ubuntu). The copy in the source repository is a template: it previews and refuses to apply.
 - **`uv` ≥ 0.13.9**, given by an explicit path with `--uv`. The bootstrap never looks `uv` up on PATH, never downloads
   it and refuses `uvx`.
 - **The first pass is a preview**: the bootstrap writes nothing and opens no connection. It reports the system, the
   Python and the SQLite that Python loads, the service manager, the version of `uv`, the cell and its proof state,
   the lock, and every acquisition (object, source, version, size, destination).
-- **`--apply` is a named option.** It creates the environment from binary wheels only, under the exact hashed
-  constraints of the cell, checks the installed package against the digest the bootstrap pins, then runs the
-  `quickstart` preview from that environment. It never runs `quickstart --apply` and never starts a service: it
-  prints the command that you then launch yourself.
+- **`--apply` is a named option.** With a filled pin, it creates the durable environment `~/.memory-os/venv` from
+  binary wheels only, under the exact hashed constraints of the cell, checks the installed package against the digest
+  the bootstrap pins, then runs the `quickstart` preview from that environment. It never runs `quickstart --apply`
+  and never starts a service: it prints the command that you then launch yourself.
 - **SQLite ≥ 3.51.3, two routes.** (a) An existing Python whose loaded SQLite meets the minimum: `--python
   /path/to/python` (default: the Python running the script). (i) The standalone CPython named for the cell
   (python-build-standalone 20261110, installed through `uv`): `--cpython 3.12` or `--cpython 3.13` on macOS,
   `--cpython 3.11` on Ubuntu 24.04. That interpreter is downloaded only with the consent `--apply --acquire-cpython`,
   and its SQLite is read back from the environment before anything is installed.
+- **Proof state.** `--p9-manifest /path/to/manifest` reads a local P9 manifest; nothing is ever fetched.
 
-On Ubuntu 24.04 arm64:
+Preview on Ubuntu 24.04 arm64 (writes nothing):
 
 ```bash
-python3 memory_os_bootstrap.py --uv /path/to/uv --profile lexical --cpython 3.11         # preview: writes nothing
-python3 memory_os_bootstrap.py --uv /path/to/uv --profile lexical --cpython 3.11 --apply --acquire-cpython
+python3 scripts/memory_os_bootstrap.py --uv /path/to/uv --profile lexical --cpython 3.11
 ```
-
-The second command creates `~/.memory-os/venv` and prints the `quickstart` command to launch next; add
-`--p9-manifest /path/to/manifest` to either command to read the published proof state of your cell.
 
 Limit: the bootstrap does not pass `XDG_CONFIG_HOME` to the `quickstart` preview it runs, which therefore resolves the
 systemd unit and the Zed configuration under `~/.config`. With a custom `XDG_CONFIG_HOME` under your home directory,
@@ -238,7 +241,7 @@ data). Interrupted writes are reported as
 ## Limits and evaluations
 
 - Platforms: only the four [platform cells](#platform-cells); local clients on the same machine. The proof state of
-  each cell is published in the P9 manifest, outside the package, and that manifest is not signed.
+  a cell is written neither here nor in the package; it is read only from a local P9 manifest, which is not signed.
 - Linux durability: the store opens only when `fullfsync` and `checkpoint_fullfsync` are read back as enabled; what
   these settings actually guarantee is established on macOS only.
 - Residual race windows: between a check and the action that follows it (for example during
@@ -278,10 +281,10 @@ policy, dated append-only history, compare-and-set on tasks and core blocks.
 platform cells (macOS arm64 with Python 3.11, 3.12 or 3.13; Ubuntu 24.04 arm64 with Python 3.11), every other platform
 refused; the semantic profile stays on macOS arm64 with Python 3.11. Lexical locks per cell, each with a frozen
 manifest of the admitted wheels; two routes to SQLite ≥ 3.51.3; a standard-library bootstrap (preview first, `--apply`
-as a named option, durable environment through `uv`); one service interface with two implementations, launchd and
+as a named option, durable environment through `uv`), shipped in the sdist as a template that previews only; one service interface with two implementations, launchd and
 `systemd --user`; Linux configuration paths for eight clients, with VS Code, Windsurf and Claude Desktop refused on
-Linux. These notes describe a scope and announce no result: the proof state of each cell is published separately, in
-the P9 manifest, bound to the SHA-256 of the wheel. No measured gain is claimed, and the P-A and P-B evaluations are
+Linux. These notes describe a scope and announce no result: the proof state of a cell is written neither here nor in
+the package; the bootstrap preview reads it only from a local, unsigned P9 manifest. No measured gain is claimed, and the P-A and P-B evaluations are
 not claimed for 4.1.1. Declared limits: [above](#limits-and-evaluations) and `docs/releases/v4.1.1.md`.
 
 **4.1.0**: explicit install profile — `lexical` (no embedding model) or `semantic` —

@@ -70,7 +70,7 @@ args = []
 
 **4.1.1 (in preparation, not published).** These paths apply to the one Linux cell that 4.1.1 retains, Ubuntu 24.04
 arm64 with Python 3.11 (lexical profile, `systemd --user` service). This section describes where `quickstart` writes;
-it announces no result. The proof state of the cell is published separately, in the P9 manifest of the release.
+it announces no result. The proof state of the cell is written neither here nor in the package.
 
 | Assistant (`--clients` name) | File on Linux | Refused when this variable is present |
 |---|---|---|
