@@ -64,7 +64,7 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
             _print_json(result)
             restored = all(r['undo'] in {'restored', 'nothing-to-undo'} for r in result['results'])
             return 0 if restored and result.get('ok', True) else 1
-        chosen = tuple(args.clients.split(',')) if args.clients else quickstart.DEFAULT_CLIENTS
+        chosen = quickstart.parse_clients_arg(args.clients)
         s, backend = quickstart.settings_for_install(s, backend=args.backend)
         consent = getattr(args, 'replace_existing', None)
         plan = quickstart.prepare(s, clients=chosen, backend=backend, profile=getattr(args, 'profile', None),
@@ -113,10 +113,11 @@ def cmd_uninstall(args, s: OpsSettings) -> int:
 
     from . import uninstall
     from .provision import ProvisionError
+    from .quickstart import parse_clients_arg
     try:
         home = Path.home()
         s = uninstall.settings_from_service(s, home)
-        chosen = tuple(args.clients.split(',')) if args.clients else None
+        chosen = parse_clients_arg(args.clients, None)
         consent = tuple(args.remove_existing.split(',')) if args.remove_existing else ()
         plan = uninstall.plan(s, home=home, python=str(Path(sys.executable).absolute()), run=subprocess.run,
                               clients=chosen, remove_existing=consent)

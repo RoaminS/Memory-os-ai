@@ -49,6 +49,15 @@ JOURNAL_SUBDIR = ".local/state/memory-os/quickstart"  # below the selected HOME
 SENSITIVE = ("TOKEN", "KEY", "SECRET", "PASSWORD", "BEARER")
 
 
+def parse_clients_arg(value, default=DEFAULT_CLIENTS):
+    """The single ``--clients`` rule: absent or empty -> ``default``; otherwise an exact ``split(',')``.
+
+    Nothing is stripped or case-folded: an inexact name stays in the tuple and is refused afterwards as
+    an unknown client. ``scripts/memory_os_bootstrap.py`` (stdlib only) carries a copy of this rule.
+    """
+    return tuple(value.split(',')) if value else default
+
+
 class QuickstartError(RuntimeError):
     """Refusal with a stable ``code`` (SETUP_4_1_0.md §11); the message never carries foreign text."""
 

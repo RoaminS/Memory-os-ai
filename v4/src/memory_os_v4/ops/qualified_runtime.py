@@ -255,6 +255,10 @@ def _constraints_match(lines: list[str], wanted_canon: dict[str, str]) -> dict:
     return {'ok': not mismatches, 'mismatches': mismatches}
 
 
+_WHEEL_TAG = re.compile(r'[A-Za-z0-9_.]+')  # distribution, python tag, abi tag, platform tag
+_WHEEL_BUILD_TAG = re.compile(r'[0-9][A-Za-z0-9_.]*')  # optional; starts with a digit
+
+
 def valid_artifact_url(value: object, *, name: str | None = None, version: str | None = None) -> bool:
     """Strict wheel artifact URL check (contract §6): https, allowed PyPI host, PEP 427 ``.whl`` path."""
     if not isinstance(value, str) or not value:
@@ -273,11 +277,19 @@ def valid_artifact_url(value: object, *, name: str | None = None, version: str |
     path = parsed.path
     if not path or not path.startswith('/') or '//' in path or '/..' in path or path.endswith('/'):
         return False
+    # No percent-encoding (encoded traversal), no backslash, no ``.``/``..`` path segment.
+    if '%' in path or '\\' in path or any(segment in ('.', '..') for segment in path.split('/')):
+        return False
     filename = path.rsplit('/', 1)[-1]
     if not filename.endswith('.whl') or len(filename) <= 4:
         return False
+    # PEP 427: {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform tag}.whl
     parts = filename[:-4].split('-')
     if len(parts) not in (5, 6) or any(not p for p in parts):
+        return False
+    if not _WHEEL_TAG.fullmatch(parts[0]) or not all(_WHEEL_TAG.fullmatch(tag) for tag in parts[-3:]):
+        return False
+    if len(parts) == 6 and not _WHEEL_BUILD_TAG.fullmatch(parts[2]):
         return False
     if name is not None and _canon(parts[0]) != _canon(name):
         return False

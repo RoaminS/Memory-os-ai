@@ -1132,3 +1132,94 @@ def test_linux_uninstall_can_stop_service_when_only_linux_supported_clients_were
     assert plan["ok"] is True and plan["service"]["action"] == "stop"
     applied = uninstall.apply(plan, c.settings, home=c.home, run=c.system, sleep=lambda s: None)
     assert applied["ok"] is True and applied["service"]["outcome"] == "stopped-and-unit-moved"
+
+
+# ===================================================================== 6. Codex L5-r3 reserves
+
+PYPI = "https://files.pythonhosted.org/packages/ab/cd/"
+
+
+@pytest.mark.parametrize("bad_url", [
+    PYPI + "pkg-1.0-abc-py3-none-any.whl",                 # build tag must start with a digit
+    PYPI + "pkg-1.0-_1-py3-none-any.whl",
+    "https://files.pythonhosted.org/%2e%2e/pkg-1.0-py3-none-any.whl",   # encoded traversal
+    "https://files.pythonhosted.org/packages/%2E%2E/pkg-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages%2Fpkg-1.0-py3-none-any.whl",
+    PYPI + "pkg-1.0-py3-none-any%2Ewhl",
+    "https://files.pythonhosted.org/packages\\pkg-1.0-py3-none-any.whl",
+    PYPI + "..\\pkg-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/./pkg-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/./pkg-1.0-py3-none-any.whl",
+    "https://files.pythonhosted.org/packages/../pkg-1.0-py3-none-any.whl",
+    PYPI + "pkg-1.0-py3+x-none-any.whl",                   # tag outside [A-Za-z0-9_.]
+    PYPI + "pkg-1.0-py3-none-any~.whl",
+    PYPI + "p$kg-1.0-py3-none-any.whl",
+])
+def test_artifact_url_refuses_bad_build_tag_encoded_traversal_backslash_and_dot_segments(bad_url):
+    """Codex L5-r3 reserve #2: strict PEP 427 wheel name; no '%', no backslash, no '.'/'..' segment."""
+    gen = load_script("generate_cell_locks_411")
+    assert qualified_runtime.valid_artifact_url(bad_url) is False
+    assert qualified_runtime.valid_artifact_url(bad_url, name="pkg", version="1.0") is False
+    assert gen._valid_https_url(bad_url, name="pkg", version="1.0") is False  # same rule, not a copy
+
+
+@pytest.mark.parametrize("good_url, name, version", [
+    (PYPI + "pkg-1.0-py3-none-any.whl", "pkg", "1.0"),
+    (PYPI + "pkg-1.0-1-py3-none-any.whl", "pkg", "1.0"),                  # valid build tag
+    (PYPI + "pkg-1.0-1a_b.2-py3-none-any.whl", "pkg", "1.0"),
+    (PYPI + "pkg-1.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", "pkg", "1.0"),  # compound tag
+    (PYPI + "pkg-1.0-py2.py3-none-any.whl", "pkg", "1.0"),
+    (PYPI + "Typing.Extensions-4.15.0-py3-none-any.whl", "typing-extensions", "4.15.0"),
+])
+def test_artifact_url_accepts_valid_build_tag_and_compound_tags(good_url, name, version):
+    gen = load_script("generate_cell_locks_411")
+    assert qualified_runtime.valid_artifact_url(good_url, name=name, version=version) is True
+    assert gen._valid_https_url(good_url, name=name, version=version) is True
+
+
+CLIENTS_ARG_CORPUS = [None, "", "codex", " codex", "Codex", "all", "codex,,cursor", "codex,", "claude-code,codex"]
+
+
+def test_bootstrap_and_quickstart_parse_clients_identically():
+    """Codex L5-r3 reserve #3: one ``--clients`` rule (exact split, no strip, no case folding)."""
+    bs = load_script("memory_os_bootstrap")
+    expected = {
+        None: qs.DEFAULT_CLIENTS, "": qs.DEFAULT_CLIENTS, "codex": ("codex",), " codex": (" codex",),
+        "Codex": ("Codex",), "all": ("all",), "codex,,cursor": ("codex", "", "cursor"),
+        "codex,": ("codex", ""), "claude-code,codex": ("claude-code", "codex"),
+    }
+    assert set(expected) == set(CLIENTS_ARG_CORPUS)
+    for value in CLIENTS_ARG_CORPUS:
+        assert bs.parse_clients_arg(value) == qs.parse_clients_arg(value) == expected[value], repr(value)
+        # uninstall keeps its own default (None = every client we installed); same rule otherwise.
+        assert qs.parse_clients_arg(value, None) == (expected[value] if value else None)
+        # A client is selected for client_env_override only when its exact name is in the tuple.
+        found = bs.detect_client_env_overrides({"CODEX_HOME": ""}, value)
+        assert [(o["client"], o["selected"]) for o in found] == [("codex", "codex" in expected[value])]
+
+
+@pytest.mark.parametrize("value", CLIENTS_ARG_CORPUS)
+def test_cli_quickstart_and_uninstall_use_the_shared_clients_rule(monkeypatch, value):
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake_prepare(s, *, clients, **kwargs):
+        seen["quickstart"] = clients
+        raise Stop
+
+    def fake_plan(s, *, clients, **kwargs):
+        seen["uninstall"] = clients
+        raise Stop
+
+    monkeypatch.setattr(qs, "settings_for_install", lambda s, backend=None: (s, backend))
+    monkeypatch.setattr(qs, "prepare", fake_prepare)
+    monkeypatch.setattr(uninstall, "settings_from_service", lambda s, home: s)
+    monkeypatch.setattr(uninstall, "plan", fake_plan)
+    monkeypatch.setattr(cli, "_print_json", lambda payload: None)
+    args = SimpleNamespace(clients=value, undo=None, backend=None, profile=None, replace_existing=None,
+                           apply=False, report=False, remove_existing=None)
+    assert cli.cmd_quickstart(args, SimpleNamespace()) == 1
+    assert cli.cmd_uninstall(args, SimpleNamespace()) == 1
+    assert seen == {"quickstart": qs.parse_clients_arg(value), "uninstall": qs.parse_clients_arg(value, None)}

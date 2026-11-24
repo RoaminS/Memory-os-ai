@@ -495,12 +495,20 @@ def child_environment(environ) -> dict:
     return env
 
 
+def parse_clients_arg(value, default=DEFAULT_CLIENTS):
+    """Copy of ``memory_os_v4.ops.quickstart.parse_clients_arg`` (the bootstrap is stdlib only).
+
+    Absent or empty -> ``default``; otherwise an exact ``split(",")``, nothing stripped or case-folded.
+    """
+    return tuple(value.split(",")) if value else default
+
+
 def detect_client_env_overrides(environ, clients_arg=None) -> list:
-    """Detect relocating client env vars by presence (empty values included), without forwarding them."""
-    if clients_arg:
-        selected = tuple(part.strip() for part in str(clients_arg).split(",") if part.strip())
-    else:
-        selected = DEFAULT_CLIENTS
+    """Detect relocating client env vars by presence (empty values included), without forwarding them.
+
+    A client is ``selected`` only when its exact name is in the parsed ``--clients`` tuple.
+    """
+    selected = parse_clients_arg(clients_arg)
     found = []
     for client_key, variables in CLIENT_OVERRIDE_ENV.items():
         for var in variables:
