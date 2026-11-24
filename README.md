@@ -10,9 +10,13 @@ the same project state on your machine: dated decisions, open tasks and verifiab
 > clients on the same machine; remote/cloud agents are not qualified. Current release: **4.1.1**.
 > Limits and evaluation results: [see below](#limits-and-evaluations).
 >
-> **Source of 4.1.1.** The GitHub repository `romainsantoli-web/Memory-os-ai` is frozen at `v3.2.0`. PyPI serves the
-> wheel and the sdist only; the sdist (`.tar.gz`) is the reference source of 4.1.1. It contains the bootstrap
-> template (`scripts/memory_os_bootstrap.py`), which previews and refuses to apply (`release_pin_unfilled`).
+> **Repository and release assets.** `RoaminS/Memory-os-ai` is the active repository; it replaces the frozen
+> mirror `romainsantoli-web/Memory-os-ai`. The [v4.1.1 Release](https://github.com/RoaminS/Memory-os-ai/releases/tag/v4.1.1)
+> carries the wheel and the sdist (same bytes as PyPI), the bootstrap with its release pin filled, the unsigned P9
+> manifest and `SHA256SUMS`. The bootstrap template in the sdist (`scripts/memory_os_bootstrap.py`) previews and
+> refuses to apply (`release_pin_unfilled`). Qualification runs locally (gates P1–P9); GitHub CI runs lint and a scan for
+> verified secrets only. The CI matrix and the PyPI workflow still described in `docs/DISTRIBUTION.md` and `CONTRIBUTING.md`
+> are obsolete: neither runs any more, and both documents are updated in 4.1.2.
 
 ## Why
 
