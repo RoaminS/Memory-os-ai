@@ -31,7 +31,17 @@ from pathlib import Path
 
 from . import cell, sqlite_runtime
 from . import service as managers
-from .clients import CLIENTS, SERVER, Client, classify, read_entry, relay_command, strict_loads
+from .clients import (
+    CLIENTS,
+    SERVER,
+    Client,
+    ClientPathError,
+    classify,
+    client_notices,
+    read_entry,
+    relay_command,
+    strict_loads,
+)
 
 DEFAULT_CLIENTS = ("claude-code", "codex")
 JOURNAL_ROOT = Path("~/.local/state/memory-os/quickstart")
@@ -380,10 +390,20 @@ def preview(*, home: Path, python: str, env: dict[str, str], clients: tuple[str,
     identity = installation_identity(env)
     plan_clients = []
     for c in selected:
-        path = c.config_path(home)
+        want = desired_entry(c, python, env)
+        try:
+            path = c.config_path(home)
+        except ClientPathError as exc:
+            plan_clients.append({"client": c.key, "name": c.name, "path": None, "file_sha256": None,
+                                 "current_class": "absent", "desired": _mask(want),
+                                 "desired_sha256": _entry_hash(want),
+                                 "installation_identity": identity, "current_identity": None,
+                                 "ownership": "unproven",
+                                 "action": "refuse-" + exc.code.replace("_", "-"),
+                                 "refusal_code": exc.code, "refusal": str(exc), "note": c.note})
+            continue
         _safe_path(path, home)
         state, current = read_entry(c, home)
-        want = desired_entry(c, python, env)
         kind = classify(current)
         current_identity = entry_identity(current)
         proven = bool(current) and bool(proof_of_ownership(journal_root, c.key, current, identity))
@@ -953,7 +973,14 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
     persist()
     for item in plan["clients"]:
         client = next(c for c in CLIENTS if c.key == item["client"])
-        path = client.config_path(home)
+        if item["action"].startswith("refuse") and item.get("path") is None:
+            records.append({"client": client.key, "path": None, "action": item["action"],
+                            "status": item["action"]})
+            continue
+        try:
+            path = client.config_path(home)
+        except ClientPathError as exc:
+            raise QuickstartError(str(exc), code=exc.code) from None
         if str(path) != item["path"]:
             raise QuickstartError("Preview path differs from client registry")
         _safe_path(path, home)
@@ -1356,9 +1383,14 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
             out.append({"client": rec["client"], "undo": "nothing-to-undo"})
             continue
         digest = _record_digest(rec)
+        try:
+            path = client.config_path(home)
+        except ClientPathError as exc:
+            out.append({"client": client.key, "undo": "refused-" + exc.code.replace("_", "-")})
+            continue
         state, current = read_entry(client, home)
         file_gone = (state == "missing-config" and isinstance(rec.get("file_created_sha256"), str)
-                     and not os.path.lexists(client.config_path(home)))  # option (b): the file we created has left
+                     and not os.path.lexists(path))  # option (b): the file we created has left
         if (state == "ok" or file_gone) and current is None and rec.get("revoked"):
             # Already removed by an earlier undo or uninstall (the proof is revoked, the entry is gone):
             # a second run has nothing to do here, so a rollback whose stop failed can be finished later.
@@ -1371,7 +1403,6 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
             # The proof was consumed by an earlier removal: the same entry, back by hand, is not ours to remove.
             out.append({"client": client.key, "undo": "refused-proof-revoked"})
             continue
-        path = client.config_path(home)
         if str(path) != rec["path"]:
             raise QuickstartError("Journal config path differs from registry")
         _safe_path(path, home)
@@ -1549,6 +1580,18 @@ PROFILE_INSTALL = {
     'lexical': ('memory-os-ai[ops,brief]', 'qualified_runtime_constraints_lexical_v1.txt'),
     'semantic': ('memory-os-ai[ops,brief,semantic]', 'qualified_runtime_constraints_v1.txt'),
 }
+
+
+def profile_install(profile: str, *, cell_id: str | None = None) -> tuple[str, str]:
+    """``(requirement, constraints_filename)`` for ``(profile, cell_id)`` (detected cell when None)."""
+    from . import qualified_runtime
+    requirement, fallback = PROFILE_INSTALL[profile]
+    resolved = cell_id if cell_id is not None else cell.detect().get('cell_id')
+    if resolved is not None:
+        entry = qualified_runtime.CELL_LOCKS.get((profile, resolved))
+        if isinstance(entry, tuple) and len(entry) >= 2:
+            return requirement, entry[1].name
+    return requirement, fallback
 
 
 _HOST = _Sentinel("HOST")  # "the manager of this machine": distinct from None, which is "no manager"
@@ -1774,16 +1817,21 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
             sqlite_report, cell_id=detected.get('cell_id'),
             remedy=sqlite_runtime.standalone_plan(detected.get('cell_id'))))
     identity = readiness.build_identity()
-    runtime = qualified_runtime.inspect_current(profile=effective, extras=('ops', 'brief'))
-    # 4.1.1: one of the retained cells, with its embedded lock for this profile; semantic stays on its cell.
+    # 4.1.1: one of the retained cells, with its attested embedded lock for this profile; semantic stays on its cell.
     cell_acceptance = cell.acceptance(detected, profile=effective)
     if not cell_acceptance['ok']:
         block(cell_acceptance['code'], cell_acceptance['message'])
+        runtime = {'ok': False, 'state': cell_acceptance['reason'], 'cell_id': detected.get('cell_id'),
+                   'profile_id': None, 'expected': {}, 'actual': {}, 'mismatches': {},
+                   'attestation': 'cell not accepted; lock not applied'}
+    else:
+        runtime = qualified_runtime.inspect_current(profile=effective, extras=('ops', 'brief'),
+                                                    cell_id=detected['cell_id'])
     if identity.get('identity_source') != 'embedded_descriptor' or not identity.get('commit') or identity.get('source_dirty'):
         block('build_unqualified', 'build_unqualified: install a qualified wheel; source/env identity is insufficient')
-    if not runtime['ok']:
+    if cell_acceptance['ok'] and not runtime['ok']:
         from .. import __version__
-        requirement, constraints = PROFILE_INSTALL[effective]
+        requirement, constraints = profile_install(effective, cell_id=detected.get('cell_id'))
         block('runtime_unqualified', f"runtime_unqualified ({runtime.get('state', 'drift')}): package versions differ: "
               + ', '.join(sorted(runtime['mismatches']))
               + f'; install the exact qualified dependencies of the {effective} profile '
@@ -1794,12 +1842,19 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         block('runtime_unqualified', 'install memory-os-ai[ops,brief] before apply; no implicit dependency install')
     if result['unknown_clients']:
         block('client_unknown', 'unknown clients')
+    path_refusal_codes = ('client_unsupported_on_os', 'client_env_override',
+                          'client_xdg_outside_home', 'client_xdg_invalid')
+    for code in path_refusal_codes:
+        refused = [c for c in result['clients'] if c.get('refusal_code') == code]
+        if refused:
+            block(code, '; '.join(c['refusal'] for c in refused))
     conflicts = [c['client'] for c in result['clients'] if c['action'].startswith('refuse-existing')]
     if conflicts:
         block('client_entry_conflict', 'client_entry_conflict: an existing memory-os-ai entry is not proven to be ours for '
               + ', '.join(conflicts) + '; nothing is overwritten silently (name the client with --replace-existing, '
               'or edit it by hand)')
-    if any(c['action'].startswith('refuse') and not c['action'].startswith('refuse-existing') for c in result['clients']):
+    if any(c['action'].startswith('refuse') and not c['action'].startswith('refuse-existing')
+           and c.get('refusal_code') not in path_refusal_codes for c in result['clients']):
         block('client_config_manual', 'manual client setup required; select only eligible clients')
     client_cli = {}
     if any(c['client'] == 'claude-code' and c['action'] in {'create', 'replace'} for c in result['clients']):
@@ -1807,7 +1862,8 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         if not client_cli['claude']:
             block('client_cli_missing', 'client_cli_missing: the claude CLI is not on PATH; Claude Code is configured '
                   'only through claude mcp add --scope user')
-    if 'claude-desktop' in clients:
+    if any(c['client'] == 'claude-desktop' and c.get('refusal_code') != 'client_unsupported_on_os'
+           for c in result['clients']):
         desktop, _, _ = _job_run(['pgrep', '-x', 'Claude'], run=run, timeout=5)
         if desktop != 1:
             block('client_app_running', 'quit Claude Desktop before apply; live config may be rewritten by the app')
@@ -1854,6 +1910,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         notices.append('Project .mcp.json can override user scope; inspect it before claiming a connection')
     if 'gemini-cli' in clients:
         notices.append('Gemini CLI folder trust is a separate user choice; configuration does not prove a connection')
+    notices += client_notices(clients, home)
     if manager is not None:
         notices += manager.notices(service['label'])
     return {**result, 'ok': not blockers, 'profile': effective, 'identity': identity, 'service': service,

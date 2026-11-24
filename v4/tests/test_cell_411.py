@@ -277,33 +277,72 @@ def test_real_detection_starts_no_process_opens_no_socket_and_writes_nothing(tmp
 
 # ---- locks and acceptance ----
 
-def test_only_the_reference_cell_embeds_locks_today():
-    assert set(qualified_runtime.CELL_LOCKS) == {("semantic", "macos-arm64-py311"), ("lexical", "macos-arm64-py311")}
+def test_all_retained_cells_embed_attested_lexical_locks_and_semantic_stays_reference_only():
+    expected_keys = {("semantic", "macos-arm64-py311")} | {("lexical", cid) for cid in cell.RETAINED_CELLS}
+    assert set(qualified_runtime.CELL_LOCKS) == expected_keys
+    assert set(qualified_runtime.CELL_LOCK_DIGESTS) == expected_keys
+    assert set(qualified_runtime.EXPECTED_PROFILE_IDS) == expected_keys
     for profile in ("semantic", "lexical"):
         lock = qualified_runtime.cell_lock("macos-arm64-py311", profile=profile)
         assert lock["catalog"] == str(qualified_runtime.CATALOGS[profile])
         assert lock["constraints"] == str(qualified_runtime.CONSTRAINTS[profile])
-        assert "macos-arm64-py311" in lock["profile_id"]
-    for cell_id in ("macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311", "ubuntu2404-arm64-py312"):
-        assert qualified_runtime.cell_lock(cell_id, profile="lexical") is None
+        assert lock["profile_id"] == qualified_runtime.EXPECTED_PROFILE_IDS[(profile, "macos-arm64-py311")]
+    for cell_id in ("macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"):
+        lock = qualified_runtime.cell_lock(cell_id, profile="lexical")
+        assert lock is not None and lock["profile_id"] == f"lexical-{cell_id}-v1"
+        assert Path(lock["catalog"]).is_file() and Path(lock["constraints"]).is_file() and Path(lock["manifest"]).is_file()
         assert qualified_runtime.cell_lock(cell_id, profile="semantic") is None
+    assert qualified_runtime.cell_lock("ubuntu2404-arm64-py312", profile="lexical") is None
+    assert qualified_runtime.cell_lock("ubuntu2404-arm64-py312", profile="semantic") is None
 
 
-def test_a_lock_counts_only_if_both_files_exist_and_name_the_cell(tmp_path, monkeypatch):
-    catalog, constraints = tmp_path / "catalog.json", tmp_path / "constraints.txt"
+def test_a_lock_counts_only_if_catalog_constraints_and_manifest_agree_for_the_cell(tmp_path, monkeypatch):
+    import hashlib
+    catalog, constraints, manifest = tmp_path / "catalog.json", tmp_path / "constraints.txt", tmp_path / "manifest.json"
     key = ("lexical", "ubuntu2404-arm64-py311")
-    monkeypatch.setattr(qualified_runtime, "CELL_LOCKS", {**qualified_runtime.CELL_LOCKS, key: (catalog, constraints)})
+
+    def anchor_current():
+        monkeypatch.setattr(
+            qualified_runtime,
+            "CELL_LOCK_DIGESTS",
+            {
+                **qualified_runtime.CELL_LOCK_DIGESTS,
+                key: (
+                    hashlib.sha256(catalog.read_bytes()).hexdigest(),
+                    hashlib.sha256(constraints.read_bytes()).hexdigest(),
+                    hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                ),
+            },
+        )
+
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCKS",
+                        {**qualified_runtime.CELL_LOCKS, key: (catalog, constraints, manifest)})
     assert qualified_runtime.cell_lock(key[1], profile="lexical") is None             # declared, files absent
-    document = {"schema_version": 1, "profile_id": "lexical-ubuntu2404-arm64-py311-v1", "versions": {"a": "1"}}
+    document = {"schema_version": 1, "cell_id": key[1], "profile_id": "lexical-ubuntu2404-arm64-py311-v1",
+                "versions": {"tiktoken": "0.12.0"}}
     catalog.write_text(json.dumps(document))
-    assert qualified_runtime.cell_lock(key[1], profile="lexical") is None             # constraints absent
-    constraints.write_text("a==1\n")
+    assert qualified_runtime.cell_lock(key[1], profile="lexical") is None             # constraints/manifest absent
+    constraints.write_text("tiktoken==0.12.0\n")
+    assert qualified_runtime.cell_lock(key[1], profile="lexical") is None             # manifest absent
+    manifest_doc = {
+        "schema_version": 1, "cell_id": key[1], "profile": "lexical", "profile_id": document["profile_id"],
+        "lock_state": "preliminary", "urls_status": "to_fill_at_step_3",
+        "constraints_sha256": hashlib.sha256(constraints.read_bytes()).hexdigest(),
+        "artifacts": [{"name": "tiktoken", "version": "0.12.0", "url": None, "sha256": ["a" * 64]}],
+    }
+    manifest.write_text(json.dumps(manifest_doc))
+    # Without matching anchored SHA-256 digests, even internally consistent files are refused.
+    assert qualified_runtime.cell_lock(key[1], profile="lexical") is None
+    anchor_current()
     assert qualified_runtime.cell_lock(key[1], profile="lexical")["profile_id"] == document["profile_id"]
     catalog.write_text(json.dumps({**document, "profile_id": "lexical-macos-arm64-py311-v1"}))
+    anchor_current()
     assert qualified_runtime.cell_lock(key[1], profile="lexical") is None             # the lock of another cell
     catalog.write_text(json.dumps({**document, "versions": {}}))
+    anchor_current()
     assert qualified_runtime.cell_lock(key[1], profile="lexical") is None
     catalog.write_text("not json")
+    anchor_current()
     assert qualified_runtime.cell_lock(key[1], profile="lexical") is None
 
 
@@ -315,7 +354,9 @@ def test_the_reference_cell_is_accepted_for_both_profiles(profile):
 
 
 @pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"])
-def test_a_retained_cell_without_embedded_lock_is_refused_without_false_promise(cell_id):
+def test_a_retained_cell_without_embedded_lock_is_refused_without_false_promise(cell_id, monkeypatch):
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCKS",
+                        {k: v for k, v in qualified_runtime.CELL_LOCKS.items() if k != ("lexical", cell_id)})
     verdict = cell.acceptance(RETAINED[cell_id](), profile="lexical")
     assert verdict["ok"] is False and verdict["code"] == "runtime_unqualified"
     assert verdict["reason"] == "cell_lock_missing" and verdict["lock"] is None
@@ -374,6 +415,8 @@ def test_quickstart_accepts_the_reference_cell_and_reports_it(c, monkeypatch, pr
 @pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"])
 def test_quickstart_refuses_a_retained_cell_whose_lock_is_not_embedded(c, monkeypatch, cell_id):
     as_cell(monkeypatch, RETAINED[cell_id]())
+    monkeypatch.setattr(qualified_runtime, "CELL_LOCKS",
+                        {k: v for k, v in qualified_runtime.CELL_LOCKS.items() if k != ("lexical", cell_id)})
     before = tree(c.root)
     plan = prepare(c, profile="lexical")
     assert plan["ok"] is False and plan["blocker_codes"] == ["runtime_unqualified"]
@@ -386,11 +429,11 @@ def test_quickstart_refuses_a_retained_cell_whose_lock_is_not_embedded(c, monkey
 
 @pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313"])
 def test_the_lock_is_the_only_gate_of_a_retained_macos_cell(c, monkeypatch, cell_id):
-    """What L5 will unlock: with a lock, the lexical profile passes and the semantic one is still refused."""
+    """L5 unlocked: with its real embedded lock, the lexical profile passes and the semantic one is still refused."""
     as_cell(monkeypatch, RETAINED[cell_id]())
-    lock_everything(monkeypatch)
     plan = prepare(c, profile="lexical")
     assert plan["ok"] is True, plan["blockers"]
+    assert plan["cell_acceptance"]["lock"]["profile_id"] == f"lexical-{cell_id}-v1"
     plan = prepare(c, profile="semantic")
     assert plan["ok"] is False and plan["blocker_codes"] == ["runtime_unqualified"]
     assert plan["cell_acceptance"]["reason"] == "profile_not_qualified_on_cell"
@@ -439,6 +482,9 @@ def linux_guard(monkeypatch, *, report=None, free=20_000_000_000, locked=True):
     as_cell(monkeypatch, report or linux())
     if locked:
         lock_everything(monkeypatch)
+    else:
+        monkeypatch.setattr(qualified_runtime, "CELL_LOCKS",
+                            {k: v for k, v in qualified_runtime.CELL_LOCKS.items() if k[1] != "ubuntu2404-arm64-py311"})
     seen = SimpleNamespace(statvfs=[])
 
     def free_bytes(path):

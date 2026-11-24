@@ -123,8 +123,21 @@ UV_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "S
                "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 # Environment of every interpreter the bootstrap starts (probes, installed-artifact check and the
 # quickstart preview run from the venv): rebuilt from this list. No MEMORY_V4_*, PYTHON*, XDG data
-# or configuration variable, nor any other variable steering the product, is inherited.
+# or configuration variable (including XDG_CONFIG_HOME), nor any client-relocating variable
+# (CLAUDE_CONFIG_DIR, CODEX_HOME, GEMINI_CLI_HOME, GROK_HOME), is inherited.
+# Declared limit (4.1.1 L5): because XDG_CONFIG_HOME is not forwarded here, the child quickstart
+# preview resolves Linux systemd units and Zed's config under the default ~/.config/; users with a
+# custom XDG_CONFIG_HOME under HOME should run `memory-os-admin quickstart` directly from the
+# durable venv after bootstrap. Relocating client variables are detected by the bootstrap itself
+# and reported consistently with ``client_env_override`` without being forwarded to the child.
 CHILD_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_RUNTIME_DIR")
+DEFAULT_CLIENTS = ("claude-code", "codex")
+CLIENT_OVERRIDE_ENV = {
+    "claude-code": ("CLAUDE_CONFIG_DIR",),
+    "codex": ("CODEX_HOME",),
+    "gemini-cli": ("GEMINI_CLI_HOME",),
+    "grok": ("GROK_HOME",),
+}
 PREVIEW_WRITES = "none detected on the inventoried destinations (preview)"
 PREVIEW_NETWORK = "none opened by the bootstrap; absence of network use not proven here (gate P3, lot L6)"
 PROBE_TIMEOUT, UV_TIMEOUT, QUICKSTART_TIMEOUT = 30, 1800, 300
@@ -480,6 +493,29 @@ def child_environment(environ) -> dict:
     env = {key: environ[key] for key in CHILD_ENV_KEEP if environ.get(key)}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
+
+
+def detect_client_env_overrides(environ, clients_arg=None) -> list:
+    """Detect relocating client env vars by presence (empty values included), without forwarding them."""
+    if clients_arg:
+        selected = tuple(part.strip() for part in str(clients_arg).split(",") if part.strip())
+    else:
+        selected = DEFAULT_CLIENTS
+    found = []
+    for client_key, variables in CLIENT_OVERRIDE_ENV.items():
+        for var in variables:
+            if var in environ:
+                found.append({
+                    "client": client_key,
+                    "variable": var,
+                    "selected": client_key in selected,
+                    "code": "client_env_override",
+                    "message": (
+                        f"{client_key} config location is overridden by {var}; automatic configuration "
+                        f"is refused without guessing a path (unset {var} or configure {client_key} manually)"
+                    ),
+                })
+    return found
 
 
 def path_problem(path, home) -> str | None:
@@ -885,6 +921,13 @@ def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None
                        "that option the venv is created only if uv already manages " + standalone["request"])
         notices.append(f"SQLite {STANDALONE_SQLITE_DECLARED} is DECLARED by the build, not attested: it is read back "
                        "from the venv before anything is installed")
+    client_env_overrides = detect_client_env_overrides(environ, options.clients)
+    for override in client_env_overrides:
+        if override["selected"]:
+            block("client_env_override", override["message"])
+        else:
+            notices.append(f"client_env_override (non-selected client {override['client']}): {override['message']}")
+
     after = _inventory(destinations)
     writes = PREVIEW_WRITES
     if before != after:
@@ -897,6 +940,7 @@ def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None
                                                                            "sha256": _own("sha256"), "path": _own("path")},
         "stage": "preview", "ok": not blockers, "writes": writes, "network": PREVIEW_NETWORK,
         "blockers": blockers, "blocker_codes": codes, "notices": notices,
+        "client_env_overrides": client_env_overrides,
         "system": {"os": host["os"], "arch": host["arch"], "machine": host["machine"],
                    "distribution": host["distribution"], "wsl": host["wsl"]},
         "service_manager": host["service_manager"], "uv": uv, "route": route, "interpreter": interpreter,
@@ -961,6 +1005,13 @@ def apply_plan(plan: dict, options, *, pin=None, run=subprocess.run, environ=Non
                   venv_kept=None, installed=None, quickstart=None)
     if not plan["ok"]:
         report.update(code="preflight_refused", error="preflight refused: " + "; ".join(plan["blockers"]),
+                      writes="none by the bootstrap (refused before any write)",
+                      network="none opened by the bootstrap (refused before any uv command)")
+        return report
+    selected_overrides = [item for item in detect_client_env_overrides(environ, options.clients) if item["selected"]]
+    if selected_overrides:
+        report.update(code="client_env_override",
+                      error="client_env_override: " + "; ".join(item["message"] for item in selected_overrides),
                       writes="none by the bootstrap (refused before any write)",
                       network="none opened by the bootstrap (refused before any uv command)")
         return report

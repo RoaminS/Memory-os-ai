@@ -17,7 +17,14 @@ from packaging.version import InvalidVersion, Version
 from pathlib import Path
 
 from .auth import SecretFileError, http_get, read_token
-from .clients import CLIENTS, classify, read_entry
+from .clients import (
+    CLIENTS,
+    ClientPathError,
+    classify,
+    gemini_system_settings_notice,
+    grok_claude_duplicate_notice,
+    read_entry,
+)
 from .diagnostics import exception_label
 from .settings import OpsSettings
 
@@ -335,7 +342,19 @@ def _clients(home: Path) -> list[Check]:
         "absent": "not connected: add the relay entry (memory-os-admin setup)",
     }
     checks = []
+    active_entries: set[str] = set()
+    gemini_seen = False
     for client in CLIENTS:
+        try:
+            config_path = client.config_path(home)
+        except ClientPathError as exc:
+            detail = (
+                f"{client.name}: not supported on this OS in 4.1.1 (no path guessed)"
+                if exc.code == "client_unsupported_on_os"
+                else f"{client.name}: {exc}"
+            )
+            checks.append(Check(f"client:{client.key}", "WARN", detail))
+            continue
         state, entry = read_entry(client, home)
         if state == "missing-config":
             checks.append(
@@ -344,16 +363,20 @@ def _clients(home: Path) -> list[Check]:
                 )
             )
             continue
+        if client.key == "gemini-cli":
+            gemini_seen = True
         if state == "unreadable":
             checks.append(
                 Check(
                     f"client:{client.key}",
                     "WARN",
                     f"{client.name}: config unreadable",
-                    str(client.config_path(home)),
+                    str(config_path),
                 )
             )
             continue
+        if entry is not None:
+            active_entries.add(client.key)
         kind = classify(entry)
         checks.append(
             Check(
@@ -364,6 +387,12 @@ def _clients(home: Path) -> list[Check]:
                 "" if kind == "relay" else hints[kind],
             )
         )
+    if gemini_seen:
+        warning = gemini_system_settings_notice()
+        if warning:
+            checks.append(Check("client:gemini-cli-system-settings", "WARN", warning))
+    if {"claude-code", "grok"} <= active_entries:
+        checks.append(Check("client:grok-claude-duplicate", "WARN", grok_claude_duplicate_notice()))
     return checks
 
 
@@ -538,27 +567,34 @@ def _capabilities(info: dict) -> list[Check]:
     except (KeyError, TypeError):
         return [Check("capabilities", "FAIL", "malformed deployed capability contract")]
     tokenizer = caps.get("brief", {}).get("tokenizer", {})
-    from .qualified_runtime import compare
+    from .qualified_runtime import REFERENCE_CELL, compare
 
     deployed_runtime = caps.get("runtime")
     if isinstance(deployed_runtime, dict) and isinstance(deployed_runtime.get("actual"), dict):
-        proof = compare(deployed_runtime["actual"], extras=("ops", "brief"), profile=profile)
-        checks.append(
-            Check(
-                "server-runtime",
-                "PASS" if proof["ok"] else "FAIL",
-                f"deployed core/ops/brief runtime versions ({profile} catalog)"
-                if proof["ok"]
-                else f"deployed runtime drift ({profile} catalog): " + ", ".join(sorted(proof["mismatches"])),
+        deployed_cell = deployed_runtime.get("cell_id")
+        if deployed_cell is None and profile == "semantic":
+            deployed_cell = REFERENCE_CELL
+        try:
+            proof = compare(deployed_runtime["actual"], extras=("ops", "brief"), profile=profile, cell_id=deployed_cell)
+        except ValueError as exc:
+            checks.append(Check("server-runtime", "FAIL", f"deployed runtime cell/lock invalid ({profile}): {exc}"))
+        else:
+            checks.append(
+                Check(
+                    "server-runtime",
+                    "PASS" if proof["ok"] else "FAIL",
+                    f"deployed core/ops/brief runtime versions ({profile} catalog)"
+                    if proof["ok"]
+                    else f"deployed runtime drift ({profile} catalog): " + ", ".join(sorted(proof["mismatches"])),
+                )
             )
-        )
     else:
         checks.append(Check("server-runtime", "WARN", "deployed core runtime attestation unavailable"))
     runtime = encoder.get("runtime") if isinstance(encoder, dict) else None
     if lexical:
         checks.append(Check("encoder-runtime", "PASS", "encoder absent by profile (lexical): nothing to attest"))
     elif isinstance(runtime, dict):
-        proof = compare(runtime, encoding_only=True)
+        proof = compare(runtime, encoding_only=True, cell_id=REFERENCE_CELL)
         names = ", ".join(sorted(proof["mismatches"]))
         if proof["ok"]:
             checks.append(Check("encoder-runtime", "PASS", "qualified encoder package versions"))

@@ -253,7 +253,17 @@ def _plist(
 
 def cmd_setup(args, s: OpsSettings) -> int:
     from .auth import create_token
-    from .clients import CLIENTS, snippet
+    from .clients import CLIENTS, is_macos, normalize_platform, snippet
+
+    macos = is_macos()
+    write_launchd = getattr(args, "write_launchd", None)
+    if write_launchd and not macos:
+        print(
+            "refused: --write-launchd is macOS-only (launchd is not available on this OS; "
+            "on Linux use `memory-os-admin quickstart --profile lexical` for systemd --user); nothing written",
+            file=sys.stderr,
+        )
+        return 2
 
     sqlite_jobs = getattr(args, 'sqlite_s4_jobs', False)
     if sqlite_jobs:
@@ -337,9 +347,17 @@ def cmd_setup(args, s: OpsSettings) -> int:
         shlex.quote(f"{k}={env[k]}") for k in ("MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE", "MEMORY_V4_OPS_DIR")
     )
     print("# 1. Connect each AI client through the relay (the relay reads the token file; no secret in configs):")
+    os_kind = normalize_platform()
     for client in CLIENTS:
         note = f" — {client.note}" if client.note else ""
-        print(f"\n## {client.name} (~/{client.path}){note}")
+        if not client.supported_on(os_kind):
+            print(f"\n## {client.name} — not supported on {os_kind} in 4.1.1 (no path guessed; configure manually)")
+            continue
+        if os_kind == "linux" and client.xdg_subpath:
+            shown_path = f"$XDG_CONFIG_HOME/{client.xdg_subpath} (default ~/{client.linux_path})"
+        else:
+            shown_path = f"~/{client.path if macos else client.linux_path}"
+        print(f"\n## {client.name} ({shown_path}){note}")
         print(snippet(client, py, relay_env))
     print("\n# 2. Claude Code hooks (~/.claude/settings.json, merge into 'hooks'):")
     _print_json(
@@ -368,61 +386,65 @@ def cmd_setup(args, s: OpsSettings) -> int:
             ],
         }
     )
-    jobs = {
-        label: _plist(
-            label,
-            [
-                py,
-                "-m",
-                "memory_os_v4.server",
-                "--transport",
-                "http",
-                "--host",
-                host,
-                "--port",
-                str(s.port),
-                "--warm",
-            ],
-            env=env,
-            keepalive=True,
-            log=s.store_dir / "server.log",
-        ),
-        f"{label}.backup": _plist(
-            f"{label}.backup",
-            [py, "-m", "memory_os_v4.ops.cli", "backup"],
-            hour=4,
-            env={**env, "MEMORY_V4_SERVICE_LABEL": label},
-            log=s.ops_dir / "logs/backup.err",
-        ),
-        f"{label}.health": _plist(
-            f"{label}.health",
-            [py, "-m", "memory_os_v4.ops.cli", "health"],
-            hour=8,
-            minute=30,
-            env=env,
-            log=s.ops_dir / "logs/health.err",
-        ),
-    }
-    if getattr(args, "sqlite_s4_jobs", False):
-        jobs[f"{label}.backup"] = _plist(f"{label}.backup",
-            [py, "-m", "memory_os_v4.ops.cli", "backup", "--backend", "sqlite", "--online", "--apply"],
-            hour=4, nice=15, env=env, log=s.ops_dir / "logs/backup.err")
-        jobs[f"{label}.restore-drill"] = _plist(f"{label}.restore-drill",
-            [py, "-m", "memory_os_v4.ops.cli", "restore-drill", "--backend", "sqlite", "--apply", "--reconcile-forgets"],
-            hour=3, minute=30, weekday=1, nice=15, env=env, log=s.ops_dir / "logs/restore-drill.err")
-        print("# SQLite S4 templates only: no activation/migration. Weekly private drill requires current "
-              "authority, qualified build commit and existing offline encoder; no production promotion.")
-    if args.write_launchd:
-        out = Path(args.write_launchd).expanduser()
-        out.mkdir(parents=True, exist_ok=True)
-        for name, xml in jobs.items():
-            (out / f"{name}.plist").write_text(xml)
-        print(
-            f"\n# 3. launchd jobs written to {out} — copy to ~/Library/LaunchAgents, then "
-            f"`launchctl bootstrap gui/$(id -u) <plist>` (after editing a plist: bootout + bootstrap)."
-        )
+    if macos:
+        jobs = {
+            label: _plist(
+                label,
+                [
+                    py,
+                    "-m",
+                    "memory_os_v4.server",
+                    "--transport",
+                    "http",
+                    "--host",
+                    host,
+                    "--port",
+                    str(s.port),
+                    "--warm",
+                ],
+                env=env,
+                keepalive=True,
+                log=s.store_dir / "server.log",
+            ),
+            f"{label}.backup": _plist(
+                f"{label}.backup",
+                [py, "-m", "memory_os_v4.ops.cli", "backup"],
+                hour=4,
+                env={**env, "MEMORY_V4_SERVICE_LABEL": label},
+                log=s.ops_dir / "logs/backup.err",
+            ),
+            f"{label}.health": _plist(
+                f"{label}.health",
+                [py, "-m", "memory_os_v4.ops.cli", "health"],
+                hour=8,
+                minute=30,
+                env=env,
+                log=s.ops_dir / "logs/health.err",
+            ),
+        }
+        if getattr(args, "sqlite_s4_jobs", False):
+            jobs[f"{label}.backup"] = _plist(f"{label}.backup",
+                [py, "-m", "memory_os_v4.ops.cli", "backup", "--backend", "sqlite", "--online", "--apply"],
+                hour=4, nice=15, env=env, log=s.ops_dir / "logs/backup.err")
+            jobs[f"{label}.restore-drill"] = _plist(f"{label}.restore-drill",
+                [py, "-m", "memory_os_v4.ops.cli", "restore-drill", "--backend", "sqlite", "--apply", "--reconcile-forgets"],
+                hour=3, minute=30, weekday=1, nice=15, env=env, log=s.ops_dir / "logs/restore-drill.err")
+            print("# SQLite S4 templates only: no activation/migration. Weekly private drill requires current "
+                  "authority, qualified build commit and existing offline encoder; no production promotion.")
+        if write_launchd:
+            out = Path(write_launchd).expanduser()
+            out.mkdir(parents=True, exist_ok=True)
+            for name, xml in jobs.items():
+                (out / f"{name}.plist").write_text(xml)
+            print(
+                f"\n# 3. launchd jobs written to {out} — copy to ~/Library/LaunchAgents, then "
+                f"`launchctl bootstrap gui/$(id -u) <plist>` (after editing a plist: bootout + bootstrap)."
+            )
+        else:
+            print(f"\n# 3. launchd jobs: rerun with --write-launchd DIR ({', '.join(jobs)})")
     else:
-        print(f"\n# 3. launchd jobs: rerun with --write-launchd DIR ({', '.join(jobs)})")
+        print("\n# 3. service: launchd jobs are macOS-only; on Ubuntu 24.04 arm64 use "
+              "`memory-os-admin quickstart --profile lexical` (systemd --user)")
     print("\n# 4. Then check everything: memory-os-admin doctor")
     return 0
 

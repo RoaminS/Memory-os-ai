@@ -23,7 +23,17 @@ import time
 from pathlib import Path
 
 from . import quickstart as qs
-from .clients import CLIENTS, SERVER, classify, read_entry, strict_loads
+from .clients import (
+    CLIENTS,
+    SERVER,
+    ClientPathError,
+    classify,
+    clients_for_platform,
+    is_macos,
+    read_entry,
+    strict_loads,
+    unsupported_clients_for_platform,
+)
 
 JOURNAL_SUBDIR = ".local/state/memory-os/uninstall"  # below the selected HOME
 URL_FIELDS = ("url", "serverUrl", "httpUrl")
@@ -178,14 +188,14 @@ def service_dependency(entry, settings, *, home, client=None) -> str:
 
 
 def remaining_dependencies(home: Path, port: int, *, removed=()) -> dict:
-    """{client: dependency} for every ``memory-os-ai`` entry of the WHOLE registry that keeps the service."""
+    """{client: dependency} for every ``memory-os-ai`` entry of the OS-supported registry that keeps the service."""
     found = {}
-    for client in CLIENTS:
+    for client in clients_for_platform():
         state, entry = _inspect(client, home)
         entries = [] if client.key in removed or entry is None else [entry]
         if client.fmt == "claude-user" and state == "ok":
             entries += _claude_project_entries(client.config_path(home))  # never "removed" by us: always counted
-        if state in {"unreadable", "unsafe-path", "ambiguous"}:
+        if state in {"unreadable", "unsafe-path", "ambiguous", "env-override"}:
             found[client.key] = "indeterminate"  # an entry may be there: nothing proves the contrary
             continue
         verdicts = {_dependency(item, port, client.key) for item in entries}
@@ -199,11 +209,19 @@ def remaining_dependencies(home: Path, port: int, *, removed=()) -> dict:
 def _inspect(client, home: Path):
     """(state, entry) with ONE path and ambiguity rule for the plan and for the dependency scan.
 
-    ``unsafe-path``: a symbolic link anywhere on the path (dangling parent included) or a special
-    file. ``ambiguous``: a TOML file holding BOTH server tables (``mcp_servers`` and
-    ``mcp.servers``) with our name in one of them: which table the client reads is not ours to guess.
+    ``unsafe-path``: a symbolic link anywhere on the path (dangling parent included), an unsafe
+    ``XDG_CONFIG_HOME``, or a special file. ``env-override``: relocated by an environment variable.
+    ``unsupported-on-os``: client has no established path on this OS. ``ambiguous``: a TOML file
+    holding BOTH server tables (``mcp_servers`` and ``mcp.servers``) with our name in one of them.
     """
-    path = client.config_path(home)
+    try:
+        path = client.config_path(home)
+    except ClientPathError as exc:
+        if exc.code == "client_unsupported_on_os":
+            return "unsupported-on-os", None
+        if exc.code == "client_env_override":
+            return "env-override", None
+        return "unsafe-path", None
     try:
         qs._safe_path(path, home)
     except qs.QuickstartError:
@@ -274,9 +292,18 @@ MANUAL_REMOVAL = (
 )
 
 
+MACOS_ONLY_MANUAL_REMOVAL = frozenset({"auxiliary-launchd-jobs"})
+
+
+def _manual_removal_entries() -> tuple[tuple[str, str], ...]:
+    if is_macos():
+        return MANUAL_REMOVAL
+    return tuple(entry for entry in MANUAL_REMOVAL if entry[0] not in MACOS_ONLY_MANUAL_REMOVAL)
+
+
 def _manual_removal() -> list:
     return [{"kind": kind, "inspected": False, "present": None, "procedure": procedure}
-            for kind, procedure in MANUAL_REMOVAL]
+            for kind, procedure in _manual_removal_entries()]
 
 
 def _identity(settings) -> str:
@@ -362,7 +389,7 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
     selection = None if clients is None else tuple(clients)
     if selection is not None and set(selection) - known:
         raise UninstallError("Unknown clients: " + ", ".join(sorted(set(selection) - known)), code="client_unknown")
-    selected = [client for client in CLIENTS if selection is None or client.key in selection]
+    selected = list(clients_for_platform()) if selection is None else [client for client in CLIENTS if client.key in selection]
     stray = sorted(set(remove_existing) - {client.key for client in selected})
     if stray:
         raise UninstallError("Consent names a client that is not selected: " + ", ".join(stray),
@@ -376,7 +403,23 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
         blocker_codes.append(code)
         blockers.append(message)
     for client in selected:
-        path = client.config_path(home)
+        try:
+            path = client.config_path(home)
+        except ClientPathError as exc:
+            if exc.code == "client_unsupported_on_os":
+                items.append({"client": client.key, "name": client.name, "path": None, "file_sha256": None,
+                              "current_class": "absent", "ownership": None, "dependency": None,
+                              "action": "refuse-client-unsupported-on-os",
+                              "refusal_code": exc.code, "refusal": str(exc)})
+                block(exc.code, str(exc))
+            else:
+                action = "keep-relocated" if exc.code == "client_env_override" else "keep-unsafe-path"
+                items.append({"client": client.key, "name": client.name, "path": None, "file_sha256": None,
+                              "current_class": "absent", "ownership": None, "dependency": "indeterminate",
+                              "action": action, "refusal_code": exc.code, "refusal": str(exc)})
+                if selection is not None:
+                    block(exc.code, str(exc))
+            continue
         state, entry = _inspect(client, home)  # unsafe path or ambiguous file: never written through
         item = {"client": client.key, "name": client.name, "path": str(path),
                 "file_sha256": qs._sha(path) if state != "unsafe-path" else None,
@@ -478,10 +521,12 @@ def _recorded_resources(home: Path) -> dict:
 
 
 def _scope(items, service) -> dict:
+    unsupported = [c.key for c in unsupported_clients_for_platform()]
     return {"clients_inspected": [item["client"] for item in items],
+            **({"unsupported_on_os": unsupported} if unsupported else {}),
             "service_label": service["label"],
             "data": "never removed, restored or opened",
-            "not_inspected": [kind for kind, _ in MANUAL_REMOVAL]}
+            "not_inspected": [kind for kind, _ in _manual_removal_entries()]}
 
 
 def _next_steps(remaining: dict) -> list:
@@ -568,7 +613,12 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
         result["clients"].append(done)
         if item["action"] != "remove":
             continue
-        path = client.config_path(home)
+        try:
+            path = client.config_path(home)
+        except ClientPathError:
+            done["status"] = "conflict-file-changed-since-preview"
+            record()
+            continue
         state, entry = read_entry(client, home)
         if (qs._sha(path) != item["file_sha256"] or state != "ok" or entry is None
                 or qs._entry_hash(entry) != item["entry_sha256"]):
@@ -717,7 +767,8 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
 
 def _kept_status(action: str) -> str:
     return {"keep-unproven": "kept-unproven", "keep-foreign": "kept-foreign", "keep-unreadable": "kept-unreadable",
-            "keep-unsafe-path": "kept-unsafe-path", "keep-ambiguous": "kept-ambiguous", "remove": "planned"}.get(action, action)
+            "keep-unsafe-path": "kept-unsafe-path", "keep-relocated": "kept-relocated",
+            "keep-ambiguous": "kept-ambiguous", "remove": "planned"}.get(action, action)
 
 
 def settings_from_service(settings, home: Path):

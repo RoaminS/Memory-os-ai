@@ -72,8 +72,11 @@ def test_the_profile_is_never_chosen_from_installed_packages(c, monkeypatch):
 
 @pytest.mark.parametrize("profile", ["lexical", "semantic"])
 def test_runtime_is_inspected_with_the_catalog_of_the_requested_profile(c, profile):
-    prepare(c, profile=profile)
-    assert c.seen.runtime_calls == [{"profile": profile, "extras": ("ops", "brief")}]
+    plan = prepare(c, profile=profile)
+    assert plan["cell"]["cell_id"]
+    assert c.seen.runtime_calls == [
+        {"profile": profile, "extras": ("ops", "brief"), "cell_id": plan["cell"]["cell_id"]}
+    ]
 
 
 def test_lexical_drift_names_the_lexical_constraints(c, monkeypatch):
