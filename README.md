@@ -263,7 +263,7 @@ data). Interrupted writes are reported as
   [proof complement](https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.2/memory-os-ai-4.1.2.proof-complement.md) of the v4.1.2 Release
   ([JSON](https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.2/memory-os-ai-4.1.2.proof-complement.json), redacted reports, own
   [`PROOF-COMPLEMENT-SHA256SUMS`](https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.2/PROOF-COMPLEMENT-SHA256SUMS)). Both gates use the MCP SDK as a scripted client:
-  real clients such as Claude Code or Codex are not launched through the registry command by any gate.
+  real clients such as Claude Code or Codex are not launched through the registry command by either of these two gates.
 - Erratum (25 November 2026): this README and the PyPI description of 4.1.2 stated that the P10-a result is recorded
   in the P9 manifest of the GitHub Release; it is not. The PyPI description keeps that former wording (a published
   release cannot be edited, and 4.1.2 is not rebuilt).
