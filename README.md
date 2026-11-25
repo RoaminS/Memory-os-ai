@@ -256,9 +256,17 @@ data). Interrupted writes are reported as
   are not qualified (the release gates run the v4 test suite only) and not supported.
 - Registry command: the release gate P10-a requires the official MCP Python SDK, as client, to launch the registry
   command `uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay memory-os-ai` (the runtime arguments of `server.json` plus the package identifier
-  the consumer appends), confined, offline, against a throwaway service, on macOS arm64 with Python 3.11. Its result
-  is recorded in the P9 manifest of the GitHub Release, not in the package. Real clients such as Claude Code or Codex
-  are not launched through the registry command by any gate.
+  the consumer appends), confined, offline, against a throwaway service, on macOS arm64 with Python 3.11. P10-a
+  passed (30/30 criteria, P2 wheel resolved offline). P10-c, the same check with the wheel downloaded from PyPI,
+  passed (32/32 criteria; the wheel uv downloaded has the qualified SHA-256). These results are **not** in the P9
+  manifest, which records the per-cell gates only: they are in the
+  [proof complement](https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.2/memory-os-ai-4.1.2.proof-complement.md) of the v4.1.2 Release
+  ([JSON](https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.2/memory-os-ai-4.1.2.proof-complement.json), redacted reports, own
+  [`PROOF-COMPLEMENT-SHA256SUMS`](https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.2/PROOF-COMPLEMENT-SHA256SUMS)). Both gates use the MCP SDK as a scripted client:
+  real clients such as Claude Code or Codex are not launched through the registry command by any gate.
+- Erratum (25 November 2026): this README and the PyPI description of 4.1.2 stated that the P10-a result is recorded
+  in the P9 manifest of the GitHub Release; it is not. The PyPI description keeps that former wording (a published
+  release cannot be edited, and 4.1.2 is not rebuilt).
 - Lexical vs semantic profile, measured for 4.1.0 in November 2026 (manifest frozen on 22 November 2026; not
   re-measured for 4.1.1 or 4.1.2), frozen BEAM 100K: this retrospective measurement covers 400 questions
   executed per arm, 355 of them scored, in 20 conversations. Mean Recall@10 is 44.089% for lexical and 45.764% for
@@ -291,7 +299,9 @@ policy, dated append-only history, compare-and-set on tasks and core blocks.
 name `io.github.RoaminS/memory-os-ai`; `server.json` marked ready for the registry, a state that a release may keep only if
 gate P10-a passes (an MCP client launching the registry command
 `uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay memory-os-ai`, confined, against a throwaway service;
-result in the P9 manifest of the Release); Linux classifier declared. Legacy
+P10-a and, after the PyPI upload, P10-c passed; results in the
+[proof complement](https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.2/memory-os-ai-4.1.2.proof-complement.md) of the Release, not in the P9 manifest); Linux
+classifier declared. Legacy
 repository files removed (`requirements_cpu.txt`, `requirements_gpu.txt`, `smithery.yaml`, `Dockerfile`, the PyPI
 workflow); GitHub CI reduced to lint and a scan for verified secrets. Retrieval, SQLite schema, encoder, locks and
 platform cells are unchanged from 4.1.1. The P-A and P-B evaluations were not run for 4.1.2. No measured gain is

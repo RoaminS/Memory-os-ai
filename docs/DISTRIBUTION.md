@@ -28,7 +28,9 @@ artifacts that are published:
   `uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay memory-os-ai` (its runtime arguments plus the
   package identifier the consumer appends, here for 4.1.2), offline, confined, against
   a throwaway service on macOS arm64 with Python 3.11;
-- a P9 manifest that records every gate, its artifacts and their SHA-256 values. It is not signed.
+- a P9 manifest that records the per-cell gates, their artifacts and their SHA-256 values. It is not signed. Gates
+  P10-a and P10-c are not in it: since 4.1.2 they are recorded in a separate proof complement of the Release, with
+  its own checksum file.
 
 ## How a release is published
 
