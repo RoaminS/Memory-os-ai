@@ -24,8 +24,9 @@ artifacts that are published:
 - the v4 test suite and the installation, service, client and uninstall gates of each cell, with throwaway home
   directories: under `sandbox-exec` on macOS (deprecated by Apple; its limits are declared in the release notes), in a
   virtual machine for Ubuntu 24.04 arm64;
-- since 4.1.2, gate P10-a: an MCP client (the official Python SDK) launches the registry command of `server.json`
-  (its runtime arguments plus the package identifier the consumer appends) through `uvx`, offline, confined, against
+- since 4.1.2, gate P10-a: an MCP client (the official Python SDK) launches the registry command of `server.json`,
+  `uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay memory-os-ai` (its runtime arguments plus the
+  package identifier the consumer appends, here for 4.1.2), offline, confined, against
   a throwaway service on macOS arm64 with Python 3.11;
 - a P9 manifest that records every gate, its artifacts and their SHA-256 values. It is not signed.
 

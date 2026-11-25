@@ -289,8 +289,9 @@ policy, dated append-only history, compare-and-set on tasks and core blocks.
 
 **4.1.2**: repository and registry identity; no engine change. Active repository `RoaminS/Memory-os-ai`; MCP registry
 name `io.github.RoaminS/memory-os-ai`; `server.json` marked ready for the registry, a state that a release may keep only if
-gate P10-a passes (an MCP client launching the registry command, confined, against a throwaway service; result in
-the P9 manifest of the Release); Linux classifier declared. Legacy
+gate P10-a passes (an MCP client launching the registry command
+`uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay memory-os-ai`, confined, against a throwaway service;
+result in the P9 manifest of the Release); Linux classifier declared. Legacy
 repository files removed (`requirements_cpu.txt`, `requirements_gpu.txt`, `smithery.yaml`, `Dockerfile`, the PyPI
 workflow); GitHub CI reduced to lint and a scan for verified secrets. Retrieval, SQLite schema, encoder, locks and
 platform cells are unchanged from 4.1.1. The P-A and P-B evaluations were not run for 4.1.2. No measured gain is

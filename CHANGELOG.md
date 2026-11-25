@@ -5,8 +5,9 @@
 - Dépôt actif `RoaminS/Memory-os-ai` (URL `Source`/`Issues`, `repository.url` de `server.json`, bandeau du README) ;
   identité au registre MCP `io.github.RoaminS/memory-os-ai`, casse comprise (`mcp-name`, `server.json`).
 - `server.json` : `publication_ready: true`, condition de publication : la version n'est publiée que si la porte
-  P10-a passe (SDK MCP officiel lançant la commande du registre, hors ligne et confiné, contre un service jetable,
-  macOS arm64 / CPython 3.11 ; résultat dans le manifeste P9 de la Release) ; `public_source_status`
+  P10-a passe (SDK MCP officiel lançant la commande du registre
+  `uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay memory-os-ai`, hors ligne et confiné, contre un
+  service jetable, macOS arm64 / CPython 3.11 ; résultat dans le manifeste P9 de la Release) ; `public_source_status`
   `github-RoaminS-active`.
 - Classifieur `Operating System :: POSIX :: Linux` déclaré (Linux limité à la cellule Ubuntu 24.04 arm64).
 - Dépôt GitHub : `requirements_cpu.txt`, `requirements_gpu.txt`, `smithery.yaml`, `Dockerfile` et le workflow de
@@ -15,8 +16,9 @@
 - Code : seuls changent les littéraux de version et les messages de refus qui nomment la version courante.
   Récupération, schéma SQLite 8, encodeur, cellules, verrous, manifestes et amorce inchangés.
 - Limites : clients réels non qualifiés par la commande du registre ; paquet hérité `memory_os_ai` /
-  `memory-os-ai-v3` embarqué, non qualifié ; P-A et P-B non lancés ; P8 déclarée non applicable sur le principe, preuve de diff et
-  acceptation consignées dans le manifeste P9.
+  `memory-os-ai-v3` embarqué, non qualifié ; P-A et P-B non lancés ; P8 déclarée non applicable sur le principe seulement : la preuve de diff
+  ligne à ligne et son acceptation par le mainteneur restent à établir après le gel de cette entrée ; elles
+  conditionnent la publication et seront consignées dans le manifeste P9.
   Détail : `docs/releases/v4.1.2.md`.
 
 ## 4.1.1 — publiée le 2026-11-24 (PyPI, Release GitHub `v4.1.1`) ; état de cette entrée figé avant la publication
