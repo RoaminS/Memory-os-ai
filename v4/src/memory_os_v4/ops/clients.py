@@ -34,15 +34,15 @@ GEMINI_SYSTEM_SETTINGS = Path("/etc/gemini-cli/settings.json")
 LINUX_UNSUPPORTED_REASONS = {
     "vscode": (
         "VS Code / GitHub Copilot is not supported on Linux in 4.1.2 (official documentation does not "
-        "establish a single user-level mcp.json path; re-evaluated in 4.1.2); no path guessed, nothing written"
+        "establish a single user-level mcp.json path; re-evaluated in 4.1.3); no path guessed, nothing written"
     ),
     "windsurf": (
         "Windsurf is not supported on Linux in 4.1.2 (official documentation cites conflicting user-level "
-        "paths; re-evaluated in 4.1.2); no path guessed, nothing written"
+        "paths; re-evaluated in 4.1.3); no path guessed, nothing written"
     ),
     "claude-desktop": (
         "Claude Desktop is not supported on Linux in 4.1.2 (official Linux version is in beta; "
-        "re-evaluated in 4.1.2); no path guessed, nothing written"
+        "re-evaluated in 4.1.3); no path guessed, nothing written"
     ),
 }
 

@@ -25,7 +25,8 @@ artifacts that are published:
   directories: under `sandbox-exec` on macOS (deprecated by Apple; its limits are declared in the release notes), in a
   virtual machine for Ubuntu 24.04 arm64;
 - since 4.1.2, gate P10-a: an MCP client (the official Python SDK) launches the registry command of `server.json`
-  through `uvx`, offline, confined, against a throwaway service on macOS arm64 with Python 3.11;
+  (its runtime arguments plus the package identifier the consumer appends) through `uvx`, offline, confined, against
+  a throwaway service on macOS arm64 with Python 3.11;
 - a P9 manifest that records every gate, its artifacts and their SHA-256 values. It is not signed.
 
 ## How a release is published
@@ -34,6 +35,12 @@ Publication is manual, by the maintainer, after the gates: the exact qualified w
 then the qualified commit is pushed without force, tagged, and a GitHub Release carries the wheel, the sdist, the
 bootstrap with its release pin filled, the P9 manifest and `SHA256SUMS`. A change of a single byte after a gate
 invalidates its evidence: the candidate is rebuilt and fully requalified.
+
+Since 4.1.2, gate P10-c follows the PyPI publication and comes before any entry in the MCP registry: the P10-a recipe
+is replayed with the wheel resolved from PyPI (fresh cache, dependencies constrained by the cell lock), and the wheel
+`uv` downloaded must have the SHA-256 of the qualified one. Its report is a complement linked to the P9 manifest by
+its digest; the P9 manifest is never rewritten. A P10-c failure blocks the registry entry, not the published
+version.
 
 ## License provenance
 

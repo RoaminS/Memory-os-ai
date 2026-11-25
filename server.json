@@ -51,7 +51,7 @@
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
       "publication_ready": true,
-      "status": "ready-P10a-consumer-qualified-see-4.1.2-release-P9-manifest",
+      "status": "published-only-if-gate-P10a-passes-result-in-4.1.2-release-P9-manifest",
       "launch": {
         "command": "memory-os-relay",
         "requires_existing_shared_service": true,
