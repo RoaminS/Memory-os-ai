@@ -13,6 +13,12 @@ PY = "/opt/venv/bin/python"
 ENV = {"MEMORY_V4_URL": "http://127.0.0.1:8765/mcp/", "MEMORY_V4_TOKEN_FILE": "/x/http.token"}
 
 
+@pytest.fixture(autouse=True)
+def no_socket(monkeypatch):
+    """preview() also reports the service port (8765 by default): never probe a real one from these tests."""
+    monkeypatch.setattr(qs, "_port_state", lambda port, **kw: "free")
+
+
 def tree(root: Path) -> dict:
     return {str(p.relative_to(root)): (p.stat().st_mtime_ns, p.read_bytes() if p.is_file() else b"")
             for p in sorted(root.rglob("*"))}
