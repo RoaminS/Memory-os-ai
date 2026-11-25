@@ -349,7 +349,7 @@ def _clients(home: Path) -> list[Check]:
             config_path = client.config_path(home)
         except ClientPathError as exc:
             detail = (
-                f"{client.name}: not supported on this OS in 4.1.1 (no path guessed)"
+                f"{client.name}: not supported on this OS in 4.1.2 (no path guessed)"
                 if exc.code == "client_unsupported_on_os"
                 else f"{client.name}: {exc}"
             )

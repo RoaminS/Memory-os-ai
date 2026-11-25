@@ -95,8 +95,8 @@ def test_package_metadata_uses_compatible_bounds_and_puts_ml_in_the_semantic_ext
 
 
 @pytest.mark.parametrize("name", ["pyproject.toml", "v4/pyproject.toml"])
-def test_release_identity_is_4_1_1_everywhere(name):
+def test_release_identity_is_4_1_2_everywhere(name):
     """Version identities move together (test_distribution_d1a.py:39 is kept as strict as today)."""
     import memory_os_v4
 
-    assert tomllib.loads((ROOT / name).read_text())["project"]["version"] == memory_os_v4.__version__ == "4.1.1"
+    assert tomllib.loads((ROOT / name).read_text())["project"]["version"] == memory_os_v4.__version__ == "4.1.2"

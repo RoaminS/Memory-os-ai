@@ -1,33 +1,39 @@
 # Distribution qualification
 
-The CI workflow qualifies Python 3.11 and 3.12 on Ubuntu. Newer Python versions
-may satisfy package metadata but are not yet part of the qualified matrix.
+Applies from 4.1.2. Earlier versions of this page described a GitHub CI matrix and a PyPI workflow; neither runs
+any more.
 
-Required checks:
+## What GitHub CI runs
 
-- Blocking Ruff E9/F checks across both engine trees, their tests, benchmark
-  adapters and qualification scripts; full E/F checks for v3 and scripts.
-- Independent v3 and v4 test runs, each with a coverage XML artifact and an
-  80% minimum. Deterministic v4 coverage excludes the separately run slow test.
-- Wheel and sdist build, `twine check`, a fresh environment installation and
-  `pip check`, on both supported Python versions.
-- Real MCP initialize/list-tools exchanges for all three installed console
-  entry points outside the checkout, with no `PYTHONPATH` source override;
-  both v4 aliases also execute `--help` and `--selfcheck`.
-- A separate CPU semantic job downloads the configured default Granite and
-  legacy MiniLM weights, caches them, then runs offline. The default smoke
-  disables lexical channels, checks a paraphrase match and checks persistence
-  after reload. Hash embeddings cannot pass this qualification.
+`.github/workflows/ci.yml` runs two jobs on every push and pull request, with tools and actions pinned:
 
-The default model job uses public weights and no paid APIs. Cold downloads and
-CPU inference have a 25-minute timeout. A missing cache/network failure is a
-qualification failure, not a reason to substitute hash vectors silently.
+- `lint`: `ruff check src tests v4/src v4/tests v4/bench scripts --select E9,F`, then `ruff check src tests scripts`;
+- `secrets-scan`: trufflehog with `--only-verified`. An empty result does not prove that no secret exists; on a push,
+  only the pushed commits are scanned.
 
-CI artifacts are candidates. Release only the exact distributions whose checks
-passed, record their SHA-256 values and run migration/rollback checks required by
-[T06's release process](../README.md#development-and-distribution-qualification).
-No release or upload is performed by ordinary CI. The PyPI workflow independently
-checks the tag matches package metadata and repeats installation qualification.
+GitHub CI runs no test suite, builds nothing and publishes nothing. GitHub-hosted x86_64 runners are not a retained
+platform cell; per-cell CI jobs are planned for 4.1.3.
+
+## How a release is qualified
+
+Qualification runs locally, per retained [platform cell](../README.md#platform-cells), on the exact commit and the exact
+artifacts that are published:
+
+- a sealed build of the wheel and the sdist from a clean Git checkout, `twine check --strict`, and the wheel rebuilt
+  identical from the sdist;
+- the v4 test suite and the installation, service, client and uninstall gates of each cell, with throwaway home
+  directories: under `sandbox-exec` on macOS (deprecated by Apple; its limits are declared in the release notes), in a
+  virtual machine for Ubuntu 24.04 arm64;
+- since 4.1.2, gate P10-a: an MCP client (the official Python SDK) launches the registry command of `server.json`
+  through `uvx`, offline, confined, against a throwaway service on macOS arm64 with Python 3.11;
+- a P9 manifest that records every gate, its artifacts and their SHA-256 values. It is not signed.
+
+## How a release is published
+
+Publication is manual, by the maintainer, after the gates: the exact qualified wheel and sdist are uploaded to PyPI,
+then the qualified commit is pushed without force, tagged, and a GitHub Release carries the wheel, the sdist, the
+bootstrap with its release pin filled, the P9 manifest and `SHA256SUMS`. A change of a single byte after a gate
+invalidates its evidence: the candidate is rebuilt and fully requalified.
 
 ## License provenance
 

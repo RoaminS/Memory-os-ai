@@ -352,7 +352,7 @@ def cmd_setup(args, s: OpsSettings) -> int:
     for client in CLIENTS:
         note = f" — {client.note}" if client.note else ""
         if not client.supported_on(os_kind):
-            print(f"\n## {client.name} — not supported on {os_kind} in 4.1.1 (no path guessed; configure manually)")
+            print(f"\n## {client.name} — not supported on {os_kind} in 4.1.2 (no path guessed; configure manually)")
             continue
         if os_kind == "linux" and client.xdg_subpath:
             shown_path = f"$XDG_CONFIG_HOME/{client.xdg_subpath} (default ~/{client.linux_path})"

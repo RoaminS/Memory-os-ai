@@ -23,8 +23,9 @@ python -m build
 python -m twine check dist/*
 ```
 
-The CI matrix, artifact installation checks and real default-model job are
-described in [distribution qualification](docs/DISTRIBUTION.md). Semantic tests
+GitHub CI runs only the two `ruff` commands above and a scan for verified secrets;
+the test suites, the build and the installation checks run locally, as described in
+[distribution qualification](docs/DISTRIBUTION.md). Semantic tests
 require cached public model weights; deterministic tests use fake/hash embeddings.
 Evaluation claims must follow the [versioned protocol](v4/bench/protocols/v1.md).
 

@@ -1,4 +1,4 @@
-<!-- mcp-name: io.github.romainsantoli-web/memory-os-ai -->
+<!-- mcp-name: io.github.RoaminS/memory-os-ai -->
 
 # Memory OS AI
 
@@ -7,16 +7,15 @@ Connected assistants — Claude Code, Codex, Cursor, VS Code Copilot, Gemini CLI
 the same project state on your machine: dated decisions, open tasks and verifiable history.
 
 > **Status: ALPHA.** Four [platform cells](#platform-cells) are retained; every other platform is refused. Local
-> clients on the same machine; remote/cloud agents are not qualified. Current release: **4.1.1**.
+> clients on the same machine; remote/cloud agents are not qualified. Current release: **4.1.2**.
 > Limits and evaluation results: [see below](#limits-and-evaluations).
 >
 > **Repository and release assets.** `RoaminS/Memory-os-ai` is the active repository; it replaces the frozen
-> mirror `romainsantoli-web/Memory-os-ai`. The [v4.1.1 Release](https://github.com/RoaminS/Memory-os-ai/releases/tag/v4.1.1)
-> carries the wheel and the sdist (same bytes as PyPI), the bootstrap with its release pin filled, the unsigned P9
-> manifest and `SHA256SUMS`. The bootstrap template in the sdist (`scripts/memory_os_bootstrap.py`) previews and
-> refuses to apply (`release_pin_unfilled`). Qualification runs locally (gates P1–P9); GitHub CI runs lint and a scan for
-> verified secrets only. The CI matrix and the PyPI workflow still described in `docs/DISTRIBUTION.md` and `CONTRIBUTING.md`
-> are obsolete: neither runs any more, and both documents are updated in 4.1.2.
+> mirror `romainsantoli-web/Memory-os-ai`. Each [GitHub Release](https://github.com/RoaminS/Memory-os-ai/releases)
+> since v4.1.1 carries the wheel and the sdist (same bytes as PyPI), the bootstrap with its release pin filled, the
+> unsigned P9 manifest and `SHA256SUMS`. The bootstrap template in the sdist (`scripts/memory_os_bootstrap.py`)
+> previews and refuses to apply (`release_pin_unfilled`). Qualification runs locally (gates P1–P9, plus P10 for the
+> registry command since 4.1.2); GitHub CI runs lint and a scan for verified secrets only ([how releases are made](docs/DISTRIBUTION.md)).
 
 ## Why
 
@@ -37,7 +36,7 @@ No account, no telemetry, no cloud service of ours.
 
 ## Platform cells
 
-A cell is a system, an architecture and a Python minor version. 4.1.1 retains these cells:
+A cell is a system, an architecture and a Python minor version. 4.1.2 retains the same cells as 4.1.1:
 
 | Cell | Install profiles |
 |---|---|
@@ -82,8 +81,8 @@ tokenizer table (with `--download-approved`); nothing is fetched from a model hu
 ```bash
 python3.11 -m venv ~/.memory-os/venv
 V=~/.memory-os/venv/bin
-$V/pip install --no-deps "memory-os-ai==4.1.1"
-$V/pip install -c "$($V/memory-os-constraints lexical)" "memory-os-ai[ops,brief]==4.1.1"
+$V/pip install --no-deps "memory-os-ai==4.1.2"
+$V/pip install -c "$($V/memory-os-constraints lexical)" "memory-os-ai[ops,brief]==4.1.2"
 $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex          # preview: writes nothing
 $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --apply --download-approved --demo
 ```
@@ -94,8 +93,8 @@ $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --ap
 ```bash
 python3.11 -m venv ~/.memory-os/venv
 V=~/.memory-os/venv/bin
-$V/pip install --no-deps "memory-os-ai==4.1.1"
-$V/pip install -c "$($V/memory-os-constraints semantic)" "memory-os-ai[ops,brief,semantic]==4.1.1"
+$V/pip install --no-deps "memory-os-ai==4.1.2"
+$V/pip install -c "$($V/memory-os-constraints semantic)" "memory-os-ai[ops,brief,semantic]==4.1.2"
 $V/memory-os-admin quickstart --profile semantic --clients claude-code,codex         # preview: writes nothing
 $V/memory-os-admin quickstart --profile semantic --clients claude-code,codex --apply --download-approved --demo
 ```
@@ -166,7 +165,7 @@ listed for manual removal (a Claude Desktop extension, Claude Code hooks, the Py
 the auxiliary launchd jobs).
 
 Measured on an isolated clean **4.0.6** install on macOS Apple Silicon (12 October 2026): **77 s** SQLite / **80 s**
-JSONL end to end (pip, model, service, demo). These are not 4.1.0 or 4.1.1 measurements, nor a user productivity
+JSONL end to end (pip, model, service, demo). These are not 4.1.x measurements, nor a user productivity
 study.
 
 ### Add another assistant later
@@ -180,10 +179,10 @@ One-click alternatives (they add only the **relay**; the service, token and toke
 they need [`uv`](https://docs.astral.sh/uv/) on the PATH of the app and reinstall the package in uv's own environment,
 under a Python 3.11 that `uv` must already find, whatever the Python of the service environment):
 
-[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp/install?name=memory-os-ai&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLXB5dGhvbiIsIjMuMTEiLCItLW5vLXB5dGhvbi1kb3dubG9hZHMiLCItLWZyb20iLCJtZW1vcnktb3MtYWlbb3BzLGJyaWVmXT09NC4xLjEiLCJtZW1vcnktb3MtcmVsYXkiXX0%3D)
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_memory--os--ai-0098FF)](https://vscode.dev/redirect/mcp/install?name=memory-os-ai&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--python%22%2C%223.11%22%2C%22--no-python-downloads%22%2C%22--from%22%2C%22memory-os-ai%5Bops%2Cbrief%5D%3D%3D4.1.1%22%2C%22memory-os-relay%22%5D%7D)
+[![Add to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/link/mcp/install?name=memory-os-ai&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLXB5dGhvbiIsIjMuMTEiLCItLW5vLXB5dGhvbi1kb3dubG9hZHMiLCItLWZyb20iLCJtZW1vcnktb3MtYWlbb3BzLGJyaWVmXT09NC4xLjIiLCJtZW1vcnktb3MtcmVsYXkiXX0%3D)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_memory--os--ai-0098FF)](https://vscode.dev/redirect/mcp/install?name=memory-os-ai&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--python%22%2C%223.11%22%2C%22--no-python-downloads%22%2C%22--from%22%2C%22memory-os-ai%5Bops%2Cbrief%5D%3D%3D4.1.2%22%2C%22memory-os-relay%22%5D%7D)
 
-VS Code fallback: `code --add-mcp '{"name":"memory-os-ai","command":"uvx","args":["--python","3.11","--no-python-downloads","--from","memory-os-ai[ops,brief]==4.1.1","memory-os-relay"]}'`
+VS Code fallback: `code --add-mcp '{"name":"memory-os-ai","command":"uvx","args":["--python","3.11","--no-python-downloads","--from","memory-os-ai[ops,brief]==4.1.2","memory-os-relay"]}'`
 
 | Client | quickstart | Notes |
 |---|---|---|
@@ -203,11 +202,11 @@ Where each client is configured, per system (`--clients` name in the first colum
 | `grok` | `~/.grok/config.toml` | same |
 | `zed` | `~/.config/zed/settings.json` | same, or `$XDG_CONFIG_HOME/zed/settings.json` |
 | `devin` | `~/.config/devin/mcp_config.json` | same |
-| `vscode` | `~/Library/Application Support/Code/User/mcp.json` | refused in 4.1.1 |
-| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | refused in 4.1.1 |
-| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` | refused in 4.1.1 |
+| `vscode` | `~/Library/Application Support/Code/User/mcp.json` | refused in 4.1.2 |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | refused in 4.1.2 |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` | refused in 4.1.2 |
 
-- **Refused on Linux in 4.1.1**: VS Code, Windsurf and Claude Desktop. The refusal is explicit
+- **Refused on Linux in 4.1.2** (as in 4.1.1): VS Code, Windsurf and Claude Desktop. The refusal is explicit
   (`client_unsupported_on_os`): no path is guessed and nothing is written.
 - **Zed on Linux** follows `XDG_CONFIG_HOME` only when it is an absolute path under your home directory, without `..`
   and without a symbolic link on the way; otherwise the configuration is refused.
@@ -250,11 +249,16 @@ data). Interrupted writes are reported as
   these settings actually guarantee is established on macOS only.
 - Residual race windows: between a check and the action that follows it (for example during
   `systemctl --user daemon-reload`), a short window remains; see the 4.1.1 release notes (`docs/releases/v4.1.1.md`).
-- Linux clients: VS Code, Windsurf and Claude Desktop are refused in 4.1.1.
-- Package metadata: 4.1.1 carries no `Operating System :: POSIX :: Linux` classifier (decision of 24 November 2026;
-  planned for 4.1.2).
+- Linux clients: VS Code, Windsurf and Claude Desktop are refused in 4.1.2, as in 4.1.1.
+- Package metadata: 4.1.2 declares the `Operating System :: POSIX :: Linux` classifier; Linux support stays limited
+  to the Ubuntu 24.04 arm64 cell.
+- Legacy package: the wheel still ships the legacy v3 package `memory_os_ai` and its command `memory-os-ai-v3`. They
+  are not qualified (the release gates run the v4 test suite only) and not supported.
+- Registry command: `uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay` is qualified with the official MCP
+  Python SDK as client (gate P10-a, macOS arm64 with Python 3.11, confined, against a throwaway service), not with
+  real clients such as Claude Code or Codex launched through the registry.
 - Lexical vs semantic profile, measured for 4.1.0 in November 2026 (manifest frozen on 22 November 2026; not
-  re-measured for 4.1.1), frozen BEAM 100K: this retrospective measurement covers 400 questions
+  re-measured for 4.1.1 or 4.1.2), frozen BEAM 100K: this retrospective measurement covers 400 questions
   executed per arm, 355 of them scored, in 20 conversations. Mean Recall@10 is 44.089% for lexical and 45.764% for
   semantic: a lexical − semantic gap of −1.675 percentage points, 95% bootstrap CI by conversation
   [−3.747, +0.404] percentage points. The pre-registered joint parity threshold (lexical ≥ semantic − 2 percentage
@@ -269,7 +273,7 @@ data). Interrupted writes are reported as
   candidate as oracle, query-forget ranking is not independently scored, and authenticity is conditional on the local
   attested sources/runtime. At the 4.0.7 release, RC evidence transfer and installed/copy qualification of these gates were still pending.
 - 4.1.0 qualification scope: macOS Apple Silicon (arm64) with Python 3.11 only; the P-A and P-B evaluations were not
-  re-run for 4.1.0 ([release notes](#release-notes)). Their earlier results are not claimed for 4.1.1 either.
+  re-run for 4.1.0 ([release notes](#release-notes)). Their earlier results are not claimed for 4.1.1 or 4.1.2 either.
 - No productivity gain is claimed: cross-assistant handoff has not been measured on users yet.
 - Local storage does not stop a cloud assistant from receiving the snippets it reads.
 - 4.0.4 / 4.0.5 fresh installs can resolve an incompatible MCP 2.x: use ≥ 4.0.6 (fully pinned dependencies).
@@ -280,6 +284,14 @@ Loopback-only service, bearer token in a 0600 file (never written into client co
 policy, dated append-only history, compare-and-set on tasks and core blocks.
 
 ## Release notes
+
+**4.1.2**: repository and registry identity; no engine change. Active repository `RoaminS/Memory-os-ai`; MCP registry
+name `io.github.RoaminS/memory-os-ai`; `server.json` marked ready for the registry after gate P10-a (an MCP client
+launched through the registry command, confined, against a throwaway service); Linux classifier declared. Legacy
+repository files removed (`requirements_cpu.txt`, `requirements_gpu.txt`, `smithery.yaml`, `Dockerfile`, the PyPI
+workflow); GitHub CI reduced to lint and a scan for verified secrets. Retrieval, SQLite schema, encoder, locks and
+platform cells are unchanged from 4.1.1. The P-A and P-B evaluations were not run for 4.1.2. No measured gain is
+claimed. Declared limits: [above](#limits-and-evaluations) and `docs/releases/v4.1.2.md`.
 
 **4.1.1**: platform scope and installation; retrieval, SQLite schema and encoder are unchanged. Four retained
 platform cells (macOS arm64 with Python 3.11, 3.12 or 3.13; Ubuntu 24.04 arm64 with Python 3.11), every other platform

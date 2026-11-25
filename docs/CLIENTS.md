@@ -1,7 +1,7 @@
 # Connecting your assistants to Memory OS AI
 
-Applies to releases **4.0.6 and later** (current release: **4.1.1**). At its introduction in 4.0.6 (October 2026),
-`quickstart` was covered by synthetic tests; this sentence says nothing about 4.1.1.
+Applies to releases **4.0.6 and later** (current release: **4.1.2**). At its introduction in 4.0.6 (October 2026),
+`quickstart` was covered by synthetic tests; this sentence says nothing about 4.1.x.
 New quickstart installations default to SQLite + tasks; `--backend jsonl` is available.
 An existing service/store is never migrated by quickstart. Relay configurations stay the same for both backends.
 Claude draft integrated after Codex review, 2026-10-11.
@@ -40,7 +40,7 @@ args    = []
 
 ## Recipes
 
-The paths of this table are the macOS ones; the Linux paths of 4.1.1 are in [the next section](#linux-411).
+The paths of this table are the macOS ones; the Linux paths (since 4.1.1) are in [the next section](#linux-411).
 
 | Assistant | File | Key / command | Pitfall |
 |---|---|---|---|
@@ -68,7 +68,7 @@ args = []
 
 ## Linux (4.1.1)
 
-**4.1.1 (in preparation, not published).** These paths apply to the one Linux cell that 4.1.1 retains, Ubuntu 24.04
+**Since 4.1.1, unchanged in 4.1.2.** These paths apply to the one Linux cell that 4.1.x retains, Ubuntu 24.04
 arm64 with Python 3.11 (lexical profile, `systemd --user` service). This section describes where `quickstart` writes;
 it announces no result. The proof state of the cell is written neither here nor in the package.
 
@@ -85,8 +85,8 @@ it announces no result. The proof state of the cell is written neither here nor 
 
 Keys and formats are those of the table above.
 
-- **Not supported on Linux in 4.1.1: VS Code, Windsurf and Claude Desktop.** `quickstart` refuses them with
-  `client_unsupported_on_os`: no path is guessed and nothing is written. They are to be re-evaluated in 4.1.2.
+- **Not supported on Linux in 4.1.1 and 4.1.2: VS Code, Windsurf and Claude Desktop.** `quickstart` refuses them with
+  `client_unsupported_on_os`: no path is guessed and nothing is written. They are to be re-evaluated in 4.1.3.
 - **Relocating variables.** The presence of `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME` or `GROK_HOME` in the
   environment, even with an empty value, refuses the automatic configuration of that client (`client_env_override`),
   on macOS as on Linux: unset the variable or configure the client by hand. The bootstrap detects the same variables

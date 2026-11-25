@@ -1608,19 +1608,20 @@ def test_bootstrap_cell_entry_lists_every_admitted_wheel_of_the_frozen_manifest(
         gen.build_bootstrap_cell_entry("macos-arm64-py313", constraints_path=con, manifest_path=man)
 
 
-def test_classifiers_declare_python_312_313_and_keep_linux_pending_the_decision():
-    """Contract §10 D2: 3.12/3.13 are declared (frozen locks, attested SQLite); Linux waits for Romain."""
+def test_classifiers_declare_python_312_313_and_linux():
+    """Contract §10 D2: 3.12/3.13 are declared (frozen locks, attested SQLite). 4.1.2 lot A: Linux is declared;
+    its support stays the one retained Linux cell (Ubuntu 24.04 arm64), which the README and notes state."""
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     project = tomllib.loads(text)["project"]
     classifiers = project["classifiers"]
     for minor in ("3.11", "3.12", "3.13"):
         assert f"Programming Language :: Python :: {minor}" in classifiers
     assert "Operating System :: MacOS :: MacOS X" in classifiers
-    assert not any("Linux" in item or "POSIX" in item for item in classifiers)
-    assert '    # "Operating System :: POSIX :: Linux",\n' in text     # prepared, commented out
+    assert [item for item in classifiers if "Linux" in item or "POSIX" in item] == ["Operating System :: POSIX :: Linux"]
+    assert "# \"Operating System" not in text     # no commented-out classifier left behind
     import memory_os_ai
     import memory_os_v4
-    assert project["version"] == memory_os_v4.__version__ == memory_os_ai.__version__ == "4.1.1"
+    assert project["version"] == memory_os_v4.__version__ == memory_os_ai.__version__ == "4.1.2"
 
 
 # ===================================================================== 8. Codex E3-gel-r1: wheels bound to the cell

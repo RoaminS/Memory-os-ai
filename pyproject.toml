@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memory-os-ai"
-version = "4.1.1"
+version = "4.1.2"
 description = "Local project memory shared by MCP clients, with dated decisions and work state"
 readme = "README.md"
 license = "LGPL-3.0-or-later"
@@ -19,8 +19,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: MacOS :: MacOS X",
-    # Linux classifier: not announced in 4.1.1 (decision D2, 2026-11-24); planned for 4.1.2.
-    # "Operating System :: POSIX :: Linux",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
@@ -71,14 +70,14 @@ dependencies = [
     "uvicorn>=0.41.0,<1",
 ]
 
-# Source/Issues remain the historical public repository while GitHub is frozen.
+# Source/Issues: the active repository RoaminS/Memory-os-ai (4.1.2).
 # Documentation points to the existing public package description; replace with
 # the versioned documentation site only after its publication is authorized.
 [project.urls]
 Homepage = "https://pypi.org/project/memory-os-ai/"
 Documentation = "https://pypi.org/project/memory-os-ai/#description"
-Source = "https://github.com/romainsantoli-web/Memory-os-ai"
-Issues = "https://github.com/romainsantoli-web/Memory-os-ai/issues"
+Source = "https://github.com/RoaminS/Memory-os-ai"
+Issues = "https://github.com/RoaminS/Memory-os-ai/issues"
 
 [project.optional-dependencies]
 documents = ["pymupdf>=1.24"]
@@ -199,7 +198,7 @@ include = ["memory_os_ai*", "memory_os_v4*"]
 memory_os_v4 = ["resources/*.json", "resources/*.txt"]
 
 [tool.setuptools.data-files]
-"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/CLIENTS.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md", "docs/releases/v4.0.6.md", "docs/releases/v4.0.6.dev0.md", "docs/releases/v4.0.7.md", "docs/releases/v4.0.8.md", "docs/releases/v4.0.9.md", "docs/releases/v4.1.0.md", "docs/releases/v4.1.1.md"]
+"share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/CLIENTS.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md", "docs/releases/v4.0.6.md", "docs/releases/v4.0.6.dev0.md", "docs/releases/v4.0.7.md", "docs/releases/v4.0.8.md", "docs/releases/v4.0.9.md", "docs/releases/v4.1.0.md", "docs/releases/v4.1.1.md", "docs/releases/v4.1.2.md"]
 "share/doc/memory-os-ai/v4" = ["v4/docs/*.md"]
 "share/doc/memory-os-ai/v4/contracts" = ["v4/docs/contracts/*.json"]
 

@@ -1,26 +1,26 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.romainsantoli-web/memory-os-ai",
+  "name": "io.github.RoaminS/memory-os-ai",
   "title": "Memory OS AI",
   "description": "Local project memory through a stdio relay. Requires an installed, authenticated shared v4 service.",
   "websiteUrl": "https://pypi.org/project/memory-os-ai/",
   "repository": {
-    "url": "https://github.com/romainsantoli-web/Memory-os-ai",
+    "url": "https://github.com/RoaminS/Memory-os-ai",
     "source": "github"
   },
-  "version": "4.1.1",
+  "version": "4.1.2",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "memory-os-ai",
-      "version": "4.1.1",
+      "version": "4.1.2",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "named",
           "name": "--from",
-          "value": "memory-os-ai[ops,brief]==4.1.1"
+          "value": "memory-os-ai[ops,brief]==4.1.2"
         },
         {
           "type": "positional",
@@ -50,15 +50,15 @@
   ],
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
-      "publication_ready": false,
-      "status": "draft-requires-D1-onboarding-and-D4-real-consumer-qualification",
+      "publication_ready": true,
+      "status": "ready-P10a-consumer-qualified-see-4.1.2-release-P9-manifest",
       "launch": {
         "command": "memory-os-relay",
         "requires_existing_shared_service": true,
         "consumer_argument_convention": "runtimeArguments before the consumer-appended package identifier; trailing identifier ignored by relay.main",
-        "manual_pinned_command": "uvx --from memory-os-ai[ops,brief]==4.1.1 memory-os-relay"
+        "manual_pinned_command": "uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay"
       },
-      "public_source_status": "historical-repository-GitHub-frozen"
+      "public_source_status": "github-RoaminS-active"
     }
   }
 }
