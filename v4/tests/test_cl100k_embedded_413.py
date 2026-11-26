@@ -60,10 +60,11 @@ def test_the_self_test_refuses_an_implementation_that_counts_differently(monkeyp
 @pytest.mark.parametrize("version, accepted", [
     # PEP 440 ">=0.12.0,<1": post-releases and local versions are admitted (Codex Lot 2 r1 item 6)
     ("0.12.0", True), ("0.12", True), ("0.13.4", True), ("0.99.99", True), ("0.12.0.post1", True),
-    ("0.12.0-1", True), ("0.12.0+local", True),
+    ("0.12.0-1", True), ("0.12.0+local", True), ("0!0.12.0", True), ("0!0.13.1.post2", True),
     # excluded: below, 1 and above, pre-releases and dev releases (including those of 1), malformed
     ("0.11.9", False), ("1.0.0", False), ("1", False), ("2.1", False), ("0.12.0rc1", False), ("0.13.0a1", False),
     ("0.12.0.dev1", False), ("1.0.0.dev1", False), ("1.0.0rc1", False), ("", False), ("x", False),
+    ("1!0.12.0", False), ("2!0.1", False), ("0!0.11.0", False), ("0!1.0", False),   # epochs (Codex Lot 2 r2)
 ])
 def test_the_tiktoken_range_is_enforced(version, accepted):
     assert brief_tokens._supported(version) is accepted

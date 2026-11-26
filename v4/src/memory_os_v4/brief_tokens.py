@@ -39,7 +39,7 @@ class TokenizerUnavailable(RuntimeError):
     pass
 
 
-_PEP440 = re.compile(r"v?(?P<release>\d+(?:\.\d+)*)(?P<pre>[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)?"
+_PEP440 = re.compile(r"v?(?:(?P<epoch>\d+)!)?(?P<release>\d+(?:\.\d+)*)(?P<pre>[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)?"
                      r"(?P<post>(?:-\d+)|(?:[-_.]?(?:post|rev|r)[-_.]?\d*))?(?P<dev>[-_.]?dev[-_.]?\d*)?"
                      r"(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?", re.IGNORECASE)
 
@@ -53,6 +53,8 @@ def _supported(version: str) -> bool:
     match = _PEP440.fullmatch(version.strip())
     if match is None or match.group("pre") or match.group("dev"):
         return False
+    if int(match.group("epoch") or 0) != 0:
+        return False                              # a non-zero epoch sorts after every epoch-0 version: >= 1
     release = [int(piece) for piece in match.group("release").split(".")]
     release += [0] * (3 - len(release))
     return (0, 12, 0) <= tuple(release[:3]) and tuple(release) < (1,)

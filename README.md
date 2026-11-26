@@ -67,15 +67,16 @@ it reports `non testé` ("not tested").
 that writes nothing; `--apply` installs and then prints the `quickstart --apply` command, which you run yourself.
 
 ```bash
-R=https://github.com/RoaminS/Memory-os-ai/releases/latest/download
-curl -fsSLO "$R/memory_os_bootstrap.py" && curl -fsSLO "$R/SHA256SUMS"
-check() { grep ' memory_os_bootstrap.py$' SHA256SUMS | shasum -a 256 -c -; }   # Ubuntu: sha256sum -c -
-check && python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical           # preview
-check && python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical --apply
+get() { R=https://github.com/RoaminS/Memory-os-ai/releases/latest/download
+  curl -fsSLO "$R/memory_os_bootstrap.py" && curl -fsSLO "$R/SHA256SUMS" &&
+  grep ' memory_os_bootstrap.py$' SHA256SUMS | shasum -a 256 -c -; }     # Ubuntu: sha256sum -c -
+get && python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical           # preview
+get && python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical --apply
 ```
 
-Each run of the bootstrap, the preview and `--apply`, starts only if both downloads succeeded and the checksum
-matches. On Ubuntu, `sha256sum -c -` replaces `shasum -a 256 -c -`.
+`get` downloads both files again and checks them before each run: the preview and `--apply` start only if both
+downloads succeeded and the checksum matches, never on files left by an earlier attempt. On Ubuntu,
+`sha256sum -c -` replaces `shasum -a 256 -c -`.
 
 On Ubuntu 24.04, whose system Python carries a SQLite below the minimum, run the script with `python3` and add
 `--cpython 3.11` (and `--acquire-cpython` with `--apply`): the bootstrap needs only the standard library. Use `--profile semantic` for the recommended profile on macOS with Python 3.11.
