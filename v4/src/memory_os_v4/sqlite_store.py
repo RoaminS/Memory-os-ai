@@ -193,6 +193,67 @@ class ProfileFinding:
         return PROFILE_LEXICAL if self.has_marker else PROFILE_SEMANTIC
 
 
+class ReadOnlyStoreError(ValueError):
+    """A read-only open refused without touching the store; ``code`` names the reason."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
+@contextmanager
+def open_readonly(database, *, timeout: float = 5.0):
+    """THE read-only open of a store database by a diagnostic (doctor, health): it never creates a file.
+
+    4.1.3 (note NOTE_4_1_3_WAL_MODE_RO_v1): a ``mode=ro`` open of a WAL database whose -wal/-shm the last
+    writer deleted RECREATES them, and fails on a read-only directory. The same rule as the profile probe
+    and the backup reader therefore applies:
+
+    * complete -wal/-shm pair: the store is in use (or was not closed cleanly): ``mode=ro``, which creates
+      nothing since both side files exist;
+    * incomplete pair: refused (``store_side_files_incomplete``);
+    * no side file: a SHARED lock is taken, without blocking, on the existing ``writer.lock`` (opened
+      ``O_RDONLY | O_NOFOLLOW``, so a read-only directory or volume works; the engine holds it exclusively
+      while it runs). Held for the whole read: no writer can start, so ``mode=ro&immutable=1`` is consistent
+      and creates nothing. Lock not obtained: ``store_busy_retry``; ``writer.lock`` missing, linked or not a
+      regular file: ``writer_lock_missing`` (never created by a reader).
+    """
+    database = Path(database)
+    has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
+    if has_wal != has_shm:
+        raise ReadOnlyStoreError("store_side_files_incomplete", "incomplete -wal/-shm pair; nothing opened")
+    uri = "file:" + quote(str(database))
+    if has_wal or os.name == "nt":
+        # Windows is not a retained cell: keep the 4.1.2 behaviour there (no fcntl).
+        connection = sqlite3.connect(uri + "?mode=ro", uri=True, timeout=timeout)
+        try:
+            yield connection
+        finally:
+            connection.close()
+        return
+    import fcntl
+
+    lock = database.parent / "writer.lock"
+    if lock.is_symlink() or not lock.is_file() or lock.stat().st_nlink != 1:
+        raise ReadOnlyStoreError("writer_lock_missing", "existing regular writer.lock required; never created by a reader")
+    fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting or running; retry") from exc
+        if any(os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm")):
+            # a writer opened and closed between the first look and the lock: the state moved, retry
+            raise ReadOnlyStoreError("store_busy_retry", "side files appeared; retry")
+        connection = sqlite3.connect(uri + "?mode=ro&immutable=1", uri=True, timeout=timeout)
+        try:
+            yield connection
+        finally:
+            connection.close()
+    finally:
+        os.close(fd)
+
+
 def probe_retrieval_profile(data_dir, *, under_lease: bool = False) -> ProfileFinding:
     """Read the retrieval profile of ``data_dir`` without creating or modifying any file.
 

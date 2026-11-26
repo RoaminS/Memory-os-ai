@@ -23,7 +23,8 @@ def _stamp(root):
     # Include directory entries, permissions and symlinks: additions/removals
     # or replacements must invalidate without waiting for the TTL.
     return tuple((str(p.relative_to(root)), file_stamp(p))
-                 for package in ('memory_os_v4',)
+                 for package in ('memory_os_v4', 'memory_os_ai')   # memory_os_ai: a v3 leftover appearing
+                 if (root/package).exists()                          # after a pass must not wait for the TTL
                  for p in (root/package, *sorted((root/package).rglob('*')))
                  if '__pycache__' not in p.parts and p.suffix not in {'.pyc', '.pyo'})
 

@@ -88,10 +88,10 @@ def explicit_chain_end(item_id: str, records: dict[str, dict], *, now: float | N
 
 def _sqlite_records(db: Path, ids: set[str]) -> dict[str, dict]:
     """Current records of ``ids`` and of their successor chains: one read-only snapshot (``mode=ro``)."""
-    import sqlite3
 
-    connection = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
-    try:
+    from ..sqlite_store import open_readonly   # 4.1.3: never creates -wal/-shm, works on a read-only volume
+
+    with open_readonly(db.resolve()) as connection:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("BEGIN")
         query = ("SELECT v.record_json FROM items i JOIN item_versions v "
@@ -112,8 +112,6 @@ def _sqlite_records(db: Path, ids: set[str]) -> dict[str, dict]:
             if not todo:
                 break
         return out
-    finally:
-        connection.close()
 
 
 def explicit_supersessions(store: Path, ids: list[str], *, now: float | None = None) -> tuple[set[str], set[str]]:
