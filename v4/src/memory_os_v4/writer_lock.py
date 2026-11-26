@@ -15,7 +15,15 @@ _owned: set[Path] = set()
 # 4.1.3: writer.lock paths of the stores a diagnostic reader of THIS process has open (sqlite_store.open_readonly),
 # with their count. An engine never starts under such a reader: the reader's held side-file descriptors would
 # otherwise be closed under the engine's SQLite connection, dropping its fcntl locks.
-_active_readers: dict[Path, int] = {}
+# Keys are PHYSICAL identities (st_dev, st_ino) of writer.lock, never path spellings: on a case-insensitive
+# volume ``store`` and ``STORE`` are one file. ``_owned_ids`` holds the identities of the leases of this process.
+_active_readers: dict[tuple[int, int], int] = {}
+_owned_ids: set[tuple[int, int]] = set()
+
+
+def file_identity(fd: int) -> tuple[int, int]:
+    st = os.fstat(fd)
+    return (st.st_dev, st.st_ino)
 # Raw duplicates of the lease descriptors reserved right after acquisition (``WriterLock.reserve``).
 # Plain integers: no Python object owns them, so neither garbage collection nor interpreter
 # shutdown can close them; only ``WriterLock.close`` does. (Inventory only: the kernel keeps a
@@ -37,12 +45,14 @@ class WriterLock:
         with _registry_lock:
             if self.path in _owned:
                 raise self._conflict()
-            if _active_readers.get(self.path):
+            fh = self.path.open("a+b")
+            identity = file_identity(fh.fileno())
+            if _active_readers.get(identity):
+                fh.close()
                 raise WriterConflictError(
                     f"A read-only diagnostic of {self.path.parent} is open in this process; "
                     "close it before starting the engine. Do not delete writer.lock."
                 )
-            fh = self.path.open("a+b")
             try:
                 if os.name == "nt":  # pragma: no cover - Windows
                     import msvcrt
@@ -60,7 +70,9 @@ class WriterLock:
                     raise self._conflict() from exc
                 raise RuntimeError(f"Cannot acquire writer lease for {self.path.parent}: {exc}") from exc
             self._file = fh
+            self._identity = identity
             _owned.add(self.path)
+            _owned_ids.add(identity)
 
     def _conflict(self) -> WriterConflictError:
         return WriterConflictError(
@@ -131,6 +143,7 @@ class WriterLock:
                     fh.close()
                 finally:
                     _owned.discard(self.path)
+                    _owned_ids.discard(self._identity)
                     self._pinned = False
                     if reserved is not None:  # after the explicit unlock above: the lease is released
                         _reserved_fds.discard(reserved)

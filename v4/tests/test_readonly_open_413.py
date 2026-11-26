@@ -39,6 +39,11 @@ def stopped_store(tmp_path):
     return data, item
 
 
+def identity(path):
+    st = os.stat(path)
+    return (st.st_dev, st.st_ino)
+
+
 def listing(directory):
     return sorted((p.name, p.stat().st_size) for p in directory.iterdir())
 
@@ -236,7 +241,7 @@ def test_a_recycled_inode_is_still_detected(external_writer, monkeypatch, no_rea
     real_connect, real_lstat = sqlite3.connect, os.lstat
 
     def same_identity_lstat(path, *args, **kwargs):
-        entry = sqlite_store._held_sides.get(str(db))
+        entry = sqlite_store._held_sides.get(identity(db))
         for fd, suffix in zip(entry[1:] if entry else (), ("-wal", "-shm")):
             if os.fspath(path) == str(db) + suffix:
                 return os.fstat(fd)                             # the OLD identity, as after an inode reuse
@@ -314,11 +319,11 @@ def test_two_readers_interleaved_with_the_writer_shutdown(external_writer, no_re
     first_context = open_readonly(db)
     first = first_context.__enter__()
     with open_readonly(db) as second:
-        assert sqlite_store._held_sides[str(db)][0] == 2
+        assert sqlite_store._held_sides[identity(db)][0] == 2
         writer.send("close-sqlite")                             # the service stops while both readers read
         writer.send("release")
         first_context.__exit__(None, None, None)
-        assert sqlite_store._held_sides[str(db)][0] == 1        # still held for the second reader
+        assert sqlite_store._held_sides[identity(db)][0] == 1        # still held for the second reader
         assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
     assert sqlite_store._held_sides == {}
     del first
@@ -336,9 +341,9 @@ def test_an_offline_reader_on_the_kept_pair_shares_the_held_descriptors(external
     assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
     with open_readonly(db) as second:                           # offline now: lock obtained, pair kept, mode=ro
         assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
-        assert sqlite_store._held_sides[str(db)][0] == 2
+        assert sqlite_store._held_sides[identity(db)][0] == 2
         first_context.__exit__(None, None, None)
-        assert sqlite_store._held_sides[str(db)][0] == 1
+        assert sqlite_store._held_sides[identity(db)][0] == 1
         assert shm_locked_by_someone(db)                        # B still holds its SQLite lock
         assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
     assert sqlite_store._held_sides == {} and not shm_locked_by_someone(db)
@@ -611,7 +616,7 @@ def release_pinned():
     """Test cleanup only (production keeps pinned resources for the life of the process)."""
     for entry in sqlite_store._pinned:
         if entry["holds_side_files"]:
-            sqlite_store._release_side_files(Path(entry["database"]))
+            sqlite_store._release_side_files(entry["side_files_key"])
         sqlite_store._unregister_reader(entry["registered"])
         os.close(entry["writer_lock_fd"])
     sqlite_store._pinned.clear()
@@ -631,9 +636,9 @@ def test_an_unestablished_native_close_keeps_the_protections(kept_pair, monkeypa
     with pytest.raises(sqlite3.OperationalError, match="synthetic close failure"):
         with open_readonly(db) as connection:
             connection.execute("SELECT 1").fetchone()
-    key = (kept_pair / "writer.lock").resolve()
+    key = identity(kept_pair / "writer.lock")
     try:
-        assert writer_lock._active_readers == {key: 1} and sqlite_store._held_sides[str(db)][0] == 1
+        assert writer_lock._active_readers == {key: 1} and sqlite_store._held_sides[identity(db)][0] == 1
         with pytest.raises(WriterConflictError, match="read-only diagnostic"):
             WriterLock(kept_pair)
         assert not writer_lock_free_for_another_process(kept_pair)
@@ -724,3 +729,55 @@ def test_a_linked_database_is_refused_by_the_opener_and_by_health(stopped_store,
     assert health.explicit_supersessions(other, [item], diagnostics=diagnostics) == (set(), set())
     assert diagnostics == ["store_database_linked"]
     assert_reader_fully_released(data / "store.sqlite3")
+
+
+def case_insensitive(directory):
+    """Without writing anything: does the upper-case spelling of writer.lock name the same file?"""
+    upper = directory / "WRITER.LOCK"
+    return upper.exists() and os.path.samefile(upper, directory / "writer.lock")
+
+
+@pytest.mark.parametrize("variant", ["file", "directory"])
+def test_case_variants_of_the_store_share_one_identity(kept_pair, no_reader_deletes, variant):
+    """Codex WAL r7: on a case-insensitive volume two spellings are one file; the held descriptors and the
+    reader registration follow the PHYSICAL identity, so A's exit never drops B's locks."""
+    if not case_insensitive(kept_pair):
+        pytest.skip("case-sensitive volume: two case variants are two files")
+    db = kept_pair / "store.sqlite3"
+    other = (kept_pair / "STORE.SQLITE3") if variant == "file" else (kept_pair.parent / kept_pair.name.upper() / "store.sqlite3")
+    first_context, second_context = open_readonly(db), open_readonly(other)
+    first, second = first_context.__enter__(), second_context.__enter__()
+    try:
+        assert first.execute("SELECT count(*) FROM items").fetchone() == second.execute("SELECT count(*) FROM items").fetchone()
+        assert list(sqlite_store._held_sides) == [identity(db)] and sqlite_store._held_sides[identity(db)][0] == 2
+        assert writer_lock._active_readers == {identity(kept_pair / "writer.lock"): 2}
+        first_context.__exit__(None, None, None)
+        assert shm_locked_by_someone(db)                        # B keeps its SQLite locks (independent probe)
+        assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
+    finally:
+        second_context.__exit__(None, None, None)
+    assert_reader_fully_released(db)
+
+
+@pytest.mark.parametrize("variant", ["file", "directory"])
+def test_case_variants_keep_the_reader_engine_exclusion(kept_pair, variant):
+    if not case_insensitive(kept_pair):
+        pytest.skip("case-sensitive volume: two case variants are two files")
+    db = kept_pair / "store.sqlite3"
+    upper_dir = kept_pair.parent / kept_pair.name.upper()
+    other = (kept_pair / "STORE.SQLITE3") if variant == "file" else (upper_dir / "store.sqlite3")
+    with open_readonly(other) as connection:                    # a reader through one spelling...
+        connection.execute("SELECT count(*) FROM items").fetchone()
+        with pytest.raises(WriterConflictError, match="read-only diagnostic"):
+            WriterLock(upper_dir if variant == "directory" else kept_pair)   # ...excludes the engine
+        assert shm_locked_by_someone(db)
+    assert_reader_fully_released(db)
+    lease = WriterLock(upper_dir)                               # the engine through another spelling...
+    try:
+        with pytest.raises(ReadOnlyStoreError) as caught:
+            with open_readonly(db):                             # ...excludes a reader (live: lock refused)
+                pass
+        assert caught.value.code == "readonly_open_in_writer_process"
+    finally:
+        lease.close()
+    assert writer_lock._owned_ids == set()

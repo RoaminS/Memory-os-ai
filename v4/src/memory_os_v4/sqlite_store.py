@@ -203,17 +203,18 @@ class ReadOnlyStoreError(ValueError):
         self.code = code
 
 
-_held_sides: dict = {}            # database -> [count, wal_fd, shm_fd]: shared by the live readers of this process
+# (st_dev, st_ino) of the database -> [count, wal_fd, shm_fd]: shared by the readers of this process. Keyed by
+# PHYSICAL identity, never by path spelling (a case-insensitive volume has several spellings of one file).
+_held_sides: dict = {}
 _held_lock = RLock()
 
 
-def _hold_side_files(database: Path):
+def _hold_side_files(database: Path, key: tuple):
     """Keep -wal and -shm open read-only so their inodes cannot be reused while a live read is checked.
 
     POSIX caveat: closing ANY descriptor of a file drops every fcntl lock the process holds on it, SQLite's
     included. The descriptors are therefore shared by the live readers of this process and closed only after the
     LAST of their connections is closed (``_release_side_files``). Returns None if a side file vanished."""
-    key = str(database)
     with _held_lock:
         if key in _held_sides:
             _held_sides[key][0] += 1
@@ -221,7 +222,7 @@ def _hold_side_files(database: Path):
         fds = []
         try:
             for suffix in ("-wal", "-shm"):
-                fds.append(os.open(key + suffix, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)))
+                fds.append(os.open(str(database) + suffix, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)))
         except OSError:
             for fd in fds:
                 os.close(fd)
@@ -230,8 +231,7 @@ def _hold_side_files(database: Path):
         return _held_sides[key]
 
 
-def _release_side_files(database: Path) -> None:
-    key = str(database)
+def _release_side_files(key: tuple) -> None:
     with _held_lock:
         entry = _held_sides.get(key)
         if entry is None:
@@ -395,7 +395,7 @@ def open_readonly(database, *, timeout: float = 5.0):
       such connection (closing a descriptor drops every fcntl lock of the process on that file). The yielded
       connection tracks its cursors and closes them before itself, so the native close is effective; if it cannot
       be established, the protections are kept for the life of the process. The store has one identity whatever
-      the spelling of its path (directory resolved). Raw SQLite
+      the spelling of its path (physical identities, st_dev/st_ino). Raw SQLite
       connections opened outside this function are not part of this protocol: the store's other readers
       (backup, migration, profile probe) run under the writer lease or in their own command.
     * DECLARED RESIDUAL WINDOW of the live read: if the service closes SQLite between this reader's look and its
@@ -416,10 +416,8 @@ def open_readonly(database, *, timeout: float = 5.0):
     # refused here, before any resolution, for every caller.
     if database.is_symlink() or not database.is_file() or database.stat().st_nlink != 1:
         raise ReadOnlyStoreError("store_database_linked", "the database must be a regular, unlinked file")
-    # ONE identity per store for the reader registry and the held descriptors, whatever the spelling (relative,
-    # absolute, through a linked directory). The file name itself is not resolved: a linked database is not
-    # followed here (callers refuse it).
-    database = Path(os.path.realpath(database.parent)) / database.name
+    # The reader registry and the held descriptors use PHYSICAL identities (st_dev, st_ino of writer.lock and of
+    # the database), so every spelling of the store (relative, absolute, linked directory, case variant) is one.
     lock = database.parent / "writer.lock"
     if lock.is_symlink() or not lock.is_file() or lock.stat().st_nlink != 1:
         raise ReadOnlyStoreError("writer_lock_missing", "existing regular writer.lock required; never created by a reader")
@@ -432,13 +430,15 @@ def open_readonly(database, *, timeout: float = 5.0):
             raise ReadOnlyStoreError("store_side_files_incomplete", "incomplete -wal/-shm pair; nothing opened")
         if not locked and not has_wal:
             raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting; retry")
-        key = _register_reader(lock)
+        st = os.stat(database)
+        database_key = (st.st_dev, st.st_ino)     # physical identity: one entry whatever the spelling
+        key = _register_reader(fd)
         held = None
         try:
             # Every reader that lets SQLite open the pair (live, or offline with a stale pair) shares the held
             # descriptors: none of them closes them while another one's connection is still open.
             if has_wal:
-                held = _hold_side_files(database)
+                held = _hold_side_files(database, database_key)
                 if held is None:
                     raise ReadOnlyStoreError("store_busy_retry", "the side files vanished before the open; retry")
                 if not _sides_unchanged(database, held):
@@ -474,34 +474,34 @@ def open_readonly(database, *, timeout: float = 5.0):
             # or another one, and no held descriptor is closed under the still-open connection.
             if native_closed:
                 if held is not None:
-                    _release_side_files(database)  # only after the native close (POSIX fcntl caveat)
+                    _release_side_files(database_key)  # only after the native close (POSIX fcntl caveat)
                 _unregister_reader(key)
             else:
-                _pinned.append({"database": str(database), "writer_lock_fd": fd, "registered": key,
+                _pinned.append({"side_files_key": database_key, "writer_lock_fd": fd, "registered": key,
                                 "holds_side_files": held is not None, "connection": connection})
     finally:
         if native_closed:
             os.close(fd)
 
 
-def _register_reader(lock: Path) -> Path:
+def _register_reader(lock_fd: int) -> tuple:
     """Exclusion between diagnostic readers and an engine IN THE SAME PROCESS, for their whole lifetime.
 
     A reader is refused while this process owns the store's writer lease, and ``WriterLock`` refuses to start an
     engine while a reader of that store is registered (``writer_lock._active_readers``), both under the registry
     lock: the held descriptors can never be closed under an engine's SQLite connection."""
-    from .writer_lock import _active_readers, _owned, _registry_lock
+    from .writer_lock import _active_readers, _owned_ids, _registry_lock, file_identity
 
-    key = lock.resolve()
+    key = file_identity(lock_fd)                  # physical identity of writer.lock (case, links, spelling)
     with _registry_lock:
-        if key in _owned:
+        if key in _owned_ids:
             raise ReadOnlyStoreError("readonly_open_in_writer_process",
                                      "this process runs the store's engine: read through it, not around it")
         _active_readers[key] = _active_readers.get(key, 0) + 1
     return key
 
 
-def _unregister_reader(key: Path) -> None:
+def _unregister_reader(key: tuple) -> None:
     from .writer_lock import _active_readers, _registry_lock
 
     with _registry_lock:
