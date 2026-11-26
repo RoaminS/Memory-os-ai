@@ -110,7 +110,6 @@ EPHEMERAL_MARKERS = ("/cache/uv/", "/.cache/uv/", "/Caches/uv/", "pip-build-env"
 NOT_TESTED, UNSIGNED = "non testé", ("unsigned manifest (manifeste non signé): the preview reports what the local "
                                      "file declares, nothing more")
 P9_KIND, P9_MAX_BYTES = "memory-os-ai-p9-manifest", 5_000_000
-CL100K_BYTES = 1_681_126
 OS_RELEASE_PATHS = ("/etc/os-release", "/usr/lib/os-release")
 KERNEL_RELEASE_PATH = "/proc/sys/kernel/osrelease"
 # Files an installer writes or rewrites itself: outside the artifact fingerprint.
@@ -920,10 +919,7 @@ def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None
     acquisitions.append({"object": "uv cache", "source": "written by uv pip install (copies of the wheels above); "
                          "kept, never reused by another run", "version": None, "size": None, "destination": uv_cache,
                          "sha256": None, "when": "--apply (no additional download)"})
-    acquisitions.append({"object": "cl100k_base.tiktoken", "source": "named by the quickstart preview run from the "
-                         "venv; downloaded only by quickstart --apply --download-approved", "version": None,
-                         "size": CL100K_BYTES, "destination": "resource directory named by quickstart",
-                         "sha256": None, "when": "later, quickstart (never the bootstrap)"})
+    # 4.1.3 (D3): the cl100k_base table ships inside the pinned wheel; it is no acquisition any more.
     if profile == "semantic":
         acquisitions.append({"object": "semantic model", "source": "named, with its size, by the quickstart preview "
                              "run from the venv", "version": None, "size": None,

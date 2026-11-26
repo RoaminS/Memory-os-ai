@@ -446,7 +446,8 @@ def test_the_preview_reports_everything_the_contract_lists(m):
         assert item["object"] and item["source"] and item["destination"]
     objects = [item["object"] for item in report["acquisitions"]]
     assert objects[:2] == ["bootstrap (this script)", "uv"] and "wheel " + m.wheel.name in objects
-    assert sum(name.startswith("wheel ") for name in objects) == 3 and "cl100k_base.tiktoken" in objects
+    # 4.1.3 (D3): the tokenizer table ships in the wheel; it is no acquisition any more
+    assert sum(name.startswith("wheel ") for name in objects) == 3 and "cl100k_base.tiktoken" not in objects
     cache = next(item for item in report["acquisitions"] if item["object"] == "uv cache")
     assert cache["destination"] == report["uv_cache"] == os.path.join(report["work_dir"], "uv-cache")
     assert os.path.dirname(report["work_dir"]) == str(m.home / ".memory-os") and not os.path.exists(report["work_dir"])

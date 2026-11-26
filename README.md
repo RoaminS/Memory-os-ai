@@ -67,14 +67,15 @@ it reports `non testé` ("not tested").
 that writes nothing; `--apply` installs and then prints the `quickstart --apply` command, which you run yourself.
 
 ```bash
-curl -fsSLO https://github.com/RoaminS/Memory-os-ai/releases/latest/download/memory_os_bootstrap.py
-curl -fsSLO https://github.com/RoaminS/Memory-os-ai/releases/latest/download/SHA256SUMS
-grep ' memory_os_bootstrap.py$' SHA256SUMS | shasum -a 256 -c - &&
-  python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical           # preview: writes nothing
-python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical --apply
+R=https://github.com/RoaminS/Memory-os-ai/releases/latest/download
+curl -fsSLO "$R/memory_os_bootstrap.py" && curl -fsSLO "$R/SHA256SUMS"
+check() { grep ' memory_os_bootstrap.py$' SHA256SUMS | shasum -a 256 -c -; }   # Ubuntu: sha256sum -c -
+check && python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical           # preview
+check && python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical --apply
 ```
 
-The preview runs only if the checksum matches; on Ubuntu, `sha256sum -c -` replaces `shasum -a 256 -c -`.
+Each run of the bootstrap, the preview and `--apply`, starts only if both downloads succeeded and the checksum
+matches. On Ubuntu, `sha256sum -c -` replaces `shasum -a 256 -c -`.
 
 On Ubuntu 24.04, whose system Python carries a SQLite below the minimum, run the script with `python3` and add
 `--cpython 3.11` (and `--acquire-cpython` with `--apply`): the bootstrap needs only the standard library. Use `--profile semantic` for the recommended profile on macOS with Python 3.11.
@@ -99,8 +100,10 @@ from the installed packages, and an existing installation keeps its profile: the
 **Semantic is the recommended profile**; lexical is offered as the light profile. The retrospective retrieval
 comparison did not establish parity under the pre-registered joint threshold ([numbers and limits](#limits-and-evaluations)).
 
-**Lexical profile (light)** — literal BM25 search, no embedding model, no ML stack, and no download at all: since
-4.1.3 the 1.7 MB tokenizer table ships in the package ([third-party notice](THIRD_PARTY_NOTICES.md)).
+**Lexical profile (light)** — literal BM25 search, no embedding model, no ML stack. With 4.1.2, the version pinned
+below, the only download is the 1.7 MB tokenizer table, fetched with `--download-approved`; nothing comes from a
+model hub. From 4.1.3 the table ships in the package ([third-party notice](THIRD_PARTY_NOTICES.md)): no download at
+all, and the same command still works (the option then authorizes nothing).
 
 ```bash
 python3.11 -m venv ~/.memory-os/venv
@@ -108,11 +111,12 @@ V=~/.memory-os/venv/bin
 $V/pip install --no-deps "memory-os-ai==4.1.2"
 $V/pip install -c "$($V/memory-os-constraints lexical)" "memory-os-ai[ops,brief]==4.1.2"
 $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex          # preview: writes nothing
-$V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --apply --demo
+$V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --apply --download-approved --demo
 ```
 
 **Semantic profile (recommended)** — hybrid BM25 + embedding model; ~1.2 GB for the environment and model:
-`--download-approved` fetches the pinned embedding model (220.2 MB); the tokenizer table ships in the package.
+`--download-approved` fetches the pinned embedding model and, with 4.1.2, the tokenizer table (221.9 MB); from
+4.1.3 the table ships in the package and only the model is fetched (220.2 MB).
 
 ```bash
 python3.11 -m venv ~/.memory-os/venv

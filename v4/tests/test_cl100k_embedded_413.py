@@ -58,9 +58,12 @@ def test_the_self_test_refuses_an_implementation_that_counts_differently(monkeyp
 
 
 @pytest.mark.parametrize("version, accepted", [
-    ("0.12.0", True), ("0.12", True), ("0.13.4", True), ("0.99.99", True),
-    ("0.11.9", False), ("1.0.0", False), ("2.1", False), ("0.12.0rc1", False), ("0.12.0+local", False),
-    ("0.12.0.post1", False), ("", False), ("x", False),
+    # PEP 440 ">=0.12.0,<1": post-releases and local versions are admitted (Codex Lot 2 r1 item 6)
+    ("0.12.0", True), ("0.12", True), ("0.13.4", True), ("0.99.99", True), ("0.12.0.post1", True),
+    ("0.12.0-1", True), ("0.12.0+local", True),
+    # excluded: below, 1 and above, pre-releases and dev releases (including those of 1), malformed
+    ("0.11.9", False), ("1.0.0", False), ("1", False), ("2.1", False), ("0.12.0rc1", False), ("0.13.0a1", False),
+    ("0.12.0.dev1", False), ("1.0.0.dev1", False), ("1.0.0rc1", False), ("", False), ("x", False),
 ])
 def test_the_tiktoken_range_is_enforced(version, accepted):
     assert brief_tokens._supported(version) is accepted
@@ -115,3 +118,52 @@ def test_packaging_ships_the_table_with_its_licence():
     assert "THIRD_PARTY_NOTICES.md" in manifest and "*.tiktoken" in manifest
     notice = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
     assert brief_tokens.TABLE_SHA256 in notice and "MIT License" in notice and "Copyright (c) 2022 OpenAI" in notice
+
+
+def test_an_empty_override_is_refused_never_replaced(monkeypatch):
+    """Codex Lot 2 r1 item 3: a SET but empty variable is an invalid explicit table."""
+    monkeypatch.setenv("MEMORY_V4_CL100K_PATH", "")
+    status = brief_tokens.status()
+    assert status["table_source"] == "explicit" and not status["ready"]
+    with pytest.raises(provision.ProvisionError, match="set but empty"):
+        provision.plan(resources=("cl100k",))
+
+
+def test_a_damaged_embedded_copy_is_reported_not_hidden_by_a_download(tmp_path, monkeypatch):
+    """Codex Lot 2 r1 item 4: the download fallback is for a MISSING copy only."""
+    raw = bytearray(brief_tokens.embedded_table().read_bytes())
+    raw[0] ^= 1
+    damaged = tmp_path / "cl100k_base.tiktoken"
+    damaged.write_bytes(bytes(raw))
+    monkeypatch.setattr(brief_tokens, "embedded_table", lambda: damaged)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    with pytest.raises(provision.ProvisionError, match="reinstall"):
+        provision.plan(resources=("cl100k",))
+    assert not (tmp_path / "config").exists()
+
+
+def test_the_download_fallback_survives_preview_then_apply(tmp_path, monkeypatch):
+    """Codex Lot 2 r1 item 2: apply re-plans with the preview's provenance (no mismatch refusal)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(brief_tokens, "embedded_table", lambda: None)
+    preview = provision.plan(resources=("cl100k",))
+    assert preview["table_source"] == "download" and preview["download_bytes"] > 0
+    with pytest.raises(provision.ProvisionError, match="download-approved"):   # consent, not "changed since preview"
+        provision.apply(preview)
+    # an external copy already present at the destination: ready, applied without download
+    destination = tmp_path / "config/memory-os/cl100k_base.tiktoken"
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes((ROOT / "v4/src/memory_os_v4/resources/cl100k_base.tiktoken").read_bytes())
+    preview = provision.plan(resources=("cl100k",))
+    assert preview["ready"] and preview["files"][0]["present"] and preview["table_source"] == "download"
+    applied = provision.apply(preview)
+    assert applied["downloaded_bytes"] == 0 and applied["modified"] is False
+
+
+def test_an_explicit_table_survives_preview_then_apply(tmp_path, monkeypatch):
+    table = tmp_path / "explicit.tiktoken"
+    table.write_bytes(brief_tokens.embedded_table().read_bytes())
+    monkeypatch.setenv("MEMORY_V4_CL100K_PATH", str(table))
+    preview = provision.plan(resources=("cl100k",))
+    assert preview["table_source"] == "explicit" and preview["ready"]
+    assert provision.apply(preview)["modified"] is False

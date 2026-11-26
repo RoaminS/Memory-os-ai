@@ -16,6 +16,7 @@ import importlib.metadata
 import importlib.resources
 import os
 from pathlib import Path
+import re
 
 TABLE_SHA256 = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
 TABLE_BYTES = 1_681_126
@@ -38,13 +39,23 @@ class TokenizerUnavailable(RuntimeError):
     pass
 
 
+_PEP440 = re.compile(r"v?(?P<release>\d+(?:\.\d+)*)(?P<pre>[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)?"
+                     r"(?P<post>(?:-\d+)|(?:[-_.]?(?:post|rev|r)[-_.]?\d*))?(?P<dev>[-_.]?dev[-_.]?\d*)?"
+                     r"(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?", re.IGNORECASE)
+
+
 def _supported(version: str) -> bool:
-    """``>=0.12.0,<1`` (D4), without depending on ``packaging``; pre-releases and local versions refused."""
-    pieces = version.split(".")
-    if not 1 <= len(pieces) <= 3 or not all(piece.isdigit() for piece in pieces):
+    """PEP 440 ``>=0.12.0,<1`` (D4) without depending on ``packaging``.
+
+    Post-releases and local versions are admitted, as the specifier admits them. Pre-releases and dev releases are
+    excluded, as pip excludes them by default; ``<1`` also excludes every pre-release of 1. The self-test remains the
+    guard against an implementation that counts differently."""
+    match = _PEP440.fullmatch(version.strip())
+    if match is None or match.group("pre") or match.group("dev"):
         return False
-    parts = [int(piece) for piece in pieces] + [0] * (3 - len(pieces))
-    return (0, 12, 0) <= tuple(parts) < (1, 0, 0)
+    release = [int(piece) for piece in match.group("release").split(".")]
+    release += [0] * (3 - len(release))
+    return (0, 12, 0) <= tuple(release[:3]) and tuple(release) < (1,)
 
 
 def embedded_table() -> Path | None:
@@ -57,9 +68,10 @@ def embedded_table() -> Path | None:
 
 
 def table_source() -> tuple[str, str | None]:
-    """("explicit", path) when ``MEMORY_V4_CL100K_PATH`` is set, else ("embedded", path or None)."""
+    """("explicit", value) when ``MEMORY_V4_CL100K_PATH`` is SET (an empty value is an explicit, invalid table:
+    refused, never replaced by the embedded copy), else ("embedded", path or None)."""
     explicit = os.environ.get("MEMORY_V4_CL100K_PATH")
-    if explicit:
+    if explicit is not None:
         return "explicit", explicit
     embedded = embedded_table()
     return "embedded", str(embedded) if embedded else None

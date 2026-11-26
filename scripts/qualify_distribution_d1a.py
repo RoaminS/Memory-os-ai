@@ -212,6 +212,75 @@ print('embedded table ready', status['implementation_version'])
 '''
                 report["steps"][f"tokenizer-embedded-{index}"] = command([str(python), "-B", "-c", tokenizer_smoke],
                     output, isolated, output / f"tokenizer-embedded-{index}.log")
+                # 4.1.3 Lot 2 (D3, Codex Lot 2 r1 item 7): compact brief end to end THROUGH THE INSTALLED RELAY, against
+                # the installed service on a random loopback port, with no table variable, no quickstart, no network
+                # beyond 127.0.0.1.
+                relay_smoke = '''import json, os, pathlib, socket, subprocess, sys, time, urllib.request
+import anyio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+import memory_os_v4
+from memory_os_v4.ops.auth import create_token, read_token
+assert pathlib.Path(memory_os_v4.__file__).is_relative_to(pathlib.Path(sys.prefix)), memory_os_v4.__file__
+assert not any(k.startswith('MEMORY_V4_CL100K') for k in os.environ), 'table env must be absent'
+root = pathlib.Path(os.environ['HOME']) / 'relay-smoke'
+root.mkdir()
+token = root / 'token'
+create_token(token)
+with socket.socket() as sock:
+    sock.bind(('127.0.0.1', 0)); port = sock.getsockname()[1]
+env = {**os.environ, 'MEMORY_V4_DIR': str(root / 'store'), 'MEMORY_V4_EMBED_MODEL': 'hash',
+       'MEMORY_V4_STORE_BACKEND': 'jsonl', 'MEMORY_V4_OPS_DIR': str(root / 'ops'),
+       'MEMORY_V4_RELAY_JOURNAL_DIR': str(root / 'ops/relay'), 'MEMORY_V4_TOKEN_FILE': str(token),
+       'MEMORY_V4_URL': f'http://127.0.0.1:{port}/mcp/', 'MEMORY_V4_QUALIFICATION_METRICS': '0'}
+bindir = pathlib.Path(sys.executable).parent
+log = (root / 'server.log').open('ab')
+service = subprocess.Popen([str(bindir / 'memory-os-v4'), '--transport', 'http', '--port', str(port), '--warm'],
+                           env=env, stdout=log, stderr=log)
+try:
+    deadline = time.monotonic() + 60
+    while True:
+        request = urllib.request.Request(f'http://127.0.0.1:{port}/ready',
+                                         headers={'Authorization': 'Bearer ' + read_token(token)})
+        try:
+            with urllib.request.urlopen(request, timeout=1) as response:
+                if response.status == 200:
+                    break
+        except Exception:
+            pass
+        assert service.poll() is None, (root / 'server.log').read_text()[-2000:]
+        assert time.monotonic() < deadline, 'installed service not ready'
+        time.sleep(0.1)
+
+    async def run():
+        params = StdioServerParameters(command=str(bindir / 'memory-os-relay'), args=[], env=env)
+        async with stdio_client(params) as (r, w), ClientSession(r, w) as session:
+            await session.initialize()
+            added = await session.call_tool('memory_add_facts', {'project': 'relay-smoke', 'facts': [
+                {'text': 'Synthetic current task: prove the installed relay counts tokens.'}]})
+            assert not added.isError, added
+            compact = await session.call_tool('memory_session_brief', {'project': 'relay-smoke', 'budget_tokens': 600})
+            assert not compact.isError, compact
+            wire = json.dumps(compact.model_dump(mode='json', by_alias=True, exclude_none=True),
+                              ensure_ascii=False, separators=(',', ':'))
+            return json.loads(compact.content[0].text), wire
+    data, wire = anyio.run(run)
+    from memory_os_v4.brief_tokens import counter, status
+    assert data.get('mode') == 'compact', data
+    tokens = counter()(wire)
+    assert len(wire.encode()) <= 6000 and tokens <= 600, (len(wire.encode()), tokens)
+    print(json.dumps({'relay_compact': True, 'bytes': len(wire.encode()), 'tokens': tokens,
+                      'table_source': status()['table_source']}))
+finally:
+    service.terminate()
+    try:
+        service.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        service.kill()
+        service.wait(timeout=5)
+'''
+                report["steps"][f"relay-compact-{index}"] = command([str(python), "-B", "-c", relay_smoke],
+                    output, isolated, output / f"relay-compact-{index}.log", guard)
                 report["steps"][f"provision-preview-{index}"] = command([str(private / "bin/memory-os-admin"), "provision"],
                     output, isolated, output / f"provision-preview-{index}.log")
                 # Installed quickstart preview: isolated HOME/port/label, absent resources,

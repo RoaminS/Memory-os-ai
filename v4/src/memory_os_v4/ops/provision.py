@@ -90,15 +90,21 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
     # 4.1.3 (D3): the attested table ships in the package. Without an explicit table (argument or
     # MEMORY_V4_CL100K_PATH), the embedded copy is used as is: nothing to download, no env key to write. A damaged
     # installation without it falls back to the explicit, consented download of 4.1.2.
-    explicit_table = table_path or os.environ.get("MEMORY_V4_CL100K_PATH")
+    # An explicit table is an argument or a SET variable, even empty: an empty value is refused, never replaced.
+    explicit_table = table_path if table_path is not None else os.environ.get("MEMORY_V4_CL100K_PATH")
+    if explicit_table is not None and not str(explicit_table).strip():
+        raise ProvisionError("MEMORY_V4_CL100K_PATH is set but empty: unset it or name the attested table")
     embedded = None
-    if "cl100k" in chosen and not explicit_table:
+    if "cl100k" in chosen and explicit_table is None:
         from ..brief_tokens import embedded_table
-        candidate = embedded_table()
-        embedded = candidate if candidate is not None and matches(candidate, record["cl100k"]) else None
-    table = embedded or Path(explicit_table or
+        embedded = embedded_table()
+        if embedded is not None and not matches(embedded, record["cl100k"]):
+            # A damaged installation is reported as such; the download fallback is only for a missing copy.
+            raise ProvisionError("The embedded cl100k table differs from the attested one: reinstall memory-os-ai; "
+                                 "nothing downloaded, never replaced")
+    table = embedded or Path(explicit_table if explicit_table is not None else
                              Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memory-os/cl100k_base.tiktoken").expanduser().absolute()
-    table_source = "embedded" if embedded else ("explicit" if explicit_table else "download")
+    table_source = "embedded" if embedded else ("explicit" if explicit_table is not None else "download")
     model = cache / ("models--" + record["model_id"].replace("/", "--"))
     snapshot = model / "snapshots" / record["revision"]
     files = []
@@ -125,7 +131,7 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
     if sum(item["bytes"] for item in files) > CAP:
         raise ProvisionError("Resource manifest exceeds 300 MB cap")
     ready = not missing and ("granite" not in chosen or ref_present)
-    return {"schema_version": 1, "ok": True, "mode": "preview", "ready": ready,
+    return {"schema_version": 1, "ok": True, "mode": "preview", "ready": ready, "table_source": table_source,
             "resources": list(chosen), "revision": record["revision"], "model_id": record["model_id"],
             "catalog_sha256": sha256(CATALOG), "cache_dir": str(cache),
             "table_path": None if embedded else str(table),
@@ -270,9 +276,15 @@ def _install(partial: Path, target: Path):
     _sync_parent(target)
 
 
+def _table_argument(preview: dict):
+    """The table argument that reproduces ``preview``: only an EXPLICIT table is passed again; the embedded copy and
+    the download destination are derived again by ``plan`` (same provenance, same destination)."""
+    return preview["table_path"] if preview.get("table_source") == "explicit" else None
+
+
 def apply(preview: dict, *, download_approved: bool = False) -> dict:
     """Revalidate, then provision sequentially. No service, token or client changes."""
-    expected = plan(resources=preview["resources"], cache_dir=preview["cache_dir"], table_path=preview["table_path"])
+    expected = plan(resources=preview["resources"], cache_dir=preview["cache_dir"], table_path=_table_argument(preview))
     if preview != expected:
         raise ProvisionError("Resources changed since preview; create a new preview")
     if expected["ready"]:
@@ -349,7 +361,7 @@ def apply(preview: dict, *, download_approved: bool = False) -> dict:
                         out.flush()
                         os.fsync(out.fileno())
                     _install(ready_ref, ref)
-            final = plan(resources=expected["resources"], cache_dir=cache, table_path=expected["table_path"])
+            final = plan(resources=expected["resources"], cache_dir=cache, table_path=_table_argument(expected))
             if not final["ready"]:
                 raise ProvisionError("Provisioned resources failed final inventory")
             report = {**final, "ok": True, "mode": "apply", "modified": True, "staging_dir": str(stage)}
