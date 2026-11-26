@@ -132,7 +132,9 @@ def main():
                         path = Path(name)
                         if path.is_absolute() or ".." in path.parts:
                             raise RuntimeError("Unsafe wheel member")
-                        if name.startswith(("memory_os_ai/", "memory_os_v4/")) and not name.endswith("/"):
+                        if name.startswith("memory_os_ai/"):
+                            raise RuntimeError("Legacy v3 package shipped in the wheel (removed in 4.1.3)")
+                        if name.startswith("memory_os_v4/") and not name.endswith("/"):
                             target = installed / name
                             target.parent.mkdir(parents=True, exist_ok=True)
                             target.write_bytes(archive.read(name))
@@ -155,10 +157,12 @@ def main():
                 python = private / "bin/python"
                 report["steps"][f"install-{index}"] = command([str(python), "-B", "-m", "pip", "--isolated", "install",
                     "--no-index", "--no-deps", "--force-reinstall", str(wheel)], output, isolated, output / f"install-{index}.log", guard)
-                for executable in ("memory-os-ai", "memory-os-v4", "memory-os-ai-v3", "memory-os-relay", "memory-os-admin",
+                for executable in ("memory-os-ai", "memory-os-v4", "memory-os-relay", "memory-os-admin",
                                    "memory-os-constraints"):
                     if not (private / "bin" / executable).is_file():
                         raise RuntimeError("Installed console command missing: " + executable)
+                if (private / "bin" / "memory-os-ai-v3").exists():
+                    raise RuntimeError("Legacy memory-os-ai-v3 command installed (removed in 4.1.3)")
                 # Relay main is a blocking stdio client: verify entrypoint import without calling it.
                 smoke = '''import importlib.metadata, json, pathlib, sys
 from memory_os_v4.readiness import build_identity

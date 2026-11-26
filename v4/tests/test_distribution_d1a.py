@@ -88,7 +88,8 @@ def test_sdist_git_free_identity_matches_payload_and_source_commit(sealed, tmp_p
         builder.seal(exported, VERSION)
 
 
-@pytest.mark.parametrize("damage", ["missing", "changed", "extra", "version", "descriptor", "root", "symlink", "directory-symlink"])
+@pytest.mark.parametrize("damage", ["missing", "changed", "extra", "version", "descriptor", "root", "symlink", "directory-symlink",
+                                    "legacy-v3-beside"])
 def test_installed_descriptor_fails_closed(sealed, tmp_path, damage):
     root = tmp_path / "installed"
     install(sealed, root)
@@ -109,6 +110,9 @@ def test_installed_descriptor_fails_closed(sealed, tmp_path, damage):
         record = json.loads(path.read_text())
         record["payload_sha256"] = "b" * 64
         path.write_text(json.dumps(record))
+    elif damage == "legacy-v3-beside":
+        (root / "memory_os_ai").mkdir()         # 4.1.3: a stale v3 package next to the payload is refused
+        (root / "memory_os_ai/__init__.py").write_text("")
     elif damage == "symlink":
         other = tmp_path / "external"
         module.rename(other)
@@ -162,6 +166,36 @@ include = ["memory_os_v4*"]
     with zipfile.ZipFile(next((source / "dist").glob("*.whl"))) as archive:
         rebuilt = json.loads(archive.read("memory_os_v4/" + NAME))
     assert rebuilt == direct
+
+
+def test_stale_build_directory_content_is_refused(sealed, tmp_path):
+    """4.1.3: a stale build/lib/memory_os_ai/ (from a 4.1.2 build) is outside the inventory yet would be packed
+    by setuptools: the attested build_py refuses any build-directory content outside the shipped payload."""
+    for name in ("setup.py", "memory_os_build.py"):
+        shutil.copyfile(ROOT / name, sealed / name)
+    (sealed / "pyproject.toml").write_text(f'''[project]
+name = "memory-os-ai"
+version = "{VERSION}"
+[tool.setuptools.packages.find]
+where = ["v4/src"]
+include = ["memory_os_v4*"]
+''')
+    (sealed / "MANIFEST.in").write_text("include setup.py memory_os_build.py LICENSE LICENSE.GPL-3.0\n")
+    subprocess.run(["git", "-C", str(sealed), "add", "."], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(sealed), "-c", "user.name=Synthetic", "-c", "user.email=test@invalid",
+                    "commit", "-qm", "tiny build inputs"], check=True, capture_output=True)
+    command = [sys.executable, "-B", "setup.py", "-q", "bdist_wheel"]
+    clean = subprocess.run(command, cwd=sealed, capture_output=True, text=True, timeout=30)
+    assert clean.returncode == 0, clean.stderr
+    with zipfile.ZipFile(next((sealed / "dist").glob("*.whl"))) as archive:
+        assert not any(n.startswith("memory_os_ai/") for n in archive.namelist())
+    shutil.rmtree(sealed / "dist")
+    stale = sealed / "build/lib/memory_os_ai"
+    stale.mkdir(parents=True)
+    (stale / "__init__.py").write_text('__version__ = "4.1.2"\n')
+    dirty = subprocess.run(command, cwd=sealed, capture_output=True, text=True, timeout=30)
+    assert dirty.returncode != 0 and "outside the shipped payload" in dirty.stderr, dirty.stderr[-600:]
+    assert not list((sealed / "dist").glob("*.whl")) if (sealed / "dist").exists() else True
 
 
 def test_pep517_clean_export_and_git_free_sdist_rebuild(sealed, tmp_path):

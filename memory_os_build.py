@@ -22,6 +22,7 @@ from setuptools.command.sdist import sdist
 SEED = "_memory_os_build_source.json"
 DESCRIPTOR = "_build_identity.json"
 PACKAGES = ("memory_os_v4",)  # 4.1.3: the legacy v3 package is no longer shipped
+MODULES = ("memory_os_constraints.py",)  # top-level py-modules of the wheel
 INPUTS = ("pyproject.toml", "setup.py", "memory_os_build.py", "MANIFEST.in", "README.md",
           "LICENSE", "LICENSE.GPL-3.0")
 
@@ -129,6 +130,12 @@ def seal(root: Path, version: str) -> dict:
 
 
 def descriptor(build_root: Path, record: dict) -> dict:
+    # 4.1.3: the build directory may hold ONLY the shipped payload. A stale tree from an older build
+    # (e.g. build/lib/memory_os_ai/ of 4.1.2) would otherwise be outside the inventory yet packed by
+    # setuptools into the wheel.
+    stray = sorted(p.name for p in build_root.iterdir() if p.name not in {*PACKAGES, *MODULES})
+    if stray:
+        raise RuntimeError(f"Build directory holds content outside the shipped payload (stale build?): {stray}")
     files = inventory(build_root)
     expected = {name.removeprefix("v4/src/"): value
                 for name, value in record["source_files"].items()

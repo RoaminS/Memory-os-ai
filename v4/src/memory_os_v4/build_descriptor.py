@@ -4,6 +4,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 import hashlib
+import os
 import json
 from pathlib import Path
 import re
@@ -59,6 +60,10 @@ def _verify(root: Path, version: str) -> dict:
         canonical = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
         if hashlib.sha256(canonical).hexdigest() != record.get("payload_sha256"):
             raise ValueError("invalid payload root")
+        if os.path.lexists(root / "memory_os_ai"):
+            # 4.1.3: the legacy v3 package is no longer shipped; one found beside memory_os_v4 is stale
+            # or foreign code importable by the same interpreter.
+            raise ValueError("legacy v3 package beside the installed payload")
         actual = {}
         for package in ("memory_os_v4",):  # 4.1.3: no legacy v3 package
             directory = root / package
