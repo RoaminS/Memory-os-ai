@@ -65,6 +65,13 @@ ALL_LOCK_RESOURCE_NAMES = (
         "qualified_runtime_constraints_lexical_ubuntu2404-arm64-py311_v1.txt",
         "qualified_runtime_manifest_lexical_ubuntu2404-arm64-py311_v1.json",
     ),
+    (
+        "lexical",
+        "ubuntu2404-x86_64-py311",
+        "qualified_runtime_lexical_ubuntu2404-x86_64-py311_v1.json",
+        "qualified_runtime_constraints_lexical_ubuntu2404-x86_64-py311_v1.txt",
+        "qualified_runtime_manifest_lexical_ubuntu2404-x86_64-py311_v1.json",
+    ),
 )
 
 RETAINED_CELLS = (
@@ -72,6 +79,7 @@ RETAINED_CELLS = (
     "macos-arm64-py312",
     "macos-arm64-py313",
     "ubuntu2404-arm64-py311",
+    "ubuntu2404-x86_64-py311",
 )
 # Frozen input filenames per cell, inside ``--input-dir``: (requirements with hashes, PEP 751 lock).
 FROZEN_INPUT_FILES = {cell_id: (f"{cell_id}.txt", f"pylock.{cell_id}.toml") for cell_id in RETAINED_CELLS}
@@ -81,9 +89,13 @@ CELL_RESOLUTION = {
     "macos-arm64-py312": ("3.12", "aarch64-apple-darwin"),
     "macos-arm64-py313": ("3.13", "aarch64-apple-darwin"),
     "ubuntu2404-arm64-py311": ("3.11", "aarch64-manylinux_2_28"),
+    "ubuntu2404-x86_64-py311": ("3.11", "x86_64-manylinux_2_28"),
 }
 RESOLVER = "uv 0.13.9"
 DEFAULT_RESOLVED_AT = "2026-11-24"
+# Resolution date of a cell resolved later with the same frozen recipe (same uv, same --exclude-newer): the
+# x86_64 lock comes from GitHub Actions run 45879240439 (2026-11-26). Used when no --resolved-at is given.
+CELL_RESOLVED_AT = {"ubuntu2404-x86_64-py311": "2026-11-26"}
 DEFAULT_EXCLUDE_NEWER = "2026-11-24T00:00:00Z"
 MANIFEST_SCHEMA_VERSION = 2
 _PYLOCK_TOP_KEYS = frozenset({"lock-version", "created-by", "requires-python", "packages"})
@@ -94,6 +106,7 @@ CELL_LABELS = {
     "macos-arm64-py312": "macOS arm64 CPython 3.12",
     "macos-arm64-py313": "macOS arm64 CPython 3.13",
     "ubuntu2404-arm64-py311": "Ubuntu 24.04 arm64 CPython 3.11",
+    "ubuntu2404-x86_64-py311": "Ubuntu 24.04 x86_64 CPython 3.11",
 }
 # Flat resource filenames under v4/src/memory_os_v4/resources/.
 # Cell 1 keeps its historical catalog and constraints filenames unchanged.
@@ -117,6 +130,11 @@ CELL_RESOURCE_NAMES = {
         "qualified_runtime_lexical_ubuntu2404-arm64-py311_v1.json",
         "qualified_runtime_constraints_lexical_ubuntu2404-arm64-py311_v1.txt",
         "qualified_runtime_manifest_lexical_ubuntu2404-arm64-py311_v1.json",
+    ),
+    "ubuntu2404-x86_64-py311": (
+        "qualified_runtime_lexical_ubuntu2404-x86_64-py311_v1.json",
+        "qualified_runtime_constraints_lexical_ubuntu2404-x86_64-py311_v1.txt",
+        "qualified_runtime_manifest_lexical_ubuntu2404-x86_64-py311_v1.json",
     ),
 }
 REQUIRED_TIKTOKEN_VERSION = "0.12.0"
@@ -298,7 +316,7 @@ def build_cell_lock_files(
     *,
     reference_catalog: dict,
     ml_packages: set[str],
-    resolved_at: str = DEFAULT_RESOLVED_AT,
+    resolved_at: str | None = None,
     exclude_newer: str = DEFAULT_EXCLUDE_NEWER,
     existing_constraints_bytes: bytes | None = None,
 ) -> tuple[dict, str, dict]:
@@ -308,10 +326,12 @@ def build_cell_lock_files(
     Both must describe the same packages and versions, and every admitted wheel SHA-256 must be one
     of the hashes of its package in ``<cell>.txt``; the constraints follow the same set exactly.
     Every wheel must also fit the cell (``qualified_runtime.wheel_compatible_with_cell``: the lock
-    of another cell is refused).
+    of another cell is refused). ``resolved_at`` defaults to the frozen date of the cell.
     """
     if cell_id not in RETAINED_CELLS:
         raise ValueError(f"not a retained cell: {cell_id}")
+    if resolved_at is None:
+        resolved_at = CELL_RESOLVED_AT.get(cell_id, DEFAULT_RESOLVED_AT)
     if not isinstance(resolved_at, str) or not _DATE_RE.fullmatch(resolved_at):
         raise ValueError(f"invalid resolved_at (YYYY-MM-DD): {resolved_at!r}")
     if not isinstance(exclude_newer, str) or not _UTC_SECOND_RE.fullmatch(exclude_newer):
@@ -548,7 +568,7 @@ def build_bootstrap_test_pin(
 
 
 def compute_cell_lock_digests(resources_dir: Path) -> dict[tuple[str, str], tuple[str, str, str | None]]:
-    """Compute SHA-256 digests of ``(catalog, constraints, manifest | None)`` for all 5 locks."""
+    """Compute SHA-256 digests of ``(catalog, constraints, manifest | None)`` for all 6 locks."""
     digests: dict[tuple[str, str], tuple[str, str, str | None]] = {}
     for profile, cell_id, cat_name, con_name, man_name in ALL_LOCK_RESOURCE_NAMES:
         cat_path = resources_dir / cat_name
@@ -681,7 +701,7 @@ def validate_all_triplets_on_disk(
     expected_digests_map: dict | None = None,
     expected_constraints_map: dict | None = None,
 ) -> list[str]:
-    """Validate ALL 5 lock triplets (historical files included) using the runtime's own attestation."""
+    """Validate ALL 6 lock triplets (historical files included) using the runtime's own attestation."""
     qr = _load_qualified_runtime()
     base = resources_dir.absolute()
     failures: list[str] = []
@@ -715,7 +735,7 @@ def generate_all(
     input_files: dict[str, tuple[Path, Path]],
     output_dir: Path,
     *,
-    resolved_at: str = DEFAULT_RESOLVED_AT,
+    resolved_at: str | None = None,
     exclude_newer: str = DEFAULT_EXCLUDE_NEWER,
     check_only: bool = False,
     qualified_runtime_path: Path | None = None,
@@ -724,7 +744,7 @@ def generate_all(
     """Generate (or verify with ``check_only=True``) flat per-cell lexical lock resources and anchored digests.
 
     ``input_files`` maps each retained cell to ``(<cell>.txt, pylock.<cell>.toml)``. Validates all
-    5 lock triplets (including historical semantic and Cell-1 lexical files) with
+    6 lock triplets (including historical semantic and Cell-1 lexical files) with
     ``qualified_runtime`` before writing anything, after writing, and during ``--check``.
     """
     qr = _load_qualified_runtime()
@@ -799,7 +819,7 @@ def generate_all(
         planned_writes.append((man_path, man_bytes))
         candidate_triplets.append(("lexical", cell_id, cat_bytes, con_bytes, man_bytes))
 
-    # Validate all 4 lexical triplets (including historical Cell-1 catalog/constraints) BEFORE any write.
+    # Validate all 5 lexical triplets (including historical Cell-1 catalog/constraints) BEFORE any write.
     if not check_only:
         for profile, cell_id, cat_bytes, con_bytes, man_bytes in candidate_triplets:
             attested = qr.validate_lock_bytes(
@@ -824,7 +844,7 @@ def generate_all(
         if constraints_script_path is not None:
             sync_constraints_script_digests(constraints_script_path, base_dir, check_only=False)
             written.append(f"{constraints_script_path.name}:CELL_CONSTRAINTS_DIGESTS")
-        # Final post-write attestation on disk across all 5 triplets with the anchored digests.
+        # Final post-write attestation on disk across all 6 triplets with the anchored digests.
         anchored_locks = (
             _parse_generated_dict(qualified_runtime_path, DIGESTS_BEGIN, DIGESTS_END)
             if qualified_runtime_path is not None
@@ -842,7 +862,7 @@ def generate_all(
             raise ValueError("post-write runtime attestation failed: " + ", ".join(post_failures))
         return {"written": written, "mismatches": mismatches}
 
-    # --check mode: verify generated payloads, anchored digests in both modules, AND all 5 triplets via runtime.
+    # --check mode: verify generated payloads, anchored digests in both modules, AND all 6 triplets via runtime.
     for path, payload in planned_writes:
         if not path.is_file() or path.read_bytes() != payload:
             mismatches.append(path.name)
@@ -875,7 +895,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--input-dir", type=Path,
-        help="Frozen input directory holding <cell>.txt and pylock.<cell>.toml for the four retained cells",
+        help="Frozen input directory holding <cell>.txt and pylock.<cell>.toml for the five retained cells",
     )
     parser.add_argument("--output-dir", type=Path, default=RESOURCES)
     parser.add_argument(
@@ -886,12 +906,13 @@ def main(argv: list[str] | None = None) -> int:
         "--constraints-script", type=Path, default=CONSTRAINTS_SCRIPT_PY,
         help="Path to memory_os_constraints.py whose CELL_CONSTRAINTS_DIGESTS constant is generated/verified",
     )
-    parser.add_argument("--resolved-at", default=DEFAULT_RESOLVED_AT, help="Resolution date (YYYY-MM-DD)")
+    parser.add_argument("--resolved-at", default=None,
+                        help="Resolution date (YYYY-MM-DD) of every cell; default: the frozen date of each cell")
     parser.add_argument("--exclude-newer", default=DEFAULT_EXCLUDE_NEWER, help="uv --exclude-newer of the resolution")
     parser.add_argument("--check", action="store_true", help="Verify existing files, anchored digests and runtime invariants without writing")
     parser.add_argument(
         "--emit-test-pin", type=Path, default=None,
-        help="Write a state='test' bootstrap pin JSON for the four cells (never 'release')",
+        help="Write a state='test' bootstrap pin JSON for the five cells (never 'release')",
     )
     args = parser.parse_args(argv)
 
@@ -909,7 +930,7 @@ def main(argv: list[str] | None = None) -> int:
             if result["mismatches"]:
                 print("MISMATCH: " + ", ".join(result["mismatches"]), file=sys.stderr)
                 return 1
-            print("OK: all 5 cell locks, manifests, anchored digests and runtime invariants match")
+            print(f"OK: all {len(ALL_LOCK_RESOURCE_NAMES)} cell locks, manifests, anchored digests and runtime invariants match")
         else:
             print("WRITTEN: " + ", ".join(result["written"]))
 

@@ -37,11 +37,15 @@ STANDALONE_SQLITE_DECLARED = "3.53.1"  # declared by the build, to be read back 
 # never a bare minor that a later uv could resolve to another interpreter. uv has no request
 # syntax for the build itself (uv 0.13.9 help): the build is pinned by naming it here and by
 # CHECKING it after installation (``standalone_check``), never by trusting what uv picked.
+# ``megabytes`` is the size of the ``install_only.tar.gz`` asset of that build and architecture on the
+# GitHub release ``20261110``, in decimal MB rounded to 0.1 (x86_64: 49,244,720 bytes).
 STANDALONE_CPYTHON = {
     "macos-arm64-py312": {"python": "3.12.16", "megabytes": 25.4, "request": "cpython-3.12.16-macos-aarch64-none"},
     "macos-arm64-py313": {"python": "3.13.18", "megabytes": 25.6, "request": "cpython-3.13.18-macos-aarch64-none"},
     "ubuntu2404-arm64-py311": {"python": "3.11.18", "megabytes": 49.5,
                                "request": "cpython-3.11.18-linux-aarch64-gnu"},
+    "ubuntu2404-x86_64-py311": {"python": "3.11.18", "megabytes": 49.2,
+                                "request": "cpython-3.11.18-linux-x86_64-gnu"},
 }
 DEFAULT_VENV = "~/.memory-os/venv"
 # "/cache/uv/" alone (4.1.0) missed the real uv cache, ~/.cache/uv: its two default spellings are named.

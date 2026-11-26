@@ -23,7 +23,8 @@ from setup_fixture_410 import install, prepare, setup_context, tree
 ROOT = Path(__file__).resolve().parents[2]
 RESOURCES = qualified_runtime.PROFILE.parent
 UBUNTU = 'ID=ubuntu\nVERSION_ID="24.04"\n'
-RETAINED_CELLS = ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311")
+RETAINED_CELLS = ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311",
+                  "ubuntu2404-x86_64-py311")
 # 4.1.3: VS Code is supported on Linux through the Copilot user configuration (~/.copilot/mcp-config.json)
 LINUX_SUPPORTED = ("claude-code", "codex", "vscode", "cursor", "antigravity", "gemini-cli", "grok", "zed", "devin")
 LINUX_UNSUPPORTED = ("windsurf", "claude-desktop")
@@ -54,6 +55,7 @@ CELL_REPORTS = {
     "macos-arm64-py312": lambda: mac_cell((3, 12, 16)),
     "macos-arm64-py313": lambda: mac_cell((3, 13, 18)),
     "ubuntu2404-arm64-py311": linux_cell,
+    "ubuntu2404-x86_64-py311": lambda: linux_cell(machine="x86_64"),
 }
 
 
@@ -137,14 +139,19 @@ FROZEN_PYLOCK_SHA256 = {
     "macos-arm64-py312": "8c86454108dc054678b17a0eec7f48db20abf2214dc63b1519a78c5cd7151a85",
     "macos-arm64-py313": "8258c4649414795df0e0132ea8d71808b3cd767f7ad5c7c213daa9561ebc96c2",
     "ubuntu2404-arm64-py311": "2d005f03c54bf251d67edad36939f592ed0331e27a1ce5cae2b4c0a08bde1d30",
+    # GitHub Actions run 45879240439, job resolve-lock-x86_64 (SHA256SUMS of the artifact).
+    "ubuntu2404-x86_64-py311": "a45cc341146d5c576fe6646d4b59a3f78ca85aed2415d738e15a8fa5fce02810",
 }
+FROZEN_RESOLVED_AT = {"ubuntu2404-x86_64-py311": "2026-11-26"}  # the other cells: 2026-11-24
 FROZEN_WHEEL_COUNTS = {
     "macos-arm64-py311": 39, "macos-arm64-py312": 39, "macos-arm64-py313": 39, "ubuntu2404-arm64-py311": 40,
+    "ubuntu2404-x86_64-py311": 40,
 }
 _MAC_MULTI = {"charset-normalizer", "cryptography", "regex"}
 FROZEN_MULTI_WHEEL_PACKAGES = {
     "macos-arm64-py311": _MAC_MULTI, "macos-arm64-py312": _MAC_MULTI, "macos-arm64-py313": _MAC_MULTI,
     "ubuntu2404-arm64-py311": {"charset-normalizer", "cryptography"},
+    "ubuntu2404-x86_64-py311": {"charset-normalizer", "cryptography"},
 }
 
 
@@ -168,7 +175,8 @@ def test_each_retained_cell_lexical_lock_attests_catalog_constraints_manifest_an
     assert manifest["profile_id"] == cat["profile_id"]
     assert manifest["constraints_sha256"] == lock["constraints_sha256"]
     assert manifest["schema_version"] == 2 and manifest["lock_state"] == "frozen"
-    assert manifest["resolved_at"] == "2026-11-24" and manifest["exclude_newer"] == "2026-11-24T00:00:00Z"
+    assert manifest["resolved_at"] == FROZEN_RESOLVED_AT.get(cell_id, "2026-11-24")
+    assert manifest["exclude_newer"] == "2026-11-24T00:00:00Z"
     assert manifest["pylock_sha256"] == FROZEN_PYLOCK_SHA256[cell_id]
     assert "urls_status" not in manifest and "uv pip compile" in manifest["source"]
     assert len(manifest["artifacts"]) == 36
@@ -177,6 +185,12 @@ def test_each_retained_cell_lexical_lock_attests_catalog_constraints_manifest_an
     multi = {item["name"] for item in manifest["artifacts"] if len(item["wheels"]) > 1}
     assert multi == FROZEN_MULTI_WHEEL_PACKAGES[cell_id]
     for item, wheel in wheels:
+        assert qualified_runtime.wheel_compatible_with_cell(wheel["filename"], cell_id) is True
+        others = [other for other in RETAINED_CELLS if other != cell_id
+                  and qualified_runtime.wheel_compatible_with_cell(wheel["filename"], other)]
+        # A platform wheel of a Linux cell fits that cell only (never the other architecture).
+        if not wheel["filename"].endswith("-none-any.whl") and cell_id.startswith("ubuntu2404-"):
+            assert others == [], (wheel["filename"], others)
         assert set(wheel) == {"filename", "url", "sha256", "size"}
         assert qualified_runtime.valid_artifact_url(wheel["url"], name=item["name"], version=item["version"]) is True
         assert wheel["url"].endswith("/" + wheel["filename"]) and wheel["size"] > 0 and len(wheel["sha256"]) == 64
@@ -735,17 +749,42 @@ def test_inspect_no_extra_packages_catches_duplicates_and_malformed_distribution
 
 # ===================================================================== 3. memory-os-constraints (stdlib only)
 
+def test_memory_os_constraints_detection_agrees_with_the_product_on_every_case(monkeypatch):
+    """Same facts (architecture included), same cell as ``ops/cell.py``, for every retained and refused case."""
+    import memory_os_constraints
+    from test_cell_411 import NOT_RETAINED, RETAINED
+
+    assert memory_os_constraints._CELL_FACTS == cell._CELL_FACTS
+    assert memory_os_constraints._ARCH_MACHINES == cell.ARCH_MACHINES
+    assert {cell_id for (_, cell_id) in memory_os_constraints.CELL_FILES} == set(cell.RETAINED_CELLS)
+    real = cell.detect
+    for name, build in {**RETAINED, **NOT_RETAINED}.items():
+        captured = {}
+
+        def spy(**facts):
+            captured.update(facts)
+            return real(**facts)
+        monkeypatch.setattr(cell, "detect", spy)
+        expected = build()["cell_id"]
+        found = memory_os_constraints.detect_cell_id(**{key: captured[key] for key in (
+            "sys_platform", "machine", "python_version", "implementation", "os_release", "kernel_release", "environ")})
+        assert found == expected, name
+
+
 def test_memory_os_constraints_is_cell_aware_and_stdlib_only():
     code = """
 import sys
 sys.path.insert(0, sys.argv[1])
 import memory_os_constraints as m
 assert 'memory_os_v4' not in sys.modules
-for cid in ('macos-arm64-py311', 'macos-arm64-py312', 'macos-arm64-py313', 'ubuntu2404-arm64-py311'):
+for cid in ('macos-arm64-py311', 'macos-arm64-py312', 'macos-arm64-py313', 'ubuntu2404-arm64-py311',
+            'ubuntu2404-x86_64-py311'):
     p = m.path('lexical', cell_id=cid)
     assert p.endswith('.txt')
+assert m.path('lexical', cell_id='ubuntu2404-x86_64-py311').endswith(
+    'qualified_runtime_constraints_lexical_ubuntu2404-x86_64-py311_v1.txt')
 assert m.path('semantic', cell_id='macos-arm64-py311').endswith('qualified_runtime_constraints_v1.txt')
-for cid in ('macos-arm64-py312', 'macos-arm64-py313', 'ubuntu2404-arm64-py311'):
+for cid in ('macos-arm64-py312', 'macos-arm64-py313', 'ubuntu2404-arm64-py311', 'ubuntu2404-x86_64-py311'):
     try:
         m.path('semantic', cell_id=cid)
     except ValueError:
@@ -758,6 +797,20 @@ assert m.detect_cell_id(sys_platform='linux', machine='aarch64', python_version=
 assert m.detect_cell_id(sys_platform='linux', machine='aarch64', python_version=(3, 11),
                         implementation='CPython', os_release='ID=ubuntu\\nVERSION_ID="24.04"\\n',
                         kernel_release='5.15-microsoft-standard-WSL2', environ={}) is None
+u2404 = dict(sys_platform='linux', implementation='CPython', os_release='ID=ubuntu\\nVERSION_ID="24.04"\\n',
+             kernel_release='6.8.0-generic', environ={})
+for machine in ('x86_64', 'amd64', 'AMD64'):
+    assert m.detect_cell_id(machine=machine, python_version=(3, 11), **u2404) == 'ubuntu2404-x86_64-py311'
+for machine, version in (('x86_64', (3, 12)), ('x86_64', (3, 13)), ('i686', (3, 11)), ('x86_64_v3', (3, 11)),
+                         ('', (3, 11))):
+    assert m.detect_cell_id(machine=machine, python_version=version, **u2404) is None
+assert m.detect_cell_id(machine='x86_64', python_version=(3, 11),
+                        **{**u2404, 'kernel_release': '5.15-microsoft-standard-WSL2'}) is None
+assert m.detect_cell_id(machine='x86_64', python_version=(3, 11), **{**u2404, 'environ': {'WSL_DISTRO_NAME': 'U'}}) is None
+assert m.detect_cell_id(machine='x86_64', python_version=(3, 11), **{**u2404, 'os_release': 'ID=debian\\nVERSION_ID=12\\n'}) is None
+assert m.detect_cell_id(sys_platform='darwin', machine='x86_64', python_version=(3, 11), implementation='CPython') is None
+assert m.main(['lexical', '--cell', 'ubuntu2404-x86_64-py311']) == 0
+assert m.main(['semantic', '--cell', 'ubuntu2404-x86_64-py311']) == 1
 assert m.main(['lexical', '--cell', 'ubuntu2404-arm64-py311']) == 0
 assert m.main(['semantic', '--cell', 'ubuntu2404-arm64-py311']) == 1
 assert m.main(['lexical', '--cell', 'debian-x86_64-py311']) == 1
@@ -801,7 +854,7 @@ def test_lock_generator_parses_refuses_bad_input_and_builds_valid_bootstrap_test
         inputs, out_dir,
         qualified_runtime_path=qr_copy, constraints_script_path=con_copy,
     )
-    assert len(written["written"]) == 12
+    assert len(written["written"]) == 15
     assert "qualified_runtime.py:CELL_LOCK_DIGESTS" in written["written"]
     assert "memory_os_constraints.py:CELL_CONSTRAINTS_DIGESTS" in written["written"]
     checked = gen.generate_all(
@@ -1537,7 +1590,8 @@ def test_frozen_generation_refuses_bad_pylock_before_writing_and_check_detects_d
         )
 
     # A sdist in the LAST cell's pylock: nothing at all is written, for any cell.
-    last_pylock = inputs["ubuntu2404-arm64-py311"][1]
+    assert gen.RETAINED_CELLS[-1] == "ubuntu2404-x86_64-py311"
+    last_pylock = inputs["ubuntu2404-x86_64-py311"][1]
     good = last_pylock.read_text(encoding="utf-8")
     last_pylock.write_text(good.replace(
         'name = "numpy"\n', 'name = "numpy"\nsdist = { url = "https://files.pythonhosted.org/packages/ab/cd/numpy-2.4.2.tar.gz" }\n',
@@ -1549,7 +1603,7 @@ def test_frozen_generation_refuses_bad_pylock_before_writing_and_check_detects_d
     last_pylock.write_text(good, encoding="utf-8")
 
     written = run()
-    assert len(written["written"]) == 12 and run(check_only=True)["mismatches"] == []
+    assert len(written["written"]) == 15 and run(check_only=True)["mismatches"] == []
     # The historical cell-1 catalog and constraints, and the constraints of every cell, are byte-identical.
     for name, payload in snapshot.items():
         if "constraints" in name or name in {"qualified_runtime_lexical_v1.json", "qualified_runtime_v1.json"}:
@@ -1559,8 +1613,12 @@ def test_frozen_generation_refuses_bad_pylock_before_writing_and_check_detects_d
     # --check sees a pylock that no longer matches the embedded manifest (its SHA-256 is recorded).
     last_pylock.write_text(good + "\n", encoding="utf-8")
     drift = run(check_only=True)["mismatches"]
-    assert drift == ["qualified_runtime_manifest_lexical_ubuntu2404-arm64-py311_v1.json"]
+    assert drift == ["qualified_runtime_manifest_lexical_ubuntu2404-x86_64-py311_v1.json"]
     last_pylock.write_text(good, encoding="utf-8")
+    arm64_pylock = inputs["ubuntu2404-arm64-py311"][1]
+    arm64_pylock.write_text(good + "\n", encoding="utf-8")
+    assert run(check_only=True)["mismatches"] == ["qualified_runtime_manifest_lexical_ubuntu2404-arm64-py311_v1.json"]
+    arm64_pylock.write_text(good, encoding="utf-8")
     # --check runs the runtime attestation on disk: a manifest edited by hand is caught twice.
     man_path = out_dir / "qualified_runtime_manifest_lexical_macos-arm64-py313_v1.json"
     mdoc = json.loads(man_path.read_text(encoding="utf-8"))
@@ -1628,6 +1686,7 @@ def test_classifiers_declare_python_312_313_and_linux():
 
 MAC_CELLS = ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313")
 UBUNTU_CELL = "ubuntu2404-arm64-py311"
+X86_CELL = "ubuntu2404-x86_64-py311"
 
 
 def embedded_manifest(cell_id: str) -> dict:
@@ -1657,6 +1716,43 @@ def test_every_frozen_wheel_fits_its_cell_and_no_neighbor_lock_fits_another_cell
             assert not all(qualified_runtime.wheel_compatible_with_cell(name, other) for name in names), other
 
 
+@pytest.mark.parametrize("cell_id", [c for c in RETAINED_CELLS if c != "macos-arm64-py311"])
+def test_the_generator_rebuilds_each_embedded_lock_with_its_own_resolution_date(cell_id):
+    """Every field but the pylock digest is rebuilt from the cell's own wheels; the date is a frozen fact per cell."""
+    gen = load_script("generate_cell_locks_411")
+    ref_cat = json.loads((RESOURCES / "qualified_runtime_lexical_v1.json").read_text(encoding="utf-8"))
+    cat_path, con_path, _ = qualified_runtime.CELL_LOCKS[("lexical", cell_id)]
+    embedded = embedded_manifest(cell_id)
+    compiled, pylock = frozen_texts_from_manifest(embedded)
+    catalog_doc, constraints_text, manifest = gen.build_cell_lock_files(
+        cell_id, compiled, pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=gen._ml_closure_names(RESOURCES))
+    assert catalog_doc == json.loads(cat_path.read_text(encoding="utf-8"))
+    assert constraints_text.encode("utf-8") == con_path.read_bytes()
+    assert {k: v for k, v in manifest.items() if k != "pylock_sha256"} == \
+        {k: v for k, v in embedded.items() if k != "pylock_sha256"}
+    assert manifest["resolved_at"] == catalog_doc["recorded_at"] == FROZEN_RESOLVED_AT.get(cell_id, "2026-11-24")
+    platform_target = gen.CELL_RESOLUTION[cell_id][1]
+    assert f"--python-platform {platform_target} " in manifest["source"]
+    assert platform_target == {"ubuntu2404-x86_64-py311": "x86_64-manylinux_2_28",
+                               "ubuntu2404-arm64-py311": "aarch64-manylinux_2_28"}.get(cell_id, "aarch64-apple-darwin")
+    # An explicit date applies to every cell, as before.
+    _, _, forced = gen.build_cell_lock_files(cell_id, compiled, pylock.encode("utf-8"), reference_catalog=ref_cat,
+                                             ml_packages=gen._ml_closure_names(RESOURCES), resolved_at="2026-12-01")
+    assert forced["resolved_at"] == "2026-12-01"
+
+
+def test_the_x86_64_cell_is_named_like_the_arm64_one_in_every_generator_table():
+    gen = load_script("generate_cell_locks_411")
+    x86, arm = "ubuntu2404-x86_64-py311", "ubuntu2404-arm64-py311"
+    assert gen.RETAINED_CELLS == cell.RETAINED_CELLS
+    assert gen.CELL_LABELS[x86] == "Ubuntu 24.04 x86_64 CPython 3.11"
+    assert gen.CELL_RESOLUTION[x86] == ("3.11", "x86_64-manylinux_2_28")
+    assert gen.CELL_RESOURCE_NAMES[x86] == tuple(name.replace(arm, x86) for name in gen.CELL_RESOURCE_NAMES[arm])
+    assert gen.FROZEN_INPUT_FILES[x86] == (f"{x86}.txt", f"pylock.{x86}.toml")
+    assert ("lexical", x86, *gen.CELL_RESOURCE_NAMES[x86]) in gen.ALL_LOCK_RESOURCE_NAMES
+    assert tuple(path.name for path in qualified_runtime.CELL_LOCKS[("lexical", x86)]) == gen.CELL_RESOURCE_NAMES[x86]
+
+
 @pytest.mark.parametrize("filename, admitted_by", [
     ("pkg-1.0-py3-none-any.whl", RETAINED_CELLS),
     ("pkg-1.0-py2.py3-none-any.whl", RETAINED_CELLS),
@@ -1682,6 +1778,16 @@ def test_every_frozen_wheel_fits_its_cell_and_no_neighbor_lock_fits_another_cell
     ("pkg-1.0-cp311-cp311-manylinux_2_40_aarch64.manylinux_2_39_aarch64.whl", (UBUNTU_CELL,)),
     ("pkg-1.0-cp38-abi3-manylinux_2_28_aarch64.whl", (UBUNTU_CELL,)),
     ("pkg-1.0-cp311-none-manylinux_2_17_aarch64.whl", (UBUNTU_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_28_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux2014_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_39_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_40_x86_64.manylinux_2_39_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp38-abi3-manylinux_2_28_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp311-none-manylinux_2_17_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-py3-none-manylinux_2_17_x86_64.whl", (X86_CELL,)),
+    ("pkg-1.0-cp311-cp311-manylinux_2_17_aarch64.manylinux_2_17_x86_64.whl", (UBUNTU_CELL, X86_CELL)),  # both triples
     # --- refused everywhere
     ("pkg-1.0-cp312-cp312-macosx_26_0_arm64.whl", ()),                                    # macOS above the 11.0 target
     ("pkg-1.0-cp312-cp312-macosx_12_0_arm64.whl", ()),
@@ -1695,8 +1801,17 @@ def test_every_frozen_wheel_fits_its_cell_and_no_neighbor_lock_fits_another_cell
     ("pkg-1.0-cp311-cp311-manylinux_3_0_aarch64.whl", ()),
     ("pkg-1.0-cp311-cp311-manylinux_2_16_aarch64.whl", ()),
     ("pkg-1.0-cp311-cp311-musllinux_1_2_aarch64.whl", ()),
-    ("pkg-1.0-cp311-cp311-manylinux_2_28_x86_64.whl", ()),
-    ("pkg-1.0-cp311-cp311-manylinux2014_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux_2_40_x86_64.whl", ()),                                # glibc above 2.39
+    ("pkg-1.0-cp311-cp311-manylinux_3_0_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux_2_16_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux2010_x86_64.whl", ()),                                 # below manylinux2014
+    ("pkg-1.0-cp311-cp311-manylinux1_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-musllinux_1_2_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-linux_x86_64.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux_2_28_i686.whl", ()),
+    ("pkg-1.0-cp311-cp311-manylinux2014_i686.whl", ()),
+    ("pkg-1.0-cp312-cp312-manylinux_2_28_x86_64.whl", ()),                                # cp312 on a py311 cell
+    ("pkg-1.0-cp313-cp313-manylinux_2_28_x86_64.whl", ()),
     ("pkg-1.0-cp311-cp311-macosx_11_0_x86_64.whl", ()),
     ("pkg-1.0-cp311-cp311-macosx_10_9_intel.whl", ()),
     ("pkg-1.0-cp311-cp311-win_amd64.whl", ()),
@@ -1727,12 +1842,23 @@ def test_wheel_tags_are_bound_to_the_cell(filename, admitted_by):
 def test_cell_wheel_tags_are_the_packaging_tags_of_an_explicit_frozen_target():
     from packaging import tags
 
-    assert qualified_runtime.MACOS_TARGET == ((11, 0), "arm64") and qualified_runtime.LINUX_GLIBC_MAX == (2, 39)
+    assert qualified_runtime.MACOS_VERSION == (11, 0) and qualified_runtime.LINUX_GLIBC_MAX == (2, 39)
+    assert qualified_runtime.CELL_WHEEL_TARGETS == {
+        "macos-arm64-py311": ("macos", "arm64", 11), "macos-arm64-py312": ("macos", "arm64", 12),
+        "macos-arm64-py313": ("macos", "arm64", 13), UBUNTU_CELL: ("linux", "aarch64", 11),
+        X86_CELL: ("linux", "x86_64", 11)}
     mac = list(tags.mac_platforms((11, 0), "arm64"))
     assert mac[:2] == ["macosx_11_0_arm64", "macosx_11_0_universal2"] and "macosx_10_9_universal2" in mac
     linux = [f"manylinux_2_{m}_aarch64" for m in range(39, 16, -1)] + ["manylinux2014_aarch64"]
+    linux_x86 = [f"manylinux_2_{m}_x86_64" for m in range(39, 16, -1)] + ["manylinux2014_x86_64"]
+    for cell_id, platforms in ((UBUNTU_CELL, linux), (X86_CELL, linux_x86)):
+        seen = {tag.platform for tag in qualified_runtime.cell_wheel_tags(cell_id)}
+        other = "x86_64" if cell_id == UBUNTU_CELL else "aarch64"
+        assert seen == {*platforms, "any"} and not any(other in p or "musllinux" in p or p.startswith("linux_")
+                                                       or p.startswith(("manylinux1_", "manylinux2010_")) for p in seen)
     for cell_id, minor, platforms in (("macos-arm64-py311", 11, mac), ("macos-arm64-py312", 12, mac),
-                                      ("macos-arm64-py313", 13, mac), (UBUNTU_CELL, 11, linux)):
+                                      ("macos-arm64-py313", 13, mac), (UBUNTU_CELL, 11, linux),
+                                      (X86_CELL, 11, linux_x86)):
         expected = frozenset((
             *tags.cpython_tags(python_version=(3, minor), abis=[f"cp3{minor}"], platforms=platforms),
             *tags.compatible_tags(python_version=(3, minor), interpreter=f"cp3{minor}", platforms=platforms),
@@ -1740,7 +1866,8 @@ def test_cell_wheel_tags_are_the_packaging_tags_of_an_explicit_frozen_target():
         assert qualified_runtime.cell_wheel_tags(cell_id) == expected
         platforms_seen = {tag.platform for tag in expected}
         assert platforms_seen == {*platforms, "any"}
-        assert not any("musllinux" in p or p == "linux_aarch64" or "x86_64" in p for p in platforms_seen)
+        foreign = "aarch64" if cell_id == X86_CELL else "x86_64"
+        assert not any("musllinux" in p or p.startswith("linux_") or foreign in p for p in platforms_seen)
     assert set(qualified_runtime.CELL_WHEEL_TARGETS) == set(RETAINED_CELLS)
 
 
@@ -1749,6 +1876,10 @@ def test_cell_wheel_tags_are_the_packaging_tags_of_an_explicit_frozen_target():
     ("macos-arm64-py311", "macos-arm64-py312"),    # the py311 lock given to py312
     ("macos-arm64-py312", "macos-arm64-py313"),    # cp312 wheels in the py313 cell
     ("macos-arm64-py311", UBUNTU_CELL),
+    (UBUNTU_CELL, X86_CELL),                       # the arm64 lock given to the x86_64 cell
+    (X86_CELL, UBUNTU_CELL),                       # and the reverse
+    (X86_CELL, "macos-arm64-py311"),
+    ("macos-arm64-py311", X86_CELL),
 ])
 def test_lock_of_another_cell_is_refused_by_generator_check_and_runtime(tmp_path, monkeypatch, capsys, source_cell, target_cell):
     gen = load_script("generate_cell_locks_411")
@@ -1827,6 +1958,18 @@ def test_lock_of_another_cell_is_refused_by_generator_check_and_runtime(tmp_path
     (UBUNTU_CELL, "cp312-cp312-manylinux_2_28_aarch64"),
     (UBUNTU_CELL, "cp311-cp311-linux_aarch64"),
     (UBUNTU_CELL, "cp311-cp311-any"),
+    (UBUNTU_CELL, "cp311-cp311-manylinux2014_x86_64"),
+    (X86_CELL, "cp311-cp311-musllinux_1_2_x86_64"),
+    (X86_CELL, "cp311-cp311-linux_x86_64"),
+    (X86_CELL, "cp311-cp311-manylinux_2_28_aarch64"),
+    (X86_CELL, "cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64"),
+    (X86_CELL, "cp311-cp311-manylinux_2_40_x86_64"),
+    (X86_CELL, "cp311-cp311-manylinux2010_x86_64"),
+    (X86_CELL, "cp311-cp311-manylinux_2_28_i686"),
+    (X86_CELL, "cp312-cp312-manylinux_2_28_x86_64"),
+    (X86_CELL, "cp311-cp311-macosx_11_0_x86_64"),
+    (X86_CELL, "cp311-cp311-win_amd64"),
+    (X86_CELL, "cp311-cp311-any"),
     ("macos-arm64-py313", "cp312-cp312-macosx_11_0_arm64"),
     ("macos-arm64-py313", "cp313-cp313t-macosx_11_0_arm64"),
     ("macos-arm64-py313", "cp313-cp313-macosx_26_0_arm64"),
@@ -1880,6 +2023,10 @@ def test_single_incompatible_wheel_is_refused_by_generator_and_runtime(tmp_path,
     (UBUNTU_CELL, "cp311-cp311-manylinux_2_39_aarch64"),
     (UBUNTU_CELL, "cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64"),
     (UBUNTU_CELL, "cp38-abi3-manylinux_2_28_aarch64"),
+    (X86_CELL, "cp311-cp311-manylinux_2_39_x86_64"),
+    (X86_CELL, "cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64"),
+    (X86_CELL, "cp38-abi3-manylinux_2_28_x86_64"),
+    (X86_CELL, "py3-none-any"),
 ])
 def test_single_compatible_wheel_is_accepted_by_generator_and_runtime(tmp_path, monkeypatch, cell_id, tags):
     gen = load_script("generate_cell_locks_411")

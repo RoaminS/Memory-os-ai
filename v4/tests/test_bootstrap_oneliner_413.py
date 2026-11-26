@@ -29,7 +29,7 @@ from memory_os_v4.ops import clients as product_clients, provision as product_pr
 from memory_os_v4.ops.clients import ClientPathError
 from memory_os_v4.ops.settings import OpsSettings
 from setup_fixture_410 import tree
-from test_bootstrap_411 import CELL, MAC, MINOR, UBUNTU, VERSION, Machine, bs, make_pin
+from test_bootstrap_411 import CELL, MAC, MINOR, UBUNTU, UBUNTU_X86, VERSION, Machine, bs, make_pin
 
 REAL_PROVISION_PLAN = product_provision.plan  # captured before any fixture replaces it
 pytestmark = pytest.mark.skipif(MINOR not in ((3, 11), (3, 12), (3, 13)), reason="needs a Python of a retained cell")
@@ -860,15 +860,22 @@ def test_the_standalone_cpython_is_announced_before_the_question_and_fetched_onl
     assert report["apply"]["standalone"]["build_state"] == "attested"
 
 
-def test_ubuntu_announces_its_standalone_cpython_with_its_size(tmp_path):
-    one = OneLiner(tmp_path, host=UBUNTU)
+@pytest.mark.parametrize("host,size,request_key", [
+    (UBUNTU, "49500000 bytes (about 49.5 MB)", "cpython-3.11.18-linux-aarch64-gnu"),
+    (UBUNTU_X86, "49200000 bytes (about 49.2 MB)", "cpython-3.11.18-linux-x86_64-gnu"),
+])
+def test_ubuntu_announces_its_standalone_cpython_with_its_size(tmp_path, host, size, request_key):
+    one = OneLiner(tmp_path, host=host)
     one.m.pin = make_pin(one.m.wheel, cells=tuple(bs.CELLS))
     one.touch(".cursor/mcp.json")
     report, text = one.run("--cpython", "3.11", terminal=lambda: None)
     assert report["stage"] == "no-terminal", report["plan"]["blockers"]
     line = next(item for item in text.splitlines() if item.startswith("  download after y"))
-    assert "CPython 3.11.18" in line and "49500000 bytes (about 49.5 MB)" in line
+    assert "CPython 3.11.18" in line and size in line
     assert "manager systemd-user" in text and one.m.verbs() == ["--version"]
+    assert report["plan"]["cell"]["cell_id"] == ("ubuntu2404-x86_64-py311" if host is UBUNTU_X86
+                                                 else "ubuntu2404-arm64-py311")
+    assert request_key in json.dumps(report["plan"])
 
 
 def test_the_semantic_refusal_points_to_the_readme_section(o):

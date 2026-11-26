@@ -51,13 +51,23 @@ RETAINED = {
     "macos-arm64-py312": lambda: simulate(python_version=(3, 12, 16), sqlite_version="3.53.1"),
     "macos-arm64-py313": lambda: simulate(python_version=(3, 13, 18), sqlite_version="3.53.1"),
     "ubuntu2404-arm64-py311": lambda: linux(),
+    "ubuntu2404-x86_64-py311": lambda: linux(machine="x86_64"),
 }
 NOT_RETAINED = {
     "ubuntu-24.04-arm64-py312": lambda: linux(python=(3, 12, 16)),        # the fallback: named, not retained
     "ubuntu-24.04-arm64-py313": lambda: linux(python=(3, 13, 18)),
     "ubuntu-22.04-arm64-py311": lambda: linux(os_release=UBUNTU_2204),
     "debian-12-arm64-py311": lambda: linux(os_release=DEBIAN_12),
-    "ubuntu-24.04-x86_64-py311": lambda: linux(machine="x86_64"),
+    "ubuntu-24.04-x86_64-py312": lambda: linux(machine="x86_64", python=(3, 12, 16)),
+    "ubuntu-24.04-x86_64-py313": lambda: linux(machine="x86_64", python=(3, 13, 18)),
+    "ubuntu-22.04-x86_64-py311": lambda: linux(machine="x86_64", os_release=UBUNTU_2204),
+    "debian-12-x86_64-py311": lambda: linux(machine="x86_64", os_release=DEBIAN_12),
+    "ubuntu-24.04-i686-py311": lambda: linux(machine="i686"),
+    "ubuntu-24.04-x86-py311": lambda: linux(machine="x86"),
+    "ubuntu-24.04-x86_64_v3-py311": lambda: linux(machine="x86_64_v3"),     # spellings compared exactly
+    "ubuntu-24.04-arm64e-py311": lambda: linux(machine="arm64e"),
+    "ubuntu-24.04-armv7l-py311": lambda: linux(machine="armv7l"),
+    "ubuntu-24.04-unknown-py311": lambda: linux(machine=""),
     "ubuntu-2404-arm64-py311": lambda: linux(os_release="ID=ubuntu\nVERSION_ID=2404\n"),
     "ubuntu-2.4.04-arm64-py311": lambda: linux(os_release="ID=ubuntu\nVERSION_ID=2.4.04\n"),
     "ubuntu-24.04.1-arm64-py311": lambda: linux(os_release='ID=ubuntu\nVERSION_ID="24.04.1"\n'),
@@ -68,26 +78,29 @@ NOT_RETAINED = {
     "linuxmint-24.04-arm64-py311": lambda: linux(os_release="ID=linuxmint\nID_LIKE=ubuntu\nVERSION_ID=24.04\n"),
     "linux-arm64-py311": lambda: linux(os_release=None),                  # no os-release: never guessed
     "macos-x86_64-py311": lambda: simulate(machine="x86_64"),
+    "macos-x86_64-py312": lambda: simulate(machine="x86_64", python_version=(3, 12, 16)),
+    "macos-x86_64-py313": lambda: simulate(machine="AMD64", python_version=(3, 13, 18)),
     "macos-arm64-py310": lambda: simulate(python_version=(3, 10, 14)),
     "macos-arm64-py314": lambda: simulate(python_version=(3, 14, 0)),
-    "win32-amd64-py311": lambda: simulate(sys_platform="win32", machine="AMD64"),
+    "win32-x86_64-py311": lambda: simulate(sys_platform="win32", machine="AMD64"),
+    "win32-arm64-py311": lambda: simulate(sys_platform="win32", machine="ARM64"),
 }
 
 
 # ---- detection ----
 
 @pytest.mark.parametrize("cell_id", sorted(RETAINED))
-def test_the_four_retained_cells_are_identified(cell_id):
+def test_the_five_retained_cells_are_identified(cell_id):
     report = RETAINED[cell_id]()
     assert report["cell_id"] == report["label"] == cell_id
     assert report["retained"] is True and report["refusal"] is None
-    assert report["arch"] == "arm64" and report["sqlite_ok"] is True
+    assert report["arch"] == ("x86_64" if "x86_64" in cell_id else "arm64") and report["sqlite_ok"] is True
     assert report["writes"] == "none" and report["network"] == "none"
 
 
 def test_retained_cells_are_exactly_the_contract_ones():
     assert cell.RETAINED_CELLS == ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313",
-                                   "ubuntu2404-arm64-py311")
+                                   "ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311")
     assert cell.SEMANTIC_CELLS == ("macos-arm64-py311",)
     assert set(RETAINED) == set(cell.RETAINED_CELLS)
 
@@ -104,6 +117,43 @@ def test_every_other_combination_is_named_but_not_retained(label):
 def test_arm_architecture_names_are_normalized(machine):
     assert simulate(machine=machine)["arch"] == "arm64"
     assert linux(machine=machine)["cell_id"] == "ubuntu2404-arm64-py311"
+
+
+@pytest.mark.parametrize("machine", ["x86_64", "amd64", "X86_64", "AMD64", "Amd64"])
+def test_x86_64_architecture_names_are_compared_exactly_after_lowercasing(machine):
+    report = linux(machine=machine)
+    assert report["arch"] == "x86_64" and report["machine"] == machine
+    assert report["cell_id"] == report["label"] == "ubuntu2404-x86_64-py311" and report["retained"] is True
+    assert simulate(machine=machine)["cell_id"] is None  # macOS on Intel stays refused
+    assert simulate(machine=machine)["label"] == "macos-x86_64-py311"
+
+
+@pytest.mark.parametrize("machine", ["x86_64 ", " x86_64", "x86-64", "x64", "x86_64_v2", "amd64\n", "i386", "aarch64_be",
+                                     "arm", "armv8l", "arm64e", "ppc64le", "s390x", "riscv64"])
+def test_an_unlisted_machine_has_no_architecture_fact_and_matches_no_cell(machine):
+    assert cell.architecture(machine) is None
+    for build in (lambda: linux(machine=machine), lambda: simulate(machine=machine)):
+        report = build()
+        assert report["cell_id"] is None and report["retained"] is False
+        assert report["label"] not in cell.RETAINED_CELLS
+
+
+def test_the_architecture_spellings_are_an_explicit_table():
+    assert cell.ARCH_MACHINES == {"arm64": frozenset({"arm64", "aarch64"}), "x86_64": frozenset({"x86_64", "amd64"})}
+    assert all(name in spellings for name, spellings in cell.ARCH_MACHINES.items())
+    assert cell.architecture(None) is None and cell.architecture("") is None
+
+
+@pytest.mark.parametrize("facts", [
+    {"kernel_release": WSL_KERNEL},
+    {"environ": {"WSL_DISTRO_NAME": "Ubuntu-24.04"}},
+    {"environ": {"WSL_INTEROP": "/run/WSL/8_interop"}},
+])
+def test_wsl_on_x86_64_is_refused_with_the_cell_named(facts):
+    report = linux(machine="x86_64", **facts)
+    assert report["wsl"] is True and report["label"] == "ubuntu2404-x86_64-py311"
+    assert report["cell_id"] is None and "WSL" in report["refusal"]
+    assert cell.acceptance(report, profile="lexical")["reason"] == "cell_not_retained"
 
 
 def test_report_fields_of_a_linux_cell():
@@ -211,9 +261,13 @@ def test_an_unmatched_label_never_spells_a_retained_identifier():
 def test_the_decision_is_an_explicit_fact_table_for_every_retained_cell():
     assert tuple(cell._CELL_FACTS) == cell.RETAINED_CELLS
     assert cell._CELL_FACTS["ubuntu2404-arm64-py311"] == {
-        "os": "linux", "distribution_id": "ubuntu", "version_id": "24.04", "python": (3, 11)}
+        "os": "linux", "arch": "arm64", "distribution_id": "ubuntu", "version_id": "24.04", "python": (3, 11)}
+    assert cell._CELL_FACTS["ubuntu2404-x86_64-py311"] == {
+        "os": "linux", "arch": "x86_64", "distribution_id": "ubuntu", "version_id": "24.04", "python": (3, 11)}
     for minor in (11, 12, 13):
-        assert cell._CELL_FACTS[f"macos-arm64-py3{minor}"] == {"os": "darwin", "python": (3, minor)}
+        assert cell._CELL_FACTS[f"macos-arm64-py3{minor}"] == {"os": "darwin", "arch": "arm64", "python": (3, minor)}
+    # Every cell names its architecture: no cell is reachable from an unknown machine.
+    assert all(facts["arch"] in cell.ARCH_MACHINES for facts in cell._CELL_FACTS.values())
     assert simulate(python_version=(4, 11, 0))["cell_id"] is None  # py411 is not 3.11
     assert simulate(python_version=(31, 1, 0))["cell_id"] is None  # nor would a glued "311" be
 
@@ -287,13 +341,15 @@ def test_all_retained_cells_embed_attested_lexical_locks_and_semantic_stays_refe
         assert lock["catalog"] == str(qualified_runtime.CATALOGS[profile])
         assert lock["constraints"] == str(qualified_runtime.CONSTRAINTS[profile])
         assert lock["profile_id"] == qualified_runtime.EXPECTED_PROFILE_IDS[(profile, "macos-arm64-py311")]
-    for cell_id in ("macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"):
+    for cell_id in ("macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311"):
         lock = qualified_runtime.cell_lock(cell_id, profile="lexical")
         assert lock is not None and lock["profile_id"] == f"lexical-{cell_id}-v1"
         assert Path(lock["catalog"]).is_file() and Path(lock["constraints"]).is_file() and Path(lock["manifest"]).is_file()
         assert qualified_runtime.cell_lock(cell_id, profile="semantic") is None
     assert qualified_runtime.cell_lock("ubuntu2404-arm64-py312", profile="lexical") is None
     assert qualified_runtime.cell_lock("ubuntu2404-arm64-py312", profile="semantic") is None
+    assert qualified_runtime.cell_lock("ubuntu2404-x86_64-py312", profile="lexical") is None
+    assert qualified_runtime.cell_lock("macos-x86_64-py311", profile="lexical") is None
 
 
 def test_a_lock_counts_only_if_catalog_constraints_and_manifest_agree_for_the_cell(tmp_path, monkeypatch):
@@ -357,7 +413,8 @@ def test_the_reference_cell_is_accepted_for_both_profiles(profile):
     assert verdict["cell_id"] == "macos-arm64-py311" and Path(verdict["lock"]["catalog"]).is_file()
 
 
-@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"])
+@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311",
+                                     "ubuntu2404-x86_64-py311"])
 def test_a_retained_cell_without_embedded_lock_is_refused_without_false_promise(cell_id, monkeypatch):
     monkeypatch.setattr(qualified_runtime, "CELL_LOCKS",
                         {k: v for k, v in qualified_runtime.CELL_LOCKS.items() if k != ("lexical", cell_id)})
@@ -368,7 +425,8 @@ def test_a_retained_cell_without_embedded_lock_is_refused_without_false_promise(
     assert "supported" not in verdict["message"].lower()
 
 
-@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"])
+@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311",
+                                     "ubuntu2404-x86_64-py311"])
 def test_the_semantic_profile_stays_on_the_reference_cell_even_with_a_lock(cell_id):
     def every_lock(found, *, profile):
         return {"catalog": "x", "constraints": "y", "profile_id": f"{profile}-{found}-v1"}
@@ -377,6 +435,14 @@ def test_the_semantic_profile_stays_on_the_reference_cell_even_with_a_lock(cell_
     assert verdict["ok"] is False and verdict["reason"] == "profile_not_qualified_on_cell"
     assert "macos-arm64-py311" in verdict["message"] and "--profile lexical" in verdict["message"]
     assert cell.acceptance(report, profile="lexical", lock=every_lock)["ok"] is True
+
+
+@pytest.mark.parametrize("cell_id", ["ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311"])
+def test_each_linux_cell_is_accepted_with_its_own_embedded_lock_only(cell_id):
+    verdict = cell.acceptance(RETAINED[cell_id](), profile="lexical")
+    assert verdict["ok"] is True and verdict["lock"]["profile_id"] == f"lexical-{cell_id}-v1"
+    assert Path(verdict["lock"]["manifest"]).name == f"qualified_runtime_manifest_lexical_{cell_id}_v1.json"
+    assert cell.acceptance(RETAINED[cell_id](), profile="semantic")["reason"] == "profile_not_qualified_on_cell"
 
 
 @pytest.mark.parametrize("label", sorted(NOT_RETAINED))
@@ -416,7 +482,8 @@ def test_quickstart_accepts_the_reference_cell_and_reports_it(c, monkeypatch, pr
     assert plan["cell_acceptance"]["ok"] is True
 
 
-@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"])
+@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311",
+                                     "ubuntu2404-x86_64-py311"])
 def test_quickstart_refuses_a_retained_cell_whose_lock_is_not_embedded(c, monkeypatch, cell_id):
     as_cell(monkeypatch, RETAINED[cell_id]())
     monkeypatch.setattr(qualified_runtime, "CELL_LOCKS",
@@ -488,7 +555,7 @@ def linux_guard(monkeypatch, *, report=None, free=20_000_000_000, locked=True):
         lock_everything(monkeypatch)
     else:
         monkeypatch.setattr(qualified_runtime, "CELL_LOCKS",
-                            {k: v for k, v in qualified_runtime.CELL_LOCKS.items() if k[1] != "ubuntu2404-arm64-py311"})
+                            {k: v for k, v in qualified_runtime.CELL_LOCKS.items() if not k[1].startswith("ubuntu2404-")})
     seen = SimpleNamespace(statvfs=[])
 
     def free_bytes(path):
@@ -526,9 +593,10 @@ def test_statvfs_free_bytes_counts_blocks_available_to_the_user(tmp_path, monkey
     assert abs(storage.statvfs_free_bytes(tmp_path) - real.f_bavail * real.f_frsize) < 1024 ** 3
 
 
-def test_linux_guard_passes_on_the_retained_cell_with_its_lock(tmp_path, monkeypatch):
+@pytest.mark.parametrize("machine", ["aarch64", "x86_64"])
+def test_linux_guard_passes_on_the_retained_cell_with_its_lock(tmp_path, monkeypatch, machine):
     meminfo(tmp_path, monkeypatch)
-    seen = linux_guard(monkeypatch)
+    seen = linux_guard(monkeypatch, report=linux(machine=machine))
     provision.guard(tmp_path / "not" / "yet" / "created")
     assert seen.statvfs == [tmp_path]  # nearest existing parent, measured through os.statvfs
 
@@ -578,16 +646,19 @@ def test_linux_guard_refuses_when_swap_cannot_be_measured(tmp_path, monkeypatch)
         provision.guard(tmp_path)
 
 
-def test_linux_guard_refuses_the_retained_cell_until_its_lock_is_embedded(tmp_path, monkeypatch):
+@pytest.mark.parametrize("machine,cell_id", [("aarch64", "ubuntu2404-arm64-py311"), ("x86_64", "ubuntu2404-x86_64-py311")])
+def test_linux_guard_refuses_the_retained_cell_until_its_lock_is_embedded(tmp_path, monkeypatch, machine, cell_id):
     meminfo(tmp_path, monkeypatch)
-    linux_guard(monkeypatch, locked=False)
-    with pytest.raises(provision.ProvisionError, match="no qualified lock embedded for cell ubuntu2404-arm64-py311"):
+    linux_guard(monkeypatch, report=linux(machine=machine), locked=False)
+    with pytest.raises(provision.ProvisionError, match=f"no qualified lock embedded for cell {cell_id}"):
         provision.guard(tmp_path)
 
 
 @pytest.mark.parametrize("report", [
-    lambda: linux(python=(3, 12, 16)), lambda: linux(machine="x86_64"), lambda: linux(os_release=DEBIAN_12),
-    lambda: linux(kernel_release=WSL_KERNEL)])
+    lambda: linux(python=(3, 12, 16)), lambda: linux(machine="x86_64", python=(3, 12, 16)),
+    lambda: linux(machine="i686"), lambda: linux(machine="x86_64", os_release=UBUNTU_2204),
+    lambda: linux(os_release=DEBIAN_12), lambda: linux(kernel_release=WSL_KERNEL),
+    lambda: linux(machine="x86_64", kernel_release=WSL_KERNEL)])
 def test_linux_guard_refuses_every_non_retained_linux(tmp_path, monkeypatch, report):
     meminfo(tmp_path, monkeypatch)
     linux_guard(monkeypatch, report=report())
