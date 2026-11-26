@@ -66,10 +66,11 @@ it reports `non testé` ("not tested").
 downloaded for you, `python3` and `bash`:
 
 ```bash
-bash -o pipefail -c "unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh"
+env -u BASH_ENV bash -o pipefail -c "unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh"
 ```
 
-Why this form: `unset SSLKEYLOGFILE` stops `curl` from writing a TLS key log (the one environment variable its manual
+Why this form: `env -u BASH_ENV` keeps `bash` from running a startup file named by `BASH_ENV` before anything
+else, `unset SSLKEYLOGFILE` stops `curl` from writing a TLS key log (the one environment variable its manual
 documents as writing a file), `-q` makes it ignore any `curlrc`, `--proto`/`--proto-redir` allow HTTPS only, for the
 request and its redirects, and `pipefail` turns a failed download into a failure (a bare `curl … | sh` reports success when
 `curl` fails). A truncated `install.sh` runs nothing and exits non-zero: its first lines set a guard that only its

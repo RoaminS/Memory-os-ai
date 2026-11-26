@@ -43,7 +43,7 @@ the quickstart preview of the venv) is checked after the answer, before anything
 ONE question, read from ``/dev/tty`` (``[y/N]``, default No; anything but y/yes is No; without a terminal: preview
 only). The bootstrap writes nothing before the answer: nothing in HOME, the store or any client configuration, and no
 service (``install.sh``, when it launches it, has only written the two verified files of its private temporary
-directory, removed at exit). After ``y``: the plan is recomputed and must be the announced one; the venv is created
+directory, and the xcrun cache that Apple's ``/usr/bin/python3`` launcher may create there, removed at exit). After ``y``: the plan is recomputed and must be the announced one; the venv is created
 as by ``--apply``; the quickstart preview run from the venv must match the announcement (profile, cell, interpreter,
 clients and paths, service argv/environment/definition/state, store, ops directory, token, no download, no blocker),
 otherwise it stops fail-closed; its ``plan_digest`` is recomputed here and handed to ``quickstart --apply

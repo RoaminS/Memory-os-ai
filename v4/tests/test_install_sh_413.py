@@ -28,7 +28,7 @@ SHELLS = [shell for shell in ("/bin/sh", "/bin/dash") if os.path.exists(shell)]
 BASE_LINE = re.compile(r'^  RELEASE_BASE="[^"\n]*"$', re.M)
 PROTO_LINE = re.compile(r'^  CURL_PROTO="[^"\n]*"$', re.M)
 README = (REPO / "README.md").read_text()
-ONE_LINER = ("bash -o pipefail -c \"unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' "
+ONE_LINER = ("env -u BASH_ENV bash -o pipefail -c \"unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' "
              "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh\"")
 pytestmark = pytest.mark.skipif(MINOR not in ((3, 11), (3, 12), (3, 13)), reason="needs a Python of a retained cell")
 
@@ -222,7 +222,7 @@ def test_the_readme_one_liner_fails_when_the_download_fails(tmp_path):
     bash = shutil.which("bash", path="/bin:/usr/bin")
     if not bash:
         pytest.skip("no bash")
-    inner = ONE_LINER[len('bash -o pipefail -c "'):-1].replace(
+    inner = ONE_LINER[len('env -u BASH_ENV bash -o pipefail -c "'):-1].replace(
         "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh", f"file://{tmp_path}/absent.sh")
     environ = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
     for protocols, label in (("'=https'", "shipped: file refused"), ("'=https,file'", "file allowed, absent")):
@@ -480,7 +480,7 @@ def test_the_readme_command_runs_its_first_curl_without_sslkeylogfile(tmp_path):
     log = tmp_path / "curl-env.log"
     _recording_curl(shims, log)
     (tmp_path / "install.sh").write_text("exit 0\n")
-    inner = ONE_LINER[len('bash -o pipefail -c "'):-1].replace(
+    inner = ONE_LINER[len('env -u BASH_ENV bash -o pipefail -c "'):-1].replace(
         "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh",
         f"file://{tmp_path}/install.sh").replace("'=https'", "'=https,file'")
     keys = tmp_path / "home" / "tls.keys"
@@ -597,3 +597,29 @@ def test_apple_python3_launcher_honours_the_redirect_for_real(tmp_path):
         if unchanged[-1]:
             break
     assert any(unchanged), "the default xcrun cache was written"
+
+
+# ---------------------------------------------------------------- Codex r6: BASH_ENV before the protections
+
+def test_the_readme_command_never_runs_bash_env(tmp_path):
+    """``bash -c`` reads $BASH_ENV before anything else: the published command unsets it first (env -u BASH_ENV)."""
+    if not shutil.which("bash", path="/bin:/usr/bin"):
+        pytest.skip("no bash")
+    assert ONE_LINER in README and ONE_LINER.startswith("env -u BASH_ENV bash ")
+    home = tmp_path / "home"
+    home.mkdir()
+    startup = tmp_path / "bash-env.sh"
+    startup.write_text(f': > "{home}/bash-start.log"\n')
+    (tmp_path / "install.sh").write_text("exit 0\n")
+    command = ONE_LINER.replace("https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh",
+                                f"file://{tmp_path}/install.sh").replace("'=https'", "'=https,file'")
+    environ = {"HOME": str(home), "PATH": "/usr/bin:/bin", "BASH_ENV": str(startup)}
+    done = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, env=environ, timeout=60,
+                          start_new_session=True)
+    assert done.returncode == 0, done.stderr
+    assert not (home / "bash-start.log").exists() and sorted(home.iterdir()) == []
+    # the test is effective: the same command without the prefix does run BASH_ENV
+    bare = command[len("env -u BASH_ENV "):]
+    subprocess.run(["/bin/sh", "-c", bare], capture_output=True, text=True, env=environ, timeout=60,
+                   start_new_session=True)
+    assert (home / "bash-start.log").exists()
