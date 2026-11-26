@@ -38,10 +38,20 @@ def test_implicit_receipts_bounded_without_results_and_explicit_replay_retained(
         assert stats["explicit"] == 1 and stats["implicit"] == 3 and stats["json_bytes"] > 10000
         maximum = engine.store._connection.execute("SELECT max(sequence) FROM request_receipts").fetchone()[0]
         assert maximum == 8 and engine.store.check_integrity()
-        assert scan_store(tmp_path)["receipts"]["json_bytes"] == stats["json_bytes"]
-        monkeypatch.setenv("MEMORY_V4_DIR", str(tmp_path))
-        assert main(["doctor", "--store-only"]) == 0
-        assert json.loads(capsys.readouterr().out)["receipts"]["explicit"] == 1
+    # 4.1.3: diagnostics are separate processes; a live read inside the engine process is refused. status()
+    # itself records an internal receipt, so the scan is compared with the closed store, read independently.
+    from memory_os_v4.sqlite_stats import receipt_statistics
+    truth = sqlite3.connect((tmp_path / "store.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)
+    try:
+        expected_receipts = receipt_statistics(truth, tmp_path / "store.sqlite3")
+    finally:
+        truth.close()
+    scanned = scan_store(tmp_path)["receipts"]
+    assert scanned["json_bytes"] == expected_receipts["json_bytes"] > 10000
+    assert scanned["explicit"] == 1 and scanned["implicit"] <= 3
+    monkeypatch.setenv("MEMORY_V4_DIR", str(tmp_path))
+    assert main(["doctor", "--store-only"]) == 0
+    assert json.loads(capsys.readouterr().out)["receipts"]["explicit"] == 1
 
 
 def test_retention_is_rolled_back_with_failed_final_receipt(tmp_path):

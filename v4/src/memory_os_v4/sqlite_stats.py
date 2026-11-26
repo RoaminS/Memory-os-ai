@@ -49,7 +49,7 @@ def scan_sqlite(path):
     if path.is_symlink() or path.stat().st_nlink != 1:
         raise ValueError("Linked SQLite database refused")
     path = path.resolve()
-    from .sqlite_store import open_readonly   # 4.1.3: never creates -wal/-shm, works on a read-only volume
+    from .sqlite_store import open_readonly   # 4.1.3: lock-protected offline read; live read with a declared window
 
     with open_readonly(path) as connection:
         return _scan(connection, path, APPLICATION_ID, SCHEMA_VERSION)

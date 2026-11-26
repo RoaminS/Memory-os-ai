@@ -89,7 +89,7 @@ def explicit_chain_end(item_id: str, records: dict[str, dict], *, now: float | N
 def _sqlite_records(db: Path, ids: set[str]) -> dict[str, dict]:
     """Current records of ``ids`` and of their successor chains: one read-only snapshot (``mode=ro``)."""
 
-    from ..sqlite_store import open_readonly   # 4.1.3: never creates -wal/-shm, works on a read-only volume
+    from ..sqlite_store import open_readonly   # 4.1.3: lock-protected offline read; live read with a declared window
 
     with open_readonly(db.resolve()) as connection:
         connection.execute("PRAGMA query_only=ON")
@@ -114,8 +114,12 @@ def _sqlite_records(db: Path, ids: set[str]) -> dict[str, dict]:
         return out
 
 
-def explicit_supersessions(store: Path, ids: list[str], *, now: float | None = None) -> tuple[set[str], set[str]]:
-    """(explicit, explicit created in the last 24 h) among ``ids``; never raises: unknown = review required."""
+def explicit_supersessions(store: Path, ids: list[str], *, now: float | None = None,
+                           diagnostics: list | None = None) -> tuple[set[str], set[str]]:
+    """(explicit, explicit created in the last 24 h) among ``ids``; never raises: unknown = review required.
+
+    When the records cannot be read, the reason (a ``ReadOnlyStoreError`` code, else the exception type) is
+    appended to ``diagnostics`` so that the caller can name it instead of absorbing it."""
     if not ids:
         return set(), set()
     now = time.time() if now is None else now
@@ -131,7 +135,9 @@ def explicit_supersessions(store: Path, ids: list[str], *, now: float | None = N
                     continue
                 if isinstance(d, dict) and isinstance(d.get("id"), str):
                     records[d["id"]] = d
-    except Exception:
+    except Exception as exc:
+        if diagnostics is not None:
+            diagnostics.append(getattr(exc, "code", None) or type(exc).__name__)
         return set(), set()
     explicit, recent = set(), set()
     for i in ids:
@@ -321,7 +327,11 @@ def report(settings: OpsSettings | None = None, confined: bool | None = None) ->
         anomalies.append(f"supersession baseline unreadable: {type(exc).__name__}")
     r["superseded_total"] = len(sup)
     unknown = [i for i in sup if i not in known]
-    explicit, recent = explicit_supersessions(settings.store_dir, unknown)
+    unreadable: list = []
+    explicit, recent = explicit_supersessions(settings.store_dir, unknown, diagnostics=unreadable)
+    if unreadable:
+        info.append(f"supersession records unreadable ({unreadable[0]}): every new supersession is treated as "
+                    "unreviewed; retry")
     r["superseded_explicit_24h"] = len(recent)
     if len(recent) > EXPLICIT_DAILY_MAX:
         anomalies.append(

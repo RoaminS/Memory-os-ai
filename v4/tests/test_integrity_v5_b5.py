@@ -164,6 +164,7 @@ def test_journal_stats_alert_and_health_render(memory,monkeypatch,tmp_path):
     monkeypatch.setattr(health,'last_drill',lambda settings:None)
     from memory_os_v4.ops import storage
     monkeypatch.setattr(storage,'margin',lambda settings:{'ok':True,'volumes':{'source':{'free_bytes':20_000_000_000}}})
+    m.close()   # 4.1.3: health is a separate process; a live read inside the engine process is refused
     r=health.report(s)
     assert r['alerts'][0]['category']=='journal_size'
     assert 'journal_size' in health.render(r)

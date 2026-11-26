@@ -6,6 +6,8 @@ read-only directory or volume.
 """
 import os
 import sqlite3
+import subprocess
+import sys
 
 import pytest
 
@@ -34,6 +36,55 @@ def stopped_store(tmp_path):
 
 def listing(directory):
     return sorted((p.name, p.stat().st_size) for p in directory.iterdir())
+
+
+WRITER = """
+import sqlite3, sys
+from pathlib import Path
+from memory_os_v4.writer_lock import WriterLock
+data = Path(sys.argv[1])
+lease = WriterLock(data)                      # the engine's real lease, held by ANOTHER process
+live = sqlite3.connect(data / "store.sqlite3")
+live.execute("PRAGMA journal_mode=WAL")
+live.execute("SELECT count(*) FROM items").fetchone()
+print("ready", flush=True)
+for line in sys.stdin:
+    command = line.strip()
+    if command == "close-sqlite":
+        live.close()                          # last connection: SQLite deletes -wal/-shm
+    elif command == "release":
+        lease.close()
+    print("ok", flush=True)
+"""
+
+
+class ExternalWriter:
+    """A live writer (lease + WAL connection) in a separate process, as the service is for a diagnostic."""
+
+    def __init__(self, data):
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+        self.process = subprocess.Popen([sys.executable, "-c", WRITER, str(data)], stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE, text=True, env=env)
+        assert self.process.stdout.readline().strip() == "ready"
+
+    def send(self, command):
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+        assert self.process.stdout.readline().strip() == "ok"
+
+    def stop(self):
+        if self.process.poll() is None:
+            self.process.stdin.close()
+            self.process.wait(timeout=30)
+
+
+@pytest.fixture
+def external_writer(stopped_store):
+    data, _ = stopped_store
+    writer = ExternalWriter(data)
+    assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
+    yield data, writer
+    writer.stop()
 
 
 def test_stopped_store_is_read_without_creating_side_files(stopped_store):
@@ -73,14 +124,25 @@ def test_old_mode_ro_open_would_have_written_and_failed(stopped_store):
     assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
 
 
-def test_running_store_is_read_with_its_side_files(tmp_path):
+def test_running_store_is_read_with_its_side_files(external_writer):
+    data, _ = external_writer
+    before = {p.name for p in data.iterdir()}
+    assert scan_sqlite(data / "store.sqlite3")["live_total"] >= 1
+    assert {p.name for p in data.iterdir()} == before
+    assert sqlite_store._held_sides == {}                       # descriptors released with the last reader
+
+
+def test_a_live_read_inside_the_engine_process_is_refused(tmp_path):
+    """Closing a descriptor drops every fcntl lock of the process on that file, SQLite's included: a diagnostic
+    never reads around an engine running in its own process."""
     data = tmp_path / "store"
     with MemoryV4(config=Config(data_dir=str(data), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)) as m:
         m.add_facts([{"text": "Synthetic live fact."}], project="P")
-        assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
-        before = {p.name for p in data.iterdir()}
-        assert scan_sqlite(data / "store.sqlite3")["live_total"] >= 1
-        assert {p.name for p in data.iterdir()} == before
+        before = listing(data)
+        with pytest.raises(ReadOnlyStoreError) as caught:
+            with open_readonly(data / "store.sqlite3"):
+                pass
+        assert caught.value.code == "readonly_open_in_writer_process" and listing(data) == before
 
 
 def test_a_writer_holding_the_lock_makes_the_offline_read_refuse(stopped_store):
@@ -109,38 +171,29 @@ def no_reader_deletes(monkeypatch):
 
 
 @pytest.mark.parametrize("lease_released", [True, False])
-def test_writer_closing_during_the_open_is_detected_and_nothing_is_deleted(stopped_store, monkeypatch,
-                                                                           lease_released):
-    """The declared residual window: a live writer (lease + WAL connection) closes SQLite between the reader's
-    look and its open. lease_released=False is Codex's interleaving: SQLite closed, writer.lock still held."""
-    data, _ = stopped_store
+def test_writer_closing_during_the_open_is_detected_and_nothing_is_deleted(external_writer, monkeypatch,
+                                                                           no_reader_deletes, lease_released):
+    """The declared residual window: the live writer (another process) closes SQLite between the reader's look
+    and its open. lease_released=False is Codex's interleaving: SQLite closed, writer.lock still held."""
+    data, writer = external_writer
     db = data / "store.sqlite3"
-    writer = WriterLock(data)
-    live = sqlite3.connect(db)
-    live.execute("PRAGMA journal_mode=WAL")
-    live.execute("SELECT count(*) FROM items").fetchone()
-    assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
     real_connect = sqlite3.connect
 
     def writer_closes_then_connect(*args, **kwargs):
-        live.close()                                            # last connection: SQLite deletes -wal/-shm
+        writer.send("close-sqlite")
         if lease_released:
-            writer.close()                                      # then the lease is released (engine order)
-        assert not any(p.name.endswith(("-wal", "-shm")) for p in data.iterdir())
+            writer.send("release")                              # then the lease is released (engine order)
+        assert not any(p.name.endswith(("-wal", "-shm")) and p.exists() for p in data.iterdir())
         return real_connect(*args, **kwargs)                    # mode=ro now RECREATES them
 
     monkeypatch.setattr(sqlite_store.sqlite3, "connect", writer_closes_then_connect)
-    import pathlib
-    def forbidden(*args, **kwargs):
-        raise AssertionError("a reader deleted a file")
-    monkeypatch.setattr(sqlite_store.os, "unlink", forbidden)
-    monkeypatch.setattr(pathlib.Path, "unlink", forbidden)
     with pytest.raises(ReadOnlyStoreError) as caught:
         with open_readonly(db):
             pass
     assert caught.value.code == "store_side_files_recreated"     # reported, never silent
     monkeypatch.undo()
-    writer.close()
+    writer.stop()
+    assert sqlite_store._held_sides == {}
     # the declared residue: two side files without data, left in place (never deleted by a reader)
     assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
     assert (data / "store.sqlite3-wal").stat().st_size == 0
@@ -150,16 +203,126 @@ def test_writer_closing_during_the_open_is_detected_and_nothing_is_deleted(stopp
         assert connection.execute("SELECT count(*) FROM items").fetchone()[0] >= 2
 
 
-def test_two_concurrent_live_readers_never_delete_anything(tmp_path, no_reader_deletes):
-    data = tmp_path / "store"
-    with MemoryV4(config=Config(data_dir=str(data), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)) as m:
-        m.add_facts([{"text": "Synthetic live fact."}], project="P")
-        before = {p.name for p in data.iterdir()}
-        with open_readonly(data / "store.sqlite3") as first:
-            with open_readonly(data / "store.sqlite3") as second:
-                assert first.execute("SELECT count(*) FROM items").fetchone() == \
-                    second.execute("SELECT count(*) FROM items").fetchone()
-        assert {p.name for p in data.iterdir()} == before
+def test_a_recycled_inode_is_still_detected(external_writer, monkeypatch, no_reader_deletes):
+    """Codex WAL r3 item 1: a recreated file reusing the old (dev, ino) must not pass. The held descriptors keep
+    the old inodes allocated; this simulates the reuse anyway (lstat reports the old identity) and relies on the
+    held file being unlinked (st_nlink == 0)."""
+    data, writer = external_writer
+    db = data / "store.sqlite3"
+    real_connect, real_lstat = sqlite3.connect, os.lstat
+
+    def same_identity_lstat(path, *args, **kwargs):
+        entry = sqlite_store._held_sides.get(str(db))
+        for fd, suffix in zip(entry[1:] if entry else (), ("-wal", "-shm")):
+            if os.fspath(path) == str(db) + suffix:
+                return os.fstat(fd)                             # the OLD identity, as after an inode reuse
+        return real_lstat(path, *args, **kwargs)
+
+    def writer_closes_then_connect(*args, **kwargs):
+        writer.send("close-sqlite")
+        monkeypatch.setattr(sqlite_store.os, "lstat", same_identity_lstat)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_store.sqlite3, "connect", writer_closes_then_connect)
+    with pytest.raises(ReadOnlyStoreError) as caught:
+        with open_readonly(db):
+            pass
+    monkeypatch.undo()
+    assert caught.value.code == "store_side_files_recreated"
+
+
+def test_a_failing_first_read_after_a_recreation_names_the_recreation(external_writer, monkeypatch,
+                                                                       no_reader_deletes):
+    """Codex WAL r3 item 2: the recreation is reported on the error path too, with the SQLite error as cause."""
+    data, writer = external_writer
+    db = data / "store.sqlite3"
+    real_connect = sqlite3.connect
+
+    class FailingFirstRead:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, *args):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def close(self):
+            self.connection.close()
+
+    def writer_closes_then_connect(*args, **kwargs):
+        writer.send("close-sqlite")
+        return FailingFirstRead(real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite_store.sqlite3, "connect", writer_closes_then_connect)
+    with pytest.raises(ReadOnlyStoreError) as caught:
+        with open_readonly(db):
+            pass
+    monkeypatch.undo()
+    assert caught.value.code == "store_side_files_recreated"
+    assert isinstance(caught.value.__cause__, sqlite3.OperationalError)
+    assert sqlite_store._held_sides == {}
+
+
+def test_a_failing_first_read_without_recreation_is_not_relabelled(external_writer, monkeypatch):
+    data, _ = external_writer
+    real_connect = sqlite3.connect
+
+    class FailingFirstRead:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, *args):
+            raise sqlite3.DatabaseError("file is not a database")
+
+        def close(self):
+            self.connection.close()
+
+    monkeypatch.setattr(sqlite_store.sqlite3, "connect", lambda *a, **k: FailingFirstRead(real_connect(*a, **k)))
+    with pytest.raises(sqlite3.DatabaseError):
+        with open_readonly(data / "store.sqlite3"):
+            pass
+
+
+def test_two_readers_interleaved_with_the_writer_shutdown(external_writer, no_reader_deletes):
+    """The held descriptors are shared: the first reader to finish must not close them (closing would drop the
+    second reader's SQLite locks on -shm); they are closed after the LAST connection."""
+    data, writer = external_writer
+    db = data / "store.sqlite3"
+    first_context = open_readonly(db)
+    first = first_context.__enter__()
+    with open_readonly(db) as second:
+        assert sqlite_store._held_sides[str(db)][0] == 2
+        writer.send("close-sqlite")                             # the service stops while both readers read
+        writer.send("release")
+        first_context.__exit__(None, None, None)
+        assert sqlite_store._held_sides[str(db)][0] == 1        # still held for the second reader
+        assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
+    assert sqlite_store._held_sides == {}
+    del first
+
+
+def test_two_concurrent_live_readers_never_delete_anything(external_writer, no_reader_deletes):
+    data, _ = external_writer
+    before = {p.name for p in data.iterdir()}
+    with open_readonly(data / "store.sqlite3") as first:
+        with open_readonly(data / "store.sqlite3") as second:
+            assert first.execute("SELECT count(*) FROM items").fetchone() == \
+                second.execute("SELECT count(*) FROM items").fetchone()
+    assert {p.name for p in data.iterdir()} == before
+
+
+def test_health_names_an_unreadable_supersession_check(stopped_store, monkeypatch):
+    """Codex WAL r3 item 2: explicit_supersessions no longer absorbs the refusal code."""
+    from memory_os_v4.ops import health
+    data, item = stopped_store
+
+    def recreated(*args, **kwargs):
+        raise ReadOnlyStoreError("store_side_files_recreated", "synthetic")
+
+    monkeypatch.setattr(health, "_sqlite_records", recreated)
+    diagnostics = []
+    assert health.explicit_supersessions(data, [item], diagnostics=diagnostics) == (set(), set())
+    assert diagnostics == ["store_side_files_recreated"]
+    assert health.explicit_supersessions(data, [item]) == (set(), set())   # unchanged without the list
 
 
 def test_doctor_run_does_not_crash_on_sqlite_errors(stopped_store, monkeypatch, tmp_path):
