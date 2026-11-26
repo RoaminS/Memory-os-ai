@@ -195,11 +195,16 @@ SERVICE_LABEL, SERVICE_PORT = "local.memory-os-v4", 8765
 SERVICE_URL = f"http://127.0.0.1:{SERVICE_PORT}/mcp/"
 READY_URL = f"http://127.0.0.1:{SERVICE_PORT}/ready"
 TOKEN_SUBPATH, STORE_SUBPATH, OPS_SUBPATH = ".config/memory-os/http.token", ".memory-os-v4", ".local/state/memory-os"
+# quickstart.settings_for_install: a NEW SQLite install without MEMORY_V4_DIR, without a service definition and
+# without the legacy directory gets this store instead of the legacy ``STORE_SUBPATH`` (the quickstart run from the
+# venv never receives MEMORY_V4_DIR; an existing definition is refused here as an existing installation).
+NEW_STORE_SUBPATH = ".local/share/memory-os/store"
+JOURNAL_SUBPATH = ".local/state/memory-os/quickstart"
 # Actions of the quickstart preview that write a client entry as announced ("unchanged" writes nothing).
 WRITING_ACTIONS = ("create", "replace", "unchanged")
 CONFIRM_PROMPT = "Install Memory OS AI with exactly this plan? [y/N] "
 # Same digest as ``ops/quickstart.plan_digest`` (a test compares them on a real plan).
-PLAN_DIGEST_VERSION = 1
+PLAN_DIGEST_VERSION = 2
 PLAN_DIGEST_CLIENT_KEYS = ("client", "path", "file_sha256", "action", "desired_sha256", "current_class", "ownership")
 PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "manager", "plist", "unit",
                             "loaded_state")
@@ -841,7 +846,8 @@ def uv_commands(*, uv, venv, route, base_python, cell_id, requirements, wheelhou
 
 
 def quickstart_command(venv, profile, clients, *, apply=False, download_approved=True, expect_plan=None) -> list:
-    argv = [os.path.join(venv, "bin", "python"), "-I", "-m", MODULE + ".ops.cli", "quickstart", "--profile", profile]
+    argv = [os.path.join(venv, "bin", "python"), "-I", "-B", "-m", MODULE + ".ops.cli", "quickstart", "--profile",
+            profile]
     if clients:
         argv += ["--clients", clients]
     if not apply:
@@ -1489,6 +1495,12 @@ def service_definition(home, *, manager_kind, environ) -> tuple:
     return str(path), None
 
 
+def store_directory(home) -> str:
+    """The store quickstart selects for a new install run from the venv (``settings_for_install``, same rule)."""
+    legacy = str(PurePosixPath(str(home)) / STORE_SUBPATH)
+    return legacy if os.path.exists(legacy) else str(PurePosixPath(str(home)) / NEW_STORE_SUBPATH)
+
+
 def interactive_extras(options, *, host, environ, which) -> dict:
     """Everything the one-command install writes beyond the venv, and its own refusals (read-only)."""
     home = environ.get("HOME") or os.path.expanduser("~")
@@ -1518,15 +1530,19 @@ def interactive_extras(options, *, host, environ, which) -> dict:
         if unsafe:
             blockers.append(("service_definition_unavailable", f"service_definition_unavailable: {unsafe}; nothing "
                              "written"))
-    store = str(PurePosixPath(home) / STORE_SUBPATH)
+    store = store_directory(home)
     token = str(PurePosixPath(home) / TOKEN_SUBPATH)
-    try:
-        store_used = os.path.isdir(store) and not os.path.islink(store) and bool(os.listdir(store))
-    except OSError:
-        store_used = True
-    existing = [item for item, present in ((store + " (non-empty store)", store_used or os.path.islink(store)),
-                                           (str(definition) + " (service definition)",
-                                            bool(definition) and os.path.lexists(definition))) if present]
+
+    def used(path):
+        try:
+            return os.path.islink(path) or (os.path.isdir(path) and bool(os.listdir(path))) or (
+                os.path.lexists(path) and not os.path.isdir(path))
+        except OSError:
+            return True
+    existing = [f"{path} (store already used)" for path in dict.fromkeys(
+        [store, str(PurePosixPath(home) / STORE_SUBPATH), str(PurePosixPath(home) / NEW_STORE_SUBPATH)]) if used(path)]
+    if definition and os.path.lexists(definition):
+        existing.append(f"{definition} (service definition)")
     if existing:
         blockers.append(("existing_installation", "existing_installation: " + ", ".join(existing) + " already "
                          "exist; the one-command install is for a new installation only (use quickstart from the "
@@ -1546,7 +1562,8 @@ def interactive_extras(options, *, host, environ, which) -> dict:
         "clients": clients["selected"], "excluded_clients": clients["excluded"],
         "service": {"label": SERVICE_LABEL, "port": SERVICE_PORT, "url": SERVICE_URL, "manager": manager.get("kind"),
                     "definition": definition, "listens": "127.0.0.1 only"},
-        "token": {"path": token, "state": "exists: validated and reused, never printed" if os.path.lexists(token)
+        "token": {"path": token, "exists": os.path.lexists(token),
+                  "state": "exists: validated and reused, never printed" if os.path.lexists(token)
                   else "created (0600), never printed"},
         "store": store, "ops_dir": str(PurePosixPath(home) / OPS_SUBPATH),
         "resource_downloads_bytes": 0, "backend": "sqlite", "python": None,
@@ -1566,8 +1583,8 @@ def quickstart_plan_digest(plan) -> str | None:
     if not all(isinstance(client, dict) for client in clients):
         return None
     body = {"version": PLAN_DIGEST_VERSION, "profile": plan.get("profile"), "backend": plan.get("backend"),
-            "python": plan.get("python"), "port": plan.get("port"),
-            "token_file": (plan.get("token") or {}).get("path") if isinstance(plan.get("token"), dict) else None,
+            "python": plan.get("python"), "port": plan.get("port"), "token": plan.get("token"),
+            "provision": plan.get("provision"), "write_targets": plan.get("write_targets"),
             "client_env": plan.get("client_env"),
             "cell_id": (plan.get("cell") or {}).get("cell_id") if isinstance(plan.get("cell"), dict) else None,
             "identity": plan.get("identity"), "downloads_required_bytes": plan.get("downloads_required_bytes"),
@@ -1659,6 +1676,24 @@ def compare_preview(preview, announced, *, cell_id) -> list:
         diffs.append("service environment differs on " + ", ".join(keys))
     if service.get("loaded_state") != "absent":
         diffs.append(f"service job state {service.get('loaded_state')!r} (no job was announced)")
+    token_state = (preview.get("token") or {}).get("state") if isinstance(preview.get("token"), dict) else None
+    if token_state != ("ok" if announced["token"]["exists"] else "absent"):
+        diffs.append(f"token state {token_state!r} instead of "
+                     f"{'reused (ok)' if announced['token']['exists'] else 'created (absent)'}")
+    targets = preview.get("write_targets") if isinstance(preview.get("write_targets"), dict) else {}
+    token_target = targets.get("token")
+    if (token_target is None) == announced["token"]["exists"] or (
+            token_target is not None and (token_target.get("kind") != "file" or token_target.get("mode") != 0o600
+                                          or token_target.get("nlink") != 1)):
+        diffs.append("token file identity differs from the announcement")
+    store_target = targets.get("store", "missing")
+    if store_target == "missing" or (store_target is not None and (
+            store_target.get("kind") != "directory" or store_target.get("entries") != 0)):
+        diffs.append("the store is not new and empty")
+    provision = preview.get("provision") if isinstance(preview.get("provision"), dict) else {}
+    if provision.get("ready") is not True or provision.get("download_bytes") != 0 or \
+            provision.get("resources") != ["cl100k"] or provision.get("table_source") != "embedded":
+        diffs.append("the resource plan is not the embedded table with nothing to fetch or write")
     digest = preview.get("plan_digest")
     if not isinstance(digest, str) or not HEX64.fullmatch(digest) or digest != quickstart_plan_digest(preview):
         diffs.append("plan_digest absent or not the digest of this preview")
@@ -1859,15 +1894,22 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
 
     plan, extras, planned = prepare()
     report.update(announced=extras["announced"], plan=_public(plan))
-    say(render(plan))
-    say(render_interactive(extras))
+    try:  # the question is asked only when the WHOLE preview reached its output
+        say(render(plan))
+        say(render_interactive(extras))
+        for stream in (out, sys.stdout, sys.stderr):  # visible before the question (tee, pipes)
+            stream.flush()
+    except (OSError, ValueError, AttributeError) as exc:
+        report.update(stage="refused", code="preview_output_failed",
+                      error=f"preview_output_failed: the preview could not be written out ({type(exc).__name__}); "
+                            "no question is asked; the bootstrap wrote nothing")
+        try:
+            print(report["error"], file=sys.stderr)
+        except (OSError, ValueError):
+            pass
+        return report
     if not plan["ok"]:
         return stop("refused", "preflight_refused", "preflight_refused: refused before any question; nothing written")
-    for stream in (out, sys.stdout, sys.stderr):  # the whole preview is visible before the question (tee, pipes)
-        try:
-            stream.flush()
-        except (AttributeError, OSError, ValueError):
-            pass
     tty = terminal()
     if tty is None:
         report.update(stage="no-terminal", code="no_terminal")

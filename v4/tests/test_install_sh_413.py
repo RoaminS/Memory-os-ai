@@ -46,7 +46,7 @@ def sha(data: bytes) -> str:
 class Release:
     """A HOME, a PATH of tools, a fixture release directory and a private TMPDIR, all under ``tmp_path``."""
 
-    def __init__(self, tmp_path: Path, *, bootstrap=MARKER_BOOTSTRAP, uv=True, uname=None, cell=None):
+    def __init__(self, tmp_path: Path, *, bootstrap=MARKER_BOOTSTRAP, uv=True, uname=None, cell=None, python=None):
         self.root = tmp_path
         self.machine = Machine(tmp_path)
         self.home = self.machine.home
@@ -56,9 +56,10 @@ class Release:
         self.tmpdir.mkdir()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
+        python_target = python
         python = self.bin / f"python{MINOR[0]}.{MINOR[1]}"
         answer = f'case "$*" in *memory-os-cell:*) echo memory-os-cell:{cell}; exit 0 ;; esac\n' if cell else ""
-        python.write_text(f'#!/bin/sh\n{answer}exec "{sys.executable}" "$@"\n')
+        python.write_text(f'#!/bin/sh\n{answer}exec "{python_target or sys.executable}" "$@"\n')
         python.chmod(0o755)
         self.uv_dir = self.machine.tools if uv else None  # the fake uv reads its configuration next to itself
         if uname:
@@ -80,10 +81,10 @@ class Release:
         text = BASE_LINE.sub(f'  RELEASE_BASE="file://{self.release}"', TEXT)
         return text if https_only else PROTO_LINE.sub('  CURL_PROTO="=https,file"', text)
 
-    def run(self, *args, shell="/bin/sh", cwd=None, script=None):
+    def run(self, *args, shell="/bin/sh", cwd=None, script=None, tmpdir=None):
         tools = f"{self.bin}:{self.uv_dir}" if self.uv_dir else str(self.bin)
-        environ = {"HOME": str(self.home), "PATH": f"{tools}:/usr/bin:/bin", "TMPDIR": str(self.tmpdir),
-                   "LANG": "en_US.UTF-8"}
+        environ = {"HOME": str(self.home), "PATH": f"{tools}:/usr/bin:/bin",
+                   "TMPDIR": str(self.tmpdir if tmpdir is None else tmpdir), "LANG": "en_US.UTF-8"}
         return subprocess.run([shell, "-s", "--", *args], input=self.script() if script is None else script,
                               capture_output=True, text=True,
                               env=environ, cwd=str(cwd or self.home), timeout=180, start_new_session=True)
@@ -109,7 +110,8 @@ def test_the_shipped_script_is_posix_pinned_to_its_release_and_has_no_override()
     assert "MEMORY_OS" not in code and "INSTALL_BASE" not in code
     assert not re.search(r"\|\s*(ba|z|da)?sh\b", code)          # never pipes anything into a shell
     assert "astral.sh/uv/install" not in TEXT and "pip install" not in code  # uv is never downloaded
-    assert '--interactive --uv "$UV" "$@" </dev/null' in code
+    assert '"$PY" -I -S -B "$WORK/memory_os_bootstrap.py" --interactive --uv "$UV" "$@" </dev/null' in code
+    assert '"$PY" -I -S -B -c "$CELL_PROBE"' in code       # no site, no .pth, no sitecustomize, no bytecode
     curls = [line.strip() for line in code.splitlines() if re.search(r"\bcurl -", line)]
     assert curls == ['curl -q -fsSL --proto "$CURL_PROTO" --proto-redir "$CURL_PROTO" -o "$WORK/$NAME" '
                      '"$RELEASE_BASE/$NAME" \\']                       # -q first: no curlrc
@@ -274,3 +276,59 @@ def test_without_a_terminal_the_real_bootstrap_previews_and_writes_nothing(tmp_p
         assert "No terminal (/dev/tty)" in done.stdout and "the bootstrap wrote nothing" in done.stdout
     assert tree(r.home) == home_before and list(r.tmpdir.iterdir()) == []
     assert {" ".join(call["argv"][:2]) for call in r.machine.calls()} == {"--version"}
+
+
+# ---------------------------------------------------------------- round 3: TMPDIR and the interpreter flags
+
+def _temporary(done) -> Path:
+    line = next(line for line in done.stdout.splitlines() if line.startswith("Temporary directory (removed at exit): "))
+    return Path(line.split(": ", 1)[1])
+
+
+@pytest.mark.parametrize("kind", ["inside", "symlink", "missing"])
+def test_a_tmpdir_in_home_is_never_used_before_the_answer(tmp_path, kind):
+    r = Release(tmp_path)
+    inside = r.home / "tmp"
+    inside.mkdir()
+    tmpdir = {"inside": inside, "missing": tmp_path / "absent-tmp"}.get(kind)
+    if kind == "symlink":
+        tmpdir = tmp_path / "linked-tmp"
+        tmpdir.symlink_to(inside, target_is_directory=True)
+    before = tree(r.home)
+    done = r.run(tmpdir=tmpdir)
+    assert done.returncode == 0, done.stderr
+    assert "the temporary directory is created under" in done.stdout
+    used = _temporary(done)
+    home = Path(os.path.realpath(r.home))
+    assert home not in used.parents and not used.exists()  # outside HOME, removed at exit
+    assert tree(r.home) == before and list(inside.iterdir()) == []
+    assert r.ran() is not None
+
+
+def test_an_ordinary_tmpdir_is_used_as_is(tmp_path):
+    r = Release(tmp_path)
+    done = r.run()
+    assert done.returncode == 0 and "created under" not in done.stdout
+    assert _temporary(done).parent == Path(os.path.realpath(r.tmpdir)) and list(r.tmpdir.iterdir()) == []
+
+
+def test_the_interpreter_runs_without_site_pth_sitecustomize_or_bytecode(tmp_path):
+    """A Python installed under HOME, whose site-packages hold a .pth and a sitecustomize that write a witness:
+    with -I -S -B neither runs, and nothing at all is written in HOME before the answer."""
+    home_python = tmp_path / "home-python"
+    created = subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(home_python)], capture_output=True,
+                             text=True, timeout=120)
+    assert created.returncode == 0, created.stderr
+    witness = tmp_path / "site-ran"
+    site = next((home_python / "lib").glob("python*/site-packages"))
+    (site / "zz_witness.pth").write_text(f"import pathlib; pathlib.Path({str(witness)!r}).write_text('pth')\n")
+    (site / "sitecustomize.py").write_text(f"import pathlib; pathlib.Path({str(witness)!r}).write_text('site')\n")
+    r = Release(tmp_path / "run", uname="Darwin", python=home_python / "bin" / "python")
+    shutil.move(str(home_python), str(r.home / "python"))   # the interpreter now lives under HOME
+    (r.bin / f"python{MINOR[0]}.{MINOR[1]}").write_text(f'#!/bin/sh\nexec "{r.home}/python/bin/python" "$@"\n')
+    before = tree(r.home)
+    done = r.run()
+    assert done.returncode == 0, done.stderr
+    assert not witness.exists() and r.ran() is not None
+    assert tree(r.home) == before
+    assert not [path for path in r.home.rglob("__pycache__")]

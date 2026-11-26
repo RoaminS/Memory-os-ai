@@ -12,7 +12,10 @@ trap 'printf "%s\n" "memory-os-ai install: this script is incomplete (truncated 
 #
 # WRITES BEFORE THE CONFIRMATION: nothing is written in $HOME, in the store or in any client configuration, and no
 # service is installed, before your "y". The only writes before it are the two verified files (memory_os_bootstrap.py
-# and SHA256SUMS of this release) in a private temporary directory (mktemp -d), removed at exit.
+# and SHA256SUMS of this release) in a private temporary directory (mktemp -d), removed at exit. Its base is TMPDIR
+# resolved physically (links followed) and never under HOME, the store or a client configuration directory (then /tmp
+# is used instead). Both Python launches before the answer run with -I -S -B: no site, .pth or sitecustomize, no
+# bytecode written.
 #
 # What it does, in order:
 #   1. checks its prerequisites: curl, a SHA-256 tool (sha256sum or shasum), python3, and uv >= 0.13.9, which it
@@ -104,7 +107,7 @@ main() {
         say "Route: the standalone CPython 3.11 named for Ubuntu 24.04 (announced with its size; downloaded only after y)."
         ;;
       Darwin)
-        if [ "$("$PY" -I -c "$CELL_PROBE" 2>/dev/null)" = "memory-os-cell:retained" ]; then
+        if [ "$("$PY" -I -S -B -c "$CELL_PROBE" 2>/dev/null)" = "memory-os-cell:retained" ]; then
           say "Route: $PY (a Python of a retained cell, SQLite >= 3.51.3)."
         else
           set -- --cpython 3.13 "$@"
@@ -115,8 +118,36 @@ main() {
     esac
   fi
 
-  WORK=$(mktemp -d "${TMPDIR:-/tmp}/memory-os-install.XXXXXX") || refuse "cannot create a temporary directory"
+  # The temporary base, resolved PHYSICALLY (symbolic links followed) before anything is created in it: never under
+  # HOME, the store or a client configuration directory (then /tmp is used instead; refused if /tmp is one too).
+  physical() { (cd "$1" 2>/dev/null && pwd -P); }
+  forbidden() {
+    for PLACE in "$HOME" "${MEMORY_V4_DIR-}" "${CLAUDE_CONFIG_DIR-}" "${CODEX_HOME-}" "${GEMINI_CLI_HOME-}" \
+                 "${GROK_HOME-}" "${COPILOT_HOME-}" "${XDG_CONFIG_HOME-}"; do
+      [ -n "$PLACE" ] || continue
+      PLACE_P=$(physical "$PLACE") || continue
+      [ -n "$PLACE_P" ] || continue
+      case "$1/" in "$PLACE_P"/*) return 0 ;; esac
+      [ "$PLACE_P" = / ] && return 0
+    done
+    return 1
+  }
+  BASE=$(physical "${TMPDIR:-/tmp}" || true)
+  if [ -z "$BASE" ] || forbidden "$BASE"; then
+    BASE=$(physical /tmp || true)
+    [ -n "$BASE" ] && ! forbidden "$BASE" \
+      || refuse "no temporary directory outside your home, store and client configurations; nothing written"
+    say "TMPDIR is not usable before your answer (missing, or under your home, store or a client configuration):"
+    say "the temporary directory is created under $BASE instead."
+  fi
+  WORK=$(mktemp -d "$BASE/memory-os-install.XXXXXX") || refuse "cannot create a temporary directory"
   case "$WORK" in /*) ;; *) refuse "unexpected temporary directory '$WORK'" ;; esac
+  WORK_P=$(physical "$WORK" || true)
+  if [ "$WORK_P" != "$WORK" ] || forbidden "$WORK_P"; then
+    rmdir "$WORK" 2>/dev/null || true
+    refuse "the temporary directory $WORK does not resolve to itself outside your home; nothing written"
+  fi
+  say "Temporary directory (removed at exit): $WORK"
   trap 'rm -f "$WORK/memory_os_bootstrap.py" "$WORK/SHA256SUMS"; rmdir "$WORK" 2>/dev/null || true' EXIT
   trap 'exit 130' INT TERM HUP
 
@@ -143,7 +174,7 @@ main() {
 
   # stdin is this script under "curl | sh": the bootstrap reads its answer from /dev/tty, never from stdin.
   STATUS=0
-  "$PY" -I -B "$WORK/memory_os_bootstrap.py" --interactive --uv "$UV" "$@" </dev/null || STATUS=$?
+  "$PY" -I -S -B "$WORK/memory_os_bootstrap.py" --interactive --uv "$UV" "$@" </dev/null || STATUS=$?
   exit "$STATUS"
 }
 

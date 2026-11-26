@@ -1516,24 +1516,55 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
     return result
 
 
-PLAN_DIGEST_VERSION = 1
+PLAN_DIGEST_VERSION = 2
 PLAN_DIGEST_CLIENT_KEYS = ("client", "path", "file_sha256", "action", "desired_sha256", "current_class", "ownership")
 PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "manager", "plist", "unit",
                             "loaded_state")
 
 
-def plan_digest(plan: dict) -> str:
-    """SHA-256 of what an apply of ``plan`` would write (4.1.3, one-command install).
+def target_identity(path) -> dict | None:
+    """What a write decision depends on for ``path`` (no content, never a secret): None when absent."""
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"kind": "unreadable"}
+    kind = ("link" if stat.S_ISLNK(status.st_mode) else "directory" if stat.S_ISDIR(status.st_mode)
+            else "file" if stat.S_ISREG(status.st_mode) else "other")
+    identity = {"kind": kind, "mode": stat.S_IMODE(status.st_mode), "uid": status.st_uid, "dev": status.st_dev,
+                "ino": status.st_ino, "nlink": status.st_nlink}
+    if kind == "file":
+        identity["size"] = status.st_size
+    if kind == "directory":
+        try:
+            identity["entries"] = len(os.listdir(path))
+        except OSError:
+            identity["entries"] = None
+    return identity
 
-    Covers the profile, backend, interpreter, port, token path, client environment, cell, build identity, resource
-    downloads, named consents, every client (path, file digest, action, desired entry) and the whole service
-    (label, definition path and text, argv, environment, state). Volatile facts (time, free disk, port probe) are
-    outside. Computed on the JSON form of the plan, so that a caller holding only the printed preview (the
+
+def write_targets(settings, home) -> dict:
+    """Identity of every location an apply may create or reuse besides clients, service and resources."""
+    return {"token": target_identity(settings.token_file), "store": target_identity(settings.store_dir),
+            "ops_dir": target_identity(settings.ops_dir), "journals": target_identity(Path(home) / JOURNAL_SUBDIR)}
+
+
+def plan_digest(plan: dict) -> str:
+    """SHA-256 of what an apply of ``plan`` would write or reuse (4.1.3, one-command install).
+
+    Covers the profile, backend, interpreter, port, token (path, state, identity of an existing file; never its
+    value), client environment, cell, build identity, the whole resource plan (resources, files and destinations,
+    presence, ref readiness, download bytes, environment), named consents, the identity of every other write target
+    (store, ops directory, journals), every client (path, file digest, action, desired entry) and the whole service
+    (label, definition path and text, argv, environment, state, job state). Volatile facts (time, free disk, port
+    probe) are outside. Computed on the JSON form of the plan, so that a caller holding only the printed preview (the
     standard-library bootstrap) computes the same value; ``--expect-plan`` binds an apply to it.
     """
     service = plan.get("service") or {}
     body = {"version": PLAN_DIGEST_VERSION, "profile": plan.get("profile"), "backend": plan.get("backend"),
-            "python": plan.get("python"), "port": plan.get("port"), "token_file": (plan.get("token") or {}).get("path"),
+            "python": plan.get("python"), "port": plan.get("port"), "token": plan.get("token"),
+            "provision": plan.get("provision"), "write_targets": plan.get("write_targets"),
             "client_env": plan.get("client_env"), "cell_id": (plan.get("cell") or {}).get("cell_id"),
             "identity": plan.get("identity"), "downloads_required_bytes": plan.get("downloads_required_bytes"),
             "replace_existing": plan.get("replace_existing"),
@@ -1956,6 +1987,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     if manager is not None:
         notices += manager.notices(service['label'])
     return {**result, 'ok': not blockers, 'profile': effective, 'identity': identity, 'service': service,
+            'write_targets': write_targets(settings, home),
             'blockers': blockers, 'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
             'sqlite_attestation': sqlite_attestation,
             **({'sqlite_runtime_target': target_report} if target_report is not sqlite_report else {}),

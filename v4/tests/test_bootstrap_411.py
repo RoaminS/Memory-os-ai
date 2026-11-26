@@ -718,9 +718,9 @@ def test_apply_creates_the_durable_venv_through_uv_with_spaces_everywhere(tmp_pa
     assert not any(key.startswith("XDG_") and key not in ("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR") for key in inherited)
     step = report["steps"][-1]
     assert step["step"] == "quickstart_preview" and shlex.split(step["command"]) == [
-        python, "-I", "-m", "memory_os_v4.ops.cli", "quickstart", "--profile", "lexical", "--clients", "claude-code,codex"]
+        python, "-I", "-B", "-m", "memory_os_v4.ops.cli", "quickstart", "--profile", "lexical", "--clients", "claude-code,codex"]
     assert "--apply" not in step["command"]
-    assert shlex.split(report["next"]) == [python, "-I", "-m", "memory_os_v4.ops.cli", "quickstart", "--profile",
+    assert shlex.split(report["next"]) == [python, "-I", "-B", "-m", "memory_os_v4.ops.cli", "quickstart", "--profile",
                                            "lexical", "--clients", "claude-code,codex", "--apply", "--download-approved"]
     saved = json.loads(Path(report["report_path"]).read_text())
     assert saved["ok"] is True and saved["sqlite_attestation"] == attested and "_argv" not in saved

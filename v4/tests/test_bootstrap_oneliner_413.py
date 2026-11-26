@@ -24,12 +24,14 @@ import zipfile
 
 import pytest
 
-from memory_os_v4.ops import clients as product_clients, quickstart as qs, service as product_service
+from memory_os_v4.ops import clients as product_clients, provision as product_provision, quickstart as qs, \
+    service as product_service
 from memory_os_v4.ops.clients import ClientPathError
 from memory_os_v4.ops.settings import OpsSettings
 from setup_fixture_410 import tree
 from test_bootstrap_411 import CELL, MAC, MINOR, UBUNTU, VERSION, Machine, bs, make_pin
 
+REAL_PROVISION_PLAN = product_provision.plan  # captured before any fixture replaces it
 pytestmark = pytest.mark.skipif(MINOR not in ((3, 11), (3, 12), (3, 13)), reason="needs a Python of a retained cell")
 LABEL = "local.memory-os-v4"
 
@@ -105,7 +107,7 @@ LEXICAL_RESOURCE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}  # p
 def product_settings(home: Path) -> OpsSettings:
     """OpsSettings.from_env() for ``home`` with no MEMORY_V4_* variable (the quickstart run from the venv)."""
     return OpsSettings(url="http://127.0.0.1:8765/mcp/", token_file=home / ".config/memory-os/http.token",
-                       store_dir=home / ".memory-os-v4", backup_dir=home / "memory-os-backups",
+                       store_dir=home / ".local/share/memory-os/store", backup_dir=home / "memory-os-backups",
                        backup_key=home / ".config/memory-os/backup.key", ops_dir=home / ".local/state/memory-os",
                        service_label=None)
 
@@ -163,6 +165,9 @@ class OneLiner:
                   "client_env": {"MEMORY_V4_URL": settings.url, "MEMORY_V4_TOKEN_FILE": str(settings.token_file),
                                  "MEMORY_V4_OPS_DIR": str(settings.ops_dir)},
                   "identity": {"version": VERSION, "commit": "0" * 40}, "replace_existing": [],
+                  "provision": {"resources": ["cl100k"], "ready": True, "download_bytes": 0, "table_source": "embedded",
+                                "table_path": None, "files": [], "env": dict(LEXICAL_RESOURCE_ENV)},
+                  "write_targets": qs.write_targets(settings, self.home),
                   "downloads_required_bytes": 0, "notices": []}
         answer.update(changes)
         return seal(answer)
@@ -253,7 +258,7 @@ def test_the_service_and_token_defaults_are_the_product_ones(tmp_path, monkeypat
     settings = OpsSettings.from_env()
     assert (settings.url, settings.ready_url, settings.port) == (bs.SERVICE_URL, bs.READY_URL, bs.SERVICE_PORT)
     assert str(settings.token_file) == str(tmp_path / bs.TOKEN_SUBPATH)
-    assert str(settings.store_dir) == str(tmp_path / bs.STORE_SUBPATH)
+    assert str(settings.store_dir) == str(tmp_path / bs.STORE_SUBPATH)  # the legacy default, before the selection
     assert str(settings.ops_dir) == str(tmp_path / bs.OPS_SUBPATH) and settings.service_label is None
     planned = qs._service_plan(settings, tmp_path, sys.executable, {}, backend="sqlite", profile="lexical", manager=None)
     assert planned["label"] == bs.SERVICE_LABEL
@@ -456,7 +461,8 @@ def test_without_a_terminal_it_is_the_complete_preview_and_nothing_is_written(o)
                   f"{LABEL} on http://127.0.0.1:8765/mcp/", "manager launchd",
                   str(o.home / "Library/LaunchAgents" / (LABEL + ".plist")),
                   str(o.home / ".config/memory-os/http.token"), "created (0600), never printed",
-                  str(o.home / ".codex/config.toml"), str(o.home / ".cursor/mcp.json"), str(o.home / ".memory-os-v4")):
+                  str(o.home / ".codex/config.toml"), str(o.home / ".cursor/mcp.json"),
+                  str(o.home / ".local/share/memory-os/store")):
         assert words in text, words
     assert o.inventory() == before and o.qs_calls() == []
     report, _ = o.run(terminal=lambda: None)
@@ -530,6 +536,7 @@ def test_after_y_every_step_runs_in_order_with_exactly_the_announced_clients(o):
                                                    "--with-service"]
     assert shlex.split(report["next"]["doctor"]) == [*bound, admin, "doctor"]
     assert "installed and ready" in text and "doctor" in text and "--undo 20261126T101500Z-aaaa" in text
+    assert not [name for name in tree(o.home) if "__pycache__" in name]  # quickstart commands run with -B
     saved = Path(report["report_path"])
     assert saved.parent == Path(report["plan"]["work_dir"]) and json.loads(saved.read_text())["ok"] is True
     assert "Bearer" not in saved.read_text() and "_quickstart_plan" not in saved.read_text()
@@ -802,7 +809,7 @@ def test_follow_up_commands_name_the_announced_installation(o, monkeypatch):
         words = shlex.split(report["next"][name].split(" (preview)")[0])
         assert words[0] == "env" and words[1:6] == bs.installation_env(announced), name
         assert words[1:6] == [f"MEMORY_V4_SERVICE_LABEL={LABEL}", "MEMORY_V4_URL=http://127.0.0.1:8765/mcp/",
-                              f"MEMORY_V4_DIR={o.home}/.memory-os-v4",
+                              f"MEMORY_V4_DIR={o.home}/.local/share/memory-os/store",
                               f"MEMORY_V4_TOKEN_FILE={o.home}/.config/memory-os/http.token",
                               f"MEMORY_V4_OPS_DIR={o.home}/.local/state/memory-os"]
         assert report["next"][name] in text
@@ -956,3 +963,183 @@ def test_the_cli_prints_the_digest_and_hands_expect_plan_to_apply(monkeypatch, c
 def c(tmp_path, monkeypatch):
     from setup_fixture_410 import setup_context
     return setup_context(tmp_path, monkeypatch)
+
+
+# ---------------------------------------------------------------- round 3 (Codex r2 of the one-liner)
+
+def _clean_product_env(monkeypatch, home):
+    for key in [key for key in os.environ if key.startswith("MEMORY_V4_")]:
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(home))
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_the_announced_store_is_the_one_quickstart_really_selects(tmp_path, monkeypatch, legacy):
+    home = tmp_path / "home"
+    home.mkdir()
+    if legacy:
+        (home / ".memory-os-v4").mkdir()
+    _clean_product_env(monkeypatch, home)
+    selected, backend = qs.settings_for_install(OpsSettings.from_env(), home=home)
+    assert backend == "sqlite" and str(selected.store_dir) == bs.store_directory(str(home))
+    assert bs.store_directory(str(home)) == str(home / (".memory-os-v4" if legacy else ".local/share/memory-os/store"))
+
+
+def _announce(home, *, clients, python, host=MAC):
+    options = argparse.Namespace(clients=clients, profile="lexical")
+    extras = bs.interactive_extras(options, host=host, environ={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                                   which=lambda name, path=None: None)
+    announced = extras["announced"]
+    announced["python"] = python
+    announced["service"].update(bs.expected_service(python=python, store=announced["store"],
+                                                    ops_dir=announced["ops_dir"], token=announced["token"]["path"]))
+    return extras
+
+
+def test_end_to_end_a_fresh_home_real_selection_real_prepare_and_the_comparison_agree(c, monkeypatch):
+    """The real chain of the CLI on a fresh HOME: from_env, settings_for_install, prepare with the real resource
+    plan, the printed preview; the bootstrap's announcement for the same HOME compares equal to it."""
+    from memory_os_v4.ops import provision
+    monkeypatch.setattr(provision, "plan", REAL_PROVISION_PLAN)
+    _clean_product_env(monkeypatch, c.home)
+    settings, backend = qs.settings_for_install(OpsSettings.from_env(), home=c.home)
+    plan = qs.prepare(settings, home=c.home, python=c.python, clients=("cursor",), run=c.system, profile="lexical",
+                      backend=backend)
+    assert plan["ok"], plan["blockers"]
+    printed = json.loads(json.dumps({**plan, "plan_digest": qs.plan_digest(plan)}, ensure_ascii=False))
+    extras = _announce(c.home, clients="cursor", python=c.python)
+    assert extras["blockers"] == [] and extras["announced"]["store"] == str(c.home / ".local/share/memory-os/store")
+    cell_id = (plan.get("cell") or {}).get("cell_id")
+    assert bs.compare_preview(printed, extras["announced"], cell_id=cell_id) == []
+    # the regression this test pins: announcing the legacy store makes the comparison refuse
+    extras["announced"]["store"] = str(c.home / ".memory-os-v4")
+    extras["announced"]["service"].update(bs.expected_service(python=c.python, store=extras["announced"]["store"],
+                                                              ops_dir=extras["announced"]["ops_dir"],
+                                                              token=extras["announced"]["token"]["path"]))
+    assert any("MEMORY_V4_DIR" in item for item in bs.compare_preview(printed, extras["announced"], cell_id=cell_id))
+
+
+def _write_token(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("T" * 43 + "\n")
+    path.chmod(0o600)
+
+
+def test_a_token_removed_between_preview_and_apply_is_refused_before_any_write(c):
+    from memory_os_v4.ops.doctor import Check
+    from setup_fixture_410 import fake_probe, prepare
+    _write_token(c.settings.token_file)
+    plan = prepare(c, profile="lexical")
+    assert plan["token"]["state"] == "ok" and plan["write_targets"]["token"]["kind"] == "file"
+    accepted = qs.plan_digest(plan)
+    c.settings.token_file.unlink()
+    again = prepare(c, profile="lexical")
+    assert qs.plan_digest(again) != accepted
+    before = tree(c.home)
+    for applied in (plan, again):  # the plan of the apply process, or the one the caller accepted
+        with pytest.raises(qs.QuickstartError) as refused:
+            qs.apply_install(applied, c.settings, home=c.home, run=c.system, probe=fake_probe, clock=c.clock,
+                             doctor_run=lambda s: [Check("server", "PASS", "synthetic")], expected_plan=accepted)
+        assert refused.value.code == "plan_digest_mismatch"
+    assert tree(c.home) == before
+
+
+def test_a_token_whose_identity_changed_moves_the_digest(c):
+    from setup_fixture_410 import prepare
+    _write_token(c.settings.token_file)
+    first = qs.plan_digest(prepare(c, profile="lexical"))
+    c.settings.token_file.unlink()
+    _write_token(c.settings.token_file)  # same value, another file
+    assert qs.plan_digest(prepare(c, profile="lexical")) != first
+    assert "T" * 43 not in json.dumps(prepare(c, profile="lexical"))  # never its value
+
+
+def test_the_semantic_manual_route_with_refs_main_removed_has_another_digest(tmp_path, monkeypatch):
+    """Codex r2: same zero download bytes, but the ref and provenance writes differ: the digest must differ."""
+    from memory_os_v4.ops import provision
+    monkeypatch.delenv("MEMORY_V4_CL100K_PATH", raising=False)
+    monkeypatch.setattr(provision, "matches", lambda path, record: True)  # every model file present
+    record = provision.catalog()
+    ref = tmp_path / ("models--" + record["model_id"].replace("/", "--")) / "refs" / "main"
+    ref.parent.mkdir(parents=True)
+    ref.write_text(record["revision"])
+    with_ref = REAL_PROVISION_PLAN(resources=("granite", "cl100k"), cache_dir=tmp_path)
+    ref.unlink()
+    without_ref = REAL_PROVISION_PLAN(resources=("granite", "cl100k"), cache_dir=tmp_path)
+    assert with_ref["download_bytes"] == without_ref["download_bytes"] == 0
+    assert with_ref["ready"] is True and without_ref["ready"] is False
+    base = {"profile": "semantic", "service": {}, "clients": []}
+    assert qs.plan_digest({**base, "provision": with_ref}) != qs.plan_digest({**base, "provision": without_ref})
+
+
+@pytest.mark.parametrize("label,change", [
+    ("token state", lambda p: p["token"].update(state="ok")),
+    ("token identity", lambda p: p["write_targets"].update(token={"kind": "file", "mode": 0o600, "ino": 1})),
+    ("store", lambda p: p["write_targets"].update(store={"kind": "directory", "entries": 3})),
+    ("ops dir", lambda p: p["write_targets"].update(ops_dir={"kind": "directory", "entries": 1})),
+    ("journals", lambda p: p["write_targets"].update(journals={"kind": "directory", "entries": 1})),
+    ("provision ready", lambda p: p["provision"].update(ready=False)),
+    ("provision files", lambda p: p["provision"].update(files=[{"target": "/x", "present": False}])),
+    ("provision env", lambda p: p["provision"]["env"].update(HF_HUB_CACHE="/x")),
+])
+def test_the_digest_covers_token_resources_and_every_write_target(c, label, change):
+    from setup_fixture_410 import prepare
+    plan = json.loads(json.dumps(prepare(c, profile="lexical")))
+    other = json.loads(json.dumps(plan))
+    change(other)
+    assert qs.plan_digest(other) != qs.plan_digest(plan), label
+    assert bs.quickstart_plan_digest(other) == qs.plan_digest(other), label
+
+
+@pytest.mark.parametrize("label,change,words", [
+    ("token reused", lambda o, p: p["token"].update(state="ok"), "token state 'ok'"),
+    ("token bad mode", lambda o, p: p["token"].update(state="bad-permissions:0o644"), "token state"),
+    ("token file", lambda o, p: p["write_targets"].update(token={"kind": "file", "mode": 0o600, "nlink": 1}),
+     "token file identity"),
+    ("store used", lambda o, p: p["write_targets"].update(store={"kind": "directory", "entries": 2}), "store is not new"),
+    ("store file", lambda o, p: p["write_targets"].update(store={"kind": "file"}), "store is not new"),
+    ("download", lambda o, p: p["provision"].update(ready=False), "resource plan"),
+    ("table", lambda o, p: p["provision"].update(table_source="download"), "resource plan"),
+    ("model", lambda o, p: p["provision"].update(resources=["granite", "cl100k"]), "resource plan"),
+])
+def test_the_comparison_covers_token_state_store_and_resources(o, label, change, words):
+    preview = o.preview(["codex", "cursor"])
+    change(o, preview)
+    o.answers(preview=seal(preview))
+    report, _ = o.run()
+    assert report["code"] == "interactive_preview_mismatch", label
+    assert any(words in item for item in report["differences"]), (label, report["differences"])
+    assert [call["mode"] for call in o.qs_calls()] == ["preview"]
+
+
+class FailingOut(io.StringIO):
+    def __init__(self, fail):
+        super().__init__()
+        self.fail = fail
+
+    def write(self, text):
+        if self.fail == "write":
+            raise BrokenPipeError(32, "Broken pipe")
+        return super().write(text)
+
+    def flush(self):
+        if self.fail == "flush":
+            raise OSError(5, "Input/output error")
+
+
+@pytest.mark.parametrize("fail", ["write", "flush"])
+def test_a_preview_that_cannot_be_written_out_asks_nothing(o, fail, capsys):
+    terminal = FakeTerminal("y")
+    before = o.inventory()
+    code = bs.main(["--uv", str(o.m.uv), "--interactive"], pin=bs.load_pin(json.dumps(o.m.pin)), run=o.m.run,
+                   environ=o.environ, host=o.m.host, out=FailingOut(fail), terminal=terminal, ready=o.ready,
+                   which=o.which)
+    assert code == 1 and terminal.opened == 0 and o.qs_calls() == [] and o.inventory() == before
+    assert "preview_output_failed" in capsys.readouterr().err
+
+
+def test_the_quickstart_commands_never_write_bytecode():
+    for argv in (bs.quickstart_command("/v", "lexical", "codex"),
+                 bs.quickstart_command("/v", "lexical", "codex", apply=True, download_approved=False,
+                                       expect_plan="a" * 64)):
+        assert argv[1:4] == ["-I", "-B", "-m"]
