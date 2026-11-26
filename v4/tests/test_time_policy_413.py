@@ -146,3 +146,45 @@ def test_at_time_reads_a_naive_value_in_utc(memory, zone):
     assert before_ids == [] and len(after_ids) == 1, (zone, before, after)
     assert before["time_notices"] == after["time_notices"] == [NAIVE_TIME_NOTICE]
     assert ids("2026-11-26T10:30+01:00")[1] == []  # explicit offset honoured: 09:30 UTC
+
+
+def test_timeline_orders_explicit_and_text_dates_the_same_in_every_zone(memory, zone):
+    # Explicit naive 00:30 (UTC) is AFTER the date found in the text (midnight UTC) in every zone; before 4.1.3
+    # the explicit value was local, so in Europe/Paris it sorted BEFORE the text date.
+    server.dispatch("memory_add_facts", {"project": "P", "facts": [
+        {"text": "Zephyr rollout started on 2026-11-26."},
+        {"text": "Zephyr rollout reached staging.", "event_time": "2026-11-26T00:30"}]})
+    timeline = server.dispatch("memory_timeline", {"project": "P", "query": "zephyr rollout"})
+    events = [e for e in timeline.get("timeline", timeline.get("items", timeline.get("events", [])))
+              if "Zephyr" in e.get("text", "")]
+    assert [e["text"] for e in events] == ["Zephyr rollout started on 2026-11-26.",
+                                           "Zephyr rollout reached staging."], (zone, timeline)
+    assert "time_notices" not in timeline        # this read carries no naive input
+
+
+def test_naive_valid_until_bounds_at_time_in_every_zone(memory, zone):
+    server.dispatch("memory_add_facts", {"project": "P", "facts": [
+        {"text": "Synthetic quokka window fact.", "valid_from": "2026-11-25", "valid_until": "2026-11-26T12:00"}]})
+    def hits(at):
+        found = server.dispatch("memory_search", {"project": "P", "query": "synthetic quokka window", "at_time": at})
+        return len(found.get("results", found.get("hits", [])))
+    assert hits("2026-11-26T11:30Z") == 1 and hits("2026-11-26T12:30Z") == 0, zone
+
+
+def test_v3_migration_reads_naive_timestamps_in_utc_in_every_zone(tmp_path, zone, monkeypatch):
+    import json as _json
+    monkeypatch.setenv("MEMORY_WORKSPACE", str(tmp_path))   # the v3 log must resolve under the workspace
+    log = tmp_path / "v3.jsonl"
+    log.write_text(_json.dumps({"timestamp": "2026-11-26T10:00:00", "project": "p", "summary": None,
+                                "messages": [{"role": "user", "content": "naive v3 message"}]}) + "\n")
+    with MemoryV4(config=Config(embed_model="hash", data_dir=str(tmp_path / "store"))) as m:
+        m.migrate_v3(str(log))
+        episode = next(it for it in m.store.all() if it.kind == "episode")
+        assert episode.event_time == TEN_UTC, zone
+
+
+def test_every_date_from_text_format_goes_through_the_single_converter(zone):
+    assert parse_absolute_dates("on 26/11/2026") == [MIDNIGHT_UTC]
+    assert parse_absolute_dates("on 26 November 2026") == [MIDNIGHT_UTC]
+    assert parse_absolute_dates("in November 2026") == [datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp()]
+    assert parse_absolute_dates("on 2026-02-30") == []          # invalid date: refused, not shifted

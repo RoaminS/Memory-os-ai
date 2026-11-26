@@ -86,9 +86,16 @@ def end_time_notices(token) -> list[dict]:
     return [dict(NAIVE_TIME_NOTICE)] if seen else []
 
 
+def _utc_timestamp(dt: datetime) -> float:
+    """THE single conversion of a datetime to a unix timestamp: a naive value means UTC."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 def utc_date(year: int, month: int, day: int) -> float:
-    """Midnight UTC of a calendar date: the single meaning of a date alone (raises ``ValueError``)."""
-    return datetime(year, month, day, tzinfo=timezone.utc).timestamp()
+    """Midnight UTC of a calendar date, through the ISO parser itself (raises ``ValueError``)."""
+    return iso_to_timestamp(f"{year:04d}-{month:02d}-{day:02d}", notice=False)
 
 
 def iso_to_timestamp(text: str, *, notice: bool = True) -> float:
@@ -97,19 +104,15 @@ def iso_to_timestamp(text: str, *, notice: bool = True) -> float:
     Only a value actually ACCEPTED here is recorded for the notice: a value refused (``ValueError``) is
     never announced as read in UTC."""
     dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        if notice and not _DATE_ONLY_RE.fullmatch(text):
-            seen = _naive_seen.get()
-            if seen is not None:
-                seen.append(True)
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    if dt.tzinfo is None and notice and not _DATE_ONLY_RE.fullmatch(text):
+        seen = _naive_seen.get()
+        if seen is not None:
+            seen.append(True)
+    return _utc_timestamp(dt)
 
 
 def _to_ts(dt: datetime) -> float:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    return _utc_timestamp(dt)
 
 
 def parse_absolute_dates(text: str) -> list[float]:
@@ -146,7 +149,7 @@ def parse_absolute_dates(text: str) -> list[float]:
         if month > 12 and day <= 12:
             day, month = month, day  # MM/DD fallback -- see docstring
         try:
-            results.append(_to_ts(datetime(int(y), month, day, tzinfo=timezone.utc)))
+            results.append(utc_date(int(y), month, day))
         except ValueError:
             continue
 
@@ -154,7 +157,7 @@ def parse_absolute_dates(text: str) -> list[float]:
         month = _MONTHS.get(month_name.lower())
         if month:
             try:
-                results.append(_to_ts(datetime(int(y), month, int(d), tzinfo=timezone.utc)))
+                results.append(utc_date(int(y), month, int(d)))
             except ValueError:
                 continue
 
@@ -164,7 +167,7 @@ def parse_absolute_dates(text: str) -> list[float]:
             continue  # already captured with a day
         month = _MONTHS.get(m.group(1).lower())
         if month:
-            results.append(_to_ts(datetime(int(m.group(2)), month, 1, tzinfo=timezone.utc)))
+            results.append(utc_date(int(m.group(2)), month, 1))
 
     return results
 
