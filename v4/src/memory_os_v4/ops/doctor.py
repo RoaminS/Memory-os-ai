@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 
@@ -233,12 +234,13 @@ def _store(settings: OpsSettings) -> Check:
             if isinstance(exc, ReadOnlyStoreError):
                 # 4.1.3: a controlled refusal of the read-only open, named by its code; a writer starting or
                 # closing during the read is transient (WARN), the other refusals need the operator (FAIL).
+                transient = exc.code in {"store_busy_retry", "store_side_files_recreated"}
                 return Check(
                     "store",
-                    "WARN" if exc.code == "store_busy_retry" else "FAIL",
+                    "WARN" if transient else "FAIL",
                     f"SQLite read-only check refused: {exc.code}",
-                    "retry doctor" if exc.code == "store_busy_retry"
-                    else "doctor never creates writer.lock or SQLite side files; see the 4.1.3 notes",
+                    "retry doctor" if transient
+                    else "doctor never creates writer.lock and never deletes SQLite side files; see the 4.1.3 notes",
                 )
             return Check(
                 "store",
@@ -470,7 +472,7 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
                     f"change journal {journal['json_bytes']} bytes / alert {journal['alert_bytes']}; no automatic purge",
                 )
             )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, sqlite3.Error) as exc:
             code = getattr(exc, "code", None)            # ReadOnlyStoreError (4.1.3) names its refusal
             checks.append(Check("journal_size", "WARN", "change journal size unavailable"
                                 + (f" (read-only open refused: {code})" if isinstance(code, str) else "")))

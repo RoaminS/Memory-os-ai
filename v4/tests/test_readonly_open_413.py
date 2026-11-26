@@ -97,8 +97,22 @@ def test_a_writer_holding_the_lock_makes_the_offline_read_refuse(stopped_store):
     assert listing(data) == before
 
 
-def test_writer_closing_during_the_open_is_detected_and_leaves_no_file(stopped_store, monkeypatch):
-    """The race: a live writer (lease + WAL connection) closes between the observation and the reader's open."""
+@pytest.fixture
+def no_reader_deletes(monkeypatch):
+    """Option B (2026-11-26): a reader NEVER deletes a file: any unlink during these tests fails them."""
+    import pathlib
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a reader deleted a file")
+    monkeypatch.setattr(sqlite_store.os, "unlink", forbidden)
+    monkeypatch.setattr(sqlite_store.os, "remove", forbidden)
+    monkeypatch.setattr(pathlib.Path, "unlink", forbidden)
+
+
+@pytest.mark.parametrize("lease_released", [True, False])
+def test_writer_closing_during_the_open_is_detected_and_nothing_is_deleted(stopped_store, monkeypatch,
+                                                                           lease_released):
+    """The declared residual window: a live writer (lease + WAL connection) closes SQLite between the reader's
+    look and its open. lease_released=False is Codex's interleaving: SQLite closed, writer.lock still held."""
     data, _ = stopped_store
     db = data / "store.sqlite3"
     writer = WriterLock(data)
@@ -110,19 +124,58 @@ def test_writer_closing_during_the_open_is_detected_and_leaves_no_file(stopped_s
 
     def writer_closes_then_connect(*args, **kwargs):
         live.close()                                            # last connection: SQLite deletes -wal/-shm
-        writer.close()                                          # then the lease is released (engine order)
+        if lease_released:
+            writer.close()                                      # then the lease is released (engine order)
         assert not any(p.name.endswith(("-wal", "-shm")) for p in data.iterdir())
         return real_connect(*args, **kwargs)                    # mode=ro now RECREATES them
 
     monkeypatch.setattr(sqlite_store.sqlite3, "connect", writer_closes_then_connect)
+    import pathlib
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a reader deleted a file")
+    monkeypatch.setattr(sqlite_store.os, "unlink", forbidden)
+    monkeypatch.setattr(pathlib.Path, "unlink", forbidden)
     with pytest.raises(ReadOnlyStoreError) as caught:
         with open_readonly(db):
             pass
-    assert caught.value.code == "store_busy_retry"
+    assert caught.value.code == "store_side_files_recreated"     # reported, never silent
     monkeypatch.undo()
-    assert not any(p.name.endswith(("-wal", "-shm")) for p in data.iterdir())   # this reader's files removed
-    with open_readonly(db) as connection:                       # and a retry succeeds
-        assert connection.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
+    writer.close()
+    # the declared residue: two side files without data, left in place (never deleted by a reader)
+    assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
+    assert (data / "store.sqlite3-wal").stat().st_size == 0
+    with MemoryV4(config=Config(data_dir=str(data), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)) as m:
+        assert m.add_facts([{"text": "After the residue."}], project="P")["added"]   # next start uses them
+    with open_readonly(db) as connection:                       # and a later read succeeds
+        assert connection.execute("SELECT count(*) FROM items").fetchone()[0] >= 2
+
+
+def test_two_concurrent_live_readers_never_delete_anything(tmp_path, no_reader_deletes):
+    data = tmp_path / "store"
+    with MemoryV4(config=Config(data_dir=str(data), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)) as m:
+        m.add_facts([{"text": "Synthetic live fact."}], project="P")
+        before = {p.name for p in data.iterdir()}
+        with open_readonly(data / "store.sqlite3") as first:
+            with open_readonly(data / "store.sqlite3") as second:
+                assert first.execute("SELECT count(*) FROM items").fetchone() == \
+                    second.execute("SELECT count(*) FROM items").fetchone()
+        assert {p.name for p in data.iterdir()} == before
+
+
+def test_doctor_run_does_not_crash_on_sqlite_errors(stopped_store, monkeypatch, tmp_path):
+    """Codex WAL r2 item 3: through doctor.run (not only _store), a SQLite error is a structured check."""
+    from memory_os_v4.ops import doctor
+    from memory_os_v4.ops.settings import OpsSettings
+    data, _ = stopped_store
+    monkeypatch.setenv("MEMORY_V4_DIR", str(data))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    def broken(*args, **kwargs):
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+    monkeypatch.setattr("memory_os_v4.sqlite_stats.scan_sqlite", broken)
+    checks = {c.area: c for c in doctor.run(OpsSettings.from_env())}
+    assert checks["store"].status == "FAIL"
+    assert checks["journal_size"].status == "WARN" and "unavailable" in checks["journal_size"].detail
 
 
 def test_stale_pair_without_writer_is_read_under_the_lock(stopped_store):

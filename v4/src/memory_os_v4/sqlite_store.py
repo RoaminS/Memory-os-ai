@@ -225,22 +225,25 @@ def _try_shared_lock(fd: int) -> bool:
 
 @contextmanager
 def open_readonly(database, *, timeout: float = 5.0):
-    """THE read-only open of a store database by a diagnostic (doctor, health): it never leaves a file behind.
+    """THE read-only open of a store database by a diagnostic (doctor, health). It never deletes a file.
 
-    4.1.3 (note NOTE_4_1_3_WAL_MODE_RO_v1): a ``mode=ro`` open of a WAL database whose -wal/-shm the last
-    writer deleted RECREATES them, and fails on a read-only directory. The engine holds ``writer.lock``
-    exclusively while it runs and only releases it after closing SQLite. The rule:
+    4.1.3 (note NOTE_4_1_3_WAL_MODE_RO_v1, decision of 2026-11-26, option B): a ``mode=ro`` open of a WAL
+    database whose -wal/-shm the last writer deleted RECREATES them, and fails on a read-only directory. The
+    engine holds ``writer.lock`` exclusively from before it opens SQLite until after it has closed every store.
 
     * ``writer.lock`` must exist as a regular file (opened ``O_RDONLY | O_NOFOLLOW``: a read-only volume works);
-      missing or linked: ``writer_lock_missing`` (never created by a reader);
-    * incomplete -wal/-shm pair: ``store_side_files_incomplete``;
-    * a SHARED non-blocking lock is attempted. Obtained, no writer runs and none can start during the read: with
-      no side file ``mode=ro&immutable=1``, with a complete pair ``mode=ro`` (nobody can delete the pair);
-    * lock refused (a writer runs) with no side file: ``store_busy_retry``;
-    * lock refused with a complete pair: ``mode=ro``, then the identity (device, inode) of both side files is
-      compared after the first read. If they changed, the writer closed between the observation and the open and
-      this reader recreated them: the read is refused (``store_busy_retry``) and, when the lock can then be taken
-      (no writer), the side files this reader created are removed (nobody else can be using them).
+      missing or linked: ``writer_lock_missing`` (never created by a reader).
+    * A SHARED non-blocking lock is attempted. Obtained, no writer can start or close during the read, so the
+      observed state is stable: no side file, ``mode=ro&immutable=1`` (creates nothing); a complete (stale) pair,
+      ``mode=ro`` (creates nothing, nobody can delete it); an incomplete pair, ``store_side_files_incomplete``.
+    * Lock refused, a writer (the service) runs: no side file, ``store_busy_retry`` (the writer is starting);
+      incomplete pair, ``store_side_files_incomplete``; complete pair, a LIVE read with ``mode=ro``.
+    * DECLARED RESIDUAL WINDOW of the live read: if the service closes SQLite between this reader's look and its
+      open (a window of microseconds, during a service shutdown only), SQLite recreates two side files without
+      data. They are never deleted by a reader (another reader or a new writer may be using them); the next
+      engine start uses them as its pair. The (device, inode) of both files is compared before the open and
+      after the first read: a change refuses the read with ``store_side_files_recreated``, never silently.
+      No writer can run on a read-only volume, so this window does not exist there.
 
     Windows is not a retained cell: refused (``readonly_open_unqualified_platform``) rather than risking a write.
     """
@@ -250,38 +253,25 @@ def open_readonly(database, *, timeout: float = 5.0):
     lock = database.parent / "writer.lock"
     if lock.is_symlink() or not lock.is_file() or lock.stat().st_nlink != 1:
         raise ReadOnlyStoreError("writer_lock_missing", "existing regular writer.lock required; never created by a reader")
-    uri = "file:" + quote(str(database))
     fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
+        locked = _try_shared_lock(fd)
         has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
         if has_wal != has_shm:
             raise ReadOnlyStoreError("store_side_files_incomplete", "incomplete -wal/-shm pair; nothing opened")
-        locked = _try_shared_lock(fd)
-        if locked:
-            # No writer can start or close while we hold the shared lock: the observed state is stable.
-            if any(os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm")) != has_wal:
-                raise ReadOnlyStoreError("store_busy_retry", "side files changed; retry")
-            mode = "?mode=ro" if has_wal else "?mode=ro&immutable=1"
-            connection = sqlite3.connect(uri + mode, uri=True, timeout=timeout)
-            try:
-                yield connection
-            finally:
-                connection.close()
-            return
-        if not has_wal:
+        if not locked and not has_wal:
             raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting; retry")
-        before = _side_identity(database)
-        connection = sqlite3.connect(uri + "?mode=ro", uri=True, timeout=timeout)
+        before = None if locked else _side_identity(database)
+        uri = "file:" + quote(str(database)) + ("?mode=ro" if has_wal else "?mode=ro&immutable=1")
+        connection = sqlite3.connect(uri, uri=True, timeout=timeout)
         try:
-            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()   # attaches to the WAL now
-            if before is None or _side_identity(database) != before:
-                connection.close()
-                if _try_shared_lock(fd):                  # writer gone: the side files are this reader's
-                    for suffix in ("-wal", "-shm"):
-                        side = Path(str(database) + suffix)
-                        if side.is_file() and not side.is_symlink() and (suffix == "-shm" or side.stat().st_size == 0):
-                            side.unlink()
-                raise ReadOnlyStoreError("store_busy_retry", "the writer closed during the open; retry")
+            if not locked:
+                connection.execute("SELECT count(*) FROM sqlite_master").fetchone()   # attaches to the WAL now
+                if before is None or _side_identity(database) != before:
+                    raise ReadOnlyStoreError(
+                        "store_side_files_recreated",
+                        "the service closed during this read; SQLite may have recreated empty side files "
+                        "(declared 4.1.3 limit, never deleted by a reader); retry")
             yield connection
         finally:
             connection.close()
