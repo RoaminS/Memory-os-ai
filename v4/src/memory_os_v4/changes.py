@@ -125,6 +125,11 @@ def listing(engine, project, cursor=None, limit=30):
                 if len(cursor)>2048:
                     raise ValueError('size')
                 raw = base64.b64decode(cursor + '='*((-len(cursor))%4), altchars=b'-_', validate=True)
+                # 4.1.3: only the canonical spelling (the one _encode produces) is accepted. The decoder
+                # above ignores the padding bits of the last character and accepts explicit '=' padding,
+                # so several strings mapped to the same bytes; re-encoding closes that malleability.
+                if base64.urlsafe_b64encode(raw).decode().rstrip('=') != cursor:
+                    raise ValueError('non-canonical cursor')
                 body,mac = raw[:-32],raw[-32:]
                 value = json.loads(body)
                 if not isinstance(value, dict):

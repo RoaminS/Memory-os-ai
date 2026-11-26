@@ -42,11 +42,52 @@ def test_scope_mac_restore_cursor(memory):
     p=listing(m,'P')
     assert all(e['project']=='P' for e in p['events'])
     with pytest.raises(CorrectionError,match='cursor_invalid'): listing(m,'Q',p['next_cursor'])
-    with pytest.raises(CorrectionError): listing(m,'P',p['next_cursor'][:-2]+'zz')
+    # 4.1.3: deterministic tamper. A character inside the MAC (not the last one, which may carry ignored
+    # padding bits) always changes the decoded MAC bytes, so the MAC check must refuse it.
+    c=p['next_cursor']; i=len(c)-10
+    tampered=c[:i]+('A' if c[i]!='A' else 'B')+c[i+1:]
+    with pytest.raises(CorrectionError,match='cursor_invalid'): listing(m,'P',tampered)
     with pytest.raises(CorrectionError,match='cursor_invalid'): listing(m,'P','W10')
     initialize(m.store,reset=True)
     with pytest.raises(CorrectionError,match='identity_changed'): listing(m,'P',p['next_cursor'])
     assert count(m)==2
+
+
+_B64URL='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+
+
+def _same_bytes_spellings(cursor):
+    """Every other spelling of ``cursor`` that a lenient base64 decoder maps to the SAME bytes: variants of the
+    last character differing only in ignored padding bits, plus explicit '=' padding."""
+    import base64
+    def lenient(s): return base64.b64decode(s+'='*((-len(s))%4),altchars=b'-_')
+    raw=lenient(cursor)
+    out=[cursor[:-1]+ch for ch in _B64URL if ch!=cursor[-1] and lenient(cursor[:-1]+ch)==raw]
+    if len(cursor)%4:
+        out.append(cursor+'='*((-len(cursor))%4))
+    return out
+
+
+def test_cursor_noncanonical_spellings_are_refused(memory):
+    """4.1.3: only the canonical spelling of a cursor is accepted (no malleability through ignored bits)."""
+    m=memory
+    m.add_facts([{'text':'Private P assertion.'}],project='P')
+    seen_padding_bits=False
+    for limit in range(1,4):                    # different cursor lengths: covers every len(raw) % 3
+        c=listing(m,'P',limit=limit)['next_cursor']
+        assert listing(m,'P',c)['ok']           # the canonical spelling stays valid
+        variants=_same_bytes_spellings(c)
+        seen_padding_bits|=any(v[-1]!='=' for v in variants)
+        for v in variants:
+            with pytest.raises(CorrectionError,match='cursor_invalid'): listing(m,'P',v)
+    m.add_facts([{'text':'Second P assertion.'}],project='P')
+    for limit in (1,2):
+        c=listing(m,'P',limit=limit)['next_cursor']
+        variants=_same_bytes_spellings(c)
+        seen_padding_bits|=any(v[-1]!='=' for v in variants)
+        for v in variants:
+            with pytest.raises(CorrectionError,match='cursor_invalid'): listing(m,'P',v)
+    assert seen_padding_bits                    # the case that made the old test flaky was exercised
 
 
 def test_preview_refusal_and_atomic_rollback_have_no_events(memory):
