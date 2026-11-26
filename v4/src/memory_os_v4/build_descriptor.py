@@ -28,6 +28,21 @@ def _stamp(root):
                  if '__pycache__' not in p.parts and p.suffix not in {'.pyc', '.pyo'})
 
 
+def _importable_legacy(path: Path) -> bool:
+    """True when ``path`` (a ``memory_os_ai`` beside the payload) holds anything Python could import or run:
+    a link, a regular file, or any file other than ``__pycache__/*.pyc`` caches."""
+    if not os.path.lexists(path):
+        return False
+    if path.is_symlink() or not path.is_dir():
+        return True
+    for item in path.rglob("*"):
+        if item.is_symlink():
+            return True
+        if item.is_file() and not (item.parent.name == "__pycache__" and item.suffix == ".pyc"):
+            return True
+    return False
+
+
 def verify(root: Path, version: str, *, max_age=0.0) -> dict:
     if not max_age:
         return _verify(root, version)
@@ -60,9 +75,10 @@ def _verify(root: Path, version: str) -> dict:
         canonical = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
         if hashlib.sha256(canonical).hexdigest() != record.get("payload_sha256"):
             raise ValueError("invalid payload root")
-        if os.path.lexists(root / "memory_os_ai"):
-            # 4.1.3: the legacy v3 package is no longer shipped; one found beside memory_os_v4 is stale
-            # or foreign code importable by the same interpreter.
+        if _importable_legacy(root / "memory_os_ai"):
+            # 4.1.3: the legacy v3 package is no longer shipped; v3 CODE found beside memory_os_v4 is stale or
+            # foreign code importable by the same interpreter. An empty leftover directory or orphan bytecode
+            # caches (never imported without their sources, PEP 3147) are tolerated.
             raise ValueError("legacy v3 package beside the installed payload")
         actual = {}
         for package in ("memory_os_v4",):  # 4.1.3: no legacy v3 package

@@ -589,3 +589,57 @@ def test_installed_admin_preview_path_without_clone(tiny_resources, monkeypatch,
                        "--table-path", str(paths["table_path"])])
     assert result == 0 and json.loads(capsys.readouterr().out)["mode"] == "preview"
     assert not paths["cache_dir"].exists()
+
+
+def test_build_tolerates_generated_bytecode_but_not_foreign_content(tmp_path):
+    """4.1.3 (Codex lot1 r2): build_py --compile may create __pycache__ for the shipped py-module."""
+    record = {"version": VERSION, "source_commit": SHA, "source_files": {}}
+    root = tmp_path / "build-lib"
+    (root / "memory_os_v4").mkdir(parents=True)
+    (root / "memory_os_constraints.py").write_text("")
+    (root / "__pycache__").mkdir()
+    (root / "__pycache__/memory_os_constraints.cpython-311.pyc").write_bytes(b"\0")
+    builder.descriptor(root, record)                         # compiled cache of the shipped module: accepted
+    (root / "__pycache__/memory_os_ai.cpython-311.pyc").write_bytes(b"\0")
+    with pytest.raises(RuntimeError, match="outside the shipped payload"):
+        builder.descriptor(root, record)                     # any other cache: refused
+    (root / "__pycache__/memory_os_ai.cpython-311.pyc").unlink()
+    (root / "memory_os_ai").mkdir()
+    with pytest.raises(RuntimeError, match="outside the shipped payload"):
+        builder.descriptor(root, record)                     # a stale v3 tree, even empty: refused at BUILD time
+
+
+@pytest.mark.parametrize("leftover, refused", [("empty", False), ("orphan-cache", False), ("source", True),
+                                               ("sourceless-pyc", True), ("symlink", True)])
+def test_installed_legacy_leftovers_only_code_is_refused(sealed, tmp_path, leftover, refused):
+    """4.1.3 (Codex lot1 r2): after an upgrade, an empty memory_os_ai or orphan __pycache__ (never imported without
+    sources, PEP 3147) must not make /ready unavailable; importable v3 code still does."""
+    root = tmp_path / "installed"
+    install(sealed, root)
+    legacy = root / "memory_os_ai"
+    if leftover == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        legacy.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    else:
+        (legacy / "__pycache__").mkdir(parents=True)
+        if leftover == "orphan-cache":
+            (legacy / "__pycache__/engine.cpython-311.pyc").write_bytes(b"\0")
+        elif leftover == "source":
+            (legacy / "__init__.py").write_text("")
+        elif leftover == "sourceless-pyc":
+            (legacy / "engine.pyc").write_bytes(b"\0")
+    check = verify(root, VERSION)
+    assert (check.get("code") == "build_unqualified") is refused and check.get("ok", False) is (not refused)
+
+
+def test_qualification_tool_environment_has_no_v3_switch_or_path():
+    spec = importlib.util.spec_from_file_location("qualify_d1a", ROOT / "scripts/qualify_distribution_d1a.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    env = tool.qualification_environment({"PATH": "/bin", "MEMORY_TEST_HASH_V3": "1", "MEMORY_V4_DIR": "/x"})
+    assert "MEMORY_TEST_HASH_V3" not in env and "MEMORY_V4_DIR" not in env
+    assert env["PYTHONPATH"].split(":") == ["v4/src", "v4"]
+    # nothing the root suite collects imports the legacy package any more
+    for path in (ROOT / "tests").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert "from memory_os_ai" not in text and "import memory_os_ai" not in text, path

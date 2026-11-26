@@ -68,6 +68,16 @@ def command(argv, cwd, env, log, monitor=None):
     return {"argv": argv, "elapsed_ms": round(1000 * (time.monotonic() - started), 3), "log_sha256": digest(log)}
 
 
+def qualification_environment(environ) -> dict:
+    """Environment of every step run by this tool. 4.1.3 (D2): no legacy v3 path or switch; the source tree
+    is v4 only (``memory_os_ai`` is no longer shipped nor importable from the sources)."""
+    env = {key: value for key, value in environ.items()
+           if not key.startswith("MEMORY_V4_") and key != "MEMORY_TEST_HASH_V3"}
+    env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONOPTIMIZE="0", PYTHONPATH="v4/src:v4",
+               HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    return env
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -83,9 +93,7 @@ def main():
     output.mkdir(parents=True)
     report = {"ok": False, "source_commit": args.source_commit, "production_modified": False,
               "downloads": 0, "model_calls": 0, "steps": {}, "installed_dependency_mode": "existing dependencies reused; not a clean dependency install"}
-    env = {key: value for key, value in os.environ.items() if not key.startswith("MEMORY_V4_")}
-    env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONOPTIMIZE="0", PYTHONPATH="src:v4/src:v4",
-               HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", MEMORY_TEST_HASH_V3="1")
+    env = qualification_environment(os.environ)
     if args.build_python:
         env["MEMORY_TEST_BUILD_PYTHON"] = str(args.build_python.resolve())
     try:

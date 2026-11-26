@@ -133,7 +133,14 @@ def descriptor(build_root: Path, record: dict) -> dict:
     # 4.1.3: the build directory may hold ONLY the shipped payload. A stale tree from an older build
     # (e.g. build/lib/memory_os_ai/ of 4.1.2) would otherwise be outside the inventory yet packed by
     # setuptools into the wheel.
-    stray = sorted(p.name for p in build_root.iterdir() if p.name not in {*PACKAGES, *MODULES})
+    def generated_cache(entry: Path) -> bool:
+        # build_py --compile may write __pycache__/memory_os_constraints.*.pyc next to the shipped module
+        return (entry.name == "__pycache__" and entry.is_dir() and not entry.is_symlink()
+                and all(child.is_file() and not child.is_symlink() and child.suffix == ".pyc"
+                        and child.name.split(".")[0] in {m.removesuffix(".py") for m in MODULES}
+                        for child in entry.iterdir()))
+    stray = sorted(p.name for p in build_root.iterdir()
+                   if p.name not in {*PACKAGES, *MODULES} and not generated_cache(p))
     if stray:
         raise RuntimeError(f"Build directory holds content outside the shipped payload (stale build?): {stray}")
     files = inventory(build_root)
