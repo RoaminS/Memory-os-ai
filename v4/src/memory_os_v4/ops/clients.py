@@ -18,10 +18,11 @@ Per-OS paths (4.1.1, contract §5, lot L5):
   it (``client_env_override``). macOS keeps ``~/Library/Application Support/Code/User/mcp.json`` unchanged.
 - ``XDG_CONFIG_HOME`` applies ONLY to Zed on Linux, and ONLY when it is an absolute path under HOME
   (no ``..`` traversal, no symlink escape); otherwise an explicit refusal is raised, consistent with
-  ``quickstart._safe_path`` and the L4 systemd XDG limit. Declared limit: ``scripts/memory_os_bootstrap.py``
-  does not forward ``XDG_CONFIG_HOME`` to its child quickstart preview (absent from ``CHILD_ENV_KEEP``).
-- Relocating environment variables (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, ``GEMINI_CLI_HOME``,
-  ``GROK_HOME``) refuse automatic configuration for the affected client without guessing a path.
+  ``quickstart._safe_path`` and the L4 systemd XDG limit. Since 4.1.3, ``scripts/memory_os_bootstrap.py`` forwards
+  ``XDG_CONFIG_HOME`` (and no other ``XDG_*``) to its child quickstart preview, which validates it with these rules.
+- Relocating environment variables (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, ``GEMINI_CLI_HOME``, ``GROK_HOME`` and,
+  for VS Code on Linux only, ``COPILOT_HOME``) refuse automatic configuration for the affected client without
+  guessing a path, even when they are set to an empty value.
 """
 
 from __future__ import annotations
