@@ -1,6 +1,7 @@
 """4.1.3 Lot 3: static checks of the Linux-cell and container qualification tooling (it runs on CI runners only)."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 
@@ -104,7 +105,7 @@ def test_p1_lists_are_motivated_and_name_what_exists_in_the_tree(cell):
         assert entry["raison"] in (ROOT / "v4/tests" / entry["fichier"]).read_text(), entry
     # ported 4.1.1 entries and new 4.1.3 ones are told apart; dropped v7 entries say why
     assert {e["origine"] for e in common["ignore"] + common["deselect"] + own["deselect"]} <= {
-        "v7", "v7 (S1 reclassé b)", "4.1.3"}
+        "v7", "v7 (S1 reclassé b)", "4.1.3", "4.1.3 (run CI n° 2)"}
     assert all(d["pourquoi"] for d in listed["retirees"])
 
 
@@ -178,3 +179,39 @@ def test_p1_workdir_exists_in_a_fresh_checkout(tmp_path):
     basetemp, junit = tool.p1_workdir(tmp_path, "p1-cell")
     assert basetemp.parent == junit.parent == tmp_path / ".local-qualification" and basetemp.parent.is_dir()
     assert not basetemp.exists() and junit.name == "p1-cell-junit.xml"
+
+
+def test_the_write_guard_judges_every_absolute_path_and_only_those(tmp_path, monkeypatch):
+    """CI run 2: on Linux /proc/self/fd/N names a pipe 'pipe:[N]' (no path); the guard joined it to the current
+    directory and refused a write under the real HOME. Non-filesystem descriptors are skipped, paths still judged."""
+    spec = importlib.util.spec_from_file_location("guard_under_test", ROOT / "scripts/test_home_guard.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    home, allowed = tmp_path / "home", tmp_path / "home/allowed"
+    allowed.mkdir(parents=True)
+    guard = module.HomeWriteGuard(home, (allowed,))
+    monkeypatch.chdir(home)                                    # where the old code joined 'pipe:[N]'
+    names = {}
+    monkeypatch.setattr(guard, "fd_path", lambda fd: names[fd])
+    for fd, name in enumerate(("pipe:[33329]", "socket:[4242]", "anon_inode:[eventfd]", "anon_inode:inotify")):
+        names[fd] = name
+        guard.check(fd)                                       # not a filesystem entry: nothing to judge
+    names[10] = str(home / "file")
+    with pytest.raises(PermissionError):
+        guard.check(10)                                       # an absolute path under HOME is still refused
+    names[11] = str(allowed / "file")
+    guard.check(11)
+    names[12] = str(tmp_path / "outside")
+    guard.check(12)
+    with pytest.raises(PermissionError):
+        guard.check(str(home / "x"))
+    with pytest.raises(PermissionError):
+        guard.check("relative", dir_fd=10)                     # relative to a directory descriptor under HOME
+    assert len(guard.violations) == 3
+    monkeypatch.undo()
+    read, write = os.pipe()                                    # a real pipe of this platform
+    try:
+        module.HomeWriteGuard(home).check(write)
+    finally:
+        os.close(read)
+        os.close(write)

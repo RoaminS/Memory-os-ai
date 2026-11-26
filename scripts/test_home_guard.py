@@ -57,7 +57,11 @@ class HomeWriteGuard:
         if isinstance(path, int):
             try:
                 path = self.fd_path(path)
-            except OSError:  # Pipe/socket, not a filesystem file.
+            except OSError:  # Pipe/socket, not a filesystem file (macOS F_GETPATH refuses them).
+                return
+            if not os.path.isabs(os.fsdecode(path)):
+                # Linux /proc/self/fd/N names a pipe, socket or anonymous inode 'pipe:[N]', 'socket:[N]',
+                # 'anon_inode:[...]': not a filesystem entry. Every absolute path is still checked below.
                 return
         path = os.fsdecode(path)
         if not os.path.isabs(path) and dir_fd not in (None, -1):

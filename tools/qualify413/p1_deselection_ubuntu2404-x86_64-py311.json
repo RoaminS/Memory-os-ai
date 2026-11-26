@@ -1,7 +1,7 @@
 {
  "format": "qualify413-p1-deselection-v1",
  "cellule": "ubuntu2404-x86_64-py311",
- "commit_base": "f317f9a",
+ "commit_base": "7e6b567",
  "origine": {
   "fichier": "qual411/harness/p1_deselection_v7.json",
   "format": "qual411-p1-deselection-v7",
@@ -16,7 +16,9 @@
   "b": "ML requis dans la suite lexicale : le test construit un moteur du profil sémantique (refus voulu du produit sans faiss : memory.py:85 _require_semantic_closure, pas de repli) ou importe un module ML ; couvert par la suite complète macOS avec le profil sémantique",
   "g": "test ancré sur la cellule de référence macos-arm64-py311 (chemins, cellule ou service macOS attendus en dur) ; sous Linux le produit applique à juste titre les règles de la cellule Linux",
   "h": "client dont la configuration Linux diffère à dessein de macOS (claude-desktop, windsurf : refus client_unsupported_on_os ; vscode depuis 4.1.3 : ~/.copilot/mcp-config.json au format copilot-json) ; le test attend le chemin et le format macOS du client",
-  "i": "test d'outillage qui lit l'historique Git du dépôt (objets d'anciens commits) ; la cellule CI extrait le commit seul (actions/checkout, profondeur 1, job qualify-arm64 sans fetch-depth) : objets absents"
+  "i": "test d'outillage qui lit l'historique Git du dépôt (objets d'anciens commits) ; la cellule CI extrait le commit seul (actions/checkout, profondeur 1, job qualify-arm64 sans fetch-depth) : objets absents",
+  "j": "outillage de qualification 4.1.0 à sémantique de socket macOS/BSD (scripts/qualify_install_410_helper.py, installeur launchd) : sous Linux un bind SO_REUSEADDR est refusé sur une connexion TIME_WAIT laissée par un socket sans SO_REUSEADDR ; la sonde répond « busy », le sens sûr",
+  "k": "limite déclarée, décision de Romain en attente (défaut produit analysé, non corrigé dans cet outillage)"
  },
  "lexicale": {
   "ignore": [
@@ -2767,6 +2769,26 @@
      "couverture": "suite lexicale de la cellule 1 macos-arm64-py311 (PASS, c1-p1-v3), même commit a9e6d8d ; P3/P4 de la cellule 3 (détection et refus attestés sur l'interpréteur de la cellule) ; 4.1.3 : suite lexicale macOS (rejeu local, PASS)",
      "origine": "v7",
      "verification_locale": "non vérifiable localement (cellule détectée sur Linux réel) ; jugé par le run CI"
+    },
+    {
+     "noeud": "tests/test_qualify_tooling_410.py::test_port_probe_on_real_ephemeral_ports_listening_is_busy_and_time_wait_is_free",
+     "categorie": "j",
+     "motif": "le test prouve le défaut macOS du run v5 de 4.1.0 (bind simple refusé en TIME_WAIT, test_qualify_tooling_410.py:1980 « if sys.platform == 'darwin' ») puis exige « free » en TIME_WAIT ; sous Linux, le premier cas (serveur sans SO_REUSEADDR, :1960) laisse un TIME_WAIT que le bind SO_REUSEADDR de la sonde (qualify_install_410_helper.py:230) ne peut pas réutiliser : « busy ». Outillage 4.1.0 (installeur launchd, macOS), pas le produit",
+     "preuve": "AssertionError: ('127.0.0.1', 'TIME_WAIT only')",
+     "couverture": "suite lexicale macOS (rejeu local et suite complète harnais : PASS) ; sous Linux le port du service est vérifié par le produit et attesté par P5 (port libre après uninstall)",
+     "origine": "4.1.3 (run CI n° 2)",
+     "verification_locale": "non reproductible sous macOS (sémantique BSD) ; observé sur les deux cellules CI",
+     "cas_junit": 1
+    },
+    {
+     "noeud": "tests/test_bootstrap_oneliner_413.py::test_a_token_whose_identity_changed_moves_the_digest",
+     "categorie": "k",
+     "motif": "target_identity (quickstart.py:1525-1547) = kind, mode, uid, dev, ino, size, nlink, sans date : sur ext4 le fichier recréé après unlink reprend le même inode, même taille et mêmes droits, donc la même identité et le même digest de plan ; défaut produit réel (un jeton remplacé à l'identique de taille entre aperçu et apply n'est pas détecté sous Linux), non corrigé ici : proposition remise, décision de Romain en attente",
+     "preuve": "AssertionError: assert 'b13797e69fd3d0fe68afeee28acfeda24e63e368a43881e12763bf3ad1e2745f' != 'b13797e69fd3d0fe68afeee28acfeda24e63e368a43881e12763bf3ad1e2745f'",
+     "couverture": "suite complète macOS (APFS ne réutilise pas l'inode : PASS) ; jeton supprimé entre aperçu et apply : test_a_token_removed_between_preview_and_apply_is_refused_before_any_write, PASS sous Linux",
+     "origine": "4.1.3 (run CI n° 2)",
+     "verification_locale": "non reproductible sous macOS (APFS) ; observé sur les deux cellules CI",
+     "cas_junit": 1
     }
    ]
   }
@@ -2776,31 +2798,55 @@
    "fichier": "test_service_411.py",
    "raison": "a unit systemd does not know has no command to print",
    "motif": "saut conditionnel écrit dans le test (test_service_411.py:770) : pour une unité que systemd ne connaît pas, il n'y a aucune commande à afficher ; site vérifié dans le clone",
-   "origine": "v7"
+   "origine": "v7",
+   "site_413": [
+    "test_service_411.py:779"
+   ]
   },
   {
    "fichier": "test_qualify_tooling_410.py",
    "raison": "evidence of run v6 not on this machine",
    "motif": "outillage 4.1.0 : les preuves locales du run v6 ne font pas partie du commit (test_qualify_tooling_410.py:3932)",
-   "origine": "v7"
+   "origine": "v7",
+   "site_413": [
+    "test_qualify_tooling_410.py:3932"
+   ]
   },
   {
    "fichier": "test_qualify_tooling_410.py",
    "raison": "run v7 copies not on this machine",
    "motif": "outillage 4.1.0 : les copies du run v7 ne font pas partie du commit (test_qualify_tooling_410.py:4069)",
-   "origine": "v7"
+   "origine": "v7",
+   "site_413": [
+    "test_qualify_tooling_410.py:4069"
+   ]
   },
   {
    "fichier": "test_qualify_tooling_410.py",
    "raison": "no dual-stack IPv6 socket here",
    "motif": "sonde de port en IPv6 refusée par le confinement C1 (test_qualify_tooling_410.py:2004)",
-   "origine": "v7"
+   "origine": "v7",
+   "site_413": [
+    "test_qualify_tooling_410.py:2004"
+   ]
   },
   {
    "fichier": "test_ops_e2e.py",
    "raison": "loopback bind forbidden in this sandbox",
    "motif": "le test détecte lui-même le confinement (test_ops_e2e.py:36) ; le relais réel est couvert par P7",
-   "origine": "v7"
+   "origine": "v7",
+   "site_413": [
+    "test_ops_e2e.py:36"
+   ]
+  },
+  {
+   "fichier": "test_install_sh_413.py",
+   "raison": "is not Apple's xcrun launcher here",
+   "motif": "saut conditionnel écrit dans le test (test_install_sh_413.py:580, skipif not _apple_launcher()) : le lanceur xcrun d'Apple n'existe que sur macOS ; observé sur les deux cellules au run CI n° 2",
+   "origine": "4.1.3 (run CI n° 2)",
+   "site_413": [
+    "test_install_sh_413.py:580"
+   ]
   }
  ],
  "retirees": [
@@ -2823,7 +2869,7 @@
    "origine": "v7.lexicale.deselect",
    "noeud": "tests/test_qualify_tooling_410.py::test_port_probe_on_real_ephemeral_ports_listening_is_busy_and_time_wait_is_free",
    "categorie_v7": "S1",
-   "pourquoi": "PASS au rejeu 4.1.3 sans confinement (cause propre au profil C1 de 4.1.1 : socket, TMPDIR sous le dépôt ou minutage sous sandbox-exec) ; non désélectionné, reste bloquant"
+   "pourquoi": "retirée de la section commune (cause C1 de 4.1.1 absente : PASS sur macOS sans confinement) ; remise dans la section de chaque cellule Linux, catégorie j, après le run CI n° 2. En 4.1.1 elle était commune (S1), donc jamais jouée dans la VM Lima : le comportement Linux n'y a jamais été observé"
   },
   {
    "origine": "v7.lexicale.deselect",
@@ -2853,13 +2899,15 @@
  "comptes": {
   "ignore": 59,
   "deselect_commun": 160,
-  "deselect_cellule": 91,
+  "deselect_cellule": 93,
   "cas_commun": 240,
-  "sauts_prevus": 5,
+  "sauts_prevus": 6,
   "retirees": 8,
   "b_new": 43,
   "b_port": 108,
   "b_reclass_S1": 9,
+  "ci2_cell_j": 1,
+  "ci2_cell_k": 1,
   "g_port": 25,
   "h_port": 25,
   "h_port_vscode": 10,

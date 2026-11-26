@@ -16,10 +16,12 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import shlex
 import subprocess
 import sys
 import threading
+import time
 import zipfile
 
 import pytest
@@ -702,7 +704,13 @@ def test_the_terminal_is_read_and_written_directly(tmp_path):
         os.write(master, b"yes\n")
         assert terminal.readline() == "yes"
         terminal.write(bs.CONFIRM_PROMPT)
-        assert os.read(master, 200).decode().endswith("[y/N] ")
+        # Everything the terminal shows: the line discipline may echo the answer first (Linux: 'yes\r\n', in a
+        # separate read, CI run 2), then the question written on the terminal. Read until it is there.
+        seen, deadline = b"", time.monotonic() + 10
+        while not seen.endswith(b"[y/N] ") and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                seen += os.read(master, 200)
+        assert seen.decode() in {bs.CONFIRM_PROMPT, "yes\r\n" + bs.CONFIRM_PROMPT, "yes\n" + bs.CONFIRM_PROMPT}
     finally:
         os.close(master)
         os.close(slave)
@@ -979,6 +987,10 @@ def _clean_product_env(monkeypatch, home):
     for key in [key for key in os.environ if key.startswith("MEMORY_V4_")]:
         monkeypatch.delenv(key)
     monkeypatch.setenv("HOME", str(home))
+    # The XDG_* of the session (conftest) belong to another HOME: on Linux the systemd --user manager would follow
+    # XDG_CONFIG_HOME outside this HOME and refuse it (declared limit; CI run 2, both Linux cells).
+    for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.mark.parametrize("legacy", [False, True])

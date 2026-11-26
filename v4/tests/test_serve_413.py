@@ -40,6 +40,11 @@ def installation(tmp_path, monkeypatch):
                        "MEMORY_V4_SERVICE_LABEL": "local.memory-os-serve-test"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.delenv("MEMORY_V4_CL100K_PATH", raising=False)
+    # The XDG_* of the session (conftest) belong to another HOME; on Linux the systemd --user manager follows
+    # XDG_CONFIG_HOME for the HOME of the process, so a value outside this HOME is refused (declared limit,
+    # service.py definition_path). This HOME has none, like a fresh account (CI run 2, both Linux cells).
+    for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(key, raising=False)
     from memory_os_v4 import readiness
     monkeypatch.setattr(readiness, "build_identity", lambda: dict(QUALIFIED_BUILD))   # an installed wheel
     return home, port
