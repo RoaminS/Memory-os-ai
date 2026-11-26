@@ -1887,13 +1887,24 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
         planned.replay = []
         plan = build_plan(planned, pin=pin, run=run, environ=environ, host=host, clock=clock)
         announced = extras["announced"]
-        stores = [os.path.realpath(announced["store"])]
-        for name in ("venv", "work_dir"):
-            where = os.path.realpath(plan[name])
-            if any(where == item or where.startswith(item.rstrip(os.sep) + os.sep) for item in stores):
-                extras["blockers"].append(("destination_in_store", f"destination_in_store: the {name} {plan[name]} "
-                                           f"is inside the store {announced['store']}, which must stay new and "
-                                           "empty; choose another --venv/--work-dir; nothing written"))
+        home_now = os.path.abspath(environ.get("HOME") or os.path.expanduser("~"))
+        legacy = str(PurePosixPath(home_now) / STORE_SUBPATH)
+        protected = (
+            (announced["store"], "destination_in_store", "the store {}, which must stay new and empty"),
+            (legacy, "destination_in_legacy_store", "the historical store location {} (even absent: creating it "
+             "would make quickstart select it, and it is never used)"))
+        for name in ("venv", "work_dir", "uv_cache", "uv_python_dir"):  # every place the bootstrap creates or fills
+            value = plan.get(name)
+            if not value:
+                continue
+            forms = {os.path.abspath(value), os.path.realpath(value)}
+            for base, code, what in protected:
+                bases = {os.path.abspath(base), os.path.realpath(base)}
+                if any(form == item or form.startswith(item.rstrip(os.sep) + os.sep) for form in forms
+                       for item in bases):
+                    extras["blockers"].append((code, f"{code}: the {name} {value} is inside " + what.format(base)
+                                               + "; choose another --venv/--work-dir/UV_PYTHON_INSTALL_DIR; "
+                                               "nothing written"))
         announced["python"] = os.path.join(plan["venv"], "bin", "python")
         announced["service"].update(expected_service(python=announced["python"], store=announced["store"],
                                                      ops_dir=announced["ops_dir"], token=announced["token"]["path"]))

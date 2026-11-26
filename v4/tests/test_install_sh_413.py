@@ -337,8 +337,8 @@ def test_the_interpreter_runs_without_site_pth_sitecustomize_or_bytecode(tmp_pat
 # ---------------------------------------------------------------- round 4: physical destinations of the defaults
 
 def _default_places():
-    block = TEXT[TEXT.index("DEFAULT_PLACES='") + len("DEFAULT_PLACES='"):]
-    return block[:block.index("'")].splitlines()
+    block = TEXT[TEXT.index("    for REL in \\\n"):]
+    return re.findall(r'^      "([^"]+)"(?: \\|; do)$', block[:block.index("; do\n") + 5], re.M)
 
 
 def test_the_default_places_cover_every_write_location_the_bootstrap_knows():
@@ -384,3 +384,53 @@ def test_an_unrelated_tmpdir_next_to_home_is_still_used(tmp_path):
     done = r.run()
     assert done.returncode == 0 and "not usable" not in done.stdout
     assert _temporary(done).parent == Path(os.path.realpath(r.tmpdir))
+
+
+# ---------------------------------------------------------------- round 5: no transient file before the bootstrap
+
+SHELL_RUNS = [[shell] for shell in SHELLS] + ([["/bin/bash", "--posix"]] if os.path.exists("/bin/bash") else [])
+
+
+def _code_lines():
+    return [line for line in TEXT.splitlines() if not line.lstrip().startswith("#")]
+
+
+def test_the_script_has_no_construct_that_writes_a_transient_file():
+    """bash 3.2 (macOS /bin/sh) writes here-documents to a file in TMPDIR (or /var/tmp): none is allowed."""
+    code = "\n".join(_code_lines())
+    assert "<<" not in code                                   # no here-document, no here-string
+    assert not re.search(r"\b(sort|tee|sed -i|mkfifo)\b", code)
+    assert code.count("mktemp") == 1                          # the private directory itself, after the checks
+    assert code.index("mktemp") > code.index("forbidden \"$BASE\"")
+
+
+def _stamp(path: Path):
+    status = os.stat(path)
+    return status.st_mtime_ns, status.st_ctime_ns, sorted(os.listdir(path))
+
+
+@pytest.mark.parametrize("shell", SHELL_RUNS, ids=lambda argv: " ".join(argv))
+def test_no_file_is_created_outside_the_private_directory_before_the_bootstrap(tmp_path, shell):
+    """A forbidden TMPDIR (where the legacy store really lives) is never written, not even transiently: its own
+    times stay identical (creating then removing a file changes them), and so do HOME's."""
+    r = Release(tmp_path)
+    volume = tmp_path / "volume" / "store"
+    volume.mkdir(parents=True)
+    (r.home / ".memory-os-v4").symlink_to(volume, target_is_directory=True)
+    watched = [volume, r.home, r.tmpdir]
+    shared = Path(os.path.realpath("/var/tmp"))   # where bash 3.2 (macOS /bin/sh) writes here-documents
+    environ = {"HOME": str(r.home), "PATH": f"{r.bin}:{r.uv_dir}:/usr/bin:/bin", "TMPDIR": str(volume),
+               "LANG": "en_US.UTF-8"}
+    untouched = []
+    for attempt in range(3):  # another process may touch /var/tmp; a here-document would touch it EVERY time
+        before = [_stamp(path) for path in watched]
+        shared_before = os.stat(shared).st_mtime_ns if shared.is_dir() else None
+        done = subprocess.run([*shell, "-s", "--"], input=r.script(), capture_output=True, text=True, env=environ,
+                              cwd=str(r.home), timeout=180, start_new_session=True)
+        assert done.returncode == 0 and done.stderr == "", done.stderr      # no "command not found" either
+        assert "TMPDIR is not usable" in done.stdout and r.ran() is not None
+        assert [_stamp(path) for path in watched] == before
+        untouched.append(shared_before is None or os.stat(shared).st_mtime_ns == shared_before)
+        if untouched[-1]:
+            break
+    assert any(untouched), "the shell wrote a transient file in /var/tmp before the bootstrap"

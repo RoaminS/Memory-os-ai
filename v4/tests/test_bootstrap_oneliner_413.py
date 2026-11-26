@@ -1219,3 +1219,40 @@ def test_a_store_that_fills_between_preview_and_apply_moves_the_digest(c):
     accepted = qs.plan_digest(plan)
     (c.settings.store_dir / "store.sqlite3").write_bytes(b"")
     assert qs.plan_digest(prepare(c, profile="lexical")) != accepted
+
+
+# ---------------------------------------------------------------- round 5 (Codex r4 of the one-liner)
+
+@pytest.mark.parametrize("option,relative,code", [
+    ("--work-dir", ".memory-os-v4/build", "destination_in_legacy_store"),        # Codex r4 counter-example 2
+    ("--venv", ".memory-os-v4/venv", "destination_in_legacy_store"),
+    ("--venv", ".memory-os-v4", "destination_in_legacy_store"),
+    ("--work-dir", ".local/share/memory-os/store/build", "destination_in_store"),
+])
+def test_no_bootstrap_destination_may_create_the_historical_or_the_new_store(o, option, relative, code):
+    terminal = FakeTerminal("y")
+    before = o.inventory()
+    report, _ = o.run(option, str(o.home / relative), terminal=terminal)
+    assert code in report["plan"]["blocker_codes"] and terminal.opened == 0
+    assert o.inventory() == before and not (o.home / ".memory-os-v4").exists()
+
+
+@pytest.mark.parametrize("relative,code", [
+    (".local/share/memory-os/store/python", "destination_in_store"),             # Codex r4 counter-example 1
+    (".memory-os-v4/python", "destination_in_legacy_store"),
+])
+def test_the_uv_python_directory_may_not_lie_in_a_store(tmp_path, relative, code):
+    one = OneLiner(tmp_path)
+    one.m.pin = make_pin(one.m.wheel, cells=tuple(bs.CELLS))
+    one.touch(".cursor/mcp.json")
+    one.environ["UV_PYTHON_INSTALL_DIR"] = str(one.home / relative)
+    terminal = FakeTerminal("y")
+    report, _ = one.run("--cpython", "3.13", terminal=terminal)
+    assert code in report["plan"]["blocker_codes"] and terminal.opened == 0
+    assert one.m.verbs() == ["--version"]                                       # nothing acquired
+
+
+def test_a_link_into_the_historical_location_is_refused_too(o):
+    (o.home / "build-link").symlink_to(o.home / ".memory-os-v4", target_is_directory=True)  # dangling: absent store
+    report, _ = o.run("--work-dir", str(o.home / "build-link" / "w"), terminal=FakeTerminal("y"))
+    assert "destination_in_legacy_store" in report["plan"]["blocker_codes"]

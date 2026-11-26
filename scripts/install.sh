@@ -16,7 +16,8 @@ trap 'printf "%s\n" "memory-os-ai install: this script is incomplete (truncated 
 # resolved physically (links followed) and never under HOME, nor under the physical destination of a store, the state
 # directory, the venv, the service or a client configuration directory, defaults followed through their links (then
 # /tmp is used instead). Both Python launches before the answer run with -I -S -B: no site, .pth or sitecustomize, no
-# bytecode written.
+# bytecode written. The script itself uses no construct that writes a transient file (no here-document: bash 3.2, the
+# macOS /bin/sh, writes those under /var/tmp; no here-string, sort or tee).
 #
 # What it does, in order:
 #   1. checks its prerequisites: curl, a SHA-256 tool (sha256sum or shasum), python3, and uv >= 0.13.9, which it
@@ -124,25 +125,6 @@ main() {
   # and token directories, the venv, the service directory, every default client configuration directory) or of
   # one of its existing ancestors, nor under anything HOME links to directly, nor under a relocated store or client
   # directory. Then /tmp is used instead; refused if /tmp is one of them too.
-  DEFAULT_PLACES='.memory-os-v4
-.local/share/memory-os/store
-.local/state/memory-os
-.config/memory-os
-.memory-os
-Library/LaunchAgents
-.config/systemd/user
-.claude
-Library/Application Support/Claude
-.codex
-Library/Application Support/Code/User
-.copilot
-.cursor
-.gemini/config
-.gemini
-.grok
-.config/zed
-.config/devin
-.codeium/windsurf'
   physical() { (cd "$1" 2>/dev/null && pwd -P); }
   under() { case "$1/" in "$2"/*) return 0 ;; esac; [ "$2" = / ]; }
   forbidden() {
@@ -152,8 +134,28 @@ Library/Application Support/Code/User
       PLACE_P=$(physical "$PLACE") || continue
       [ -n "$PLACE_P" ] && under "$1" "$PLACE_P" && return 0
     done
-    while IFS= read -r REL; do
-      [ -n "$REL" ] || continue
+    # DEFAULT_PLACES: a plain list of quoted words (no here-document: bash 3.2, the macOS /bin/sh, writes those to a
+    # file under /var/tmp, which could be where a store really lives).
+    for REL in \
+      ".memory-os-v4" \
+      ".local/share/memory-os/store" \
+      ".local/state/memory-os" \
+      ".config/memory-os" \
+      ".memory-os" \
+      "Library/LaunchAgents" \
+      ".config/systemd/user" \
+      ".claude" \
+      "Library/Application Support/Claude" \
+      ".codex" \
+      "Library/Application Support/Code/User" \
+      ".copilot" \
+      ".cursor" \
+      ".gemini/config" \
+      ".gemini" \
+      ".grok" \
+      ".config/zed" \
+      ".config/devin" \
+      ".codeium/windsurf"; do
       STEP="$HOME"
       REST="$REL"
       while [ -n "$REST" ]; do
@@ -164,9 +166,7 @@ Library/Application Support/Code/User
         PLACE_P=$(physical "$STEP") || break
         [ -n "$PLACE_P" ] && under "$1" "$PLACE_P" && return 0
       done
-    done <<PLACES
-$DEFAULT_PLACES
-PLACES
+    done
     for ENTRY in "$HOME"/* "$HOME"/.[!.]* "$HOME"/..?*; do
       [ -L "$ENTRY" ] || continue
       PLACE_P=$(physical "$ENTRY") || continue
