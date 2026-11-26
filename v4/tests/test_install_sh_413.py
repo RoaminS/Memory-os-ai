@@ -28,7 +28,8 @@ SHELLS = [shell for shell in ("/bin/sh", "/bin/dash") if os.path.exists(shell)]
 BASE_LINE = re.compile(r'^  RELEASE_BASE="[^"\n]*"$', re.M)
 PROTO_LINE = re.compile(r'^  CURL_PROTO="[^"\n]*"$', re.M)
 README = (REPO / "README.md").read_text()
-ONE_LINER = ("env -u BASH_ENV bash -o pipefail -c \"unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' "
+ONE_LINER = ("env -u BASH_ENV bash -o pipefail -c \"unset SSLKEYLOGFILE; "
+             "curl -q -fsSL --proto '=https' --proto-redir '=https' "
              "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh\"")
 pytestmark = pytest.mark.skipif(MINOR not in ((3, 11), (3, 12), (3, 13)), reason="needs a Python of a retained cell")
 
