@@ -15,6 +15,7 @@ import sqlite3
 from threading import RLock
 import time
 from urllib.parse import quote
+import weakref
 
 from .config import LEXICAL_MARKER, PROFILE_LEXICAL, PROFILE_SEMANTIC
 from .store import MemoryItem, Store, VALID_KINDS
@@ -271,6 +272,49 @@ def _try_shared_lock(fd: int) -> bool:
         return False
 
 
+class _ReadOnlyConnection:
+    """What ``open_readonly`` yields: the SQLite connection, with every cursor tracked.
+
+    ``connection.close()`` alone does not end the native connection while a cursor holds an unfinished
+    statement (``sqlite3_close_v2`` defers it: a partly consumed cursor, an iterator kept by a traceback). All
+    tracked cursors are therefore closed BEFORE the connection, so that the native close is effective when the
+    held side-file descriptors are released. Entry points that create statements outside the tracked cursors
+    (``iterdump``, ``backup``, ``blobopen``) are refused."""
+
+    __slots__ = ("_connection", "_cursors")
+    _REFUSED = frozenset({"iterdump", "backup", "blobopen", "close"})
+
+    def __init__(self, connection):
+        self._connection = connection
+        self._cursors = weakref.WeakSet()
+
+    def cursor(self, *args, **kwargs):
+        cursor = self._connection.cursor(*args, **kwargs)
+        self._cursors.add(cursor)
+        return cursor
+
+    def execute(self, sql, parameters=(), /):
+        return self.cursor().execute(sql, parameters)
+
+    def executemany(self, sql, parameters, /):
+        return self.cursor().executemany(sql, parameters)
+
+    def executescript(self, script, /):
+        return self.cursor().executescript(script)
+
+    def __getattr__(self, name):
+        if name in self._REFUSED:
+            raise AttributeError(f"{name} is not available on a diagnostic read-only connection")
+        return getattr(self._connection, name)
+
+    def _close(self) -> None:
+        try:
+            for cursor in list(self._cursors):
+                cursor.close()
+        finally:
+            self._connection.close()
+
+
 def _recreated(cause=None) -> ReadOnlyStoreError:
     error = ReadOnlyStoreError(
         "store_side_files_recreated",
@@ -299,7 +343,10 @@ def open_readonly(database, *, timeout: float = 5.0):
     * In one process, readers and the engine of a store exclude each other for their whole lifetime: a reader is
       refused while the engine runs, and the engine refuses to start while a reader is open (``WriterLock``).
       Every reader whose SQLite connection opens the pair holds shared descriptors on it, closed after the LAST
-      such connection (closing a descriptor drops every fcntl lock of the process on that file). Raw SQLite
+      such connection (closing a descriptor drops every fcntl lock of the process on that file). The yielded
+      connection tracks its cursors and closes them before itself, so the native close is effective; if it cannot
+      be established, the protections are kept for the life of the process. The store has one identity whatever
+      the spelling of its path (directory resolved). Raw SQLite
       connections opened outside this function are not part of this protocol: the store's other readers
       (backup, migration, profile probe) run under the writer lease or in their own command.
     * DECLARED RESIDUAL WINDOW of the live read: if the service closes SQLite between this reader's look and its
@@ -316,6 +363,10 @@ def open_readonly(database, *, timeout: float = 5.0):
     database = Path(database)
     if _windows():
         raise ReadOnlyStoreError("readonly_open_unqualified_platform", "no lock-protected read-only open on Windows")
+    # ONE identity per store for the reader registry and the held descriptors, whatever the spelling (relative,
+    # absolute, through a linked directory). The file name itself is not resolved: a linked database is not
+    # followed here (callers refuse it).
+    database = Path(os.path.realpath(database.parent)) / database.name
     lock = database.parent / "writer.lock"
     if lock.is_symlink() or not lock.is_file() or lock.stat().st_nlink != 1:
         raise ReadOnlyStoreError("writer_lock_missing", "existing regular writer.lock required; never created by a reader")
@@ -328,35 +379,49 @@ def open_readonly(database, *, timeout: float = 5.0):
         if not locked and not has_wal:
             raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting; retry")
         key = _register_reader(lock)
+        held = None
+        native_closed = True                      # nothing opened yet
         try:
             # Every reader that lets SQLite open the pair (live, or offline with a stale pair) shares the held
             # descriptors: none of them closes them while another one's connection is still open.
-            held = _hold_side_files(database) if has_wal else None
-            if has_wal and held is None:
-                raise ReadOnlyStoreError("store_busy_retry", "the side files vanished before the open; retry")
-            try:
-                if held is not None and not _sides_unchanged(database, held):
+            if has_wal:
+                held = _hold_side_files(database)
+                if held is None:
+                    raise ReadOnlyStoreError("store_busy_retry", "the side files vanished before the open; retry")
+                if not _sides_unchanged(database, held):
                     raise ReadOnlyStoreError("store_busy_retry", "the side files changed before the open; retry")
-                uri = "file:" + quote(str(database)) + ("?mode=ro" if has_wal else "?mode=ro&immutable=1")
-                connection = sqlite3.connect(uri, uri=True, timeout=timeout)
-                try:
-                    if not locked:
-                        try:
-                            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()   # attaches to the WAL
-                        except Exception as exc:
-                            if not _sides_unchanged(database, held):
-                                raise _recreated(exc)
-                            raise
+            uri = "file:" + quote(str(database)) + ("?mode=ro" if has_wal else "?mode=ro&immutable=1")
+            connection = sqlite3.connect(uri, uri=True, timeout=timeout)
+            native_closed = False
+            proxy = None
+            try:
+                if not locked:
+                    try:
+                        connection.execute("SELECT count(*) FROM sqlite_master").fetchone()   # attaches to the WAL
+                    except Exception as exc:
                         if not _sides_unchanged(database, held):
-                            raise _recreated()
-                    yield connection
+                            raise _recreated(exc)
+                        raise
+                    if not _sides_unchanged(database, held):
+                        raise _recreated()
+                proxy = _ReadOnlyConnection(connection)
+                try:
+                    yield proxy
                 finally:
-                    connection.close()            # BEFORE the held descriptors (POSIX fcntl caveat)
+                    proxy._close()                # cursors, then the connection: an EFFECTIVE native close
+                    native_closed = True
             finally:
-                if held is not None:
-                    _release_side_files(database)
+                if proxy is None:                 # failed before the yield: no cursor was handed out
+                    connection.close()
+                    native_closed = True
         finally:
-            _unregister_reader(key)
+            # Protections are released only once the native close is established. Otherwise (a cursor or the
+            # connection could not be closed) the descriptors and the registration are deliberately kept for the
+            # life of the process: no engine of this store can start in it, and no held descriptor is closed.
+            if native_closed:
+                if held is not None:
+                    _release_side_files(database)  # only after the native close (POSIX fcntl caveat)
+                _unregister_reader(key)
     finally:
         os.close(fd)
 

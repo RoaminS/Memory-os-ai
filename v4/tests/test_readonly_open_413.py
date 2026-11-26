@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -491,3 +492,121 @@ def test_the_shared_lock_does_not_block_another_reader(stopped_store):
     with open_readonly(data / "store.sqlite3"):
         with open_readonly(data / "store.sqlite3") as second:
             assert second.execute("SELECT 1").fetchone() == (1,)
+
+
+CRASHED_WRITER = """
+import os, sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("PRAGMA journal_mode=WAL")
+connection.execute("SELECT count(*) FROM items").fetchone()
+os._exit(0)                                   # no close: the pair stays, nobody holds it
+"""
+
+
+@pytest.fixture
+def kept_pair(stopped_store):
+    """A pair left by a crashed writer: present, held by no connection of any process."""
+    data, _ = stopped_store
+    db = data / "store.sqlite3"
+    subprocess.run([sys.executable, "-c", CRASHED_WRITER, str(db)], check=True)
+    assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
+    assert not shm_locked_by_someone(db)
+    return data
+
+
+def descriptors_on(path):
+    """Descriptors of THIS process open on ``path`` (a native SQLite connection keeps one on the database)."""
+    target = os.stat(path)
+    count = 0
+    for name in os.listdir("/dev/fd"):
+        try:
+            st = os.fstat(int(name))
+        except (OSError, ValueError):
+            continue
+        count += (st.st_dev, st.st_ino) == (target.st_dev, target.st_ino)
+    return count
+
+
+def assert_reader_fully_released(db):
+    assert descriptors_on(db) == 0 and descriptors_on(str(db) + "-shm") == 0
+    assert sqlite_store._held_sides == {} and writer_lock._active_readers == {}
+
+
+def test_a_partly_consumed_cursor_does_not_outlive_the_read(kept_pair):
+    """Codex WAL r5 item 1: connection.close() alone defers the native close while a cursor holds an unfinished
+    statement; the cursors are closed first, so nothing survives the read."""
+    db = kept_pair / "store.sqlite3"
+    with open_readonly(db) as connection:
+        kept = connection.execute("SELECT name FROM sqlite_master")
+        assert kept.fetchone() is not None                      # partly consumed, still referenced
+        assert descriptors_on(db) >= 1 and shm_locked_by_someone(db)
+    assert_reader_fully_released(db)
+    with pytest.raises(sqlite3.ProgrammingError):
+        kept.fetchone()                                         # closed, not a zombie statement
+    for refused in ("iterdump", "backup", "blobopen"):
+        with open_readonly(db) as connection:
+            with pytest.raises(AttributeError):
+                getattr(connection, refused)
+
+
+def test_an_error_during_the_scan_releases_everything(kept_pair, monkeypatch):
+    """Codex WAL r5 item 1: a decoding error raised while rows are consumed, its traceback kept."""
+    import types
+    from memory_os_v4 import sqlite_stats
+    db = kept_pair / "store.sqlite3"
+
+    def broken(text):
+        raise ValueError("synthetic decoding error")
+
+    monkeypatch.setattr(sqlite_stats, "json", types.SimpleNamespace(loads=broken))
+    with pytest.raises(ValueError, match="synthetic decoding error") as kept:
+        scan_sqlite(db)
+    assert kept.value.__traceback__ is not None                 # the traceback is still alive here
+    assert_reader_fully_released(db)
+
+
+def test_every_spelling_of_the_store_shares_one_identity(kept_pair, tmp_path, monkeypatch, no_reader_deletes):
+    """Codex WAL r5 item 2: relative, absolute and linked-directory spellings share the held descriptors."""
+    db = kept_pair / "store.sqlite3"
+    (tmp_path / "alias").symlink_to(kept_pair)
+    monkeypatch.chdir(kept_pair.parent)
+    spellings = [Path(kept_pair.name) / "store.sqlite3", tmp_path / "alias" / "store.sqlite3", db]
+    contexts = [open_readonly(spelling) for spelling in spellings]
+    connections = [context.__enter__() for context in contexts]
+    try:
+        for connection in connections:
+            assert connection.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
+        assert list(sqlite_store._held_sides.values())[0][0] == 3 and len(sqlite_store._held_sides) == 1
+        assert list(writer_lock._active_readers.values()) == [3]
+        for context in contexts[:2]:
+            context.__exit__(None, None, None)
+        assert shm_locked_by_someone(db)                        # the last reader keeps its SQLite locks
+        assert connections[2].execute("SELECT count(*) FROM items").fetchone()[0] >= 1
+    finally:
+        contexts[2].__exit__(None, None, None)
+    assert_reader_fully_released(db)
+
+
+def test_an_unestablished_native_close_keeps_the_protections(kept_pair, monkeypatch):
+    """If the cursors or the connection cannot be closed, the descriptors and the registration stay: no engine of
+    this store can start in this process, and no held descriptor is closed."""
+    db = kept_pair / "store.sqlite3"
+    real_close = sqlite_store._ReadOnlyConnection._close
+
+    def failing_close(self):
+        real_close(self)
+        raise sqlite3.OperationalError("synthetic close failure")
+
+    monkeypatch.setattr(sqlite_store._ReadOnlyConnection, "_close", failing_close)
+    with pytest.raises(sqlite3.OperationalError, match="synthetic close failure"):
+        with open_readonly(db) as connection:
+            connection.execute("SELECT 1").fetchone()
+    key = (kept_pair / "writer.lock").resolve()
+    try:
+        assert writer_lock._active_readers == {key: 1} and sqlite_store._held_sides[str(db)][0] == 1
+        with pytest.raises(WriterConflictError, match="read-only diagnostic"):
+            WriterLock(kept_pair)
+    finally:                                                    # test cleanup only: release what was kept
+        sqlite_store._release_side_files(db)
+        sqlite_store._unregister_reader(key)
+    assert_reader_fully_released(db)

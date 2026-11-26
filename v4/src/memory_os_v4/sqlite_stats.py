@@ -66,12 +66,11 @@ def _scan(connection, path, APPLICATION_ID, SCHEMA_VERSION):
         raise ValueError("SQLite schema unsupported; doctor never upgrades it")
     if connection.execute("PRAGMA quick_check").fetchone()[0] != "ok":
         raise ValueError("SQLite integrity check failed")
-    rows = [
-        json.loads(row[0])
-        for row in connection.execute(
-            "SELECT v.record_json FROM items i JOIN item_versions v ON i.id=v.item_id AND i.current_revision=v.revision"
-        )
-    ]
+    # fetchall first: a decoding error must not keep a half-consumed statement alive (4.1.3)
+    raw = connection.execute(
+        "SELECT v.record_json FROM items i JOIN item_versions v ON i.id=v.item_id AND i.current_revision=v.revision"
+    ).fetchall()
+    rows = [json.loads(row[0]) for row in raw]
     live = [row for row in rows if not row.get("deleted")]
     added = {}
     for row in rows:
