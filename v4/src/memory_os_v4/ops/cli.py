@@ -588,6 +588,8 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--allow-unqualified-platform", action="store_true",
                     help="unretained platform (other Linux, WSL2, macOS Intel): lexical only, explicit warning")
     sv.add_argument("--dry-run", action="store_true", help="print the resolved command and environment, start nothing")
+    sv.add_argument("--container-listen-all", action="store_true",
+                    help="inside a container only: listen on 0.0.0.0 (publish 127.0.0.1:PORT:PORT on the host)")
     st = sub.add_parser("setup")
     st.add_argument("--write-launchd", metavar="DIR")
     st.add_argument("--sqlite-s4-jobs", action="store_true", help="Generate inactive SQLite backup + weekly file-drill templates")

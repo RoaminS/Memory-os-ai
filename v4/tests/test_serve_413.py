@@ -179,3 +179,42 @@ def test_serve_runs_in_the_foreground_and_stops_cleanly_on_a_signal(installation
     from memory_os_v4.writer_lock import WriterLock
     lease = WriterLock(home / "store")                          # the writer lease was released at exit
     lease.close()
+
+
+# ---- D8: 0.0.0.0 only inside a container, behind the explicit opt-in; Host/Origin unchanged
+
+def test_wildcard_listen_needs_both_a_container_and_the_opt_in():
+    from memory_os_v4.http_security import local_security_settings
+    inside = lambda path: path == "/.dockerenv"
+    outside = lambda path: False
+    for environ, exists in (({}, inside), ({"MEMORY_V4_CONTAINER_LISTEN_ALL": "1"}, outside),
+                            ({"MEMORY_V4_CONTAINER_LISTEN_ALL": "true"}, inside)):
+        with pytest.raises(ValueError, match="loopback"):
+            local_security_settings("0.0.0.0", 8765, environ=environ, exists=exists)
+    settings_ = local_security_settings("0.0.0.0", 8765, environ={"MEMORY_V4_CONTAINER_LISTEN_ALL": "1"},
+                                        exists=lambda path: path == "/run/.containerenv")
+    assert settings_.allowed_hosts == ["127.0.0.1:8765", "localhost:8765", "[::1]:8765"]   # Host/Origin unchanged
+    assert all(origin.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:"))
+               for origin in settings_.allowed_origins)
+    with pytest.raises(ValueError):
+        local_security_settings("192.168.1.5", 8765, environ={"MEMORY_V4_CONTAINER_LISTEN_ALL": "1"}, exists=inside)
+
+
+def test_serve_container_listen_is_refused_outside_a_container(installation):
+    home, _ = installation
+    create_token(home / "token")
+    refused("container_listen_outside_container", profile="lexical", allow_unqualified=True, home=home,
+            detected=UNRETAINED, container_listen_all=True, container=False)
+
+
+def test_serve_container_listen_inside_a_container(installation):
+    home, port = installation
+    create_token(home / "token")
+    result = serve.plan(settings(), profile="lexical", allow_unqualified=True, home=home, detected=UNRETAINED,
+                        container_listen_all=True, container=True)
+    assert result["argv"][result["argv"].index("--host") + 1] == "0.0.0.0"
+    assert result["env"]["MEMORY_V4_CONTAINER_LISTEN_ALL"] == "1"
+    assert result["env"]["MEMORY_V4_URL"] == f"http://127.0.0.1:{port}/mcp/"           # clients keep loopback
+    assert any(f"127.0.0.1:{port}:{port}" in notice for notice in result["notices"])
+    plain = serve.plan(settings(), profile="lexical", allow_unqualified=True, home=home, detected=UNRETAINED)
+    assert "MEMORY_V4_CONTAINER_LISTEN_ALL" not in plain["env"] and "0.0.0.0" not in plain["argv"]

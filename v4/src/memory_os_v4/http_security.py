@@ -42,9 +42,31 @@ def load_http_token(path: str | Path | None) -> bytes:
             os.close(fd)
 
 
-def local_security_settings(host: str, port: int) -> TransportSecuritySettings:
-    if host not in {"127.0.0.1", "localhost", "::1"} or not 1 <= port <= 65535:
-        raise ValueError("HTTP ALPHA is restricted to loopback and a valid TCP port")
+CONTAINER_LISTEN_ENV = "MEMORY_V4_CONTAINER_LISTEN_ALL"
+CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
+
+
+def in_container(exists=None) -> bool:
+    """A Docker (``/.dockerenv``) or Podman (``/run/.containerenv``) container."""
+    exists = os.path.exists if exists is None else exists
+    return any(exists(marker) for marker in CONTAINER_MARKERS)
+
+
+def container_listen_allowed(environ=None, exists=None) -> bool:
+    """4.1.3 (D8): ``0.0.0.0`` only INSIDE a container, behind the explicit opt-in that ``memory-os-admin serve
+    --container-listen-all`` sets; never by default, and the loopback rule is unchanged outside a container."""
+    environ = os.environ if environ is None else environ
+    return environ.get(CONTAINER_LISTEN_ENV) == "1" and in_container(exists)
+
+
+def local_security_settings(host: str, port: int, *, environ=None, exists=None) -> TransportSecuritySettings:
+    loopback = host in {"127.0.0.1", "localhost", "::1"}
+    container_wildcard = host == "0.0.0.0" and container_listen_allowed(environ, exists)
+    if not (loopback or container_wildcard) or not 1 <= port <= 65535:
+        raise ValueError("HTTP ALPHA is restricted to loopback and a valid TCP port (0.0.0.0 only inside a container "
+                         "with the explicit opt-in)")
+    # Host/Origin protection is unchanged, including for 0.0.0.0 in a container: only loopback authorities of THIS
+    # port are accepted, so the host must publish it as 127.0.0.1:<same port>.
     authorities = [f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"]
     return TransportSecuritySettings(enable_dns_rebinding_protection=True,
                                      allowed_hosts=authorities,

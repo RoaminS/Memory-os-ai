@@ -32,7 +32,7 @@ class ServeRefused(RuntimeError):
 
 
 def plan(settings, *, profile=None, allow_unqualified=False, home=None, environ=None, detected=None,
-         python=None) -> dict:
+         python=None, container_listen_all=False, container=None) -> dict:
     """The exact foreground command (argv, env) of this installation, or ``ServeRefused``. Writes nothing."""
     from . import cell, provision, qualified_runtime, quickstart
     from .auth import read_token
@@ -45,6 +45,11 @@ def plan(settings, *, profile=None, allow_unqualified=False, home=None, environ=
     notices: list[str] = []
     if sys.platform.startswith("win"):
         raise ServeRefused("platform_windows_unsupported", "native Windows is not supported (planned for 4.2.0)")
+    if container_listen_all:
+        from ..http_security import in_container
+        if not (in_container() if container is None else container):
+            raise ServeRefused("container_listen_outside_container", "--container-listen-all is accepted only inside "
+                               "a container (/.dockerenv or /run/.containerenv); the loopback rule is unchanged here")
     detected = cell.detect() if detected is None else detected
     installed = quickstart._installed_profile(settings, home)
     effective = profile or installed
@@ -99,16 +104,28 @@ def plan(settings, *, profile=None, allow_unqualified=False, home=None, environ=
         raise ServeRefused(getattr(exc, "code", None) or "serve_refused", str(exc)) from None
     env = {key: value for key, value in environ.items() if not key.startswith("MEMORY_V4_")}
     env.update(service["env"])
+    argv = list(service["argv"])
     if unqualified:
         env[UNQUALIFIED_ENV] = "1"
+    if container_listen_all:
+        # D8: listen on every interface of the CONTAINER; clients still use the loopback URL, the host publishes
+        # 127.0.0.1:<same port>, Host/Origin stay restricted to loopback authorities, the token file stays 0600.
+        from ..http_security import CONTAINER_LISTEN_ENV
+        env[CONTAINER_LISTEN_ENV] = "1"
+        argv[argv.index("--host") + 1] = "0.0.0.0"
+        notices.append("container: listening on 0.0.0.0 inside the container only; publish it on the host as "
+                       f"127.0.0.1:{settings.port}:{settings.port} (Host/Origin stay restricted to loopback)")
     return {"ok": True, "profile": effective, "cell": detected.get("cell_id"), "cell_label": detected.get("label"),
-            "unqualified": unqualified, "argv": service["argv"], "env": env, "server_env": service["env"],
+            "unqualified": unqualified, "argv": argv, "env": env,
+            "server_env": {k: env[k] for k in (*service["env"], *([UNQUALIFIED_ENV] if unqualified else []),
+                                               *(["MEMORY_V4_CONTAINER_LISTEN_ALL"] if container_listen_all else []))},
             "notices": notices}
 
 
 def main(args, settings) -> int:
     try:
-        result = plan(settings, profile=args.profile, allow_unqualified=args.allow_unqualified_platform)
+        result = plan(settings, profile=args.profile, allow_unqualified=args.allow_unqualified_platform,
+                      container_listen_all=args.container_listen_all)
     except ServeRefused as exc:
         print(json.dumps({"ok": False, "code": exc.code, "error": str(exc)}), file=sys.stderr)
         return 2
