@@ -66,6 +66,15 @@ modifiée = refus. `/ready.capabilities.brief.tokenizer` et doctor exposent cet 
 La table n'est pas embarquée dans ce bundle, ni téléchargée par Codex. L'acquisition
 explicite est séparée dans `scripts/provision_cl100k.py`, GO Romain requis.
 Le serveur et chaque runtime de relais doivent tous disposer du compteur/table.
+
+**Depuis 4.1.3 (décisions D3 et D4).**
+- La table attestée est **embarquée** dans le paquet (`memory_os_v4/resources/cl100k_base.tiktoken`, notice MIT dans
+  `THIRD_PARTY_NOTICES.md`). Le service et le relais comptent sans aucune configuration.
+- `MEMORY_V4_CL100K_PATH` reste une surcharge explicite : définie, elle seule est utilisée, sans repli silencieux, et
+  son SHA-256 doit être identique.
+- `tiktoken>=0.12.0,<1` est accepté (versions exactes figées dans les verrous qualifiés). Un auto-test encode six
+  vecteurs de référence au chargement ; tout écart donne `tokenizer_unavailable`, jamais un compte faux.
+- `/ready.capabilities.brief.tokenizer.table_source` vaut `embedded` ou `explicit`.
 Ne pas activer cette candidate avant la preuve exacte et la qualification sur copie.
 
 ## Qualification

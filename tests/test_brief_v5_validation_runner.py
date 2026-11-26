@@ -17,6 +17,12 @@ runner=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 
+def attested_table():
+    """4.1.3: the frozen arms predate the embedded table and need it explicitly; give them the package's copy."""
+    from memory_os_v4.brief_tokens import embedded_table
+    return os.environ.get('MEMORY_V4_CL100K_PATH') or str(embedded_table())
+
+
 def development_case():
     return {'id':'DEV-1','language':'en','family':'units','now':'2026-10-12T10:00:00Z',
         'items':[{'id':'dev-fact','kind':'fact','text':'Independent synthetic marker. Entire second sentence.',
@@ -130,7 +136,7 @@ def test_real_frozen_arms_on_one_independent_case_only(tmp_path,revision,policy)
     for i in (1,2):
         (tmp_path/str(i)).mkdir()
     env={**os.environ,'PYTHONPATH':str(source/'v4/src'),'MEMORY_V4_BUILD_COMMIT':revision,
-         'MEMORY_V4_CL100K_PATH':os.environ.get('MEMORY_V4_CL100K_PATH',''),
+         'MEMORY_V4_CL100K_PATH':attested_table(),
          'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1','PYTHONDONTWRITEBYTECODE':'1'}
     env.pop('MEMORY_V4_PROJECT_REGISTRY',None)
     program='''

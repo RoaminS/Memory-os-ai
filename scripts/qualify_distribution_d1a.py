@@ -187,6 +187,29 @@ assert 'torch' not in sys.modules and 'sentence_transformers' not in sys.modules
 print(json.dumps(info,sort_keys=True))
 '''
                 report["steps"][f"smoke-{index}"] = command([str(python), "-B", "-c", smoke], output, isolated, output / f"smoke-{index}.log")
+                # 4.1.3 Lot 2 (D3): plain `pip install --no-deps` of the wheel, no quickstart, no network: the
+                # attested table is in the installed package and counts without MEMORY_V4_CL100K_PATH; the licence
+                # metadata carries the MIT component.
+                tokenizer_smoke = '''import hashlib, importlib.metadata, os, pathlib, sys
+assert not any(k.startswith('MEMORY_V4_CL100K') for k in os.environ), 'table env must be absent'
+from memory_os_v4 import brief_tokens
+table = brief_tokens.embedded_table()
+assert table is not None and table.is_relative_to(pathlib.Path(sys.prefix)), table
+assert hashlib.sha256(table.read_bytes()).hexdigest() == brief_tokens.TABLE_SHA256
+status = brief_tokens.status()
+assert status['ready'] and status['table_source'] == 'embedded', status
+assert brief_tokens.counter()('hello world') == 2
+from memory_os_v4.ops import provision
+preview = provision.plan(resources=('cl100k',))
+assert preview['ready'] and preview['download_bytes'] == 0 and 'MEMORY_V4_CL100K_PATH' not in preview['env'], preview
+distribution = importlib.metadata.distribution('memory-os-ai')
+assert distribution.metadata['License-Expression'] == 'LGPL-3.0-or-later AND MIT', distribution.metadata['License-Expression']
+licences = [f for f in distribution.files if f.name == 'THIRD_PARTY_NOTICES.md']
+assert licences and brief_tokens.TABLE_SHA256 in licences[0].read_text(), licences
+print('embedded table ready', status['implementation_version'])
+'''
+                report["steps"][f"tokenizer-embedded-{index}"] = command([str(python), "-B", "-c", tokenizer_smoke],
+                    output, isolated, output / f"tokenizer-embedded-{index}.log")
                 report["steps"][f"provision-preview-{index}"] = command([str(private / "bin/memory-os-admin"), "provision"],
                     output, isolated, output / f"provision-preview-{index}.log")
                 # Installed quickstart preview: isolated HOME/port/label, absent resources,

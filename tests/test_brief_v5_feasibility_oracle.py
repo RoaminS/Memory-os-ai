@@ -15,6 +15,12 @@ tool=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tool)
 
 
+def attested_table():
+    """4.1.3: the frozen arms predate the embedded table and need it explicitly; give them the package's copy."""
+    from memory_os_v4.brief_tokens import embedded_table
+    return os.environ.get('MEMORY_V4_CL100K_PATH') or str(embedded_table())
+
+
 def context():
     return {'id':'DEV-ORACLE','project':'P','budget_tokens':600,
         'eligible':{'fact':2},'pool':[
@@ -165,7 +171,7 @@ def test_frozen_worker_opens_no_engine_and_selects_no_candidate(tmp_path):
     output.mkdir()
     env={**os.environ,'PYTHONPATH':str(tmp_path/'frozen/v4/src'),
         'MEMORY_V4_BUILD_COMMIT':tool.CANDIDATE,
-        'MEMORY_V4_CL100K_PATH':os.environ['MEMORY_V4_CL100K_PATH'],
+        'MEMORY_V4_CL100K_PATH':attested_table(),
         'HF_HUB_OFFLINE':'1','TRANSFORMERS_OFFLINE':'1','PYTHONDONTWRITEBYTECODE':'1'}
     program='''
 import importlib.util,sys

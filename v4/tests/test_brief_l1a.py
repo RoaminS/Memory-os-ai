@@ -179,7 +179,9 @@ def test_sealed_case_structural(case, backend, tmp_path, monkeypatch):
 
 
 def test_no_table_never_downloads(monkeypatch):
+    # 4.1.3: the table ships in the package; "no table" now means an installation without the embedded copy
     monkeypatch.delenv("MEMORY_V4_CL100K_PATH", raising=False)
+    monkeypatch.setattr(brief_tokens, "embedded_table", lambda: None)
     brief_tokens._load.cache_clear()
     with pytest.raises(brief_tokens.TokenizerUnavailable):
         brief_tokens.counter()
@@ -253,6 +255,7 @@ async def test_large_invalid_brief_arguments_get_small_error_before_engine(monke
 
 def test_default_compact_missing_counter_is_explicit(tmp_path, monkeypatch):
     monkeypatch.delenv("MEMORY_V4_CL100K_PATH", raising=False)
+    monkeypatch.setattr(brief_tokens, "embedded_table", lambda: None)   # 4.1.3: installation without the table
     brief_tokens._load.cache_clear()
     e = load_case(CASES[4], tmp_path, "jsonl")
     monkeypatch.setattr(server, "_engine", e)

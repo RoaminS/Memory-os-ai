@@ -87,8 +87,18 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
     record = catalog()
     cache = Path(cache_dir or os.environ.get("HF_HUB_CACHE") or
                  Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub").expanduser().absolute()
-    table = Path(table_path or os.environ.get("MEMORY_V4_CL100K_PATH") or
-                 Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memory-os/cl100k_base.tiktoken").expanduser().absolute()
+    # 4.1.3 (D3): the attested table ships in the package. Without an explicit table (argument or
+    # MEMORY_V4_CL100K_PATH), the embedded copy is used as is: nothing to download, no env key to write. A damaged
+    # installation without it falls back to the explicit, consented download of 4.1.2.
+    explicit_table = table_path or os.environ.get("MEMORY_V4_CL100K_PATH")
+    embedded = None
+    if "cl100k" in chosen and not explicit_table:
+        from ..brief_tokens import embedded_table
+        candidate = embedded_table()
+        embedded = candidate if candidate is not None and matches(candidate, record["cl100k"]) else None
+    table = embedded or Path(explicit_table or
+                             Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "memory-os/cl100k_base.tiktoken").expanduser().absolute()
+    table_source = "embedded" if embedded else ("explicit" if explicit_table else "download")
     model = cache / ("models--" + record["model_id"].replace("/", "--"))
     snapshot = model / "snapshots" / record["revision"]
     files = []
@@ -110,17 +120,18 @@ def plan(*, resources=("granite", "cl100k"), cache_dir=None, table_path=None) ->
         if (table.exists() or table.is_symlink()) and not present:
             raise ProvisionError("Existing cl100k table differs; never overwritten")
         files.append({**item, "path": "cl100k_base.tiktoken", "resource": "cl100k",
-                      "target": str(table), "present": present})
+                      "target": str(table), "present": present, "table_source": table_source})
     missing = sum(item["bytes"] for item in files if not item["present"])
     if sum(item["bytes"] for item in files) > CAP:
         raise ProvisionError("Resource manifest exceeds 300 MB cap")
     ready = not missing and ("granite" not in chosen or ref_present)
     return {"schema_version": 1, "ok": True, "mode": "preview", "ready": ready,
             "resources": list(chosen), "revision": record["revision"], "model_id": record["model_id"],
-            "catalog_sha256": sha256(CATALOG), "cache_dir": str(cache), "table_path": str(table),
+            "catalog_sha256": sha256(CATALOG), "cache_dir": str(cache),
+            "table_path": None if embedded else str(table),
             "files": files, "download_bytes": missing, "peak_additional_bytes_upper_bound": 2 * missing + 1_000_000,
             "env": {**({"HF_HUB_CACHE": str(cache)} if "granite" in chosen else {}),
-                    **({"MEMORY_V4_CL100K_PATH": str(table)} if "cl100k" in chosen else {}),
+                    **({"MEMORY_V4_CL100K_PATH": str(table)} if "cl100k" in chosen and not embedded else {}),
                     "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}}
 
 

@@ -622,3 +622,40 @@ def test_408_all_mutation_authors_reach_change_events(harness):
                     expected['actor_label'] = None  # WorkOwnerIn's preserved nullable field.
                 assert event['changed_by'] == expected
     anyio.run(run)
+
+
+def _relay_compact_brief(h):
+    from mcp.types import Implementation
+
+    async def run():
+        async with stdio_client(h.params()) as (r, w), ClientSession(
+                r, w, client_info=Implementation(name='Codex', version='lot2-test')) as session:
+            await session.initialize()
+            payload(await session.call_tool('memory_add_facts', {'project': 'brief-test', 'facts': [
+                {'text': 'Synthetic current task: verify the embedded table.'}]}))
+            compact = await session.call_tool('memory_session_brief', {'project': 'brief-test', 'budget_tokens': 600})
+            wire = json.dumps(compact.model_dump(mode='json', by_alias=True, exclude_none=True),
+                              ensure_ascii=False, separators=(',', ':'))
+            return payload(compact), wire
+    return anyio.run(run)
+
+
+def test_relay_compact_brief_needs_no_table_configuration(harness):
+    """4.1.3 Lot 2 (D3): service AND relay (real processes, real TCP) count with the embedded table; no
+    MEMORY_V4_CL100K_PATH anywhere, no quickstart, no network."""
+    h = harness
+    h.env.pop('MEMORY_V4_CL100K_PATH', None)
+    h.start()
+    data, wire = _relay_compact_brief(h)
+    from memory_os_v4.brief_tokens import counter
+    assert data['mode'] == 'compact', data
+    assert len(wire.encode()) <= 6000 and counter()(wire) <= 600
+
+
+def test_relay_compact_brief_with_a_bad_explicit_table_fails_explicitly(harness, tmp_path):
+    """The explicit override is never silently replaced by the embedded copy."""
+    h = harness
+    h.env['MEMORY_V4_CL100K_PATH'] = str(tmp_path / 'missing.tiktoken')
+    h.start()
+    data, _ = _relay_compact_brief(h)
+    assert data['code'] == 'tokenizer_unavailable', data

@@ -8,6 +8,18 @@
     "url": "https://github.com/RoaminS/Memory-os-ai",
     "source": "github"
   },
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/RoaminS/Memory-os-ai/main/docs/assets/memory-os-ai-logo.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": ["any"]
+    },
+    {
+      "src": "https://raw.githubusercontent.com/RoaminS/Memory-os-ai/main/docs/assets/memory-os-ai-logo-512.png",
+      "mimeType": "image/png",
+      "sizes": ["512x512"]
+    }
+  ],
   "version": "4.1.2",
   "packages": [
     {

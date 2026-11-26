@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Memory OS AI — 3D Diagonal Symbol Rotation">
+  <defs>
+    <linearGradient id="bgDiag" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#18181B"/>
+      <stop offset="100%" stop-color="#09090B"/>
+    </linearGradient>
+    <clipPath id="squircleClip">
+      <rect x="16" y="16" width="480" height="480" rx="108"/>
+    </clipPath>
+  </defs>
+  <style>
+    .diag3d {
+      transform-box: view-box;
+      transform-origin: 256px 256px;
+      animation: spinDiag 4.5s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+    }
+    @keyframes spinDiag {
+      0%, 10% {
+        transform: perspective(850px) rotate3d(1, -1, 0, 0deg);
+      }
+      90%, 100% {
+        transform: perspective(850px) rotate3d(1, -1, 0, 360deg);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .diag3d { animation: none; }
+    }
+  </style>
+
+  <!-- Fixed obsidian squircle background -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bgDiag)" stroke="#27272A" stroke-width="4"/>
+
+  <!-- Only the white symbols rotate in 3D around the diagonal axis -->
+  <g clip-path="url(#squircleClip)">
+    <g class="diag3d">
+      <line x1="196" y1="316" x2="316" y2="196" stroke="#FFFFFF" stroke-width="28" stroke-linecap="round"/>
+      <circle cx="156" cy="156" r="46" fill="none" stroke="#FFFFFF" stroke-width="28"/>
+      <circle cx="356" cy="156" r="46" fill="none" stroke="#FFFFFF" stroke-width="28"/>
+      <circle cx="156" cy="356" r="46" fill="none" stroke="#FFFFFF" stroke-width="28"/>
+      <circle cx="356" cy="356" r="46" fill="none" stroke="#FFFFFF" stroke-width="28"/>
+      <circle cx="156" cy="356" r="14" fill="#FFFFFF"/>
+      <circle cx="356" cy="156" r="14" fill="#FFFFFF"/>
+    </g>
+  </g>
+</svg>

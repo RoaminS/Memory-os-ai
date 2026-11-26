@@ -1,6 +1,12 @@
 <!-- mcp-name: io.github.RoaminS/memory-os-ai -->
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/RoaminS/Memory-os-ai/main/docs/assets/memory-os-ai-logo-animated.svg" width="88" height="88" alt="Memory OS AI logo" />
+</p>
+
 # Memory OS AI
+
+[![Memory OS AI MCP server](https://glama.ai/mcp/servers/RoaminS/Memory-os-ai/badges/score.svg)](https://glama.ai/mcp/servers/RoaminS/Memory-os-ai)
 
 **One local memory, shared by your AI assistants.**
 Connected assistants — Claude Code, Codex, Cursor, VS Code Copilot, Gemini CLI, Grok, Zed… — can read and update
@@ -56,6 +62,24 @@ it reports `non testé` ("not tested").
 
 ## Install on macOS and Ubuntu 24.04
 
+**Quick install** with the bootstrap of the latest release, checked against its `SHA256SUMS`. It needs
+[`uv`](https://docs.astral.sh/uv/) ≥ 0.13.9 and a Python of your [cell](#platform-cells). The first run is a preview
+that writes nothing; `--apply` installs and then prints the `quickstart --apply` command, which you run yourself.
+
+```bash
+curl -fsSLO https://github.com/RoaminS/Memory-os-ai/releases/latest/download/memory_os_bootstrap.py
+curl -fsSLO https://github.com/RoaminS/Memory-os-ai/releases/latest/download/SHA256SUMS
+grep ' memory_os_bootstrap.py$' SHA256SUMS | shasum -a 256 -c - &&
+  python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical           # preview: writes nothing
+python3.11 memory_os_bootstrap.py --uv "$(command -v uv)" --profile lexical --apply
+```
+
+The preview runs only if the checksum matches; on Ubuntu, `sha256sum -c -` replaces `shasum -a 256 -c -`.
+
+On Ubuntu 24.04, whose system Python carries a SQLite below the minimum, run the script with `python3` and add
+`--cpython 3.11` (and `--acquire-cpython` with `--apply`): the bootstrap needs only the standard library. Use `--profile semantic` for the recommended profile on macOS with Python 3.11.
+The details, and the manual `pip` route below, follow.
+
 Prerequisites: one of the [platform cells](#platform-cells), a Python of that cell (**Python 3.11**, e.g. Homebrew, on
 macOS) and a 5 GB free-disk safety reserve. Check the SQLite library of that Python: `python3.11 -c 'import sqlite3; print(sqlite3.sqlite_version)'`. SQLite ≥ 3.51.3 is required
 for the SQLite backend; check the library linked to this Python interpreter, not the sqlite3 command-line tool
@@ -75,8 +99,8 @@ from the installed packages, and an existing installation keeps its profile: the
 **Semantic is the recommended profile**; lexical is offered as the light profile. The retrospective retrieval
 comparison did not establish parity under the pre-registered joint threshold ([numbers and limits](#limits-and-evaluations)).
 
-**Lexical profile (light)** — literal BM25 search, no embedding model, no ML stack: the only download is the 1.7 MB
-tokenizer table (with `--download-approved`); nothing is fetched from a model hub.
+**Lexical profile (light)** — literal BM25 search, no embedding model, no ML stack, and no download at all: since
+4.1.3 the 1.7 MB tokenizer table ships in the package ([third-party notice](THIRD_PARTY_NOTICES.md)).
 
 ```bash
 python3.11 -m venv ~/.memory-os/venv
@@ -84,11 +108,11 @@ V=~/.memory-os/venv/bin
 $V/pip install --no-deps "memory-os-ai==4.1.2"
 $V/pip install -c "$($V/memory-os-constraints lexical)" "memory-os-ai[ops,brief]==4.1.2"
 $V/memory-os-admin quickstart --profile lexical --clients claude-code,codex          # preview: writes nothing
-$V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --apply --download-approved --demo
+$V/memory-os-admin quickstart --profile lexical --clients claude-code,codex --apply --demo
 ```
 
 **Semantic profile (recommended)** — hybrid BM25 + embedding model; ~1.2 GB for the environment and model:
-`--download-approved` fetches the pinned embedding model and the tokenizer table (221.9 MB).
+`--download-approved` fetches the pinned embedding model (220.2 MB); the tokenizer table ships in the package.
 
 ```bash
 python3.11 -m venv ~/.memory-os/venv
@@ -132,9 +156,8 @@ Preview on Ubuntu 24.04 arm64 (writes nothing):
 python3 scripts/memory_os_bootstrap.py --uv /path/to/uv --profile lexical --cpython 3.11
 ```
 
-Limit: the bootstrap does not pass `XDG_CONFIG_HOME` to the `quickstart` preview it runs, which therefore resolves the
-systemd unit and the Zed configuration under `~/.config`. With a custom `XDG_CONFIG_HOME` under your home directory,
-run `memory-os-admin quickstart` directly from the environment afterwards.
+Since 4.1.3 the bootstrap passes `XDG_CONFIG_HOME` to the `quickstart` preview it runs (validated by `quickstart`), so
+a custom configuration directory under your home is honoured.
 
 ### What quickstart does
 
@@ -340,4 +363,5 @@ report their impacts with a compatibility notice. Existing schema 7 installation
 runtime cannot reopen schema 8. No automatic downgrade after new writes is promised. **4.0.6**: fully pinned dependencies, `quickstart`, embedded build
 identity, explicit model provisioning, SQLite + tasks by default for new installs.
 
-License: LGPL-3.0-or-later.
+License: LGPL-3.0-or-later. The embedded tokenizer table is MIT (OpenAI tiktoken): see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

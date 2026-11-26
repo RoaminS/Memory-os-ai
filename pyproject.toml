@@ -7,8 +7,8 @@ name = "memory-os-ai"
 version = "4.1.2"
 description = "Local project memory shared by MCP clients, with dated decisions and work state"
 readme = "README.md"
-license = "LGPL-3.0-or-later"
-license-files = ["LICENSE", "LICENSE.GPL-3.0"]
+license = "LGPL-3.0-or-later AND MIT"
+license-files = ["LICENSE", "LICENSE.GPL-3.0", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.11"
 authors = [
     {name = "Kocupyr Romain", email = "romainsantoli@gmail.com"},
@@ -147,7 +147,7 @@ where = ["v4/src"]
 include = ["memory_os_v4*"]
 
 [tool.setuptools.package-data]
-memory_os_v4 = ["resources/*.json", "resources/*.txt"]
+memory_os_v4 = ["resources/*.json", "resources/*.txt", "resources/*.tiktoken"]
 
 [tool.setuptools.data-files]
 "share/doc/memory-os-ai" = ["AGENTS.md", "CLAUDE.md", "CHANGELOG.md", "docs/CLIENTS.md", "docs/releases/v4.0.1.md", "docs/releases/v4.0.2.md", "docs/releases/v4.0.3.md", "docs/releases/v4.0.4.md", "docs/releases/v4.0.5.md", "docs/releases/v4.0.6.md", "docs/releases/v4.0.6.dev0.md", "docs/releases/v4.0.7.md", "docs/releases/v4.0.8.md", "docs/releases/v4.0.9.md", "docs/releases/v4.1.0.md", "docs/releases/v4.1.1.md", "docs/releases/v4.1.2.md"]

@@ -109,7 +109,8 @@ def test_readme_gives_the_semantic_install_with_extra_and_constraints():
 
 def test_readme_states_what_each_profile_downloads():
     block = README[README.index("## Install on macOS"):]
-    assert "no embedding model" in block and "221.9 MB" in block
+    # 4.1.3 (D3): the tokenizer table ships in the package; lexical downloads nothing, semantic only the model
+    assert "no embedding model" in block and "no download at all" in block and "220.2 MB" in block
     assert "uninstall" in block and "never deletes" in block
 
 

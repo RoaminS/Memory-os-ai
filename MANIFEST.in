@@ -1,11 +1,11 @@
-include LICENSE LICENSE.GPL-3.0
+include LICENSE LICENSE.GPL-3.0 THIRD_PARTY_NOTICES.md
 include CONTRIBUTING.md
 include AGENTS.md CLAUDE.md CHANGELOG.md
 include server.json
 include conftest.py
 include setup.py memory_os_build.py
 include v4/src/memory_os_constraints.py
-recursive-include v4/src/memory_os_v4/resources *.json *.txt
+recursive-include v4/src/memory_os_v4/resources *.json *.txt *.tiktoken
 exclude .mcp.json .vscode/mcp.json
 include v4/pyproject.toml
 recursive-include docs *.md
