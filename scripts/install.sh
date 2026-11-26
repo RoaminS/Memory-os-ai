@@ -7,7 +7,7 @@ trap 'printf "%s\n" "memory-os-ai install: this script is incomplete (truncated 
 # SHA256SUMS. Run it so that a failed download is a failure (pipefail), with curl ignoring any curlrc (-q) and
 # speaking HTTPS only, redirects included:
 #
-#   bash -o pipefail -c "curl -q -fsSL --proto '=https' --proto-redir '=https' <release-asset-url>/install.sh | sh"
+#   bash -o pipefail -c "unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' <release-asset-url>/install.sh | sh"
 #   (options for the bootstrap go after "sh -s --", for example: ... | sh -s -- --clients codex,cursor)
 #
 # WRITES BEFORE THE CONFIRMATION: nothing is written in $HOME, in the store or in any client configuration, and no
@@ -55,6 +55,8 @@ main() {
     [ "$INDEX" -lt "$COUNT" ] && set -- "$@" "$ARGUMENT"
   done
   trap - EXIT
+  # curl writes a TLS key log wherever SSLKEYLOGFILE points (-q does not disable it): never before the answer.
+  unset SSLKEYLOGFILE
 
   RELEASE_TAG="v4.1.3"
   RELEASE_BASE="https://github.com/RoaminS/Memory-os-ai/releases/download/$RELEASE_TAG"

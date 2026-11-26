@@ -28,7 +28,7 @@ SHELLS = [shell for shell in ("/bin/sh", "/bin/dash") if os.path.exists(shell)]
 BASE_LINE = re.compile(r'^  RELEASE_BASE="[^"\n]*"$', re.M)
 PROTO_LINE = re.compile(r'^  CURL_PROTO="[^"\n]*"$', re.M)
 README = (REPO / "README.md").read_text()
-ONE_LINER = ("bash -o pipefail -c \"curl -q -fsSL --proto '=https' --proto-redir '=https' "
+ONE_LINER = ("bash -o pipefail -c \"unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' "
              "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh\"")
 pytestmark = pytest.mark.skipif(MINOR not in ((3, 11), (3, 12), (3, 13)), reason="needs a Python of a retained cell")
 
@@ -434,3 +434,55 @@ def test_no_file_is_created_outside_the_private_directory_before_the_bootstrap(t
         if untouched[-1]:
             break
     assert any(untouched), "the shell wrote a transient file in /var/tmp before the bootstrap"
+
+
+# ---------------------------------------------------------------- round 6: SSLKEYLOGFILE
+
+def _recording_curl(directory: Path, log: Path) -> None:
+    real = shutil.which("curl", path="/usr/bin:/bin")
+    shim = directory / "curl"
+    shim.write_text(f'#!/bin/sh\nif [ "${{SSLKEYLOGFILE+set}}" = set ]; then echo "set:$SSLKEYLOGFILE" >> "{log}"; '
+                    f'else echo unset >> "{log}"; fi\nexec "{real}" "$@"\n')
+    shim.chmod(0o755)
+
+
+def test_the_script_unsets_sslkeylogfile_before_any_download():
+    code = "\n".join(_code_lines())
+    assert code.index("unset SSLKEYLOGFILE") < code.index("curl -q")
+    assert ONE_LINER.index("unset SSLKEYLOGFILE;") < ONE_LINER.index("curl -q")
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_no_curl_of_the_script_sees_sslkeylogfile(tmp_path, shell):
+    r = Release(tmp_path)
+    log = tmp_path / "curl-env.log"
+    _recording_curl(r.bin, log)
+    keys = r.home / "tls.keys"
+    environ = {"HOME": str(r.home), "PATH": f"{r.bin}:{r.uv_dir}:/usr/bin:/bin", "TMPDIR": str(r.tmpdir),
+               "LANG": "en_US.UTF-8", "SSLKEYLOGFILE": str(keys)}
+    before = tree(r.home)
+    done = subprocess.run([shell, "-s", "--"], input=r.script(), capture_output=True, text=True, env=environ,
+                          cwd=str(r.home), timeout=180, start_new_session=True)
+    assert done.returncode == 0, done.stderr
+    assert log.read_text().splitlines() == ["unset", "unset"]   # both downloads, neither with the variable
+    assert not keys.exists() and tree(r.home) == before
+
+
+def test_the_readme_command_runs_its_first_curl_without_sslkeylogfile(tmp_path):
+    bash = shutil.which("bash", path="/bin:/usr/bin")
+    if not bash:
+        pytest.skip("no bash")
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    log = tmp_path / "curl-env.log"
+    _recording_curl(shims, log)
+    (tmp_path / "install.sh").write_text("exit 0\n")
+    inner = ONE_LINER[len('bash -o pipefail -c "'):-1].replace(
+        "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh",
+        f"file://{tmp_path}/install.sh").replace("'=https'", "'=https,file'")
+    keys = tmp_path / "home" / "tls.keys"
+    environ = {"HOME": str(tmp_path / "home"), "PATH": f"{shims}:/usr/bin:/bin", "SSLKEYLOGFILE": str(keys)}
+    done = subprocess.run([bash, "-o", "pipefail", "-c", inner], capture_output=True, text=True, env=environ,
+                          timeout=60, start_new_session=True)
+    assert done.returncode == 0, done.stderr
+    assert log.read_text().splitlines() == ["unset"] and not keys.exists()
