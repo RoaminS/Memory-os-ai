@@ -12,7 +12,8 @@ import pytest
 from memory_os_v4 import Config, MemoryV4, server
 from memory_os_v4.extract import _coerce_time
 from memory_os_v4.migrate import _parse_v3_timestamp
-from memory_os_v4.temporal import iso_to_timestamp, naive_time_notices, parse_absolute_dates
+from memory_os_v4.temporal import (NAIVE_TIME_NOTICE, begin_time_notices, end_time_notices, iso_to_timestamp,
+                                   parse_absolute_dates, utc_date)
 
 ZONES = ("UTC", "Europe/Paris", "America/New_York", "America/Los_Angeles", "Asia/Tokyo")
 MIDNIGHT_UTC = datetime(2026, 11, 26, tzinfo=timezone.utc).timestamp()
@@ -56,33 +57,60 @@ def test_explicit_offsets_are_honoured_in_every_zone(zone):
         server.parse_iso("not a date")
 
 
-def test_only_a_naive_date_time_produces_a_notice():
-    args = {"project": "P", "at_time": "2026-11-26T10:00", "facts": [
-        {"text": "A.", "event_time": "2026-11-26"},                 # a date alone: midnight UTC, no notice
-        {"text": "B.", "valid_from": "2026-11-26T10:00Z"},          # explicit offset: no notice
-        {"text": "C.", "valid_until": "2026-11-26T10:00"},
-        {"text": "D.", "event_time": "not a date"},                 # left to the handler
-        {"text": "E.", "keywords": ["event_time"], "note": "2026-11-26T10:00"}]}
-    notices = naive_time_notices(args)
-    assert [(n["field"], n["value"]) for n in notices] == [("at_time", "2026-11-26T10:00"),
-                                                           ("valid_until", "2026-11-26T10:00")]
-    assert {n["code"] for n in notices} == {"naive_time_assumed_utc"}
-    assert naive_time_notices({"facts": [{"event_time": 1764151200.0}]}) == []
+def test_only_an_accepted_naive_date_time_produces_a_notice():
+    token = begin_time_notices()
+    iso_to_timestamp("2026-11-26")              # a date alone: documented midnight UTC, no notice
+    iso_to_timestamp("2026-11-26T10:00Z")       # explicit offset: no notice
+    with pytest.raises(ValueError):
+        iso_to_timestamp("2026-11-26T25:00")    # refused: never announced as read in UTC
+    assert _coerce_time("tomorrow-ish") is None
+    assert end_time_notices(token) == []
+    token = begin_time_notices()
+    assert _coerce_time(" 2026-11-26T10:00 ") == TEN_UTC   # blanks ignored on every entry point (as parse_iso)
+    iso_to_timestamp("2026-11-26T11:00")
+    notices = end_time_notices(token)
+    assert notices == [NAIVE_TIME_NOTICE]       # one notice, the input value is never echoed
+    assert "2026" not in str(notices)
+    assert iso_to_timestamp("2026-11-26T11:00") == TEN_UTC + 3600   # outside a handler run: silent
+    assert utc_date(2026, 11, 26) == MIDNIGHT_UTC
 
 
-def test_dispatch_reports_naive_date_times_without_altering_the_receipt(memory, zone):
-    args = {"project": "P", "request_id": f"naive-{zone}",
+def _status(args, first):
+    pre = server.dispatch("memory_request_status", {"operation": "memory_add_facts", "arguments": args})
+    query = {"request_id": args["request_id"], **{k: pre[k] for k in
+             ("scope", "operation", "raw_args_sha256", "store_instance_id")}}
+    return server.dispatch("memory_request_status", query)
+
+
+def test_notice_lives_in_the_receipt_replay_status_reorder_restart(tmp_path, monkeypatch, zone):
+    config = Config(data_dir=str(tmp_path), store_backend="sqlite_s1", work_state=True, embed_model="hash", hash_dim=16)
+    args = {"project": "P", "request_id": "naive-receipt",
             "facts": [{"text": "Synthetic decision.", "event_time": "2026-11-26T10:00"}]}
-    first = server.dispatch("memory_add_facts", args)
-    assert first["added"] and first["time_notices"][0]["code"] == "naive_time_assumed_utc"
-    replay = server.dispatch("memory_add_facts", args)
-    assert replay == first                       # same arguments, same receipt, same notice
-    item = memory.store.get(first["added"][0])
-    assert item.event_time == TEN_UTC
-    dated = server.dispatch("memory_add_facts", {"project": "P", "facts": [
-        {"text": "Another synthetic decision.", "event_time": "2026-11-26"}]})
-    assert dated["added"] and "time_notices" not in dated
-    assert memory.store.get(dated["added"][0]).event_time == MIDNIGHT_UTC
+    with MemoryV4(config=config) as m:
+        monkeypatch.setattr(server, "_engine", m)
+        first = server.dispatch("memory_add_facts", args)
+        assert first["added"] and first["time_notices"] == [NAIVE_TIME_NOTICE]
+        assert m.store.get(first["added"][0]).event_time == TEN_UTC
+        assert server.dispatch("memory_add_facts", args) == first                       # direct replay
+        reordered = {"facts": args["facts"], "request_id": args["request_id"], "project": "P"}
+        assert server.dispatch("memory_add_facts", reordered) == first                  # key order
+        status = _status(args, first)
+        assert status["status"] == "completed" and status["result"] == first            # what the relay replays
+    with MemoryV4(config=config) as m:                                                  # restart
+        monkeypatch.setattr(server, "_engine", m)
+        assert server.dispatch("memory_add_facts", args) == first
+        assert _status(args, first)["result"] == first
+    dated = {"project": "P", "facts": [{"text": "Another synthetic decision.", "event_time": "2026-11-26"}]}
+    with MemoryV4(config=config) as m:
+        monkeypatch.setattr(server, "_engine", m)
+        result = server.dispatch("memory_add_facts", dated)
+        assert result["added"] and "time_notices" not in result
+        assert m.store.get(result["added"][0]).event_time == MIDNIGHT_UTC
+
+
+def test_refused_naive_value_gets_no_notice(memory):
+    result = server.dispatch("memory_search", {"project": "P", "query": "x", "at_time": "2026-11-26T25:00"})
+    assert result.get("ok") is False and "time_notices" not in result
 
 
 def _anomaly6(memory):
@@ -109,6 +137,12 @@ def test_anomaly6_same_day_correction_has_the_same_outcome_in_every_zone(memory,
 
 def test_at_time_reads_a_naive_value_in_utc(memory, zone):
     server.dispatch("memory_add_facts", {"project": "P", "facts": [
-        {"text": "Synthetic fact valid from ten.", "event_time": "2026-11-26T10:00Z"}]})
-    found = server.dispatch("memory_search", {"project": "P", "query": "synthetic fact", "at_time": "2026-11-26T10:30"})
-    assert found["time_notices"][0]["value"] == "2026-11-26T10:30"
+        {"text": "Synthetic orchid fact valid from ten.", "event_time": "2026-11-26T10:00Z"}]})
+    def ids(at):
+        found = server.dispatch("memory_search", {"project": "P", "query": "synthetic orchid fact", "at_time": at})
+        return found, [hit.get("id") or hit.get("item_id") for hit in found.get("results", found.get("hits", []))]
+    before, before_ids = ids("2026-11-26T09:30")   # naive = 09:30 UTC in every zone: not yet valid
+    after, after_ids = ids("2026-11-26T10:30")     # naive = 10:30 UTC in every zone: valid
+    assert before_ids == [] and len(after_ids) == 1, (zone, before, after)
+    assert before["time_notices"] == after["time_notices"] == [NAIVE_TIME_NOTICE]
+    assert ids("2026-11-26T10:30+01:00")[1] == []  # explicit offset honoured: 09:30 UTC

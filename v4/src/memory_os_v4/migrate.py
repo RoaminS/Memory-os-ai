@@ -50,7 +50,7 @@ def _parse_v3_timestamp(ts: str) -> float:
     which would shift every migrated episode's event_time by the host's UTC
     offset."""
     from .temporal import iso_to_timestamp
-    return iso_to_timestamp(ts)   # 4.1.3: the same single policy as the server
+    return iso_to_timestamp(ts, notice=False)  # v3 timestamps: expected naive, no notice   # 4.1.3: the same single policy as the server
 
 
 def _deterministic_id(prefix: str, *parts: str) -> str:

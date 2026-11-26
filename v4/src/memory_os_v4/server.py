@@ -42,7 +42,7 @@ from .maintenance import MaintenanceDenied, MaintenancePolicy, MaintenanceWindow
 from .qualification import QualificationMetrics, enabled_from_env, result_text
 from .migrate import resolve_under_home as _resolve_under_home
 from .store import MemoryItem
-from .temporal import iso_to_timestamp, naive_time_notices
+from .temporal import begin_time_notices, end_time_notices, iso_to_timestamp
 from .text import tokenize
 from . import __version__, models
 
@@ -756,20 +756,24 @@ def dispatch(name: str, arguments: dict | None) -> dict:
     return result
 
 
+def _with_time_notices(handler):
+    """4.1.3: the tool handler's result carries ``time_notices`` when it ACCEPTED a naive date-time.
+
+    The notice is added to the handler's own result, BEFORE the engine stores an idempotent receipt:
+    a direct replay, the relay, memory_request_status and a restart return exactly the first response."""
+    def run(engine, parsed):
+        token = begin_time_notices()
+        try:
+            result = handler(engine, parsed)
+        finally:
+            notices = end_time_notices(token)
+        if notices and isinstance(result, dict):
+            result = {**result, "time_notices": notices}
+        return result
+    return run
+
+
 def _dispatch(name: str, arguments: dict | None) -> dict:
-    """Run one tool call and attach the 4.1.3 naive-time notices it produced, if any.
-
-    The notices are computed from the arguments and go to a dedicated ``time_notices`` key of a COPY of
-    the result: an idempotent receipt cached by the engine is never altered, and a replay with the same
-    arguments yields the same notices."""
-    result = _dispatch_call(name, arguments)
-    notices = naive_time_notices(arguments or {})
-    if notices and isinstance(result, dict):
-        result = {**result, "time_notices": notices}
-    return result
-
-
-def _dispatch_call(name: str, arguments: dict | None) -> dict:
     """Validate ``arguments`` against ``name``'s model, call its handler, and
     normalize any exception into ``{"ok": False, "error": ...}``."""
     arguments = arguments or {}
@@ -777,6 +781,7 @@ def _dispatch_call(name: str, arguments: dict | None) -> dict:
     handler = TOOL_HANDLERS.get(name)
     if model_cls is None or handler is None:
         return {"ok": False, "error": f"unknown tool: {name!r}"}
+    handler = _with_time_notices(handler)
 
     try:
         parsed = model_cls(**arguments)

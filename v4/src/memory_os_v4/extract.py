@@ -20,7 +20,8 @@ def _coerce_time(value) -> float | None:
         return float(value)
     if isinstance(value, str):
         try:
-            return iso_to_timestamp(value)          # 4.1.3 single policy: naive values are UTC
+            # 4.1.3 single policy (same as server.parse_iso): surrounding blanks ignored, naive values UTC.
+            return iso_to_timestamp(value.strip())
         except ValueError:
             return None
     return None

@@ -8,6 +8,7 @@ from __future__ import annotations
 import calendar
 import math
 import re
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -60,51 +61,49 @@ def _add_months(dt: datetime, delta: int) -> datetime:
 #   * a number is a unix timestamp;
 #   * an ISO string WITH an offset ("Z" = "+00:00") is honoured as given;
 #   * a NAIVE ISO string is read in UTC, never in the server's local time zone. A date alone
-#     ("2026-11-26") is midnight UTC; a naive date-time ("2026-11-26T10:00") is also read in UTC and
-#     the tool response carries a ``naive_time_assumed_utc`` notice (``naive_time_notices``).
+#     ("2026-11-26") is midnight UTC; a naive date-time ("2026-11-26T10:00") is also read in UTC and,
+#     when it is actually accepted while a tool handler runs, the handler's result carries ONE
+#     ``naive_time_assumed_utc`` notice under ``time_notices`` (inside the idempotent receipt, so a
+#     replay, the relay, memory_request_status and a restart all return it; the input is not echoed).
 # Before 4.1.3, explicit naive values were read in local time while dates extracted from text and
 # v3 timestamps were read in UTC, so the same date gave different instants (demo412, anomaly 6).
 _DATE_ONLY_RE = re.compile(r"\d{4}-?\d{2}-?\d{2}")
-TIME_FIELDS = frozenset({"event_time", "valid_from", "valid_until", "at_time", "before"})
+NAIVE_TIME_NOTICE = {"code": "naive_time_assumed_utc",
+                     "message": "a date-time without an offset was read in UTC; send an offset (e.g. +01:00 or Z) "
+                                "to state another time zone"}
+_naive_seen: ContextVar[list | None] = ContextVar("memory_os_v4_naive_time_seen", default=None)
 
 
-def iso_to_timestamp(text: str) -> float:
-    """Parse one ISO date or date-time string under the single time policy (raises ``ValueError``)."""
+def begin_time_notices():
+    """Start recording naive date-times accepted by :func:`iso_to_timestamp` (one tool handler run)."""
+    return _naive_seen.set([])
+
+
+def end_time_notices(token) -> list[dict]:
+    """Stop recording; ``[NAIVE_TIME_NOTICE]`` if at least one naive date-time was accepted, else ``[]``."""
+    seen = _naive_seen.get()
+    _naive_seen.reset(token)
+    return [dict(NAIVE_TIME_NOTICE)] if seen else []
+
+
+def utc_date(year: int, month: int, day: int) -> float:
+    """Midnight UTC of a calendar date: the single meaning of a date alone (raises ``ValueError``)."""
+    return datetime(year, month, day, tzinfo=timezone.utc).timestamp()
+
+
+def iso_to_timestamp(text: str, *, notice: bool = True) -> float:
+    """Parse one ISO date or date-time string under the single time policy (raises ``ValueError``).
+
+    Only a value actually ACCEPTED here is recorded for the notice: a value refused (``ValueError``) is
+    never announced as read in UTC."""
     dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     if dt.tzinfo is None:
+        if notice and not _DATE_ONLY_RE.fullmatch(text):
+            seen = _naive_seen.get()
+            if seen is not None:
+                seen.append(True)
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
-
-
-def naive_time_notices(arguments) -> list[dict]:
-    """Notices for the naive DATE-TIMES among the time fields of a tool call's arguments (any depth).
-
-    Computed from the arguments alone, so a first call and its idempotent replay get the same notices.
-    A date alone is documented midnight UTC and gets none; unparsable values are left to the handler."""
-    found: list[dict] = []
-
-    def visit(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key in TIME_FIELDS and isinstance(value, str):
-                    text = value.strip()
-                    try:
-                        naive = datetime.fromisoformat(text.replace("Z", "+00:00")).tzinfo is None
-                    except ValueError:
-                        continue
-                    notice = {"code": "naive_time_assumed_utc", "field": key, "value": text,
-                              "message": "naive date-time read in UTC; send an offset (e.g. +01:00 or Z) "
-                                         "to state another time zone"}
-                    if naive and not _DATE_ONLY_RE.fullmatch(text) and notice not in found:
-                        found.append(notice)
-                else:
-                    visit(value)
-        elif isinstance(node, list):
-            for value in node:
-                visit(value)
-
-    visit(arguments)
-    return found
 
 
 def _to_ts(dt: datetime) -> float:
@@ -138,7 +137,7 @@ def parse_absolute_dates(text: str) -> list[float]:
 
     for y, m, d in _ISO_RE.findall(text):
         try:
-            results.append(_to_ts(datetime(int(y), int(m), int(d), tzinfo=timezone.utc)))
+            results.append(utc_date(int(y), int(m), int(d)))
         except ValueError:
             continue
 
