@@ -1,4 +1,6 @@
-"""4.1.3 (NOTE_4_1_3_WAL_MODE_RO_v1): the read-only open of diagnostics never creates a file in the store.
+"""4.1.3 (NOTE_4_1_3_WAL_MODE_RO_v1, option B): the read-only open of diagnostics never DELETES a file. Offline it
+creates nothing (shared lock on writer.lock); a live read has a declared window in which SQLite may recreate two
+empty side files, always reported with ``store_side_files_recreated``.
 
 Before 4.1.3 ``scan_sqlite`` (doctor, health) and ``health._sqlite_records`` opened the store with ``mode=ro``:
 on a WAL store whose -wal/-shm the last writer had deleted, that open RECREATED them, and it failed on a
@@ -8,6 +10,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -19,7 +22,8 @@ from memory_os_v4.ops.health import _sqlite_records
 from memory_os_v4.sqlite_stats import scan_sqlite
 from memory_os_v4 import sqlite_store
 from memory_os_v4.sqlite_store import ReadOnlyStoreError, open_readonly
-from memory_os_v4.writer_lock import WriterLock
+from memory_os_v4 import writer_lock
+from memory_os_v4.writer_lock import WriterConflictError, WriterLock
 
 
 @pytest.fixture
@@ -76,6 +80,25 @@ class ExternalWriter:
         if self.process.poll() is None:
             self.process.stdin.close()
             self.process.wait(timeout=30)
+
+
+DMS_PROBE = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, 128, 0)   # SQLite unix VFS: DMS byte of -shm
+    print("free")
+except OSError:
+    print("locked")
+"""
+
+
+def shm_locked_by_someone(db):
+    """From an INDEPENDENT process (an in-process fcntl probe would itself drop our locks when closed): does any
+    connection still hold its SQLite shared lock on the -shm DMS byte?"""
+    out = subprocess.run([sys.executable, "-c", DMS_PROBE, str(db) + "-shm"], capture_output=True, text=True,
+                         check=True).stdout.strip()
+    return out == "locked"
 
 
 @pytest.fixture
@@ -298,6 +321,62 @@ def test_two_readers_interleaved_with_the_writer_shutdown(external_writer, no_re
         assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
     assert sqlite_store._held_sides == {}
     del first
+
+
+def test_an_offline_reader_on_the_kept_pair_shares_the_held_descriptors(external_writer, no_reader_deletes):
+    """Codex WAL r4 item 2: A reads live; the service stops (A keeps the pair); B then obtains the shared lock and
+    reads the kept pair offline; A finishes first. B's SQLite locks must survive A's exit."""
+    data, writer = external_writer
+    db = data / "store.sqlite3"
+    first_context = open_readonly(db)
+    first_context.__enter__().execute("SELECT count(*) FROM items").fetchone()
+    writer.send("close-sqlite")
+    writer.send("release")
+    assert {"store.sqlite3-wal", "store.sqlite3-shm"} <= {p.name for p in data.iterdir()}
+    with open_readonly(db) as second:                           # offline now: lock obtained, pair kept, mode=ro
+        assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
+        assert sqlite_store._held_sides[str(db)][0] == 2
+        first_context.__exit__(None, None, None)
+        assert sqlite_store._held_sides[str(db)][0] == 1
+        assert shm_locked_by_someone(db)                        # B still holds its SQLite lock
+        assert second.execute("SELECT count(*) FROM items").fetchone()[0] >= 1
+    assert sqlite_store._held_sides == {} and not shm_locked_by_someone(db)
+
+
+def test_the_engine_cannot_start_under_a_reader_of_this_process(external_writer):
+    """Codex WAL r4 item 1: the exclusion holds for the reader's whole lifetime, across threads."""
+    data, writer = external_writer
+    db = data / "store.sqlite3"
+    opened, finish, errors = threading.Event(), threading.Event(), []
+
+    def reader():
+        try:
+            with open_readonly(db) as connection:
+                connection.execute("SELECT count(*) FROM items").fetchone()
+                opened.set()
+                finish.wait(30)
+                connection.execute("SELECT count(*) FROM items").fetchone()
+        except Exception as exc:                                 # reported to the main thread
+            errors.append(exc)
+            opened.set()
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    config = Config(data_dir=str(data), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)
+    try:
+        assert opened.wait(30) and not errors
+        writer.send("close-sqlite")
+        writer.send("release")                                  # the service stopped: its lease is free
+        with pytest.raises(WriterConflictError, match="read-only diagnostic"):
+            MemoryV4(config=config)
+        assert shm_locked_by_someone(db)                        # the reader's locks are intact
+    finally:
+        finish.set()
+        thread.join(30)
+    assert not errors and sqlite_store._held_sides == {} and writer_lock._active_readers == {}
+    writer.stop()
+    with MemoryV4(config=config) as m:                          # starts once the reader is closed
+        assert m.add_facts([{"text": "After the reader."}], project="P")["added"]
 
 
 def test_two_concurrent_live_readers_never_delete_anything(external_writer, no_reader_deletes):

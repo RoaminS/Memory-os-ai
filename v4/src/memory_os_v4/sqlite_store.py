@@ -296,6 +296,12 @@ def open_readonly(database, *, timeout: float = 5.0):
     * Lock refused, a writer (the service) runs: no side file, ``store_busy_retry`` (the writer is starting);
       incomplete pair, ``store_side_files_incomplete``; a process that itself holds this store's writer lease
       (an engine running in it), ``readonly_open_in_writer_process``; otherwise a LIVE read with ``mode=ro``.
+    * In one process, readers and the engine of a store exclude each other for their whole lifetime: a reader is
+      refused while the engine runs, and the engine refuses to start while a reader is open (``WriterLock``).
+      Every reader whose SQLite connection opens the pair holds shared descriptors on it, closed after the LAST
+      such connection (closing a descriptor drops every fcntl lock of the process on that file). Raw SQLite
+      connections opened outside this function are not part of this protocol: the store's other readers
+      (backup, migration, profile probe) run under the writer lease or in their own command.
     * DECLARED RESIDUAL WINDOW of the live read: if the service closes SQLite between this reader's look and its
       open, SQLite recreates two side files without data. The window is short in practice but NOT bounded (a
       suspended reader process lengthens it); it only opens while the service shuts down. The files are never
@@ -319,45 +325,68 @@ def open_readonly(database, *, timeout: float = 5.0):
         has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
         if has_wal != has_shm:
             raise ReadOnlyStoreError("store_side_files_incomplete", "incomplete -wal/-shm pair; nothing opened")
-        if locked:
-            uri = "file:" + quote(str(database)) + ("?mode=ro" if has_wal else "?mode=ro&immutable=1")
-            connection = sqlite3.connect(uri, uri=True, timeout=timeout)
-            try:
-                yield connection
-            finally:
-                connection.close()
-            return
-        if not has_wal:
+        if not locked and not has_wal:
             raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting; retry")
-        from .writer_lock import _owned, _registry_lock
-        with _registry_lock:
-            in_writer_process = lock.resolve() in _owned
-        if in_writer_process:
-            raise ReadOnlyStoreError("readonly_open_in_writer_process",
-                                     "this process runs the store's engine: read through it, not around it")
-        held = _hold_side_files(database)
-        if held is None:
-            raise ReadOnlyStoreError("store_busy_retry", "the side files vanished before the open; retry")
+        key = _register_reader(lock)
         try:
-            if not _sides_unchanged(database, held):
-                raise ReadOnlyStoreError("store_busy_retry", "the side files changed before the open; retry")
-            connection = sqlite3.connect("file:" + quote(str(database)) + "?mode=ro", uri=True, timeout=timeout)
+            # Every reader that lets SQLite open the pair (live, or offline with a stale pair) shares the held
+            # descriptors: none of them closes them while another one's connection is still open.
+            held = _hold_side_files(database) if has_wal else None
+            if has_wal and held is None:
+                raise ReadOnlyStoreError("store_busy_retry", "the side files vanished before the open; retry")
             try:
+                if held is not None and not _sides_unchanged(database, held):
+                    raise ReadOnlyStoreError("store_busy_retry", "the side files changed before the open; retry")
+                uri = "file:" + quote(str(database)) + ("?mode=ro" if has_wal else "?mode=ro&immutable=1")
+                connection = sqlite3.connect(uri, uri=True, timeout=timeout)
                 try:
-                    connection.execute("SELECT count(*) FROM sqlite_master").fetchone()   # attaches to the WAL
-                except Exception as exc:
-                    if not _sides_unchanged(database, held):
-                        raise _recreated(exc)
-                    raise
-                if not _sides_unchanged(database, held):
-                    raise _recreated()
-                yield connection
+                    if not locked:
+                        try:
+                            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()   # attaches to the WAL
+                        except Exception as exc:
+                            if not _sides_unchanged(database, held):
+                                raise _recreated(exc)
+                            raise
+                        if not _sides_unchanged(database, held):
+                            raise _recreated()
+                    yield connection
+                finally:
+                    connection.close()            # BEFORE the held descriptors (POSIX fcntl caveat)
             finally:
-                connection.close()            # BEFORE the held descriptors (POSIX fcntl caveat)
+                if held is not None:
+                    _release_side_files(database)
         finally:
-            _release_side_files(database)
+            _unregister_reader(key)
     finally:
         os.close(fd)
+
+
+def _register_reader(lock: Path) -> Path:
+    """Exclusion between diagnostic readers and an engine IN THE SAME PROCESS, for their whole lifetime.
+
+    A reader is refused while this process owns the store's writer lease, and ``WriterLock`` refuses to start an
+    engine while a reader of that store is registered (``writer_lock._active_readers``), both under the registry
+    lock: the held descriptors can never be closed under an engine's SQLite connection."""
+    from .writer_lock import _active_readers, _owned, _registry_lock
+
+    key = lock.resolve()
+    with _registry_lock:
+        if key in _owned:
+            raise ReadOnlyStoreError("readonly_open_in_writer_process",
+                                     "this process runs the store's engine: read through it, not around it")
+        _active_readers[key] = _active_readers.get(key, 0) + 1
+    return key
+
+
+def _unregister_reader(key: Path) -> None:
+    from .writer_lock import _active_readers, _registry_lock
+
+    with _registry_lock:
+        count = _active_readers.get(key, 0) - 1
+        if count > 0:
+            _active_readers[key] = count
+        else:
+            _active_readers.pop(key, None)
 
 
 def probe_retrieval_profile(data_dir, *, under_lease: bool = False) -> ProfileFinding:

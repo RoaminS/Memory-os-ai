@@ -12,6 +12,10 @@ from threading import Lock
 
 _registry_lock = Lock()
 _owned: set[Path] = set()
+# 4.1.3: writer.lock paths of the stores a diagnostic reader of THIS process has open (sqlite_store.open_readonly),
+# with their count. An engine never starts under such a reader: the reader's held side-file descriptors would
+# otherwise be closed under the engine's SQLite connection, dropping its fcntl locks.
+_active_readers: dict[Path, int] = {}
 # Raw duplicates of the lease descriptors reserved right after acquisition (``WriterLock.reserve``).
 # Plain integers: no Python object owns them, so neither garbage collection nor interpreter
 # shutdown can close them; only ``WriterLock.close`` does. (Inventory only: the kernel keeps a
@@ -33,6 +37,11 @@ class WriterLock:
         with _registry_lock:
             if self.path in _owned:
                 raise self._conflict()
+            if _active_readers.get(self.path):
+                raise WriterConflictError(
+                    f"A read-only diagnostic of {self.path.parent} is open in this process; "
+                    "close it before starting the engine. Do not delete writer.lock."
+                )
             fh = self.path.open("a+b")
             try:
                 if os.name == "nt":  # pragma: no cover - Windows
