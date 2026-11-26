@@ -215,7 +215,7 @@ JOURNAL_SUBPATH = ".local/state/memory-os/quickstart"
 WRITING_ACTIONS = ("create", "replace", "unchanged")
 CONFIRM_PROMPT = "Install Memory OS AI with exactly this plan? [y/N] "
 # Same digest as ``ops/quickstart.plan_digest`` (a test compares them on a real plan).
-PLAN_DIGEST_VERSION = 2
+PLAN_DIGEST_VERSION = 3
 PLAN_DIGEST_CLIENT_KEYS = ("client", "path", "file_sha256", "action", "desired_sha256", "current_class", "ownership")
 PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "manager", "plist", "unit",
                             "loaded_state")
