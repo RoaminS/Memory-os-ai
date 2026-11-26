@@ -171,3 +171,10 @@ def test_p1_junit_judgement(tmp_path):
     assert not verdict["ok"] and verdict["n_blocking_skips"] == 1
     junit.write_text(junit.read_text().replace('name="t1"/>', 'name="t1"><failure message="x"/></testcase>'))
     assert tool.judge_p1_junit(junit, skips)["n_failures"] == 1 and not tool.judge_p1_junit(junit, skips)["ok"]
+
+
+def test_p1_workdir_exists_in_a_fresh_checkout(tmp_path):
+    tool = load("linux_cell")
+    basetemp, junit = tool.p1_workdir(tmp_path, "p1-cell")
+    assert basetemp.parent == junit.parent == tmp_path / ".local-qualification" and basetemp.parent.is_dir()
+    assert not basetemp.exists() and junit.name == "p1-cell-junit.xml"

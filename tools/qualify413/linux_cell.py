@@ -128,6 +128,14 @@ def p1_environment(venv: Path, home: Path, root: Path = ROOT) -> dict:
             "TMPDIR": "/tmp", "PYTHONPATH": os.pathsep.join(str(root / p) for p in ("v4/src", "v4")), **P1_VARIABLES}
 
 
+def p1_workdir(root: Path, name: str):
+    """``--basetemp`` and JUnit paths under ``<repo>/.local-qualification``, which a fresh checkout does not have
+    (pytest creates the basetemp itself but not its parent: local replay from a depth-1 clone)."""
+    free = root / ".local-qualification"
+    free.mkdir(mode=0o700, exist_ok=True)
+    return free / name, free / f"{name}-junit.xml"
+
+
 def p1_pytest_argv(python: Path, listed, cell, basetemp: Path, junit: Path) -> list:
     return [str(python), "-B", "-m", "pytest", "-c", "pyproject.toml", "-q", "-p", "no:cacheprovider",
             "-o", "faulthandler_timeout=60", f"--basetemp={basetemp}", f"--junitxml={junit}", "-rs", "v4/tests",
@@ -350,8 +358,7 @@ class Run:
         # The test write guard (scripts/test_home_guard.py) admits, under the operator's real HOME, only the session
         # HOME and <repo>/.local-qualification; on the runner the checkout and --output are under /home/runner, so
         # the JUnit file is written there first, then copied into the report (CI run 1).
-        basetemp = ROOT / ".local-qualification" / f"p1-{self.cell}"
-        junit_written = ROOT / ".local-qualification" / f"p1-{self.cell}-junit.xml"
+        basetemp, junit_written = p1_workdir(ROOT, f"p1-{self.cell}")
         junit = self.output / "p1-junit.xml"
         home = self.R / "p1-home"
         home.mkdir()
