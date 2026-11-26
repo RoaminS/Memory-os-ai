@@ -4,8 +4,11 @@
 Transposed from the 4.1.1 qualification harness (``qual411/harness/portes.py``, run then on a Lima VM). The judgements
 are the same; the means are those of a runner where there is no production to observe:
 
-* P1  portable lexical suite from the SOURCES, in a venv of the cell interpreter holding the exact cell lock and the
-      test pins (``scripts/qualify_410_pytest_pins.txt``); 0 failure, 0 error; skips listed.
+* P1  portable lexical suite ``v4/tests`` from the SOURCES (``PYTHONPATH=v4/src:v4``, probed: package of the
+      checkout, distribution not installed, no ``MEMORY_V4_BUILD_COMMIT``), in a venv of the cell interpreter holding
+      the exact cell lock and the test pins (``scripts/qualify_410_pytest_pins.txt``); the audited selection of the
+      4.1.1 P1 gate ported to this tree (``tools/qualify413/p1_deselection_<cell>.json``: file ignores, node
+      deselects, cell section, expected skips; every entry motivated); 0 failure, 0 error, only listed skips.
 * P3  bootstrap: a copy of the template OUTSIDE the checkout receives a TEST pin through its own ``fill_pin`` (wheel of
       this run, lock of the cell from the wheel's manifest); previews and expected refusals only, WITHOUT network
       (``unshare -n``; a connection attempt is shown to fail), inventory of the whole P3 root identical before/after.
@@ -47,6 +50,116 @@ RELAY_KEYS = ("installed", "ready", "roundtrip", "failure_reported", "reconnecte
 TEST_CLIENTS = ("cursor", "gemini-cli", "codex")
 TEST_LABEL = "local.memory-os-qual413"
 ALL_GATES = ("P1", "P3", "P4", "P5", "P6", "P7")
+CELLS = ("ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311")
+
+# ---------------------------------------------------------------- P1 (shared with the local replay and the tests)
+# Port of the 4.1.1 P1 gate (qual411/harness/portes.py: VARIABLES_P1, SONDE_P1, p1, evaluer_junit). The list keeps the
+# keys of p1_deselection_v7.json (fichier, noeud, categorie, motif, preuve, couverture, raison) so that every ported
+# entry can be compared with its audited original.
+P1_FORMAT = "qualify413-p1-deselection-v1"
+P1_VARIABLES = {"MEMORY_TEST_HASH_V3": "1", "MEMORY_V4_EMBED_MODEL": "hash", "OMP_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1", "VECLIB_MAXIMUM_THREADS": "1", "PYTHONOPTIMIZE": "0",
+                "PYTHONDONTWRITEBYTECODE": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+P1_PROBE = ("import importlib.metadata as md, json, os, memory_os_v4\n"
+            "try:\n md.version('memory-os-ai'); installed = True\n"
+            "except md.PackageNotFoundError:\n installed = False\n"
+            "print(json.dumps({'package': memory_os_v4.__file__, 'distribution_installed': installed,\n"
+            " 'pythonpath': os.environ.get('PYTHONPATH'), 'build_commit': os.environ.get('MEMORY_V4_BUILD_COMMIT')}))\n")
+P1_REQUIRED = {"ignore": ("fichier", "categorie", "motif", "couverture"),
+               "deselect": ("noeud", "categorie", "motif", "preuve", "couverture"),
+               "sauts_prevus": ("fichier", "raison", "motif")}
+
+
+def p1_list_problems(listed, cell) -> list:
+    """Why a P1 list cannot be used for ``cell`` (empty: usable). Every entry is motivated: a known category, a
+    ``motif``, the observed error line (``preuve``) for a node and where the behaviour IS covered (``couverture``)."""
+    problems = []
+    if not isinstance(listed, dict) or listed.get("format") != P1_FORMAT:
+        return [f"format is not {P1_FORMAT}"]
+    if listed.get("cellule") != cell:
+        problems.append(f"list of cell {listed.get('cellule')!r}, not {cell}")
+    categories = listed.get("categories")
+    if not isinstance(categories, dict) or not all(isinstance(v, str) and v for v in categories.values()):
+        return problems + ["categories: a non-empty description per code is required"]
+    cells = listed.get("par_cellule", {})
+    if not isinstance(cells, dict) or set(cells) - set(CELLS):
+        problems.append("par_cellule: unknown cell")
+        cells = {}
+    sections = [("lexicale", listed.get("lexicale", {}))] + [(f"par_cellule.{c}", s) for c, s in cells.items()]
+    seen = set()
+    for where, section in sections:
+        if not isinstance(section, dict) or set(section) - {"ignore", "deselect"}:
+            problems.append(f"{where}: only 'ignore' and 'deselect' are admitted")
+            continue
+        for kind in ("ignore", "deselect"):
+            for entry in section.get(kind, []):
+                key = entry.get("fichier" if kind == "ignore" else "noeud") if isinstance(entry, dict) else None
+                if not (isinstance(entry, dict) and all(isinstance(entry.get(k), str) and entry[k].strip()
+                                                        for k in P1_REQUIRED[kind])):
+                    problems.append(f"{where}.{kind}: entry not motivated: {entry!r}"[:300])
+                elif entry["categorie"] not in categories:
+                    problems.append(f"{where}.{kind}: unknown category {entry['categorie']!r} for {key}")
+                elif (kind == "ignore" and (".." in key or not key.endswith(".py"))) or \
+                        (kind == "deselect" and (not key.startswith("tests/") or ".." in key or "::" not in key)):
+                    problems.append(f"{where}.{kind}: not a v4/tests path: {key}")
+                elif key in seen:
+                    problems.append(f"{where}.{kind}: listed twice: {key}")
+                seen.add(key)
+    for entry in listed.get("sauts_prevus", []):
+        if not (isinstance(entry, dict) and all(isinstance(entry.get(k), str) and entry[k].strip()
+                                                for k in P1_REQUIRED["sauts_prevus"])):
+            problems.append(f"sauts_prevus: entry not motivated: {entry!r}"[:300])
+    return problems
+
+
+def p1_selection(listed, cell) -> list:
+    """The pytest options of the list, as the 4.1.1 gate built them: ``--ignore`` per file of ``v4/tests``,
+    ``--deselect`` per node (common section, then the section of the cell)."""
+    common = listed.get("lexicale", {})
+    own = listed.get("par_cellule", {}).get(cell, {})
+    return ([f"--ignore=v4/tests/{e['fichier']}" for e in common.get("ignore", []) + own.get("ignore", [])]
+            + [f"--deselect=v4/{e['noeud']}" for e in common.get("deselect", []) + own.get("deselect", [])])
+
+
+def p1_environment(venv: Path, home: Path, root: Path = ROOT) -> dict:
+    """The P1 environment, rebuilt from nothing (never inherited): the sources of the checkout on PYTHONPATH, as in
+    the 4.1.1 gate and the v9 "full" gate (``scripts/qualify_405_test_isolation.py``); never MEMORY_V4_BUILD_COMMIT."""
+    return {"HOME": str(home), "PATH": f"{venv}/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TZ": "Europe/Paris",
+            "TMPDIR": "/tmp", "PYTHONPATH": os.pathsep.join(str(root / p) for p in ("v4/src", "v4")), **P1_VARIABLES}
+
+
+def p1_pytest_argv(python: Path, listed, cell, basetemp: Path, junit: Path) -> list:
+    return [str(python), "-B", "-m", "pytest", "-c", "pyproject.toml", "-q", "-p", "no:cacheprovider",
+            "-o", "faulthandler_timeout=60", f"--basetemp={basetemp}", f"--junitxml={junit}", "-rs", "v4/tests",
+            "-m", "not slow", *p1_selection(listed, cell)]
+
+
+def p1_probe_ok(probe: dict, env: dict, root: Path = ROOT) -> bool:
+    package = Path(probe.get("package") or "/").resolve()
+    return (package.is_relative_to((root / "v4/src").resolve()) and probe.get("distribution_installed") is False
+            and probe.get("build_commit") is None and probe.get("pythonpath") == env["PYTHONPATH"])
+
+
+def judge_p1_junit(junit: Path, expected_skips) -> dict:
+    """0 failure, 0 error, and every skip listed (file + reason), otherwise blocking (4.1.1 ``evaluer_junit``)."""
+    cases = list(ET.parse(junit).getroot().iter("testcase"))
+    failures, errors, expected, blocking = [], [], [], []
+    for case in cases:
+        name = f"{case.get('classname')}::{case.get('name')}"
+        if case.find("failure") is not None:
+            failures.append(name)
+        if case.find("error") is not None:
+            errors.append(name)
+        skip = case.find("skipped")
+        if skip is not None:
+            reason = ((skip.get("message") or "") + " " + (skip.text or "")).strip()
+            module = next((part for part in (case.get("classname") or "").split(".") if part.startswith("test_")), "")
+            known = any(e["fichier"].rsplit("/", 1)[-1] == module + ".py" and e["raison"] in reason
+                        for e in expected_skips)
+            (expected if known else blocking).append({"test": name, "reason": reason[:200]})
+    return {"tests": len(cases), "failures": failures[:50], "errors": errors[:50], "expected_skips": expected,
+            "blocking_skips": blocking[:50], "n_failures": len(failures), "n_errors": len(errors),
+            "n_blocking_skips": len(blocking), "ok": bool(cases) and not failures and not errors and not blocking}
 
 
 def sha256(path: Path) -> str:
@@ -212,24 +325,28 @@ class Run:
         return path
 
     def p1(self):
-        venv = self.venv("p1-venv")
+        # Not "*venv": the fake interpreter of test_bootstrap_411.py answers for any path ending in "venv/bin/python"
+        # (rewrite suffix, :207/:781), hence also for the base interpreter of the suite (local replay of CI run 1).
+        venv = self.venv("p1-lexical")
         self.uv_install(venv, "lock", "-r", self.hashed_lock(), hashes=True)
         # setuptools and wheel: the build backend that the distribution tests import (memory_os_build.py). The
         # 4.1.1 harness got them from the seeding of a CPython 3.11 venv; `uv venv` seeds nothing (CI run 1).
         self.uv_install(venv, "test-pins", "-r", ROOT / "scripts/qualify_410_pytest_pins.txt", "pytest-asyncio==1.3.0",
                         "ruff==0.17.6", "setuptools==80.9.0", "wheel==0.48.0")
-        deselect = ROOT / f"tools/qualify413/p1_deselection_{self.cell}.json"
-        listed = json.loads(deselect.read_text()) if deselect.is_file() else {"format": "qualify413-p1-v1", "tests": [],
-                                                                              "expected_skips": []}
-        self.check("deselection and expected-skip lists: own format, every entry motivated",
-                   listed.get("format") == "qualify413-p1-v1"
-                   and all(isinstance(t, dict) and t.get("nodeid") and t.get("reason") for t in listed["tests"])
-                   and all(isinstance(t, dict) and t.get("file") and t.get("reason")
-                           for t in listed.get("expected_skips", [])),
-                   {"file": deselect.name, "deselected": len(listed["tests"]),
-                    "expected_skips": len(listed.get("expected_skips", []))})
-        if deselect.is_file():
-            self.report["artifacts"][deselect.name] = sha256(deselect)
+        path = ROOT / f"tools/qualify413/p1_deselection_{self.cell}.json"
+        if not path.is_file():
+            raise Refused(f"P1: no selection list {path.name} (the 4.1.1 gate refused without one)")
+        listed = json.loads(path.read_text())
+        problems = p1_list_problems(listed, self.cell)
+        own = listed.get("par_cellule", {}).get(self.cell, {})
+        self.report["gates"]["P1"]["selection"] = {
+            "file": path.name, "sha256": sha256(path), "origine": listed.get("origine"),
+            "ignored_files": len(listed.get("lexicale", {}).get("ignore", [])) + len(own.get("ignore", [])),
+            "deselected_nodes": len(listed.get("lexicale", {}).get("deselect", [])) + len(own.get("deselect", [])),
+            "of_the_cell": len(own.get("deselect", [])), "expected_skips": len(listed.get("sauts_prevus", []))}
+        self.report["artifacts"][path.name] = sha256(path)
+        self.check(f"selection list {P1_FORMAT}: list of this cell, known categories, every entry motivated",
+                   not problems, problems[:20])
         # The test write guard (scripts/test_home_guard.py) admits, under the operator's real HOME, only the session
         # HOME and <repo>/.local-qualification; on the runner the checkout and --output are under /home/runner, so
         # the JUnit file is written there first, then copied into the report (CI run 1).
@@ -238,38 +355,27 @@ class Run:
         junit = self.output / "p1-junit.xml"
         home = self.R / "p1-home"
         home.mkdir()
-        env = {"HOME": str(home), "PATH": f"{venv}/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TZ": "Europe/Paris",
-               "TMPDIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0", "MEMORY_V4_EMBED_MODEL": "hash",
-               "MEMORY_TEST_HASH_V3": "1", "VECLIB_MAXIMUM_THREADS": "1", "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+        env = p1_environment(venv, home)
         for name, argv in (("lint-correctness", ["tests", "v4/src", "v4/tests", "v4/bench", "scripts", "--select", "E9,F"]),
                            ("lint-default", ["tests", "scripts"])):
-            self.step(name, [venv / "bin/ruff", "check", *argv], env=env, cwd=ROOT)
-        argv = [venv / "bin/python", "-B", "-m", "pytest", "-c", "pyproject.toml", "-m", "not slow", "-q",
-                "-p", "no:cacheprovider", f"--basetemp={basetemp}", f"--junitxml={junit_written}", "v4/tests", "tests"]
-        for test in listed["tests"]:
-            argv += ["--deselect", test["nodeid"]]
+            self.step(name, [venv / "bin/ruff", "check", "--no-cache", *argv], env=env, cwd=ROOT)
+        rc, out = self.step("probe", [venv / "bin/python", "-B", "-c", P1_PROBE], env=env, cwd=ROOT)
+        probe = self.last_json(out)
+        self.check("the package imported is that of the SOURCES of the checkout; the distribution is not installed; "
+                   "no MEMORY_V4_BUILD_COMMIT", p1_probe_ok(probe, env), probe)
+        argv = p1_pytest_argv(venv / "bin/python", listed, self.cell, basetemp, junit_written)
         rc, _ = self.step("suite", argv, env=env, cwd=ROOT, timeout=2400, expect=(0, 1))
         if not junit_written.is_file():
             raise Refused(f"P1: pytest wrote no JUnit report (rc={rc}); see logs/P1-suite.log")
         shutil.copyfile(junit_written, junit)
-        cases = list(ET.parse(junit).getroot().iter("testcase"))
-        failed = [f"{c.get('classname')}::{c.get('name')}" for c in cases
-                  if c.find("failure") is not None or c.find("error") is not None]
-        expected, blocking = [], []
-        for case in cases:
-            skip = case.find("skipped")
-            if skip is None:
-                continue
-            reason = ((skip.get("message") or "") + " " + (skip.text or "")).strip()
-            module = next((part for part in (case.get("classname") or "").split(".") if part.startswith("test_")), "")
-            known = any(e["file"] == module + ".py" and e["reason"] in reason for e in listed.get("expected_skips", []))
-            (expected if known else blocking).append({"test": f"{case.get('classname')}::{case.get('name')}",
-                                                      "reason": reason[:200]})
-        self.report["gates"]["P1"].update(tests=len(cases), expected_skips=expected)
+        verdict = judge_p1_junit(junit, listed.get("sauts_prevus", []))
+        self.report["gates"]["P1"].update(tests=verdict["tests"], expected_skips=verdict["expected_skips"])
         self.report["artifacts"]["p1-junit.xml"] = sha256(junit)
-        self.check("portable lexical suite from the sources: pytest exit 0, 0 failure, 0 error", rc == 0 and cases
-                   and not failed, {"rc": rc, "failed": failed[:50]})
-        self.check("every skip is listed with its reason (an unexpected skip blocks)", not blocking, blocking[:50])
+        self.check("portable lexical suite from the sources: pytest exit 0, 0 failure, 0 error",
+                   rc == 0 and verdict["tests"] and not verdict["n_failures"] and not verdict["n_errors"],
+                   {"rc": rc, **{k: verdict[k] for k in ("tests", "n_failures", "n_errors", "failures", "errors")}})
+        self.check("every skip is listed with its reason (an unexpected skip blocks)", not verdict["n_blocking_skips"],
+                   verdict["blocking_skips"])
         shutil.rmtree(basetemp, ignore_errors=True)
 
     # ---------------------------------------------------------------- P3
@@ -685,7 +791,7 @@ class Run:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--cell", required=True, choices=("ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311"))
+    parser.add_argument("--cell", required=True, choices=CELLS)
     parser.add_argument("--dist", type=Path, required=True)
     parser.add_argument("--cpython", required=True)
     parser.add_argument("--output", type=Path, required=True)

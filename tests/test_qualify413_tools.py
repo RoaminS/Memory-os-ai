@@ -1,5 +1,6 @@
 """4.1.3 Lot 3: static checks of the Linux-cell and container qualification tooling (it runs on CI runners only)."""
 import importlib.util
+import json
 from pathlib import Path
 import re
 
@@ -79,3 +80,94 @@ def test_p6_worker_keeps_the_frozen_data_of_4_1_1():
     assert worker.PLAN_FORMAT == "qualify413-linux-p6-v1"
     assert len(worker.LEXICAL_FACTS) >= 3 and len(worker.LEXICAL_QUERIES) >= 3
     assert len(worker.fixed_data_sha256()) == 64
+
+
+def p1_list(cell):
+    return json.loads((ROOT / f"tools/qualify413/p1_deselection_{cell}.json").read_text())
+
+
+@pytest.mark.parametrize("cell", ["ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311"])
+def test_p1_lists_are_motivated_and_name_what_exists_in_the_tree(cell):
+    tool = load("linux_cell")
+    listed = p1_list(cell)
+    assert tool.p1_list_problems(listed, cell) == []
+    assert listed["origine"]["format"] == "qual411-p1-deselection-v7" and len(listed["origine"]["sha256"]) == 64
+    common, own = listed["lexicale"], listed["par_cellule"][cell]
+    assert set(listed["par_cellule"]) == {cell} and common["ignore"] and common["deselect"] and own["deselect"]
+    for entry in common["ignore"]:
+        assert (ROOT / "v4/tests" / entry["fichier"]).is_file(), entry["fichier"]
+    for entry in common["deselect"] + own["deselect"]:
+        path, _, rest = entry["noeud"].partition("::")
+        source = (ROOT / "v4" / path).read_text()
+        assert f"def {rest.split('::')[-1].split('[')[0]}(" in source, entry["noeud"]
+    for entry in listed["sauts_prevus"]:
+        assert entry["raison"] in (ROOT / "v4/tests" / entry["fichier"]).read_text(), entry
+    # ported 4.1.1 entries and new 4.1.3 ones are told apart; dropped v7 entries say why
+    assert {e["origine"] for e in common["ignore"] + common["deselect"] + own["deselect"]} <= {
+        "v7", "v7 (S1 reclassé b)", "4.1.3"}
+    assert all(d["pourquoi"] for d in listed["retirees"])
+
+
+def test_p1_lists_of_the_two_cells_differ_only_by_the_cell():
+    arm, x86 = p1_list("ubuntu2404-arm64-py311"), p1_list("ubuntu2404-x86_64-py311")
+    x86.pop("note_cellule")
+    for doc, cell in ((arm, "ubuntu2404-arm64-py311"), (x86, "ubuntu2404-x86_64-py311")):
+        doc["par_cellule"] = doc["par_cellule"][cell]
+        doc.pop("cellule")
+    assert arm == x86
+
+
+def test_p1_list_check_refuses_unmotivated_or_foreign_entries():
+    tool = load("linux_cell")
+    good = p1_list("ubuntu2404-arm64-py311")
+    assert tool.p1_list_problems(good, "ubuntu2404-x86_64-py311")  # another cell's list
+    assert tool.p1_list_problems({"format": "qualify413-p1-v1", "tests": []}, "ubuntu2404-arm64-py311")
+    for mutate in (lambda d: d["lexicale"]["deselect"][0].pop("preuve"),
+                   lambda d: d["lexicale"]["deselect"][0].update(couverture=" "),
+                   lambda d: d["lexicale"]["ignore"][0].update(categorie="zz"),
+                   lambda d: d["lexicale"]["deselect"].append(dict(d["lexicale"]["deselect"][0])),
+                   lambda d: d["lexicale"]["deselect"][0].update(noeud="../tests/x.py::t"),
+                   lambda d: d["sauts_prevus"][0].pop("motif"),
+                   lambda d: d["par_cellule"].update({"windows-x86_64-py311": {}})):
+        bad = json.loads(json.dumps(good))
+        mutate(bad)
+        assert tool.p1_list_problems(bad, "ubuntu2404-arm64-py311"), mutate
+
+
+def test_p1_command_is_that_of_the_4_1_1_gate(tmp_path):
+    tool = load("linux_cell")
+    cell = "ubuntu2404-arm64-py311"
+    listed = p1_list(cell)
+    argv = tool.p1_pytest_argv(Path("py"), listed, cell, tmp_path / "bt", tmp_path / "j.xml")
+    assert "v4/tests" in argv and "tests" not in argv and "-rs" in argv
+    assert argv[argv.index("-o") + 1] == "faulthandler_timeout=60" and argv[argv.index("not slow") - 1] == "-m"
+    selection = tool.p1_selection(listed, cell)
+    n_common = len(listed["lexicale"]["ignore"]) + len(listed["lexicale"]["deselect"])
+    assert len(selection) == n_common + len(listed["par_cellule"][cell]["deselect"])
+    assert all(s.startswith(("--ignore=v4/tests/", "--deselect=v4/tests/")) for s in selection)
+    assert len(tool.p1_selection(listed, "ubuntu2404-x86_64-py311")) == n_common  # no section of another cell
+    env = tool.p1_environment(tmp_path / "venv", tmp_path / "home")
+    assert env["PYTHONPATH"] == f"{ROOT / 'v4/src'}:{ROOT / 'v4'}" and "MEMORY_V4_BUILD_COMMIT" not in env
+    assert env["MEMORY_TEST_HASH_V3"] == "1" and env["MEMORY_V4_EMBED_MODEL"] == "hash"
+    probe = {"package": str(ROOT / "v4/src/memory_os_v4/__init__.py"), "distribution_installed": False,
+             "pythonpath": env["PYTHONPATH"], "build_commit": None}
+    assert tool.p1_probe_ok(probe, env)
+    for key, value in (("distribution_installed", True), ("build_commit", "abc"),
+                       ("package", "/site-packages/memory_os_v4/__init__.py")):
+        assert not tool.p1_probe_ok({**probe, key: value}, env)
+
+
+def test_p1_junit_judgement(tmp_path):
+    tool = load("linux_cell")
+    junit = tmp_path / "j.xml"
+    junit.write_text('<testsuites><testsuite>'
+                     '<testcase classname="v4.tests.test_a" name="t1"/>'
+                     '<testcase classname="v4.tests.test_ops_e2e" name="t2"><skipped message="loopback bind forbidden '
+                     'in this sandbox"/></testcase>'
+                     '</testsuite></testsuites>')
+    skips = [{"fichier": "test_ops_e2e.py", "raison": "loopback bind forbidden in this sandbox", "motif": "m"}]
+    assert tool.judge_p1_junit(junit, skips)["ok"]
+    verdict = tool.judge_p1_junit(junit, [])
+    assert not verdict["ok"] and verdict["n_blocking_skips"] == 1
+    junit.write_text(junit.read_text().replace('name="t1"/>', 'name="t1"><failure message="x"/></testcase>'))
+    assert tool.judge_p1_junit(junit, skips)["n_failures"] == 1 and not tool.judge_p1_junit(junit, skips)["ok"]
