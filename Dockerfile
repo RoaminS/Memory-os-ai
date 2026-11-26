@@ -2,16 +2,18 @@
 #
 # Build from a qualified wheel of the same commit (placed in dist/ by the CI job that builds it):
 #   docker build --build-arg WHEEL=memory_os_ai-<version>-py3-none-any.whl -t memory-os-ai:local .
-# Run (token file 0600 owned by uid 10001 on the host; same port on both sides, published on loopback ONLY):
+# Run (token file 0600 owned by uid 10001 on the host; same port on both sides, published on loopback ONLY). The
+# container listens on its own loopback by default; listening on 0.0.0.0 INSIDE it is the explicit opt-in that you
+# append to the command (decision D8: never by default):
 #   docker run --rm -p 127.0.0.1:8765:8765 -v memory-os-data:/data \
-#     -v /path/to/http.token:/run/memory-os/http.token:ro memory-os-ai:local
+#     -v /path/to/http.token:/run/memory-os/http.token:ro memory-os-ai:local --container-listen-all
 #
 # * Lexical profile only, no ML stack, no model download; the cl100k_base table ships in the wheel.
 # * CPython 3.11.18 standalone through uv (its SQLite is read back by `serve`, >= 3.51.3 required); the system
 #   Python of Ubuntu 24.04 (SQLite 3.45.1) is never used.
 # * The token comes from a mounted FILE (mode 0600), never from an environment variable; the image holds no secret.
-# * Inside the container the service listens on 0.0.0.0 behind the explicit `--container-listen-all` opt-in;
-#   Host/Origin stay restricted to the loopback authorities of the port, hence the same port on the host.
+# * Inside the container the service listens on 0.0.0.0 only behind the explicit `--container-listen-all` opt-in
+#   given at `docker run`; Host/Origin stay restricted to the loopback authorities of the port, hence the same port.
 
 ARG UV_VERSION=0.13.9
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
@@ -46,7 +48,8 @@ ENV HOME=/home/memoryos \
 VOLUME ["/data"]
 EXPOSE 8765
 
+# The product's own authenticated client (no proxy, no redirect: the token never leaves the container loopback).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD \
-  ["/opt/memory-os/venv/bin/python", "-c", "import os,sys,urllib.request; from memory_os_v4.ops.auth import read_token; t=read_token(os.environ['MEMORY_V4_TOKEN_FILE']); r=urllib.request.Request('http://127.0.0.1:8765/ready', headers={'Authorization': 'Bearer '+(t or '')}); sys.exit(0 if urllib.request.urlopen(r, timeout=4).status == 200 else 1)"]
+  ["/opt/memory-os/venv/bin/python", "-I", "-c", "import sys; from memory_os_v4.ops.auth import http_get; from memory_os_v4.ops.settings import OpsSettings; s = OpsSettings.from_env(); sys.exit(0 if http_get(s.ready_url, s, timeout=4)[0] == 200 else 1)"]
 
-ENTRYPOINT ["/opt/memory-os/venv/bin/memory-os-admin", "serve", "--profile", "lexical", "--container-listen-all"]
+ENTRYPOINT ["/opt/memory-os/venv/bin/memory-os-admin", "serve", "--profile", "lexical"]

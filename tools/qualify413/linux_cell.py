@@ -199,39 +199,67 @@ class Run:
                   env={**os.environ, "UV_NO_CONFIG": "1", "UV_PYTHON_DOWNLOADS": "never"})
 
     # ---------------------------------------------------------------- P1
+    def hashed_lock(self) -> Path:
+        """The cell lock with the SHA-256 of every admitted wheel (from the wheel's frozen manifest), for
+        ``--require-hashes``: the embedded constraints file carries versions only."""
+        lines = []
+        for item in self.manifest["artifacts"]:
+            hashes = " ".join(f"--hash=sha256:{wheel['sha256']}" for wheel in item["wheels"])
+            lines.append(f"{item['name']}=={item['version']} {hashes}")
+        path = self.R / "cell-lock-hashed.txt"
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
     def p1(self):
         venv = self.venv("p1-venv")
-        self.uv_install(venv, "lock", "-r", self.constraints, hashes=True)
-        self.uv_install(venv, "test-pins", "-r", ROOT / "scripts/qualify_410_pytest_pins.txt", "pytest-asyncio==1.3.0")
+        self.uv_install(venv, "lock", "-r", self.hashed_lock(), hashes=True)
+        self.uv_install(venv, "test-pins", "-r", ROOT / "scripts/qualify_410_pytest_pins.txt", "pytest-asyncio==1.3.0",
+                        "ruff==0.17.6")
         deselect = ROOT / f"tools/qualify413/p1_deselection_{self.cell}.json"
-        listed = json.loads(deselect.read_text()) if deselect.is_file() else {"format": "qualify413-p1-v1", "tests": []}
-        self.check("deselection list: own format, every entry motivated", listed.get("format") == "qualify413-p1-v1"
-                   and all(isinstance(t, dict) and t.get("nodeid") and t.get("reason") for t in listed["tests"]),
-                   {"file": deselect.name, "count": len(listed["tests"])})
+        listed = json.loads(deselect.read_text()) if deselect.is_file() else {"format": "qualify413-p1-v1", "tests": [],
+                                                                              "expected_skips": []}
+        self.check("deselection and expected-skip lists: own format, every entry motivated",
+                   listed.get("format") == "qualify413-p1-v1"
+                   and all(isinstance(t, dict) and t.get("nodeid") and t.get("reason") for t in listed["tests"])
+                   and all(isinstance(t, dict) and t.get("file") and t.get("reason")
+                           for t in listed.get("expected_skips", [])),
+                   {"file": deselect.name, "deselected": len(listed["tests"]),
+                    "expected_skips": len(listed.get("expected_skips", []))})
+        if deselect.is_file():
+            self.report["artifacts"][deselect.name] = sha256(deselect)
         basetemp = ROOT / ".local-qualification" / f"p1-{self.cell}"
-        junit = self.R / "p1-junit.xml"
+        junit = self.output / "p1-junit.xml"
         home = self.R / "p1-home"
         home.mkdir()
         env = {"HOME": str(home), "PATH": f"{venv}/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TZ": "Europe/Paris",
                "TMPDIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0", "MEMORY_V4_EMBED_MODEL": "hash",
                "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+        for name, argv in (("lint-correctness", ["tests", "v4/src", "v4/tests", "v4/bench", "scripts", "--select", "E9,F"]),
+                           ("lint-default", ["tests", "scripts"])):
+            self.step(name, [venv / "bin/ruff", "check", *argv], env=env, cwd=ROOT)
         argv = [venv / "bin/python", "-B", "-m", "pytest", "-c", "pyproject.toml", "-m", "not slow", "-q",
                 "-p", "no:cacheprovider", f"--basetemp={basetemp}", f"--junitxml={junit}", "v4/tests", "tests"]
         for test in listed["tests"]:
             argv += ["--deselect", test["nodeid"]]
-        self.step("suite", argv, env=env, cwd=ROOT, timeout=2400, expect=(0, 1))
-        tree = ET.parse(junit).getroot()
-        suites = [tree] if tree.tag == "testsuite" else list(tree.iter("testsuite"))
-        counts = {key: sum(int(s.get(key, "0")) for s in suites) for key in ("tests", "failures", "errors", "skipped")}
-        failed = [f"{case.get('classname')}::{case.get('name')}" for case in tree.iter("testcase")
-                  if case.find("failure") is not None or case.find("error") is not None]
-        skipped = [f"{case.get('classname')}::{case.get('name')}: {case.find('skipped').get('message', '')[:160]}"
-                   for case in tree.iter("testcase") if case.find("skipped") is not None]
-        self.report["gates"]["P1"]["counts"] = counts
-        self.report["gates"]["P1"]["skipped"] = skipped
+        rc, _ = self.step("suite", argv, env=env, cwd=ROOT, timeout=2400, expect=(0, 1))
+        cases = list(ET.parse(junit).getroot().iter("testcase"))
+        failed = [f"{c.get('classname')}::{c.get('name')}" for c in cases
+                  if c.find("failure") is not None or c.find("error") is not None]
+        expected, blocking = [], []
+        for case in cases:
+            skip = case.find("skipped")
+            if skip is None:
+                continue
+            reason = ((skip.get("message") or "") + " " + (skip.text or "")).strip()
+            module = next((part for part in (case.get("classname") or "").split(".") if part.startswith("test_")), "")
+            known = any(e["file"] == module + ".py" and e["reason"] in reason for e in listed.get("expected_skips", []))
+            (expected if known else blocking).append({"test": f"{case.get('classname')}::{case.get('name')}",
+                                                      "reason": reason[:200]})
+        self.report["gates"]["P1"].update(tests=len(cases), expected_skips=expected)
         self.report["artifacts"]["p1-junit.xml"] = sha256(junit)
-        self.check("portable lexical suite from the sources: 0 failure, 0 error", counts["tests"] > 0
-                   and counts["failures"] == 0 and counts["errors"] == 0, {"counts": counts, "failed": failed[:50]})
+        self.check("portable lexical suite from the sources: pytest exit 0, 0 failure, 0 error", rc == 0 and cases
+                   and not failed, {"rc": rc, "failed": failed[:50]})
+        self.check("every skip is listed with its reason (an unexpected skip blocks)", not blocking, blocking[:50])
         shutil.rmtree(basetemp, ignore_errors=True)
 
     # ---------------------------------------------------------------- P3
@@ -262,14 +290,15 @@ class Run:
                 "        lock['lock_sha256'] = b.lock_fingerprint(cell, profile, lock)\n"
                 "open(out, 'x').write(b.fill_pin(open(template).read(), pin))\n"
                 "print(json.dumps({'state': pin['state'], 'wheel_sha256': pin['wheel']['sha256']}))\n")
-        env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+        (d / "tmp").mkdir(mode=0o700)
+        env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "TMPDIR": str(d / "tmp")}
         rc, out = self.step("fill-pin", [self.python, "-I", "-B", "-c", fill, template, d / "partial-pin.json",
                                          self.wheel, pinned], env=env, sudo_netless=True)
         filled = self.last_json(out)
         self.check("TEST pin set by fill_pin of the template copy (wheel of this run)", filled["state"] == "test"
                    and filled["wheel_sha256"] == self.report["artifacts"][self.wheel.name]
                    and sha256(template) == sha256(ROOT / "scripts/memory_os_bootstrap.py"), filled)
-        before = inventory(d)
+        before = inventory(self.R)            # the WHOLE disposable root (logs are written outside it)
 
         def preview(name, script, *options, expect):
             rc, out = self.step(name, [self.python, "-I", "-B", script, "--uv", self.uv, "--venv", home / ".memory-os/venv",
@@ -299,9 +328,9 @@ class Run:
                    seen.get("ok") is False and seen.get("code") == "preflight_refused"
                    and str(seen.get("writes") or "").startswith("none by the bootstrap"),
                    {"code": seen.get("code"), "writes": seen.get("writes")})
-        after = inventory(d)
+        after = inventory(self.R)
         changed = sorted(set(before) ^ set(after) | {k for k in before if k in after and before[k] != after[k]})
-        self.check("no write: inventory of the whole P3 root identical before and after the previews",
+        self.check("no write: inventory of the whole disposable root (HOME and TMPDIR included) identical",
                    before == after, changed[:50])
         probe = ("import socket\ntry:\n    socket.create_connection(('1.1.1.1', 443), timeout=3)\n    print('CONNECTED')\n"
                  "except OSError as exc:\n    print('REFUSED', type(exc).__name__)\n")
@@ -360,33 +389,86 @@ class Run:
         venv, home = self.venv_path, Path.home()
         port = free_port()
         admin = venv / "bin/memory-os-admin"
-        env = {**self.user_systemd(), "MEMORY_V4_URL": f"http://127.0.0.1:{port}/mcp/",
+        store = self.R / "p5-store"          # ONE explicit disposable store for every command of the gate
+        env = {**self.user_systemd(), "MEMORY_V4_URL": f"http://127.0.0.1:{port}/mcp/", "MEMORY_V4_DIR": str(store),
                "MEMORY_V4_SERVICE_LABEL": TEST_LABEL, "PATH": f"{venv}/bin:/usr/bin:/bin"}
-        for key in [k for k in env if k.startswith("MEMORY_V4_") and k not in ("MEMORY_V4_URL", "MEMORY_V4_SERVICE_LABEL")]:
+        for key in [k for k in env if k.startswith("MEMORY_V4_")
+                    and k not in ("MEMORY_V4_URL", "MEMORY_V4_SERVICE_LABEL", "MEMORY_V4_DIR")]:
             env.pop(key)
-        client_files = {"cursor": home / ".cursor/mcp.json", "gemini-cli": home / ".gemini/settings.json",
-                        "codex": home / ".codex/config.toml"}
-        existed = {key: path.exists() for key, path in client_files.items()}
-        journals = home / ".local/state/memory-os/quickstart"   # quickstart.JOURNAL_SUBDIR
-        store = home / ".memory-os-v4"
+        client_files = {"cursor": ".cursor/mcp.json", "gemini-cli": ".gemini/settings.json", "codex": ".codex/config.toml"}
+        created = {rel for key, rel in client_files.items() if not (home / rel).exists()}
+        unit_rel = f".config/systemd/user/{TEST_LABEL}.service"
+        unit = home / unit_rel
+        roots = (".config/memory-os", ".local/state/memory-os", ".config/systemd/user", "memory-os-backups",
+                 *{rel.split("/", 1)[0] for rel in client_files.values()})
+
+        def snapshot():
+            """Inventory of every installation location under HOME, plus the store (judged apart)."""
+            out = {}
+            for root in roots:
+                if (home / root).exists():
+                    out.update({f"{root}/{rel}": v for rel, v in inventory(home / root).items()})
+            return out
+
+        def store_counters():
+            rc, out = self.step(f"store-counters-{len(self.report['gates']['P5'].get('steps', {}))}",
+                                [admin, "doctor", "--store-only", "--json"], env=env, cwd=self.R, expect=(0, 1))
+            data = self.last_json(out)
+            data = data[0] if isinstance(data, list) and data else data
+            if not isinstance(data, dict):
+                return {"raw": str(data)[:300]}
+            journal = data.get("change_journal") or {}
+            return {"live_total": data.get("live_total"), "facts_valid": data.get("facts_valid"),
+                    "superseded_ids": data.get("superseded_ids"), "journal_events": journal.get("events")}
+
         clients = ",".join(TEST_CLIENTS)
+        before_preview = snapshot()
         rc, out = self.step("quickstart-preview", [admin, "quickstart", "--profile", "lexical", "--clients", clients,
                                                    "--report"], env=env, cwd=self.R)
         preview = self.last_json(out)
-        self.check("quickstart preview accepted, nothing written", preview.get("ok") is True
-                   and preview.get("writes") == "none" and preview.get("downloads_required_bytes") == 0,
-                   preview.get("blocker_codes"))
-        rc, out = self.step("quickstart-apply", [admin, "quickstart", "--profile", "lexical", "--clients", clients,
-                                                 "--apply", "--report"], env=env, cwd=self.R, timeout=900)
-        applied = self.last_json(out)
-        self.check("quickstart --apply under systemd --user", applied.get("ok") is True, applied.get("error"))
-        unit = home / ".config/systemd/user" / f"{TEST_LABEL}.service"
-        self.check("systemd user unit written and active", unit.is_file() and self.step(
-            "unit-active", ["systemctl", "--user", "is-active", f"{TEST_LABEL}.service"], env=env,
-            expect=(0, 3))[1].strip() == "active", str(unit))
+        self.check("quickstart preview accepted", preview.get("ok") is True and preview.get("writes") == "none"
+                   and preview.get("downloads_required_bytes") == 0, preview.get("blocker_codes"))
+        self.check("the preview wrote nothing (installation locations inventoried before/after)",
+                   snapshot() == before_preview and not store.exists())
+
+        def apply(name, *extra):
+            rc, out = self.step(name, [admin, "quickstart", "--profile", "lexical", "--clients", clients, "--apply",
+                                       *extra, "--report"], env=env, cwd=self.R, timeout=900)
+            result = self.last_json(out)
+            self.check(f"{name}: quickstart --apply under systemd --user", result.get("ok") is True
+                       and isinstance(result.get("stamp"), str), result.get("error"))
+            active = self.step(f"{name}-active", ["systemctl", "--user", "is-active", f"{TEST_LABEL}.service"],
+                               env=env, expect=(0, 3))[1].strip()
+            self.check(f"{name}: unit written and active", unit.is_file() and active == "active", active)
+            return result
+
+        def stopped(name):
+            state = self.step(f"{name}-state", ["systemctl", "--user", "is-active", f"{TEST_LABEL}.service"], env=env,
+                              expect=(0, 3, 4))[1].strip()
+            with socket.socket() as sock:
+                sock.settimeout(1)
+                free = sock.connect_ex(("127.0.0.1", port)) != 0
+            self.check(f"{name}: stop attested, port free, unit removed", state in ("inactive", "unknown") and free
+                       and not unit.exists(), {"state": state, "port_free": free, "unit": unit.exists()})
+            self.check(f"{name}: client files created by the install removed",
+                       all(not (home / rel).exists() for rel in created), sorted(created))
+            self.check(f"{name}: data kept (store present)", (store / "store.sqlite3").is_file())
+
+        # 1. install, then roll it back (quickstart --undo STAMP --with-service)
+        first = apply("apply-1")
+        counters_running = store_counters()
+        rc, out = self.step("undo", [admin, "quickstart", "--undo", first["stamp"], "--with-service"], env=env,
+                            cwd=self.R, timeout=600, expect=(0, 1))
+        undone = self.last_json(out)
+        self.check("rollback: quickstart --undo --with-service restored every client", rc == 0 and all(
+            r.get("undo") in ("restored", "nothing-to-undo") for r in undone.get("results", [])), undone.get("results"))
+        stopped("rollback")
+        self.check("rollback: the store is the same store, nothing lost", store_counters() == counters_running)
+        # 2. install again, then uninstall; the uninstall is judged path by path
+        apply("apply-2", "--demo")             # the opt-in demo saves and searches through the relay: real data
         rc, out = self.step("doctor", [admin, "doctor", "--json"], env=env, cwd=self.R, expect=(0, 1))
         checks = self.last_json(out)
-        failing = [c for c in (checks.get("checks") if isinstance(checks, dict) else checks) or []
+        failing = [c for c in (checks if isinstance(checks, list) else checks.get("checks", []))
                    if isinstance(c, dict) and c.get("status") == "FAIL"]
         self.check("doctor: 0 FAIL", rc == 0 and not failing, failing)
         sys.path.insert(0, str(ROOT / "v4/src"))
@@ -396,38 +478,63 @@ class Run:
             if client.key in TEST_CLIENTS:
                 state, entry = read_entry(client, home, platform="linux")
                 attested[client.key] = {"state": state, "class": classify(entry)}
-        self.check("client configurations attested (relay entries)", all(
-            v == {"state": "ok", "class": "relay"} for v in attested.values()), attested)
-        journals_before = {str(p.relative_to(journals)): p.read_bytes() for p in journals.rglob("*.json")} \
-            if journals.is_dir() else {}
+        self.check("client configurations attested (relay entries)",
+                   all(v == {"state": "ok", "class": "relay"} for v in attested.values()), attested)
+        counters = store_counters()
+        self.check("the store holds data before the uninstall (demo item through the relay)",
+                   isinstance(counters.get("live_total"), int) and counters["live_total"] >= 1, counters)
+        before = snapshot()
+        logs = {rel: (home / rel).stat().st_size for rel in before if rel.startswith(".local/state/memory-os/")
+                and "/logs/" in rel and (home / rel).is_file()}
+        logs_raw = {rel: (home / rel).read_bytes() for rel in logs}
+        journals_raw = {rel: (home / rel).read_bytes() for rel in before
+                        if rel.startswith(".local/state/memory-os/quickstart/") and rel.endswith(".json")}
         rc, out = self.step("uninstall-preview", [admin, "uninstall"], env=env, cwd=self.R, expect=(0, 1))
+        self.check("uninstall preview wrote nothing", snapshot() == before)
         rc, out = self.step("uninstall-apply", [admin, "uninstall", "--apply"], env=env, cwd=self.R, timeout=600,
                             expect=(0, 1))
         result = self.last_json(out)
         self.check("uninstall --apply", rc == 0 and result.get("ok") is True, result.get("error"))
-        state = self.step("unit-after", ["systemctl", "--user", "is-active", f"{TEST_LABEL}.service"], env=env,
-                          expect=(0, 3, 4))[1].strip()
-        with socket.socket() as sock:
-            sock.settimeout(1)
-            free = sock.connect_ex(("127.0.0.1", port)) != 0
-        self.check("stop attested, port free, unit removed", state in ("inactive", "unknown") and free
-                   and not unit.exists(), {"state": state, "port_free": free, "unit": unit.exists()})
-        removed = {key: not path.exists() for key, path in client_files.items() if not existed[key]}
-        self.check("client files created by the install removed", all(removed.values()), removed)
-        self.check("data kept (the store is never removed)", (store / "store.sqlite3").is_file(), str(store))
-        after = {str(p.relative_to(journals)): p.read_bytes() for p in journals.rglob("*.json")} if journals.is_dir() else {}
+        stopped("uninstall")
+        after = snapshot()
 
-        def without_revocations(raw):
-            document = json.loads(raw)
-            for record in document.get("records", []) if isinstance(document, dict) else []:
-                if isinstance(record, dict):
-                    record.pop("revoked", None)
-                    record.pop("revoked_by", None)
-            return document
-        kept = all(name in after and (after[name] == raw or without_revocations(after[name]) == without_revocations(raw))
-                   for name, raw in journals_before.items())
-        self.check("journals append-only (only revocations change an existing journal)", kept and bool(journals_before),
-                   {"before": sorted(journals_before), "after": sorted(after)})
+        def revocation_only(old, new):
+            try:
+                a, b = json.loads(old), json.loads(new)
+            except ValueError:
+                return False
+            for document in (a, b):
+                for record in document.get("records", []) if isinstance(document, dict) else []:
+                    if isinstance(record, dict):
+                        record.pop("revoked", None)
+                        record.pop("revoked_by", None)
+            return a == b
+        unexpected = []
+        for rel in sorted(set(before) | set(after)):
+            old, new = before.get(rel), after.get(rel)
+            if old == new:
+                continue
+            if rel == unit_rel and new is None:
+                continue                                    # service definition removed
+            if new is None and (rel in created or any(c.startswith(rel + "/") for c in created)):
+                continue                                    # client file created by the install, removed
+            if old is None and rel.startswith(".local/state/memory-os/uninstall"):
+                continue                                    # uninstall journal
+            if rel in logs and new is not None and (home / rel).read_bytes()[:logs[rel]] == logs_raw[rel]:
+                continue                                    # log appended only (prefix = previous file)
+            if old is None and "/logs/" in rel and rel.startswith(".local/state/memory-os/"):
+                continue                                    # new log
+            if rel in journals_raw and new is not None and revocation_only(journals_raw[rel], (home / rel).read_bytes()):
+                continue                                    # proof revoked, field by field
+            if rel.startswith(".config/systemd/user/") and old == "dir":
+                continue                                    # empty unit directory left by systemd
+            unexpected.append({"path": rel, "before": old, "after": new})
+        self.check("uninstall changed only what its protocol allows (token, key, backups, journals kept)",
+                   not unexpected, unexpected[:30])
+        self.check("journals never removed nor shortened", all(rel in after for rel in journals_raw)
+                   and bool(journals_raw), sorted(journals_raw))
+        self.check("store content kept (same instance, same live items, same journal)", store_counters() == counters,
+                   counters)
 
     # ---------------------------------------------------------------- P6
     def p6(self):
@@ -449,6 +556,8 @@ class Run:
         self.step("worker", ["nice", "-n", "15", venv / "bin/python", "-I", "-B", worker, "--plan", d / "plan.json",
                              "--kind", "lexical-store"], env=env, cwd=d, timeout=900)
         line = json.loads((d / "lexical-store.json").read_text())
+        shutil.copyfile(d / "lexical-store.json", self.output / "p6-lexical-store.json")
+        self.report["artifacts"]["p6-lexical-store.json"] = sha256(self.output / "p6-lexical-store.json")
         moments = line.get("rankings", {})
         self.check("write, search, reopen, backup, restore", line.get("ok") is True
                    and (line.get("backup") or {}).get("ok") is True and (line.get("restore") or {}).get("ok") is True
@@ -458,6 +567,10 @@ class Run:
                    and moments["after_write"] == moments["after_reopen"] == moments["after_restore"]
                    and list(moments["after_write"]) == list(module.LEXICAL_QUERIES)
                    and line.get("added") == len(module.LEXICAL_FACTS))
+        self.check("every ranking is non-empty, without duplicate, and made of the frozen facts only",
+                   all(isinstance(hits, list) and hits and len(set(hits)) == len(hits)
+                       and set(hits) <= set(module.LEXICAL_FACTS) for hits in moments["after_write"].values()),
+                   {"queries": len(moments.get("after_write", {}))})
         self.check("PRAGMA read back on the store", line.get("pragmas") == PRAGMAS, line.get("pragmas"))
         self.check("lexical marker on the store and its restoration",
                    (line.get("marker") or {}).get("name") == "lexical" and line.get("marker") == line.get("restored_marker"),
@@ -471,7 +584,7 @@ class Run:
     # ---------------------------------------------------------------- P7
     def p7(self):
         venv = self.venv_path
-        out = self.R / "p7.json"
+        out = self.output / "p7.json"
         env = {"HOME": str(self.R / "p7-home"), "PATH": "/usr/bin:/bin", "PYTHONOPTIMIZE": "0"}
         (self.R / "p7-home").mkdir()
         self.step("installed-relay-case", [venv / "bin/python", "-B", ROOT / "scripts/installed_relay_case.py",

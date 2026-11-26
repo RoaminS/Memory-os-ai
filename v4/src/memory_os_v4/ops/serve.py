@@ -11,6 +11,12 @@ only mode allowed on an unqualified platform (decision D7).
 * The process is then REPLACED by the server (``os.execve``): it listens on 127.0.0.1 only, handles SIGINT and SIGTERM
   itself (clean shutdown, engine closed, writer lease released) and its exit code is the command's.
 * Inherited ``MEMORY_V4_*`` variables are dropped: only the installation's own environment reaches the server.
+  Declared exception, as for ``quickstart``: an explicit ``MEMORY_V4_CL100K_PATH`` is honoured by the provisioning
+  plan (``provision.plan``) and written into the server environment, so the server uses the table the operator named.
+* The installation is the one quickstart set up: when a service definition exists, its RECORDED environment (store,
+  token file, URL, ops directory) is used; otherwise the same new-install rule as quickstart
+  (``quickstart.settings_for_install``) chooses the store. The build is attested in every case, including
+  ``--allow-unqualified-platform`` (which waives the platform cell only).
 """
 from __future__ import annotations
 
@@ -51,6 +57,7 @@ def plan(settings, *, profile=None, allow_unqualified=False, home=None, environ=
             raise ServeRefused("container_listen_outside_container", "--container-listen-all is accepted only inside "
                                "a container (/.dockerenv or /run/.containerenv); the loopback rule is unchanged here")
     detected = cell.detect() if detected is None else detected
+    settings = installation_settings(settings, home)
     installed = quickstart._installed_profile(settings, home)
     effective = profile or installed
     if effective is None:
@@ -73,7 +80,12 @@ def plan(settings, *, profile=None, allow_unqualified=False, home=None, environ=
         if detected.get("implementation") != "cpython":
             raise ServeRefused("python_not_cpython", "CPython is required (sqlite3 extension and locks)")
         notices.append(UNQUALIFIED_WARNING.format(label=detected.get("label") or "unknown"))
-    else:
+    identity = readiness.build_identity()
+    if identity.get("identity_source") != "embedded_descriptor" or not identity.get("commit") \
+            or identity.get("source_dirty"):
+        raise ServeRefused("build_unqualified", "install a qualified wheel; source/env identity is insufficient "
+                           "(--allow-unqualified-platform waives the platform cell, never the build)")
+    if not unqualified:
         acceptance = cell.acceptance(detected, profile=effective)
         if not acceptance["ok"]:
             raise ServeRefused(acceptance["code"], acceptance["message"])
@@ -82,10 +94,6 @@ def plan(settings, *, profile=None, allow_unqualified=False, home=None, environ=
         if not runtime["ok"]:
             raise ServeRefused("runtime_unqualified", "installed package versions differ from the cell lock: "
                                + ", ".join(sorted(runtime.get("mismatches") or {})))
-        identity = readiness.build_identity()
-        if identity.get("identity_source") != "embedded_descriptor" or not identity.get("commit") \
-                or identity.get("source_dirty"):
-            raise ServeRefused("build_unqualified", "install a qualified wheel; source/env identity is insufficient")
     try:
         token = read_token(settings.token_file)
     except (OSError, ValueError) as exc:
@@ -120,6 +128,32 @@ def plan(settings, *, profile=None, allow_unqualified=False, home=None, environ=
             "server_env": {k: env[k] for k in (*service["env"], *([UNQUALIFIED_ENV] if unqualified else []),
                                                *(["MEMORY_V4_CONTAINER_LISTEN_ALL"] if container_listen_all else []))},
             "notices": notices}
+
+
+def installation_settings(settings, home: Path):
+    """The settings of THIS installation: the recorded environment of its service definition when there is one,
+    otherwise quickstart's new-install rule. Nothing is written."""
+    from dataclasses import replace
+    from . import quickstart
+    from . import service as managers
+
+    manager = managers.host_manager()
+    label = settings.service_label or "local.memory-os-v4"
+    if manager is not None:
+        path = manager.definition_path(label, home)
+        if path.is_file() and not path.is_symlink():
+            try:
+                recorded = manager.read_environment(path)
+            except (OSError, ValueError, AttributeError) as exc:
+                raise ServeRefused("service_definition_unreadable", f"{path}: {type(exc).__name__}") from None
+            keys = ("MEMORY_V4_DIR", "MEMORY_V4_TOKEN_FILE", "MEMORY_V4_URL", "MEMORY_V4_OPS_DIR")
+            if not isinstance(recorded, dict) or not all(isinstance(recorded.get(k), str) for k in keys):
+                raise ServeRefused("service_definition_unreadable", f"{path}: incomplete recorded environment")
+            return replace(settings, store_dir=Path(recorded["MEMORY_V4_DIR"]),
+                           token_file=Path(recorded["MEMORY_V4_TOKEN_FILE"]), url=recorded["MEMORY_V4_URL"],
+                           ops_dir=Path(recorded["MEMORY_V4_OPS_DIR"]))
+    settings, _ = quickstart.settings_for_install(settings, home=home)
+    return settings
 
 
 def main(args, settings) -> int:

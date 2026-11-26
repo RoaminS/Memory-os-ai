@@ -26,6 +26,9 @@ def free_port():
         return sock.getsockname()[1]
 
 
+QUALIFIED_BUILD = {"identity_source": "embedded_descriptor", "commit": "a" * 40, "source_dirty": False}
+
+
 @pytest.fixture
 def installation(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -37,6 +40,8 @@ def installation(tmp_path, monkeypatch):
                        "MEMORY_V4_SERVICE_LABEL": "local.memory-os-serve-test"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.delenv("MEMORY_V4_CL100K_PATH", raising=False)
+    from memory_os_v4 import readiness
+    monkeypatch.setattr(readiness, "build_identity", lambda: dict(QUALIFIED_BUILD))   # an installed wheel
     return home, port
 
 
@@ -125,6 +130,8 @@ def test_dry_run_prints_the_command_and_starts_nothing(installation, capsys, mon
 
 LAUNCHER = """
 import sys
+from memory_os_v4 import readiness
+readiness.build_identity = lambda: {"identity_source": "embedded_descriptor", "commit": "a" * 40, "source_dirty": False}
 from memory_os_v4.ops import cell, cli
 cell.detect = lambda: {"cell_id": None, "retained": False, "label": "debian-12-x86_64-py311",
                        "refusal": "debian-12-x86_64-py311 is not one of the retained cells",
@@ -218,3 +225,53 @@ def test_serve_container_listen_inside_a_container(installation):
     assert any(f"127.0.0.1:{port}:{port}" in notice for notice in result["notices"])
     plain = serve.plan(settings(), profile="lexical", allow_unqualified=True, home=home, detected=UNRETAINED)
     assert "MEMORY_V4_CONTAINER_LISTEN_ALL" not in plain["env"] and "0.0.0.0" not in plain["argv"]
+
+
+
+def test_unqualified_platform_never_waives_the_build(installation, monkeypatch):
+    """Codex Lot 3 r1 item 4: --allow-unqualified-platform waives the platform cell only."""
+    home, _ = installation
+    create_token(home / "token")
+    from memory_os_v4 import readiness
+    monkeypatch.setattr(readiness, "build_identity", lambda: {"identity_source": "env", "commit": "a" * 40})
+    refused("build_unqualified", profile="lexical", allow_unqualified=True, home=home, detected=UNRETAINED)
+
+
+def test_serve_uses_the_installation_store_not_the_legacy_default(installation, monkeypatch):
+    """Codex Lot 3 r1 item 3: a new quickstart install lives in ~/.local/share/memory-os/store; serve follows the
+    recorded service definition when there is one, quickstart's new-install rule otherwise."""
+    home, _ = installation
+    monkeypatch.delenv("MEMORY_V4_DIR")
+    resolved = serve.installation_settings(settings(), home)
+    assert resolved.store_dir == home / ".local/share/memory-os/store"
+    monkeypatch.setenv("MEMORY_V4_DIR", str(home / "explicit-store"))
+    assert serve.installation_settings(settings(), home).store_dir == home / "explicit-store"
+    from memory_os_v4.ops import service as managers
+
+    class Recorded:
+        def definition_path(self, label, home_):
+            return home_ / "definition"
+
+        def read_environment(self, path):
+            return {"MEMORY_V4_DIR": str(home / "recorded-store"), "MEMORY_V4_TOKEN_FILE": str(home / "rec.token"),
+                    "MEMORY_V4_URL": "http://127.0.0.1:41234/mcp/", "MEMORY_V4_OPS_DIR": str(home / "rec-ops")}
+    (home / "definition").write_text("unit")
+    monkeypatch.setattr(managers, "host_manager", lambda: Recorded())
+    resolved = serve.installation_settings(settings(), home)
+    assert resolved.store_dir == home / "recorded-store" and resolved.token_file == home / "rec.token"
+    assert resolved.url == "http://127.0.0.1:41234/mcp/" and resolved.ops_dir == home / "rec-ops"
+
+
+def test_stop_signals_are_handled_before_the_engine_opens(monkeypatch):
+    """Codex Lot 3 r1 item 5: a SIGTERM during startup (engine opening, warm-up) also ends cleanly."""
+    from memory_os_v4 import server
+    order = []
+    monkeypatch.setattr(server, "_exit_cleanly_on_stop_signals", lambda: order.append("signals"))
+
+    def build(host, port):
+        order.append("app")
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(server, "_build_http_app", build)
+    with pytest.raises(RuntimeError, match="stop here"):
+        server._run_http("127.0.0.1", 9, warm=True)
+    assert order == ["signals", "app"]

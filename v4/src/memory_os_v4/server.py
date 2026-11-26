@@ -976,12 +976,13 @@ def _build_http_app(host: str, port: int):
 def _run_http(host: str, port: int, *, warm: bool = False) -> None:
     import uvicorn
 
+    # A stop signal during startup (engine opening, warm-up) also ends through a normal exit that closes the engine.
+    _exit_cleanly_on_stop_signals()
     # Validate credentials and transport before opening any data directory.
     app = _build_http_app(host, port)
     if warm:
         get_engine().ensure_retrieval()  # SQLite task-only startup is intentionally lazy unless --warm
     logger.warning("memory-os-v4 streamable HTTP on http://%s:%d/mcp/", host, port)
-    _exit_cleanly_on_stop_signals()
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

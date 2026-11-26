@@ -38,10 +38,13 @@ def test_the_workflow_runs_the_tools_that_exist_on_the_retained_runners():
 
 def test_the_dockerfile_contract():
     assert "USER 10001:10001" in DOCKERFILE and "useradd --uid 10001" in DOCKERFILE
-    assert '"--container-listen-all"' in DOCKERFILE and '"--profile", "lexical"' in DOCKERFILE
+    # D8: never by default; the opt-in is appended at docker run (Codex Lot 3 r1 item 2)
+    assert 'ENTRYPOINT ["/opt/memory-os/venv/bin/memory-os-admin", "serve", "--profile", "lexical"]' in DOCKERFILE
+    assert "--container-listen-all\n" in DOCKERFILE and "ENTRYPOINT" not in DOCKERFILE.split("--container-listen-all")[-1].split("\n")[0]
+    assert "http_get(s.ready_url" in DOCKERFILE and "urlopen" not in DOCKERFILE   # no proxy, no redirect (item 1)
     assert "MEMORY_V4_TOKEN_FILE=/run/memory-os/http.token" in DOCKERFILE
     assert not re.search(r"(?m)^\s*ENV[^\n]*MEMORY_V4_TOKEN=", DOCKERFILE)       # never a token in the environment
-    assert "HEALTHCHECK" in DOCKERFILE and "/ready" in DOCKERFILE
+    assert "HEALTHCHECK" in DOCKERFILE and "s.ready_url" in DOCKERFILE
     assert "127.0.0.1:8765:8765" in DOCKERFILE                                    # documented loopback publication
     assert "uv python install" in DOCKERFILE and "(3,51,3)" in DOCKERFILE        # standalone CPython, SQLite read back
     assert (ROOT / ".dockerignore").read_text().splitlines()[-2:] == ["*", "!dist/*.whl"]
