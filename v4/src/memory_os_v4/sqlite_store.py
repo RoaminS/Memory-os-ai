@@ -201,52 +201,87 @@ class ReadOnlyStoreError(ValueError):
         self.code = code
 
 
-@contextmanager
-def open_readonly(database, *, timeout: float = 5.0):
-    """THE read-only open of a store database by a diagnostic (doctor, health): it never creates a file.
+def _side_identity(database: Path) -> tuple | None:
+    """(device, inode) of -wal and -shm, or None when either is missing (never follows a link)."""
+    try:
+        return tuple((st.st_dev, st.st_ino) for st in (os.lstat(str(database) + s) for s in ("-wal", "-shm")))
+    except FileNotFoundError:
+        return None
 
-    4.1.3 (note NOTE_4_1_3_WAL_MODE_RO_v1): a ``mode=ro`` open of a WAL database whose -wal/-shm the last
-    writer deleted RECREATES them, and fails on a read-only directory. The same rule as the profile probe
-    and the backup reader therefore applies:
 
-    * complete -wal/-shm pair: the store is in use (or was not closed cleanly): ``mode=ro``, which creates
-      nothing since both side files exist;
-    * incomplete pair: refused (``store_side_files_incomplete``);
-    * no side file: a SHARED lock is taken, without blocking, on the existing ``writer.lock`` (opened
-      ``O_RDONLY | O_NOFOLLOW``, so a read-only directory or volume works; the engine holds it exclusively
-      while it runs). Held for the whole read: no writer can start, so ``mode=ro&immutable=1`` is consistent
-      and creates nothing. Lock not obtained: ``store_busy_retry``; ``writer.lock`` missing, linked or not a
-      regular file: ``writer_lock_missing`` (never created by a reader).
-    """
-    database = Path(database)
-    has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
-    if has_wal != has_shm:
-        raise ReadOnlyStoreError("store_side_files_incomplete", "incomplete -wal/-shm pair; nothing opened")
-    uri = "file:" + quote(str(database))
-    if has_wal or os.name == "nt":
-        # Windows is not a retained cell: keep the 4.1.2 behaviour there (no fcntl).
-        connection = sqlite3.connect(uri + "?mode=ro", uri=True, timeout=timeout)
-        try:
-            yield connection
-        finally:
-            connection.close()
-        return
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _try_shared_lock(fd: int) -> bool:
     import fcntl
 
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+@contextmanager
+def open_readonly(database, *, timeout: float = 5.0):
+    """THE read-only open of a store database by a diagnostic (doctor, health): it never leaves a file behind.
+
+    4.1.3 (note NOTE_4_1_3_WAL_MODE_RO_v1): a ``mode=ro`` open of a WAL database whose -wal/-shm the last
+    writer deleted RECREATES them, and fails on a read-only directory. The engine holds ``writer.lock``
+    exclusively while it runs and only releases it after closing SQLite. The rule:
+
+    * ``writer.lock`` must exist as a regular file (opened ``O_RDONLY | O_NOFOLLOW``: a read-only volume works);
+      missing or linked: ``writer_lock_missing`` (never created by a reader);
+    * incomplete -wal/-shm pair: ``store_side_files_incomplete``;
+    * a SHARED non-blocking lock is attempted. Obtained, no writer runs and none can start during the read: with
+      no side file ``mode=ro&immutable=1``, with a complete pair ``mode=ro`` (nobody can delete the pair);
+    * lock refused (a writer runs) with no side file: ``store_busy_retry``;
+    * lock refused with a complete pair: ``mode=ro``, then the identity (device, inode) of both side files is
+      compared after the first read. If they changed, the writer closed between the observation and the open and
+      this reader recreated them: the read is refused (``store_busy_retry``) and, when the lock can then be taken
+      (no writer), the side files this reader created are removed (nobody else can be using them).
+
+    Windows is not a retained cell: refused (``readonly_open_unqualified_platform``) rather than risking a write.
+    """
+    database = Path(database)
+    if _windows():
+        raise ReadOnlyStoreError("readonly_open_unqualified_platform", "no lock-protected read-only open on Windows")
     lock = database.parent / "writer.lock"
     if lock.is_symlink() or not lock.is_file() or lock.stat().st_nlink != 1:
         raise ReadOnlyStoreError("writer_lock_missing", "existing regular writer.lock required; never created by a reader")
+    uri = "file:" + quote(str(database))
     fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
+        has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
+        if has_wal != has_shm:
+            raise ReadOnlyStoreError("store_side_files_incomplete", "incomplete -wal/-shm pair; nothing opened")
+        locked = _try_shared_lock(fd)
+        if locked:
+            # No writer can start or close while we hold the shared lock: the observed state is stable.
+            if any(os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm")) != has_wal:
+                raise ReadOnlyStoreError("store_busy_retry", "side files changed; retry")
+            mode = "?mode=ro" if has_wal else "?mode=ro&immutable=1"
+            connection = sqlite3.connect(uri + mode, uri=True, timeout=timeout)
+            try:
+                yield connection
+            finally:
+                connection.close()
+            return
+        if not has_wal:
+            raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting; retry")
+        before = _side_identity(database)
+        connection = sqlite3.connect(uri + "?mode=ro", uri=True, timeout=timeout)
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting or running; retry") from exc
-        if any(os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm")):
-            # a writer opened and closed between the first look and the lock: the state moved, retry
-            raise ReadOnlyStoreError("store_busy_retry", "side files appeared; retry")
-        connection = sqlite3.connect(uri + "?mode=ro&immutable=1", uri=True, timeout=timeout)
-        try:
+            connection.execute("SELECT count(*) FROM sqlite_master").fetchone()   # attaches to the WAL now
+            if before is None or _side_identity(database) != before:
+                connection.close()
+                if _try_shared_lock(fd):                  # writer gone: the side files are this reader's
+                    for suffix in ("-wal", "-shm"):
+                        side = Path(str(database) + suffix)
+                        if side.is_file() and not side.is_symlink() and (suffix == "-shm" or side.stat().st_size == 0):
+                            side.unlink()
+                raise ReadOnlyStoreError("store_busy_retry", "the writer closed during the open; retry")
             yield connection
         finally:
             connection.close()

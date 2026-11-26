@@ -228,6 +228,18 @@ def _store(settings: OpsSettings) -> Check:
                 f"json_bytes={counts['json_bytes']} db_bytes={counts['db_bytes']} wal_bytes={counts['wal_bytes']}",
             )
         except Exception as exc:
+            from ..sqlite_store import ReadOnlyStoreError
+
+            if isinstance(exc, ReadOnlyStoreError):
+                # 4.1.3: a controlled refusal of the read-only open, named by its code; a writer starting or
+                # closing during the read is transient (WARN), the other refusals need the operator (FAIL).
+                return Check(
+                    "store",
+                    "WARN" if exc.code == "store_busy_retry" else "FAIL",
+                    f"SQLite read-only check refused: {exc.code}",
+                    "retry doctor" if exc.code == "store_busy_retry"
+                    else "doctor never creates writer.lock or SQLite side files; see the 4.1.3 notes",
+                )
             return Check(
                 "store",
                 "FAIL",
@@ -458,8 +470,10 @@ def run(settings: OpsSettings | None = None, home: Path | None = None) -> list[C
                     f"change journal {journal['json_bytes']} bytes / alert {journal['alert_bytes']}; no automatic purge",
                 )
             )
-        except (OSError, ValueError):
-            checks.append(Check("journal_size", "WARN", "change journal size unavailable"))
+        except (OSError, ValueError) as exc:
+            code = getattr(exc, "code", None)            # ReadOnlyStoreError (4.1.3) names its refusal
+            checks.append(Check("journal_size", "WARN", "change journal size unavailable"
+                                + (f" (read-only open refused: {code})" if isinstance(code, str) else "")))
     checks += _clients(home)
     from .connection_proof import inspect_proofs
 

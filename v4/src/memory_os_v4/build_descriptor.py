@@ -22,11 +22,18 @@ def _stamp(root):
     from .read_audit import file_stamp
     # Include directory entries, permissions and symlinks: additions/removals
     # or replacements must invalidate without waiting for the TTL.
-    return tuple((str(p.relative_to(root)), file_stamp(p))
-                 for package in ('memory_os_v4', 'memory_os_ai')   # memory_os_ai: a v3 leftover appearing
-                 if (root/package).exists()                          # after a pass must not wait for the TTL
-                 for p in (root/package, *sorted((root/package).rglob('*')))
-                 if '__pycache__' not in p.parts and p.suffix not in {'.pyc', '.pyo'})
+    payload = tuple((str(p.relative_to(root)), file_stamp(p))
+                    for p in (root/'memory_os_v4', *sorted((root/'memory_os_v4').rglob('*')))
+                    if '__pycache__' not in p.parts and p.suffix not in {'.pyc', '.pyo'})
+    # 4.1.3: a memory_os_ai leftover is stamped on EXACTLY the entries _importable_legacy inspects (every entry,
+    # __pycache__ included, and the link itself), so v3 code appearing after a pass does not wait for the TTL.
+    legacy = root/'memory_os_ai'
+    if not os.path.lexists(legacy):
+        return payload
+    if legacy.is_symlink() or not legacy.is_dir():
+        return payload + (('memory_os_ai', file_stamp(legacy)),)
+    return payload + tuple((str(p.relative_to(root)), file_stamp(p))
+                           for p in (legacy, *sorted(legacy.rglob('*'))))
 
 
 def _importable_legacy(path: Path) -> bool:

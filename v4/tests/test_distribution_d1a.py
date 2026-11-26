@@ -649,3 +649,23 @@ def test_qualification_tool_environment_has_no_v3_switch_or_path():
     for path in (ROOT / "tests").rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         assert "from memory_os_ai" not in text and "import memory_os_ai" not in text, path
+
+
+@pytest.mark.parametrize("change", ["source-in-pycache", "dangling-link", "new-source"])
+def test_cached_pass_does_not_hide_v3_code_appearing_later(sealed, tmp_path, change):
+    """4.1.3 (Codex r1 WAL review, item 6): the cache stamp covers exactly what _importable_legacy inspects."""
+    root = tmp_path / "installed"
+    install(sealed, root)
+    legacy = root / "memory_os_ai"
+    if change == "source-in-pycache":
+        (legacy / "__pycache__").mkdir(parents=True)
+    elif change == "new-source":
+        legacy.mkdir()
+    assert verify(root, VERSION, max_age=60)["ok"]                 # cached success
+    if change == "source-in-pycache":
+        (legacy / "__pycache__" / "engine.py").write_text("")
+    elif change == "dangling-link":
+        legacy.symlink_to(tmp_path / "nowhere", target_is_directory=True)
+    else:
+        (legacy / "__init__.py").write_text("")
+    assert verify(root, VERSION, max_age=60)["code"] == "build_unqualified"   # within the TTL
