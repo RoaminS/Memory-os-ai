@@ -162,7 +162,7 @@ def cmd_audit_naive_times(args, s: OpsSettings) -> int:
     except (OSError, sqlite3.Error) as exc:
         report = {"ok": False, "code": "store_unreadable", "error": str(exc)}
     _print_json(report)
-    return 0 if report.get("ok") else 1
+    return 0 if report.get("ok") and report.get("complete") else 1   # an incomplete audit is never a success
 
 
 def cmd_backup(args, s: OpsSettings) -> int:

@@ -35,7 +35,8 @@ def test_paris_lists_exactly_the_local_midnights(store):
     data, ids = store
     before = listing(data)
     report = audit(data, "Europe/Paris")
-    assert report["ok"] and report["rewritten"] == 0 and report["scanned"] >= 5
+    assert report["ok"] and report["complete"] and report["unparsable"] == []
+    assert report["rewritten"] == 0 and report["scanned"] >= 5
     found = {(c["id"], c["field"]) for c in report["candidates"]}
     assert found == {(ids["old"], "event_time"), (ids["old"], "valid_from"), (ids["until"], "valid_until")}
     first = next(c for c in report["candidates"] if c["id"] == ids["old"] and c["field"] == "event_time")
@@ -68,3 +69,41 @@ def test_cli_prints_the_report(store, monkeypatch, capsys):
     assert cli.main(["audit-naive-times", "--tz", "Europe/Paris"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed["ok"] and {c["id"] for c in printed["candidates"]} == {ids["old"], ids["until"]}
+
+
+def test_a_client_supplied_date_from_text_tag_does_not_hide_a_candidate(tmp_path):
+    data = tmp_path / "store"
+    with MemoryV4(config=Config(data_dir=str(data), store_backend="sqlite_s1", embed_model="hash", hash_dim=16)) as m:
+        tagged = m.add_facts([{"text": "Secret synthetic tagged decision.", "event_time": PARIS_MIDNIGHT,
+                               "tags": ["date_from_text"]}], project="P")["added"][0]
+    report = audit(data, "Europe/Paris")
+    assert (tagged, "event_time") in {(c["id"], c["field"]) for c in report["candidates"]}
+
+
+def test_unparsable_records_and_times_make_the_audit_incomplete(store, monkeypatch, capsys):
+    import sqlite3 as _sqlite3
+    data, ids = store
+    connection = _sqlite3.connect(data / "store.sqlite3")
+    # throwaway test store only: lift the immutability triggers to inject damaged revisions
+    for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='item_versions'").fetchall():
+        connection.execute(f'DROP TRIGGER "{name}"')
+    rows = dict(connection.execute(
+        "SELECT i.id, v.revision FROM items i JOIN item_versions v ON i.id=v.item_id AND i.current_revision=v.revision"))
+    connection.execute("UPDATE item_versions SET record_json=? WHERE item_id=? AND revision=?",
+                       ("{not json", ids["new"], rows[ids["new"]]))
+    record = json.loads(connection.execute("SELECT record_json FROM item_versions WHERE item_id=? AND revision=?",
+                                           (ids["noon"], rows[ids["noon"]])).fetchone()[0])
+    record["valid_until"] = 1e20                               # finite, but outside every calendar
+    connection.execute("UPDATE item_versions SET record_json=? WHERE item_id=? AND revision=?",
+                       (json.dumps(record), ids["noon"], rows[ids["noon"]]))
+    connection.commit()
+    connection.close()
+    report = audit(data, "Europe/Paris")
+    assert report["ok"] and report["complete"] is False
+    reasons = {(u["id"], u.get("field"), u["reason"]) for u in report["unparsable"]}
+    assert (ids["new"], None, "invalid_record_json") in reasons
+    assert (ids["noon"], "valid_until", "time_out_of_range") in reasons
+    assert ids["old"] in {c["id"] for c in report["candidates"]}   # the rest is still analysed
+    monkeypatch.setenv("MEMORY_V4_DIR", str(data))
+    assert cli.main(["audit-naive-times", "--tz", "Europe/Paris"]) == 1   # an incomplete audit is not a success
+    assert json.loads(capsys.readouterr().out)["complete"] is False
