@@ -95,9 +95,10 @@ Keys and formats are those of the table above.
   home directory, without `..` and without a symbolic link on the way. A relative value or control characters are
   refused with `client_xdg_invalid`; a path outside the home directory, `..` or a symbolic link with
   `client_xdg_outside_home`. No other client follows `XDG_CONFIG_HOME`.
-- **Bootstrap limit.** `scripts/memory_os_bootstrap.py` does not pass `XDG_CONFIG_HOME` to the `quickstart` preview it
-  runs: that preview resolves Zed (and the systemd unit) under `~/.config`. With a custom `XDG_CONFIG_HOME`, run
-  `memory-os-admin quickstart` directly from the installed environment.
+- **Bootstrap.** Since 4.1.3, `scripts/memory_os_bootstrap.py` passes `XDG_CONFIG_HOME` (and no other `XDG_*`
+  variable) to the `quickstart` preview it runs, so the preview resolves Zed and the systemd unit where a direct
+  `memory-os-admin quickstart` would. The value is validated by `quickstart` with the rules above. The bootstrap's own
+  probes never receive it.
 - **Gemini CLI.** `/etc/gemini-cli/settings.json`, when it exists, takes precedence over `~/.gemini/settings.json`;
   the same holds for a file named by `GEMINI_CLI_SYSTEM_SETTINGS_PATH`. The preview warns in both cases: check that
   the system file does not override `memory-os-ai`.

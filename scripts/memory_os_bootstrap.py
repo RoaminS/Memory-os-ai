@@ -123,13 +123,11 @@ UV_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "S
                "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 # Environment of every interpreter the bootstrap starts (probes, installed-artifact check and the
 # quickstart preview run from the venv): rebuilt from this list. No MEMORY_V4_*, PYTHON*, XDG data
-# or configuration variable (including XDG_CONFIG_HOME), nor any client-relocating variable
-# (CLAUDE_CONFIG_DIR, CODEX_HOME, GEMINI_CLI_HOME, GROK_HOME), is inherited.
-# Declared limit (4.1.1 L5): because XDG_CONFIG_HOME is not forwarded here, the child quickstart
-# preview resolves Linux systemd units and Zed's config under the default ~/.config/; users with a
-# custom XDG_CONFIG_HOME under HOME should run `memory-os-admin quickstart` directly from the
-# durable venv after bootstrap. Relocating client variables are detected by the bootstrap itself
-# and reported consistently with ``client_env_override`` without being forwarded to the child.
+# or configuration variable, nor any client-relocating variable (CLAUDE_CONFIG_DIR, CODEX_HOME,
+# GEMINI_CLI_HOME, GROK_HOME), is inherited. Relocating client variables are detected by the
+# bootstrap itself and reported consistently with ``client_env_override`` without being forwarded.
+# 4.1.3 (lifts the 4.1.1 L5 limit): the quickstart preview ALONE also receives XDG_CONFIG_HOME, see
+# ``quickstart_environment``; quickstart validates it itself (client_xdg_invalid, client_xdg_outside_home).
 CHILD_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_RUNTIME_DIR")
 DEFAULT_CLIENTS = ("claude-code", "codex")
 CLIENT_OVERRIDE_ENV = {
@@ -493,6 +491,18 @@ def child_environment(environ) -> dict:
     """The whole environment of an interpreter started by the bootstrap (allow-list)."""
     env = {key: environ[key] for key in CHILD_ENV_KEEP if environ.get(key)}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def quickstart_environment(environ) -> dict:
+    """Environment of the quickstart preview only: the child allow-list plus ``XDG_CONFIG_HOME`` when set.
+
+    The value is forwarded verbatim and validated by quickstart itself, with the same rules as a direct
+    ``memory-os-admin quickstart`` (absolute, under HOME, no ``..``, no symbolic link): the preview then
+    resolves Zed and the systemd unit exactly where a direct run would. Probes never receive it."""
+    env = child_environment(environ)
+    if environ.get("XDG_CONFIG_HOME"):
+        env["XDG_CONFIG_HOME"] = environ["XDG_CONFIG_HOME"]
     return env
 
 
@@ -1163,7 +1173,8 @@ def apply_plan(plan: dict, options, *, pin=None, run=subprocess.run, environ=Non
             raise Refused("artifact_mismatch", "the installed memory-os-ai is not the pinned artifact (version, "
                           "location or content digest differ); quickstart is not run")
         # Allow-listed environment: no MEMORY_V4_* (nor any other product variable) reaches the child.
-        code, out = step("quickstart_preview", argv["quickstart_preview"], env=child_env, timeout=QUICKSTART_TIMEOUT)
+        code, out = step("quickstart_preview", argv["quickstart_preview"], env=quickstart_environment(environ),
+                         timeout=QUICKSTART_TIMEOUT)
         try:
             preview = json.loads(out)
         except ValueError:

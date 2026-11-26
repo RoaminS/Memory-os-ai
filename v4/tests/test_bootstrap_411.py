@@ -709,8 +709,12 @@ def test_apply_creates_the_durable_venv_through_uv_with_spaces_everywhere(tmp_pa
     assert quickstart["ok"] is True and quickstart["writes"] == "none (preview)" and quickstart["cell_id"] == CELL
     # the child environment is an allow-list: nothing that steers the product is inherited
     inherited = set(quickstart["downloads_required_bytes"])  # the fake CLI echoes its environment keys there
-    assert inherited <= set(bs.CHILD_ENV_KEEP) | {"PYTHONDONTWRITEBYTECODE", "__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
-    assert "HOME" in inherited and not any(key.startswith(("MEMORY_V4_", "UV_", "XDG_CONFIG", "HF_")) for key in inherited)
+    # 4.1.3: XDG_CONFIG_HOME is the ONE extra key of the quickstart preview (quickstart validates it itself)
+    assert inherited <= set(bs.CHILD_ENV_KEEP) | {"PYTHONDONTWRITEBYTECODE", "__CF_USER_TEXT_ENCODING", "LC_CTYPE",
+                                                  "XDG_CONFIG_HOME"}
+    assert "HOME" in inherited and "XDG_CONFIG_HOME" in inherited
+    assert not any(key.startswith(("MEMORY_V4_", "UV_", "HF_")) for key in inherited)
+    assert not any(key.startswith("XDG_") and key not in ("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR") for key in inherited)
     step = report["steps"][-1]
     assert step["step"] == "quickstart_preview" and shlex.split(step["command"]) == [
         python, "-I", "-m", "memory_os_v4.ops.cli", "quickstart", "--profile", "lexical", "--clients", "claude-code,codex"]
@@ -1223,3 +1227,16 @@ def test_the_probe_of_a_target_loads_neither_pth_nor_sitecustomize(m):
     assert probe["ok"] and probe["sqlite"] == sqlite3.sqlite_version and not witness.exists()
     assert sqlite_runtime.probe_target(str(venv / "bin" / "python"))["version"] == sqlite3.sqlite_version
     assert not witness.exists()
+
+
+
+def test_quickstart_preview_alone_receives_xdg_config_home():
+    """4.1.3 (lifts 4.1.1 L5): XDG_CONFIG_HOME reaches the quickstart preview verbatim, never the probes."""
+    environ = {"HOME": "/home/u", "PATH": "/usr/bin:/bin", "XDG_CONFIG_HOME": "/home/u/.cfg",
+               "XDG_DATA_HOME": "/home/u/.data", "MEMORY_V4_DIR": "/elsewhere", "CODEX_HOME": "/elsewhere/codex"}
+    probe, preview = bs.child_environment(environ), bs.quickstart_environment(environ)
+    assert "XDG_CONFIG_HOME" not in probe and "XDG_CONFIG_HOME" not in bs.CHILD_ENV_KEEP
+    assert preview == {**probe, "XDG_CONFIG_HOME": "/home/u/.cfg"}
+    assert not any(k in preview for k in ("XDG_DATA_HOME", "MEMORY_V4_DIR", "CODEX_HOME"))
+    assert "XDG_CONFIG_HOME" not in bs.quickstart_environment({**environ, "XDG_CONFIG_HOME": ""})
+    assert bs.quickstart_environment({k: v for k, v in environ.items() if k != "XDG_CONFIG_HOME"}) == probe
