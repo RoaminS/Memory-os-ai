@@ -53,6 +53,7 @@ MAC = {"os": "darwin", "sys_platform": "darwin", "arch": "arm64", "machine": "ar
 UBUNTU = {"os": "linux", "sys_platform": "linux", "arch": "arm64", "machine": "aarch64",
           "distribution": {"id": "ubuntu", "version_id": "24.04", "conflicts": []}, "wsl": False,
           "service_manager": {"kind": "systemd-user", "available": True, "attestation": "presence only"}}
+UBUNTU_X86 = {**UBUNTU, "arch": "x86_64", "machine": "x86_64"}
 VERSION = "4.1.1"
 
 # ---------------------------------------------------------------- fakes
@@ -286,7 +287,30 @@ def test_cell_matching_agrees_with_the_product_detection(name, monkeypatch):
 
 def test_wsl_and_other_implementations_are_refused_like_the_product():
     assert bs.match_cell({**UBUNTU, "wsl": True}, (3, 11, 18))["refusal"].startswith("WSL is not a retained")
+    assert bs.match_cell({**UBUNTU_X86, "wsl": True}, (3, 11, 18))["refusal"].startswith("WSL is not a retained")
     assert bs.match_cell(MAC, (3, 11, 14), "pypy")["cell_id"] is None
+
+
+def test_the_architecture_tables_are_those_of_the_product():
+    assert bs.ARCH_MACHINES == cell.ARCH_MACHINES
+    for machine in ("arm64", "aarch64", "ARM64", "x86_64", "amd64", "AMD64", "x86_64_v3", "i686", "x86-64", "", None):
+        assert bs.architecture(machine) == cell.architecture(machine), machine
+
+
+@pytest.mark.parametrize("machine,python,expected", [
+    ("aarch64", (3, 11, 18), "ubuntu2404-arm64-py311"),
+    ("x86_64", (3, 11, 18), "ubuntu2404-x86_64-py311"),
+    ("AMD64", (3, 11, 18), "ubuntu2404-x86_64-py311"),
+    ("x86_64", (3, 12, 16), None),
+    ("x86_64", (3, 13, 18), None),
+    ("i686", (3, 11, 18), None),
+    ("x86_64_v3", (3, 11, 18), None),
+])
+def test_the_architecture_fact_comes_from_the_machine_read_never_from_the_display(machine, python, expected):
+    # A host whose display ``arch`` disagrees with its machine is matched on the machine only.
+    for display in ("arm64", "x86_64", "whatever"):
+        found = bs.match_cell({**UBUNTU, "arch": display, "machine": machine}, python)
+        assert found["cell_id"] == expected
 
 
 def test_the_probe_reads_the_target_like_the_product_probe():
@@ -600,6 +624,10 @@ def test_uv_is_never_looked_up_and_uvx_is_never_accepted(m, tmp_path):
 @pytest.mark.parametrize("host,label", [
     ({**UBUNTU, "distribution": {"id": "debian", "version_id": "12", "conflicts": []}}, "debian-12-arm64"),
     ({**MAC, "arch": "x86_64", "machine": "x86_64"}, "macos-x86_64"),
+    ({**UBUNTU_X86, "distribution": {"id": "debian", "version_id": "12", "conflicts": []}}, "debian-12-x86_64"),
+    ({**UBUNTU_X86, "distribution": {"id": "ubuntu", "version_id": "22.04", "conflicts": []}}, "ubuntu-22.04-x86_64"),
+    ({**UBUNTU_X86, "wsl": True}, "WSL"),
+    ({**UBUNTU, "arch": "i686", "machine": "i686"}, "ubuntu-24.04-i686"),
     ({**UBUNTU, "distribution": {"id": "ubuntu", "version_id": "22.04", "conflicts": []}}, "ubuntu-22.04-arm64"),
     ({**UBUNTU, "wsl": True}, "WSL"),
     ({"os": "other", "sys_platform": "win32", "arch": "amd64", "machine": "AMD64", "distribution": None, "wsl": False,
@@ -633,6 +661,17 @@ def test_a_retained_cell_without_pinned_lock_is_refused(m):
     pin = make_pin(m.wheel, cells=("ubuntu2404-arm64-py311",))
     code, report = m.main("--profile", "lexical", pin=pin)
     assert code == 1 and report["blocker_codes"] == ["cell_lock_missing"] and report["cell"]["cell_id"] == CELL
+
+
+@pytest.mark.parametrize("host,own,other", [
+    (UBUNTU, "ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311"),
+    (UBUNTU_X86, "ubuntu2404-x86_64-py311", "ubuntu2404-arm64-py311"),
+])
+def test_the_lock_of_the_other_architecture_never_serves_a_linux_cell(m, host, own, other):
+    m.host = dict(host)
+    m.rewrite = (os.path.basename(sys.executable), lambda seen: {**seen, "python": [3, 11, 18]})
+    code, report = m.main("--profile", "lexical", pin=make_pin(m.wheel, cells=(other,)))
+    assert code == 1 and report["blocker_codes"] == ["cell_lock_missing"] and report["cell"]["cell_id"] == own
 
 
 def test_the_target_interpreter_is_probed_not_the_one_running_the_bootstrap(m):
@@ -890,6 +929,15 @@ def test_route_i_exists_only_where_a_standalone_is_named(mi):
     assert code == 1 and report["blocker_codes"] == ["standalone_not_named"] and "ubuntu-24.04-arm64-py312" in report["blockers"][0]
     code, report = m.main("--profile", "lexical", "--cpython", "3.11", "--python", sys.executable)
     assert "python_choice_conflict" in report["blocker_codes"]
+    m.host = dict(UBUNTU_X86)
+    code, report = m.main("--profile", "lexical", "--cpython", "3.11")
+    assert code == 0 and report["cell"]["cell_id"] == "ubuntu2404-x86_64-py311"
+    assert report["service_manager"]["kind"] == "systemd-user"
+    assert "cpython-3.11.18-linux-x86_64-gnu" in report["commands"]["acquire_cpython"]
+    assert "aarch64" not in report["commands"]["acquire_cpython"]
+    code, report = m.main("--profile", "lexical", "--cpython", "3.12")
+    assert code == 1 and report["blocker_codes"] == ["standalone_not_named"]
+    assert "ubuntu-24.04-x86_64-py312" in report["blockers"][0]
 
 
 def test_the_consent_option_means_nothing_alone(m, capsys):

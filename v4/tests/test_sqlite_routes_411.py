@@ -149,7 +149,8 @@ def test_uv_version_is_parsed_from_text_given_by_the_caller(text, version, ok, c
 
 @pytest.mark.parametrize("cell_id,version,megabytes", [("macos-arm64-py312", "3.12.16", 25.4),
                                                        ("macos-arm64-py313", "3.13.18", 25.6),
-                                                       ("ubuntu2404-arm64-py311", "3.11.18", 49.5)])
+                                                       ("ubuntu2404-arm64-py311", "3.11.18", 49.5),
+                                                       ("ubuntu2404-x86_64-py311", "3.11.18", 49.2)])
 def test_standalone_plan_names_the_acquisition_and_the_exact_commands(cell_id, version, megabytes, monkeypatch):
     monkeypatch.setenv("HOME", "/Users/someone")
     request = sqlite_runtime.STANDALONE_CPYTHON[cell_id]["request"]
@@ -181,17 +182,30 @@ def test_standalone_plan_takes_the_venv_and_the_uv_binary_of_the_caller():
     assert plan["commands"][1][-1] == "/srv/mos/venv" and plan["python"] == "/srv/mos/venv/bin/python"
 
 
-@pytest.mark.parametrize("cell_id", ["macos-arm64-py311", "ubuntu2404-arm64-py312", "macos-x86_64-py312", None])
-def test_no_standalone_cpython_is_named_outside_the_three_cells(cell_id):
+@pytest.mark.parametrize("cell_id", ["macos-arm64-py311", "ubuntu2404-arm64-py312", "macos-x86_64-py312",
+                                     "macos-x86_64-py311", "ubuntu2404-x86_64-py312", None])
+def test_no_standalone_cpython_is_named_outside_the_four_cells(cell_id):
     assert sqlite_runtime.standalone_plan(cell_id) is None
     assert set(sqlite_runtime.STANDALONE_CPYTHON) == {"macos-arm64-py312", "macos-arm64-py313",
-                                                      "ubuntu2404-arm64-py311"}
+                                                      "ubuntu2404-arm64-py311", "ubuntu2404-x86_64-py311"}
+
+
+def test_each_standalone_request_names_the_architecture_and_libc_of_its_cell():
+    """The complete uv key of each cell: never the CPython of the other architecture, never musl."""
+    assert {cell_id: record["request"] for cell_id, record in sqlite_runtime.STANDALONE_CPYTHON.items()} == {
+        "macos-arm64-py312": "cpython-3.12.16-macos-aarch64-none",
+        "macos-arm64-py313": "cpython-3.13.18-macos-aarch64-none",
+        "ubuntu2404-arm64-py311": "cpython-3.11.18-linux-aarch64-gnu",
+        "ubuntu2404-x86_64-py311": "cpython-3.11.18-linux-x86_64-gnu"}
+    # megabytes: the install_only.tar.gz asset of release 20261110 (49,244,720 bytes for linux x86_64).
+    assert round(49_244_720 / 1e6, 1) == sqlite_runtime.STANDALONE_CPYTHON["ubuntu2404-x86_64-py311"]["megabytes"]
+    assert round(49_469_868 / 1e6, 1) == sqlite_runtime.STANDALONE_CPYTHON["ubuntu2404-arm64-py311"]["megabytes"]
 
 
 # ---- actionable refusal ----
 
 @pytest.mark.parametrize("cell_id,version", [("macos-arm64-py312", "3.12.16"), ("macos-arm64-py313", "3.13.18"),
-                                             ("ubuntu2404-arm64-py311", "3.11.18")])
+                                             ("ubuntu2404-arm64-py311", "3.11.18"), ("ubuntu2404-x86_64-py311", "3.11.18")])
 def test_refusal_names_the_uv_commands_and_says_it_is_a_download(cell_id, version, monkeypatch):
     monkeypatch.setenv("HOME", "/Users/someone")
     request = sqlite_runtime.STANDALONE_CPYTHON[cell_id]["request"]
@@ -255,7 +269,8 @@ def test_plan_carries_the_value_read_back_by_this_interpreter(c):
     assert attested["server"]["state"] == "not_running" and attested["message"] is None
 
 
-@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311"])
+@pytest.mark.parametrize("cell_id", ["macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311",
+                                     "ubuntu2404-x86_64-py311"])
 def test_quickstart_refusal_is_actionable_on_a_cell_with_a_standalone_route(c, monkeypatch, cell_id):
     as_cell(monkeypatch, RETAINED[cell_id]())
     lock_everything(monkeypatch)

@@ -1,9 +1,9 @@
 """Read-only detection of the platform cell of THIS interpreter (4.1.1, lot L1).
 
-A cell is (system, architecture, Python minor). Four cells are retained for 4.1.1; every other
-combination is refused with an actionable message, never announced as supported. Detection reads
-``sys``/``platform``/``sqlite3`` and a few well-known files; it starts no process, writes nothing
-and never touches the network. Every input can be injected, so a test simulates any cell without
+A cell is (system, architecture, Python minor). Four cells are retained for 4.1.1 and 4.1.3 adds a
+fifth, ``ubuntu2404-x86_64-py311`` (lexical); every other combination is refused with an actionable
+message, never announced as supported. Detection reads ``sys``/``platform``/``sqlite3`` and a few
+well-known files; it starts no process, writes nothing and never touches the network. Every input can be injected, so a test simulates any cell without
 forcing the rest of the process to another platform.
 
 Being retained is not enough to be accepted: ``acceptance`` also requires the embedded qualified
@@ -22,23 +22,35 @@ import re
 import shutil
 import sys
 
-RETAINED_CELLS = ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311")
+RETAINED_CELLS = ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311",
+                  "ubuntu2404-x86_64-py311")
 SEMANTIC_CELLS = ("macos-arm64-py311",)
-# The decision: exact facts per retained cell, compared one by one. The identifier is a name given
-# AFTER the match; no label is ever normalized and then looked up. The architecture is always
-# arm64 (arm64/aarch64) and the implementation CPython.
+# The architecture fact: the lowercased ``platform.machine()`` must be one of the exact spellings of
+# an architecture; any other machine has no architecture fact (``None``) and matches no cell.
+ARCH_MACHINES = {"arm64": frozenset({"arm64", "aarch64"}), "x86_64": frozenset({"x86_64", "amd64"})}
+# The decision: exact facts per retained cell, compared one by one, the architecture included. The
+# identifier is a name given AFTER the match; no label is ever normalized and then looked up. The
+# implementation is always CPython.
 _CELL_FACTS = {
-    "macos-arm64-py311": {"os": "darwin", "python": (3, 11)},
-    "macos-arm64-py312": {"os": "darwin", "python": (3, 12)},
-    "macos-arm64-py313": {"os": "darwin", "python": (3, 13)},
-    "ubuntu2404-arm64-py311": {"os": "linux", "distribution_id": "ubuntu", "version_id": "24.04", "python": (3, 11)},
+    "macos-arm64-py311": {"os": "darwin", "arch": "arm64", "python": (3, 11)},
+    "macos-arm64-py312": {"os": "darwin", "arch": "arm64", "python": (3, 12)},
+    "macos-arm64-py313": {"os": "darwin", "arch": "arm64", "python": (3, 13)},
+    "ubuntu2404-arm64-py311": {"os": "linux", "arch": "arm64", "distribution_id": "ubuntu", "version_id": "24.04",
+                               "python": (3, 11)},
+    "ubuntu2404-x86_64-py311": {"os": "linux", "arch": "x86_64", "distribution_id": "ubuntu", "version_id": "24.04",
+                                "python": (3, 11)},
 }
 OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
 KERNEL_RELEASE_PATH = Path("/proc/sys/kernel/osrelease")
 LAUNCHCTL = Path("/bin/launchctl")
 SYSTEMD_BOOTED = Path("/run/systemd/system")
 _READ = object()  # "measure it": distinct from None, which simulates an absent source
-_ARM64 = {"arm64", "aarch64"}
+
+
+def architecture(machine) -> str | None:
+    """The architecture fact of a ``platform.machine()`` value: exact spelling, lowercased; else ``None``."""
+    lowered = (machine or "").lower()
+    return next((name for name, spellings in ARCH_MACHINES.items() if lowered in spellings), None)
 
 
 def _dotted(version) -> str:
@@ -121,7 +133,8 @@ def detect(*, sys_platform=None, machine=None, python_version=None, implementati
     loaded = _sqlite_triplet(sqlite_version)
 
     system = "darwin" if raw_platform == "darwin" else "linux" if raw_platform.startswith("linux") else "other"
-    arch = "arm64" if raw_machine.lower() in _ARM64 else (raw_machine.lower() or "unknown")
+    arch_fact = architecture(raw_machine)
+    arch = arch_fact or raw_machine.lower() or "unknown"  # display: an unknown machine is shown as read
     python = f"{version[0]}.{version[1]}"
     distribution, wsl = None, False
     if system == "linux":
@@ -132,11 +145,11 @@ def detect(*, sys_platform=None, machine=None, python_version=None, implementati
                or bool(environ.get("WSL_DISTRO_NAME")) or bool(environ.get("WSL_INTEROP")))
 
     conflicts = (distribution or {}).get("conflicts") or []
-    facts = {"os": system, "python": tuple(version[:2])}
+    facts = {"os": system, "arch": arch_fact, "python": tuple(version[:2])}
     if system == "linux":
         facts.update(distribution_id=distribution["id"], version_id=distribution["version_id"])
     matched = None
-    if arch == "arm64" and not conflicts:
+    if not conflicts:
         matched = next((name for name in RETAINED_CELLS if _CELL_FACTS[name] == facts), None)
 
     # Display only. The dashed form of an unmatched Linux can never spell a retained identifier.
@@ -175,17 +188,20 @@ def detect(*, sys_platform=None, machine=None, python_version=None, implementati
 
 
 def linux_platform_retained(report: dict) -> bool:
-    """The OS side of a retained Linux cell (distribution, version, arm64, not WSL), whatever the Python minor.
+    """The OS side of a retained Linux cell (distribution, version, architecture, not WSL), whatever the Python minor.
 
     Used to choose the service manager (4.1.1 L4): ``systemd --user`` is driven only where a Linux
-    cell is retained. Compared with the same fact table as ``detect``; no second constant.
+    cell is retained. Compared with the same fact table as ``detect``; no second constant. The
+    architecture fact is recomputed from the reported ``machine``, never taken from the display ``arch``.
     """
-    if report.get("os") != "linux" or report.get("arch") != "arm64" or report.get("wsl"):
+    if report.get("os") != "linux" or report.get("wsl"):
         return False
     distribution = report.get("distribution") or {}
     if distribution.get("conflicts"):
         return False
-    return any(facts["os"] == "linux" and facts.get("distribution_id") == distribution.get("id")
+    arch_fact = architecture(report.get("machine"))
+    return any(facts["os"] == "linux" and facts["arch"] == arch_fact
+               and facts.get("distribution_id") == distribution.get("id")
                and facts.get("version_id") == distribution.get("version_id") for facts in _CELL_FACTS.values())
 
 

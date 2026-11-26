@@ -104,12 +104,17 @@ PACKAGE = "memory-os-ai"
 MODULE = "memory_os_v4"
 PROFILES = ("lexical", "semantic")
 EXTRAS = {"lexical": "ops,brief", "semantic": "ops,brief,semantic"}
-# The four retained cells: exact facts, compared one by one (same table as ops/cell.py).
+# The five retained cells: exact facts, the architecture included, compared one by one (same tables
+# as ops/cell.py: ARCH_MACHINES and _CELL_FACTS).
+ARCH_MACHINES = {"arm64": frozenset({"arm64", "aarch64"}), "x86_64": frozenset({"x86_64", "amd64"})}
 CELLS = {
-    "macos-arm64-py311": {"os": "darwin", "python": (3, 11)},
-    "macos-arm64-py312": {"os": "darwin", "python": (3, 12)},
-    "macos-arm64-py313": {"os": "darwin", "python": (3, 13)},
-    "ubuntu2404-arm64-py311": {"os": "linux", "distribution_id": "ubuntu", "version_id": "24.04", "python": (3, 11)},
+    "macos-arm64-py311": {"os": "darwin", "arch": "arm64", "python": (3, 11)},
+    "macos-arm64-py312": {"os": "darwin", "arch": "arm64", "python": (3, 12)},
+    "macos-arm64-py313": {"os": "darwin", "arch": "arm64", "python": (3, 13)},
+    "ubuntu2404-arm64-py311": {"os": "linux", "arch": "arm64", "distribution_id": "ubuntu", "version_id": "24.04",
+                               "python": (3, 11)},
+    "ubuntu2404-x86_64-py311": {"os": "linux", "arch": "x86_64", "distribution_id": "ubuntu", "version_id": "24.04",
+                                "python": (3, 11)},
 }
 SEMANTIC_CELLS = ("macos-arm64-py311",)
 MIN_SQLITE = (3, 51, 3)
@@ -120,11 +125,14 @@ STANDALONE_SOURCE = ("python-build-standalone " + STANDALONE_BUILD
 STANDALONE_SQLITE_DECLARED = "3.53.1"
 # Route (i): the complete uv key per cell. uv has no request syntax for a BUILD: the build is
 # named here and checked after installation (BUILD file of the managed installation, sys.version).
+# megabytes: the install_only.tar.gz asset of the build on its GitHub release, decimal MB (ops/sqlite_runtime.py).
 STANDALONE = {
     "macos-arm64-py312": {"python": "3.12.16", "megabytes": 25.4, "request": "cpython-3.12.16-macos-aarch64-none"},
     "macos-arm64-py313": {"python": "3.13.18", "megabytes": 25.6, "request": "cpython-3.13.18-macos-aarch64-none"},
     "ubuntu2404-arm64-py311": {"python": "3.11.18", "megabytes": 49.5,
                                "request": "cpython-3.11.18-linux-aarch64-gnu"},
+    "ubuntu2404-x86_64-py311": {"python": "3.11.18", "megabytes": 49.2,
+                                "request": "cpython-3.11.18-linux-x86_64-gnu"},
 }
 DEFAULT_VENV = "~/.memory-os/venv"
 EPHEMERAL_MARKERS = ("/cache/uv/", "/.cache/uv/", "/Caches/uv/", "pip-build-env", "uvx")
@@ -473,6 +481,12 @@ def _read_first(paths):
 _READ = object()
 
 
+def architecture(machine):
+    """The architecture fact of a ``platform.machine()`` value: exact spelling, lowercased; else None."""
+    lowered = (machine or "").lower()
+    return next((name for name, spellings in ARCH_MACHINES.items() if lowered in spellings), None)
+
+
 def detect_host(*, sys_platform=None, machine=None, os_release=_READ, kernel_release=_READ, environ=None,
                 which=None, exists=None) -> dict:
     """System, architecture, distribution, WSL and service manager (presence only). Starts nothing."""
@@ -482,7 +496,7 @@ def detect_host(*, sys_platform=None, machine=None, os_release=_READ, kernel_rel
     which = shutil.which if which is None else which
     exists = os.path.exists if exists is None else exists
     system = "darwin" if raw_platform == "darwin" else "linux" if raw_platform.startswith("linux") else "other"
-    arch = "arm64" if raw_machine.lower() in ("arm64", "aarch64") else (raw_machine.lower() or "unknown")
+    arch = architecture(raw_machine) or raw_machine.lower() or "unknown"  # display: an unknown machine as read
     distribution, wsl = None, False
     manager = {"kind": None, "available": False, "attestation": "presence only"}
     if system == "linux":
@@ -506,11 +520,12 @@ def match_cell(host: dict, python_version, implementation: str = "cpython") -> d
     version = tuple(python_version)
     distribution = host.get("distribution") or {}
     conflicts = distribution.get("conflicts") or []
-    facts = {"os": host["os"], "python": version[:2]}
+    # The architecture fact is recomputed from the machine read, never taken from the display ``arch``.
+    facts = {"os": host["os"], "arch": architecture(host.get("machine")), "python": version[:2]}
     if host["os"] == "linux":
         facts.update(distribution_id=distribution.get("id"), version_id=distribution.get("version_id"))
     matched = None
-    if host["arch"] == "arm64" and not conflicts:
+    if not conflicts:
         matched = next((name for name, wanted in CELLS.items() if wanted == facts), None)
     if matched:
         label = matched

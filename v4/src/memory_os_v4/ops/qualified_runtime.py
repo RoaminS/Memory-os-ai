@@ -65,6 +65,11 @@ CELL_LOCKS: dict[tuple[str, str], tuple[Path, Path, Path | None]] = {
         _RES / 'qualified_runtime_constraints_lexical_ubuntu2404-arm64-py311_v1.txt',
         _RES / 'qualified_runtime_manifest_lexical_ubuntu2404-arm64-py311_v1.json',
     ),
+    ('lexical', 'ubuntu2404-x86_64-py311'): (
+        _RES / 'qualified_runtime_lexical_ubuntu2404-x86_64-py311_v1.json',
+        _RES / 'qualified_runtime_constraints_lexical_ubuntu2404-x86_64-py311_v1.txt',
+        _RES / 'qualified_runtime_manifest_lexical_ubuntu2404-x86_64-py311_v1.json',
+    ),
 }
 
 
@@ -75,6 +80,7 @@ EXPECTED_PROFILE_IDS: dict[tuple[str, str], str] = {
     ('lexical', 'macos-arm64-py312'): 'lexical-macos-arm64-py312-v1',
     ('lexical', 'macos-arm64-py313'): 'lexical-macos-arm64-py313-v1',
     ('lexical', 'ubuntu2404-arm64-py311'): 'lexical-ubuntu2404-arm64-py311-v1',
+    ('lexical', 'ubuntu2404-x86_64-py311'): 'lexical-ubuntu2404-x86_64-py311-v1',
 }
 
 # Anchored SHA-256 digests of (catalog, constraints, manifest | None) per (profile, platform cell).
@@ -105,6 +111,11 @@ CELL_LOCK_DIGESTS: dict[tuple[str, str], tuple[str, str, str | None]] = {
         'b9670a31c57aa7849096c12d4fe311e3b3c1f67908d8ee11d190918bc3cb407b',
         'ce22752cb9ee6ac527c12aa87264db8f0b8c2437ebcae9983f7e20f21efe194d',
         '637c902934a9bb83c297740b34694a2f7716a4ba79afd739d4226265b9a01e3a',
+    ),
+    ('lexical', 'ubuntu2404-x86_64-py311'): (
+        '3b33c9181b464b6e11fab1c03aba872c4c1dd06fa07c96b2f70803ba25770ecb',
+        '9c4b36b32fde100e5419e3cda7632f0b59ea9ca223dbc6b4c099e63ee68aa0b8',
+        '518f0d2da60f2c85b98cb0fe659d438a8bce3dcfb137e7cbaad53560862aafc3',
     ),
 }
 # END GENERATED CELL_LOCK_DIGESTS
@@ -320,23 +331,25 @@ def valid_artifact_url(value: object, *, name: str | None = None, version: str |
     return True
 
 
-# Explicit, frozen installation target of each retained cell: (system, CPython minor). The admitted
-# wheel tags are computed with ``packaging.tags`` (the logic pip and uv share) for THIS target, never
-# for the host that happens to run the check:
-# - macOS cells: macOS 11.0 on arm64 (``MACOS_TARGET``), i.e. ``macosx_11_0_arm64`` and the
+# Explicit, frozen installation target of each retained cell: (system, wheel platform architecture,
+# CPython minor). The admitted wheel tags are computed with ``packaging.tags`` (the logic pip and uv
+# share) for THIS target, never for the host that happens to run the check:
+# - macOS cells: macOS 11.0 (``MACOS_VERSION``) on ``arm64``, i.e. ``macosx_11_0_arm64`` and the
 #   ``universal2`` tags up to 11.0; a wheel requiring a later macOS is refused;
-# - Ubuntu 24.04 arm64: glibc up to 2.39 (``LINUX_GLIBC_MAX``), i.e. ``manylinux_2_17`` ..
-#   ``manylinux_2_39`` on aarch64 plus the ``manylinux2014_aarch64`` alias; no ``linux_aarch64``,
-#   no ``musllinux``.
-CELL_WHEEL_TARGETS: dict[str, tuple[str, int]] = {
-    'macos-arm64-py311': ('macos', 11),
-    'macos-arm64-py312': ('macos', 12),
-    'macos-arm64-py313': ('macos', 13),
-    'ubuntu2404-arm64-py311': ('linux', 11),
+# - Ubuntu 24.04 cells: glibc up to 2.39 (``LINUX_GLIBC_MAX``), i.e. ``manylinux_2_17`` ..
+#   ``manylinux_2_39`` plus the ``manylinux2014`` alias, on the architecture of the cell only
+#   (``aarch64`` for arm64, ``x86_64`` for x86_64); no ``linux_<arch>``, no ``musllinux``, never the
+#   wheel of the other architecture.
+CELL_WHEEL_TARGETS: dict[str, tuple[str, str, int]] = {
+    'macos-arm64-py311': ('macos', 'arm64', 11),
+    'macos-arm64-py312': ('macos', 'arm64', 12),
+    'macos-arm64-py313': ('macos', 'arm64', 13),
+    'ubuntu2404-arm64-py311': ('linux', 'aarch64', 11),
+    'ubuntu2404-x86_64-py311': ('linux', 'x86_64', 11),
 }
-MACOS_TARGET = ((11, 0), 'arm64')
+MACOS_VERSION = (11, 0)
 LINUX_GLIBC_MAX = (2, 39)  # Ubuntu 24.04
-_LINUX_GLIBC_MIN_MINOR = 17  # manylinux2014: the first glibc with aarch64 manylinux wheels
+_LINUX_GLIBC_MIN_MINOR = 17  # manylinux2014 (glibc 2.17): the oldest manylinux tag admitted
 
 
 @functools.lru_cache(maxsize=None)
@@ -344,13 +357,13 @@ def cell_wheel_tags(cell_id: str) -> frozenset:
     """The ``packaging.tags.Tag`` set a wheel may carry to be installable on the retained ``cell_id``."""
     from packaging import tags
 
-    system, minor = CELL_WHEEL_TARGETS[cell_id]
+    system, arch, minor = CELL_WHEEL_TARGETS[cell_id]
     if system == 'macos':
-        platforms = list(tags.mac_platforms(*MACOS_TARGET))
+        platforms = list(tags.mac_platforms(MACOS_VERSION, arch))
     else:
         glibc_major, glibc_minor = LINUX_GLIBC_MAX
-        platforms = [f'manylinux_{glibc_major}_{m}_aarch64'
-                     for m in range(glibc_minor, _LINUX_GLIBC_MIN_MINOR - 1, -1)] + ['manylinux2014_aarch64']
+        platforms = [f'manylinux_{glibc_major}_{m}_{arch}'
+                     for m in range(glibc_minor, _LINUX_GLIBC_MIN_MINOR - 1, -1)] + [f'manylinux2014_{arch}']
     interpreter = f'cp3{minor}'
     return frozenset((
         *tags.cpython_tags(python_version=(3, minor), abis=[interpreter], platforms=platforms),

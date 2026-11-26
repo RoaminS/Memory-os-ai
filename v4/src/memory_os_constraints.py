@@ -31,6 +31,7 @@ CELL_FILES = {
     ("lexical", "macos-arm64-py312"): "qualified_runtime_constraints_lexical_macos-arm64-py312_v1.txt",
     ("lexical", "macos-arm64-py313"): "qualified_runtime_constraints_lexical_macos-arm64-py313_v1.txt",
     ("lexical", "ubuntu2404-arm64-py311"): "qualified_runtime_constraints_lexical_ubuntu2404-arm64-py311_v1.txt",
+    ("lexical", "ubuntu2404-x86_64-py311"): "qualified_runtime_constraints_lexical_ubuntu2404-x86_64-py311_v1.txt",
 }
 # Anchored SHA-256 digests of the packaged constraints files (generated and verified by
 # scripts/generate_cell_locks_411.py --check; stdlib-only, never imports memory_os_v4).
@@ -41,18 +42,23 @@ CELL_CONSTRAINTS_DIGESTS: dict[tuple[str, str], str] = {
     ('lexical', 'macos-arm64-py312'): '769ba2f9a4020549a976a06406e2a387772c50d33531de966a27110eea8db5cc',
     ('lexical', 'macos-arm64-py313'): 'f7068c427ab1de814fa891afa8875e092d82a842e6532b28f532ee257fd9d8eb',
     ('lexical', 'ubuntu2404-arm64-py311'): 'ce22752cb9ee6ac527c12aa87264db8f0b8c2437ebcae9983f7e20f21efe194d',
+    ('lexical', 'ubuntu2404-x86_64-py311'): '9c4b36b32fde100e5419e3cda7632f0b59ea9ca223dbc6b4c099e63ee68aa0b8',
 }
 # END GENERATED CELL_CONSTRAINTS_DIGESTS
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+# Same exact facts as ops/cell.py, the architecture included (stdlib copy, never imported from it).
+_ARCH_MACHINES = {"arm64": frozenset({"arm64", "aarch64"}), "x86_64": frozenset({"x86_64", "amd64"})}
 _CELL_FACTS = {
-    "macos-arm64-py311": {"os": "darwin", "python": (3, 11)},
-    "macos-arm64-py312": {"os": "darwin", "python": (3, 12)},
-    "macos-arm64-py313": {"os": "darwin", "python": (3, 13)},
-    "ubuntu2404-arm64-py311": {"os": "linux", "distribution_id": "ubuntu", "version_id": "24.04", "python": (3, 11)},
+    "macos-arm64-py311": {"os": "darwin", "arch": "arm64", "python": (3, 11)},
+    "macos-arm64-py312": {"os": "darwin", "arch": "arm64", "python": (3, 12)},
+    "macos-arm64-py313": {"os": "darwin", "arch": "arm64", "python": (3, 13)},
+    "ubuntu2404-arm64-py311": {"os": "linux", "arch": "arm64", "distribution_id": "ubuntu", "version_id": "24.04",
+                               "python": (3, 11)},
+    "ubuntu2404-x86_64-py311": {"os": "linux", "arch": "x86_64", "distribution_id": "ubuntu", "version_id": "24.04",
+                                "python": (3, 11)},
 }
 _OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
 _KERNEL_RELEASE_PATH = Path("/proc/sys/kernel/osrelease")
-_ARM64 = {"arm64", "aarch64"}
 _READ = object()
 
 USAGE = "usage: memory-os-constraints {lexical|semantic} [--cell CELL_ID]"
@@ -102,10 +108,12 @@ def detect_cell_id(
     version = tuple(sys.version_info[:2] if python_version is None else python_version[:2])
     impl = (platform.python_implementation() if implementation is None else implementation).lower()
     env = os.environ if environ is None else environ
-    if impl != "cpython" or raw_machine.lower() not in _ARM64:
+    lowered = (raw_machine or "").lower()
+    arch = next((name for name, spellings in _ARCH_MACHINES.items() if lowered in spellings), None)
+    if impl != "cpython" or arch is None:
         return None
     system = "darwin" if raw_platform == "darwin" else "linux" if raw_platform.startswith("linux") else "other"
-    facts: dict[str, object] = {"os": system, "python": version}
+    facts: dict[str, object] = {"os": system, "arch": arch, "python": version}
     if system == "linux":
         dist_id, ver_id, conflict = _parse_os_release(
             _read_first(_OS_RELEASE_PATHS) if os_release is _READ else os_release

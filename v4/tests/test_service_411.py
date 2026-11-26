@@ -86,6 +86,8 @@ def test_the_manager_comes_from_the_detected_cell():
     assert isinstance(managers.select(mac_cell()), managers.Launchd)
     assert isinstance(managers.select(mac_cell(python_version=(3, 13, 1))), managers.Launchd)
     assert isinstance(managers.select(linux_cell()), managers.SystemdUser)
+    assert isinstance(managers.select(linux_cell(machine="x86_64")), managers.SystemdUser)
+    assert isinstance(managers.select(linux_cell(machine="AMD64")), managers.SystemdUser)
     # The Python minor is not a property of the service manager: the cell gate refuses it elsewhere.
     assert isinstance(managers.select(linux_cell(python_version=(3, 12, 4))), managers.SystemdUser)
 
@@ -93,8 +95,14 @@ def test_the_manager_comes_from_the_detected_cell():
 @pytest.mark.parametrize("report", [
     lambda: linux_cell(os_release="ID=debian\nVERSION_ID=12\n"),
     lambda: linux_cell(os_release='ID=ubuntu\nVERSION_ID="22.04"\n'),
-    lambda: linux_cell(machine="x86_64"),
+    lambda: linux_cell(machine="i686"),
+    lambda: linux_cell(machine="x86_64_v3"),
+    lambda: linux_cell(machine="riscv64"),
+    lambda: linux_cell(machine="x86_64", os_release="ID=debian\nVERSION_ID=12\n"),
+    lambda: linux_cell(machine="x86_64", os_release='ID=ubuntu\nVERSION_ID="22.04"\n'),
     lambda: linux_cell(kernel_release="5.15.167.4-microsoft-standard-WSL2\n"),
+    lambda: linux_cell(machine="x86_64", kernel_release="5.15.167.4-microsoft-standard-WSL2\n"),
+    lambda: linux_cell(machine="x86_64", environ={"XDG_RUNTIME_DIR": "/run/user/1000", "WSL_DISTRO_NAME": "U"}),
     lambda: linux_cell(os_release=None),
     lambda: mac_cell(sys_platform="win32", machine="AMD64"),
 ])
@@ -109,9 +117,10 @@ def test_no_manager_outside_macos_and_the_retained_linux_platform(report):
     ({"exists": lambda path: str(path) == "/run/user/1000/systemd"}, "a system booted with systemd"),
     ({"exists": lambda path: str(path) == "/run/systemd/system"}, "a running systemd user manager"),
 ])
-def test_systemd_absent_on_the_retained_cell_is_an_actionable_refusal(missing, words):
-    detected = linux_cell(**missing)
-    assert detected["cell_id"] == "ubuntu2404-arm64-py311"
+@pytest.mark.parametrize("machine, cell_id", [("aarch64", "ubuntu2404-arm64-py311"), ("x86_64", "ubuntu2404-x86_64-py311")])
+def test_systemd_absent_on_the_retained_cell_is_an_actionable_refusal(missing, words, machine, cell_id):
+    detected = linux_cell(machine=machine, **missing)
+    assert detected["cell_id"] == cell_id
     assert managers.select(detected) is None
     message = managers.unavailable(detected)
     assert words in message and "no service is installed" in message and "systemctl --user status" in message
