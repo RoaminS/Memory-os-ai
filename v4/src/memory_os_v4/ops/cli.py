@@ -28,6 +28,11 @@ def _print_json(obj) -> None:
     print(json.dumps(obj, indent=1, ensure_ascii=False))
 
 
+def cmd_serve(args, s: OpsSettings) -> int:
+    from .serve import main
+    return main(args, s)
+
+
 def cmd_token(args, s: OpsSettings) -> int:
     from .auth import create_token
 
@@ -577,6 +582,12 @@ def main(argv: list[str] | None = None) -> int:
     dr = sub.add_parser("doctor", help="read-only check of the whole installation and of every AI client")
     dr.add_argument("--json", action="store_true")
     dr.add_argument("--store-only", action="store_true", help="local store counters only (no HTTP or client reads)")
+    sv = sub.add_parser("serve", help="run the shared service in the foreground (no launchd/systemd); loopback only")
+    sv.add_argument("--profile", choices=["lexical", "semantic"], default=None,
+                    help="install profile (required when no service definition records one)")
+    sv.add_argument("--allow-unqualified-platform", action="store_true",
+                    help="unretained platform (other Linux, WSL2, macOS Intel): lexical only, explicit warning")
+    sv.add_argument("--dry-run", action="store_true", help="print the resolved command and environment, start nothing")
     st = sub.add_parser("setup")
     st.add_argument("--write-launchd", metavar="DIR")
     st.add_argument("--sqlite-s4-jobs", action="store_true", help="Generate inactive SQLite backup + weekly file-drill templates")
@@ -598,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
         "hook": cmd_hook,
         "setup": cmd_setup,
         "doctor": cmd_doctor,
+        "serve": cmd_serve,
         "audit-naive-times": cmd_audit_naive_times,
     }[args.cmd]
     return handler(args, s)

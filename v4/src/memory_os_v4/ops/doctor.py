@@ -638,6 +638,10 @@ def _capabilities(info: dict) -> list[Check]:
     if marker is not None:
         checks.append(marker)
     checks.append(_server_sqlite(caps))
+    platform = caps.get("platform")
+    if isinstance(platform, dict) and platform.get("cell") == "unqualified":
+        checks.append(Check("platform", "WARN", f"cell: unqualified ({platform.get('label')}): no qualification "
+                            "claim; foreground serve only", "report problems with the platform named"))
     if caps.get("brief", {}).get("compact"):
         checks.append(
             Check(

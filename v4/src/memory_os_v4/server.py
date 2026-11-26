@@ -981,7 +981,28 @@ def _run_http(host: str, port: int, *, warm: bool = False) -> None:
     if warm:
         get_engine().ensure_retrieval()  # SQLite task-only startup is intentionally lazy unless --warm
     logger.warning("memory-os-v4 streamable HTTP on http://%s:%d/mcp/", host, port)
+    _exit_cleanly_on_stop_signals()
     uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+def _exit_cleanly_on_stop_signals() -> None:
+    """4.1.3 Lot 3: a stop signal ends the process through a normal exit.
+
+    uvicorn shuts down gracefully, restores the previous handlers, then RE-RAISES the captured signal. With the default
+    SIGTERM action the process would die there, before ``run``'s ``finally`` closes the engine (the store would not be
+    closed cleanly). These handlers turn that re-raised SIGTERM/SIGINT into ``SystemExit(0)``: the engine is closed,
+    the writer lease released, and the exit code is 0 (a requested stop is a clean stop)."""
+    import signal
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        return
+
+    def stop(signum, frame):
+        raise SystemExit(0)
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, stop)
 
 
 # ---------------------------------------------------------------- selfcheck

@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+import os
+
 from . import __version__
+
+
+@lru_cache(maxsize=1)
+def _detected_cell() -> tuple:
+    from .ops.cell import detect
+    report = detect()
+    return report.get("cell_id"), report.get("label")
+
+
+def platform_status() -> dict:
+    """4.1.3 (D7): the platform cell of THIS server. ``unqualified`` when started by ``memory-os-admin serve
+    --allow-unqualified-platform``: no qualification claim is made for it."""
+    cell_id, label = _detected_cell()
+    if os.environ.get("MEMORY_V4_PLATFORM_UNQUALIFIED") == "1":
+        return {"cell": "unqualified", "label": label, "qualification_claim": None}
+    return {"cell": cell_id or "unretained", "label": label, "qualification_claim": "retained-cell" if cell_id else None}
 
 
 def deployed(engine, build: dict) -> dict:
@@ -27,6 +46,7 @@ def deployed(engine, build: dict) -> dict:
         }
     return {
         "schema_version": 1,
+        "platform": platform_status(),
         "retrieval_profile": dict(LEXICAL_MARKER) if lexical else {"name": cfg.retrieval_profile, "policy": None},
         "runtime": inspect_current(profile=cfg.retrieval_profile, extras=('ops', 'brief')),
         "engine": {"name": "memory-os-v4", "version": __version__, **build},
