@@ -59,7 +59,7 @@ def audit(store_dir, zone: str | None = None) -> dict:
         return {"ok": False, "code": "store_missing", "error": "no regular SQLite store.sqlite3 in the store directory"}
     candidates, unparsable, scanned = [], [], 0
     try:
-        with open_readonly(database.resolve()) as connection:
+        with open_readonly(database) as connection:
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
             rows = connection.execute(

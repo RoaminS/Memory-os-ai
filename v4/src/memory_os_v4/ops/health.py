@@ -91,7 +91,7 @@ def _sqlite_records(db: Path, ids: set[str]) -> dict[str, dict]:
 
     from ..sqlite_store import open_readonly   # 4.1.3: lock-protected offline read; live read with a declared window
 
-    with open_readonly(db.resolve()) as connection:
+    with open_readonly(db) as connection:   # the opener refuses links before any resolution
         connection.execute("PRAGMA query_only=ON")
         connection.execute("BEGIN")
         query = ("SELECT v.record_json FROM items i JOIN item_versions v "

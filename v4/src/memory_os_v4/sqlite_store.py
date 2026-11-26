@@ -272,26 +272,74 @@ def _try_shared_lock(fd: int) -> bool:
         return False
 
 
+class _ReadOnlyCursor:
+    """A tracked cursor of a diagnostic read: explicit read API only, never the native connection."""
+
+    __slots__ = ("_cursor", "_owner")
+
+    def __init__(self, cursor, owner):
+        self._cursor = cursor
+        self._owner = owner
+
+    @property
+    def connection(self):
+        return self._owner                        # the proxy, never the native connection
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def execute(self, sql, parameters=(), /):
+        self._cursor.execute(sql, parameters)
+        return self
+
+    def executemany(self, sql, parameters, /):
+        self._cursor.executemany(sql, parameters)
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchmany(self, size=None):
+        return self._cursor.fetchmany() if size is None else self._cursor.fetchmany(size)
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._cursor)
+
+    def close(self):
+        self._cursor.close()
+
+
 class _ReadOnlyConnection:
-    """What ``open_readonly`` yields: the SQLite connection, with every cursor tracked.
+    """What ``open_readonly`` yields: an explicit read API over the SQLite connection, every cursor tracked.
 
     ``connection.close()`` alone does not end the native connection while a cursor holds an unfinished
     statement (``sqlite3_close_v2`` defers it: a partly consumed cursor, an iterator kept by a traceback). All
-    tracked cursors are therefore closed BEFORE the connection, so that the native close is effective when the
-    held side-file descriptors are released. Entry points that create statements outside the tracked cursors
-    (``iterdump``, ``backup``, ``blobopen``) are refused."""
+    cursors are created here, wrapped (``_ReadOnlyCursor``: its ``connection`` is this proxy) and closed BEFORE
+    the connection, so that the native close is effective when the protections are released. Nothing is
+    delegated implicitly: no cursor factory, no ``iterdump``/``backup``/``blobopen``, no context manager, no
+    access to the native connection through the public API."""
 
     __slots__ = ("_connection", "_cursors")
-    _REFUSED = frozenset({"iterdump", "backup", "blobopen", "close"})
 
     def __init__(self, connection):
         self._connection = connection
-        self._cursors = weakref.WeakSet()
+        self._cursors = weakref.WeakSet()         # an abandoned cursor is freed (its statement reset) by itself
 
-    def cursor(self, *args, **kwargs):
-        cursor = self._connection.cursor(*args, **kwargs)
-        self._cursors.add(cursor)
-        return cursor
+    def cursor(self):
+        raw = self._connection.cursor()
+        self._cursors.add(raw)
+        return _ReadOnlyCursor(raw, self)
 
     def execute(self, sql, parameters=(), /):
         return self.cursor().execute(sql, parameters)
@@ -299,13 +347,9 @@ class _ReadOnlyConnection:
     def executemany(self, sql, parameters, /):
         return self.cursor().executemany(sql, parameters)
 
-    def executescript(self, script, /):
-        return self.cursor().executescript(script)
-
-    def __getattr__(self, name):
-        if name in self._REFUSED:
-            raise AttributeError(f"{name} is not available on a diagnostic read-only connection")
-        return getattr(self._connection, name)
+    @property
+    def in_transaction(self):
+        return self._connection.in_transaction
 
     def _close(self) -> None:
         try:
@@ -313,6 +357,11 @@ class _ReadOnlyConnection:
                 cursor.close()
         finally:
             self._connection.close()
+
+
+# Resources of reads whose native close could not be established (``open_readonly``): kept, never released, for
+# the life of the process (inventory for diagnosis only).
+_pinned: list = []
 
 
 def _recreated(cause=None) -> ReadOnlyStoreError:
@@ -363,6 +412,10 @@ def open_readonly(database, *, timeout: float = 5.0):
     database = Path(database)
     if _windows():
         raise ReadOnlyStoreError("readonly_open_unqualified_platform", "no lock-protected read-only open on Windows")
+    # A linked database (symbolic or hard link) could be read under ANOTHER directory's lock, without its WAL:
+    # refused here, before any resolution, for every caller.
+    if database.is_symlink() or not database.is_file() or database.stat().st_nlink != 1:
+        raise ReadOnlyStoreError("store_database_linked", "the database must be a regular, unlinked file")
     # ONE identity per store for the reader registry and the held descriptors, whatever the spelling (relative,
     # absolute, through a linked directory). The file name itself is not resolved: a linked database is not
     # followed here (callers refuse it).
@@ -371,6 +424,7 @@ def open_readonly(database, *, timeout: float = 5.0):
     if lock.is_symlink() or not lock.is_file() or lock.stat().st_nlink != 1:
         raise ReadOnlyStoreError("writer_lock_missing", "existing regular writer.lock required; never created by a reader")
     fd = os.open(lock, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    native_closed = True                          # nothing opened yet
     try:
         locked = _try_shared_lock(fd)
         has_wal, has_shm = (os.path.lexists(str(database) + suffix) for suffix in ("-wal", "-shm"))
@@ -380,7 +434,6 @@ def open_readonly(database, *, timeout: float = 5.0):
             raise ReadOnlyStoreError("store_busy_retry", "the store writer is starting; retry")
         key = _register_reader(lock)
         held = None
-        native_closed = True                      # nothing opened yet
         try:
             # Every reader that lets SQLite open the pair (live, or offline with a stale pair) shares the held
             # descriptors: none of them closes them while another one's connection is still open.
@@ -416,14 +469,19 @@ def open_readonly(database, *, timeout: float = 5.0):
                     native_closed = True
         finally:
             # Protections are released only once the native close is established. Otherwise (a cursor or the
-            # connection could not be closed) the descriptors and the registration are deliberately kept for the
-            # life of the process: no engine of this store can start in it, and no held descriptor is closed.
+            # connection could not be closed) the held descriptors, the registration AND the shared lock on
+            # writer.lock are deliberately kept for the life of the process: no engine can start, in this process
+            # or another one, and no held descriptor is closed under the still-open connection.
             if native_closed:
                 if held is not None:
                     _release_side_files(database)  # only after the native close (POSIX fcntl caveat)
                 _unregister_reader(key)
+            else:
+                _pinned.append({"database": str(database), "writer_lock_fd": fd, "registered": key,
+                                "holds_side_files": held is not None, "connection": connection})
     finally:
-        os.close(fd)
+        if native_closed:
+            os.close(fd)
 
 
 def _register_reader(lock: Path) -> Path:

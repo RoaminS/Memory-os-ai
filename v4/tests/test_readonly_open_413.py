@@ -516,8 +516,11 @@ def kept_pair(stopped_store):
 
 def descriptors_on(path):
     """Descriptors of THIS process open on ``path`` (a native SQLite connection keeps one on the database)."""
-    target = os.stat(path)
-    count = 0
+    try:
+        target = os.stat(path)
+    except FileNotFoundError:
+        return 0                                                # an absent file: an unlinked one would be
+    count = 0                                                   # caught by the held-descriptor checks
     for name in os.listdir("/dev/fd"):
         try:
             st = os.fstat(int(name))
@@ -587,9 +590,36 @@ def test_every_spelling_of_the_store_shares_one_identity(kept_pair, tmp_path, mo
     assert_reader_fully_released(db)
 
 
+FLOCK_PROBE = """
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("free")
+except OSError:
+    print("locked")
+"""
+
+
+def writer_lock_free_for_another_process(data):
+    out = subprocess.run([sys.executable, "-c", FLOCK_PROBE, str(data / "writer.lock")], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    return out == "free"
+
+
+def release_pinned():
+    """Test cleanup only (production keeps pinned resources for the life of the process)."""
+    for entry in sqlite_store._pinned:
+        if entry["holds_side_files"]:
+            sqlite_store._release_side_files(Path(entry["database"]))
+        sqlite_store._unregister_reader(entry["registered"])
+        os.close(entry["writer_lock_fd"])
+    sqlite_store._pinned.clear()
+
+
 def test_an_unestablished_native_close_keeps_the_protections(kept_pair, monkeypatch):
-    """If the cursors or the connection cannot be closed, the descriptors and the registration stay: no engine of
-    this store can start in this process, and no held descriptor is closed."""
+    """If the cursors or the connection cannot be closed, the descriptors, the registration and the writer.lock
+    shared lock stay: no engine of this store can start, here or in another process."""
     db = kept_pair / "store.sqlite3"
     real_close = sqlite_store._ReadOnlyConnection._close
 
@@ -606,7 +636,91 @@ def test_an_unestablished_native_close_keeps_the_protections(kept_pair, monkeypa
         assert writer_lock._active_readers == {key: 1} and sqlite_store._held_sides[str(db)][0] == 1
         with pytest.raises(WriterConflictError, match="read-only diagnostic"):
             WriterLock(kept_pair)
-    finally:                                                    # test cleanup only: release what was kept
-        sqlite_store._release_side_files(db)
-        sqlite_store._unregister_reader(key)
+        assert not writer_lock_free_for_another_process(kept_pair)
+    finally:
+        release_pinned()
     assert_reader_fully_released(db)
+
+
+def test_a_real_close_failure_keeps_the_writer_lock_shared_lock(stopped_store):
+    """Codex WAL r6 item 2: offline immutable read opened in thread A, context closed in another thread: SQLite
+    refuses the close (check_same_thread) and the connection stays usable in A; an independent writer must stay
+    locked out."""
+    data, _ = stopped_store
+    db = data / "store.sqlite3"
+    state, opened, finish = {}, threading.Event(), threading.Event()
+
+    def thread_a():
+        context = open_readonly(db)
+        connection = context.__enter__()
+        connection.execute("SELECT count(*) FROM items").fetchone()
+        state["context"] = context
+        opened.set()
+        finish.wait(30)
+        state["still_usable"] = connection.execute("SELECT count(*) FROM items").fetchone()[0]
+        for entry in sqlite_store._pinned:                      # cleanup in the owning thread
+            entry["connection"].close()
+
+    thread = threading.Thread(target=thread_a)
+    thread.start()
+    try:
+        assert opened.wait(30)
+        with pytest.raises(sqlite3.ProgrammingError):
+            state["context"].__exit__(None, None, None)         # a close from the wrong thread fails for real
+        assert len(sqlite_store._pinned) == 1 and not sqlite_store._pinned[0]["holds_side_files"]
+        assert not writer_lock_free_for_another_process(data)   # shared lock kept: no external writer starts
+        with pytest.raises(WriterConflictError):
+            WriterLock(data)
+    finally:
+        finish.set()
+        thread.join(30)
+        release_pinned()
+    assert state["still_usable"] >= 1
+    assert writer_lock_free_for_another_process(data)
+    assert_reader_fully_released(db)
+
+
+def test_the_proxy_never_exposes_the_native_connection(kept_pair):
+    """Codex WAL r6 item 1: no public route to an untracked cursor (cursor.connection, context manager, cursor
+    factory, delegated attributes)."""
+    db = kept_pair / "store.sqlite3"
+    with open_readonly(db) as connection:
+        cursor = connection.cursor()
+        assert cursor.connection is connection and connection.execute("SELECT 1").connection is connection
+        escaped = cursor.connection.execute("SELECT name FROM sqlite_master")
+        assert escaped.fetchone() is not None                   # partly consumed, kept
+        for name in ("__enter__", "iterdump", "backup", "blobopen", "row_factory", "create_function",
+                     "set_authorizer", "_unknown"):
+            if name.startswith("_") and name != "__enter__":
+                continue
+            with pytest.raises(AttributeError):
+                getattr(connection, name)
+        with pytest.raises(TypeError):
+            connection.cursor(sqlite3.Cursor)                   # no cursor factory
+        with pytest.raises(AttributeError):
+            cursor.arraysize = 10                               # explicit API only
+        assert [row for row in connection.execute("SELECT 1 UNION ALL SELECT 2")] == [(1,), (2,)]
+    assert_reader_fully_released(db)
+
+
+@pytest.mark.parametrize("link", ["symbolic", "hard"])
+def test_a_linked_database_is_refused_by_the_opener_and_by_health(stopped_store, tmp_path, link):
+    """Codex WAL r6 item 3: refused before any resolution, for every caller."""
+    from memory_os_v4.ops import health
+    data, item = stopped_store
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "writer.lock").write_bytes(b"")
+    alias = other / "store.sqlite3"
+    if link == "symbolic":
+        alias.symlink_to(data / "store.sqlite3")
+    else:
+        os.link(data / "store.sqlite3", alias)
+    with pytest.raises(ReadOnlyStoreError) as caught:
+        with open_readonly(alias):
+            pass
+    assert caught.value.code == "store_database_linked"
+    diagnostics = []
+    assert health.explicit_supersessions(other, [item], diagnostics=diagnostics) == (set(), set())
+    assert diagnostics == ["store_database_linked"]
+    assert_reader_fully_released(data / "store.sqlite3")
