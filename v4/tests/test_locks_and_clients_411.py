@@ -1716,6 +1716,43 @@ def test_every_frozen_wheel_fits_its_cell_and_no_neighbor_lock_fits_another_cell
             assert not all(qualified_runtime.wheel_compatible_with_cell(name, other) for name in names), other
 
 
+@pytest.mark.parametrize("cell_id", [c for c in RETAINED_CELLS if c != "macos-arm64-py311"])
+def test_the_generator_rebuilds_each_embedded_lock_with_its_own_resolution_date(cell_id):
+    """Every field but the pylock digest is rebuilt from the cell's own wheels; the date is a frozen fact per cell."""
+    gen = load_script("generate_cell_locks_411")
+    ref_cat = json.loads((RESOURCES / "qualified_runtime_lexical_v1.json").read_text(encoding="utf-8"))
+    cat_path, con_path, _ = qualified_runtime.CELL_LOCKS[("lexical", cell_id)]
+    embedded = embedded_manifest(cell_id)
+    compiled, pylock = frozen_texts_from_manifest(embedded)
+    catalog_doc, constraints_text, manifest = gen.build_cell_lock_files(
+        cell_id, compiled, pylock.encode("utf-8"), reference_catalog=ref_cat, ml_packages=gen._ml_closure_names(RESOURCES))
+    assert catalog_doc == json.loads(cat_path.read_text(encoding="utf-8"))
+    assert constraints_text.encode("utf-8") == con_path.read_bytes()
+    assert {k: v for k, v in manifest.items() if k != "pylock_sha256"} == \
+        {k: v for k, v in embedded.items() if k != "pylock_sha256"}
+    assert manifest["resolved_at"] == catalog_doc["recorded_at"] == FROZEN_RESOLVED_AT.get(cell_id, "2026-11-24")
+    platform_target = gen.CELL_RESOLUTION[cell_id][1]
+    assert f"--python-platform {platform_target} " in manifest["source"]
+    assert platform_target == {"ubuntu2404-x86_64-py311": "x86_64-manylinux_2_28",
+                               "ubuntu2404-arm64-py311": "aarch64-manylinux_2_28"}.get(cell_id, "aarch64-apple-darwin")
+    # An explicit date applies to every cell, as before.
+    _, _, forced = gen.build_cell_lock_files(cell_id, compiled, pylock.encode("utf-8"), reference_catalog=ref_cat,
+                                             ml_packages=gen._ml_closure_names(RESOURCES), resolved_at="2026-12-01")
+    assert forced["resolved_at"] == "2026-12-01"
+
+
+def test_the_x86_64_cell_is_named_like_the_arm64_one_in_every_generator_table():
+    gen = load_script("generate_cell_locks_411")
+    x86, arm = "ubuntu2404-x86_64-py311", "ubuntu2404-arm64-py311"
+    assert gen.RETAINED_CELLS == cell.RETAINED_CELLS
+    assert gen.CELL_LABELS[x86] == "Ubuntu 24.04 x86_64 CPython 3.11"
+    assert gen.CELL_RESOLUTION[x86] == ("3.11", "x86_64-manylinux_2_28")
+    assert gen.CELL_RESOURCE_NAMES[x86] == tuple(name.replace(arm, x86) for name in gen.CELL_RESOURCE_NAMES[arm])
+    assert gen.FROZEN_INPUT_FILES[x86] == (f"{x86}.txt", f"pylock.{x86}.toml")
+    assert ("lexical", x86, *gen.CELL_RESOURCE_NAMES[x86]) in gen.ALL_LOCK_RESOURCE_NAMES
+    assert tuple(path.name for path in qualified_runtime.CELL_LOCKS[("lexical", x86)]) == gen.CELL_RESOURCE_NAMES[x86]
+
+
 @pytest.mark.parametrize("filename, admitted_by", [
     ("pkg-1.0-py3-none-any.whl", RETAINED_CELLS),
     ("pkg-1.0-py2.py3-none-any.whl", RETAINED_CELLS),
