@@ -82,14 +82,25 @@ it announces no result. The proof state of the cell is written neither here nor 
 | Grok CLI (`grok`) | `~/.grok/config.toml` | `GROK_HOME` |
 | Zed (`zed`) | `~/.config/zed/settings.json`, or `$XDG_CONFIG_HOME/zed/settings.json` | |
 | Devin Desktop (`devin`) | `~/.config/devin/mcp_config.json` | |
+| VS Code / Copilot (`vscode`), from 4.1.3 | `~/.copilot/mcp-config.json` (`mcpServers` + `"type": "stdio"`, `"tools": ["*"]`) | `COPILOT_HOME` |
 
-Keys and formats are those of the table above.
+Keys and formats are those of the table above, except VS Code on Linux.
 
-- **Not supported on Linux in 4.1.1 and 4.1.2: VS Code, Windsurf and Claude Desktop.** `quickstart` refuses them with
-  `client_unsupported_on_os`: no path is guessed and nothing is written. They are to be re-evaluated in 4.1.3.
+- **VS Code on Linux, from 4.1.3.** The official VS Code documentation states no user-level `mcp.json` path. For a
+  server shared across workspaces, it names the Copilot user configuration: `$COPILOT_HOME/mcp-config.json`, or
+  `~/.copilot/mcp-config.json` when `COPILOT_HOME` is unset, with a top-level `mcpServers` object
+  ([MCP configuration reference](https://code.visualstudio.com/docs/copilot/reference/mcp-configuration)). The
+  GitHub Copilot CLI uses the same file
+  ([Copilot CLI: add MCP servers](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers)).
+  `--clients vscode` writes our relay entry there, with `"tools": ["*"]` (all tools of the server; it does not bypass
+  tool approvals). `COPILOT_HOME` in the environment, even empty, refuses it (`client_env_override`).
+  Limit: the documentation does not say whether VS Code reads this file with no setting enabled; check that the
+  server appears in VS Code. macOS is unchanged: `~/Library/Application Support/Code/User/mcp.json`.
+- **Not supported on Linux: Windsurf and Claude Desktop** (and VS Code before 4.1.3). `quickstart` refuses them with
+  `client_unsupported_on_os`: no path is guessed and nothing is written.
 - **Relocating variables.** The presence of `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME` or `GROK_HOME` in the
-  environment, even with an empty value, refuses the automatic configuration of that client (`client_env_override`),
-  on macOS as on Linux: unset the variable or configure the client by hand. The bootstrap detects the same variables
+  environment (and, on Linux from 4.1.3, `COPILOT_HOME` for VS Code), even with an empty value, refuses the automatic
+  configuration of that client (`client_env_override`), on macOS as on Linux: unset the variable or configure the client by hand. The bootstrap detects the same variables
   itself; for a client that is not selected it only reports a notice.
 - **Zed and `XDG_CONFIG_HOME`.** On Linux, Zed follows `XDG_CONFIG_HOME` only when it is an absolute path under the
   home directory, without `..` and without a symbolic link on the way. A relative value or control characters are

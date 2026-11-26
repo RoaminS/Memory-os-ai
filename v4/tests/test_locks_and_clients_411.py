@@ -24,8 +24,9 @@ ROOT = Path(__file__).resolve().parents[2]
 RESOURCES = qualified_runtime.PROFILE.parent
 UBUNTU = 'ID=ubuntu\nVERSION_ID="24.04"\n'
 RETAINED_CELLS = ("macos-arm64-py311", "macos-arm64-py312", "macos-arm64-py313", "ubuntu2404-arm64-py311")
-LINUX_SUPPORTED = ("claude-code", "codex", "cursor", "antigravity", "gemini-cli", "grok", "zed", "devin")
-LINUX_UNSUPPORTED = ("vscode", "windsurf", "claude-desktop")
+# 4.1.3: VS Code is supported on Linux through the Copilot user configuration (~/.copilot/mcp-config.json)
+LINUX_SUPPORTED = ("claude-code", "codex", "vscode", "cursor", "antigravity", "gemini-cli", "grok", "zed", "devin")
+LINUX_UNSUPPORTED = ("windsurf", "claude-desktop")
 
 
 def mac_cell(py=(3, 11, 14)) -> dict:
@@ -966,8 +967,9 @@ def test_bootstrap_detects_relocating_env_vars_without_forwarding_them(tmp_path,
     ("zed", ".config/zed/settings.json"),
     ("devin", ".config/devin/mcp_config.json"),
     ("grok", ".grok/config.toml"),
+    ("vscode", ".copilot/mcp-config.json"),
 ])
-def test_eight_established_linux_client_paths(tmp_path, key, expected_rel):
+def test_nine_established_linux_client_paths(tmp_path, key, expected_rel):
     client = next(item for item in clients.CLIENTS if item.key == key)
     assert client.supported_on("linux") is True
     assert client.config_path(tmp_path, platform="linux", environ={}) == tmp_path / expected_rel
@@ -982,7 +984,6 @@ def test_vscode_windsurf_and_claude_desktop_are_refused_on_linux_without_guessin
     with pytest.raises(clients.ClientPathError) as err:
         client.config_path(c.home, platform="linux", environ={})
     assert err.value.code == "client_unsupported_on_os" and "Linux" in str(err.value)
-    assert "4.1.2" in str(err.value)
 
     before = tree(c.root)
     plan = prepare(c, profile="lexical", clients=(key,))
@@ -1943,3 +1944,71 @@ def test_check_reports_invalid_or_missing_inputs_as_mismatches_without_traceback
         assert "input:lexical:macos-arm64-py313 (" in captured.err and "Traceback" not in captured.err, label
         assert "input:lexical:macos-arm64-py312" not in captured.err, label
     assert {path.name: path.read_bytes() for path in out_dir.iterdir()} == snapshot
+
+
+# ===================================================================== 4.1.3 Lot 3: VS Code on Linux
+
+def test_vscode_on_linux_uses_the_copilot_user_configuration_and_macos_is_unchanged(tmp_path):
+    vscode = next(item for item in clients.CLIENTS if item.key == "vscode")
+    linux = vscode.on("linux")
+    assert linux.fmt == "copilot-json" and "COPILOT_HOME" in linux.override_env
+    assert linux.config_path(tmp_path, platform="linux", environ={}) == tmp_path / ".copilot/mcp-config.json"
+    mac = vscode.on("darwin")
+    assert mac == vscode and mac.fmt == "vscode" and "COPILOT_HOME" not in mac.override_env
+    assert mac.config_path(tmp_path, platform="darwin", environ={"COPILOT_HOME": "/elsewhere"}) == \
+        tmp_path / "Library/Application Support/Code/User/mcp.json"            # macOS: unchanged, no new guard
+    snippet = json.loads(clients.snippet(linux, "/py", {"MEMORY_V4_URL": "u"}))
+    entry = snippet["mcpServers"][clients.SERVER]
+    assert entry["type"] == "stdio" and entry["tools"] == ["*"] and entry["args"] == ["-m", "memory_os_v4.ops.relay"]
+    assert "servers" in json.loads(clients.snippet(mac, "/py", {}))
+
+
+@pytest.mark.parametrize("value", ["/elsewhere/.copilot", ""])
+def test_copilot_home_refuses_vscode_on_linux_even_empty(tmp_path, value):
+    linux = next(item for item in clients.CLIENTS if item.key == "vscode").on("linux")
+    with pytest.raises(clients.ClientPathError) as err:
+        linux.config_path(tmp_path, platform="linux", environ={"COPILOT_HOME": value})
+    assert err.value.code == "client_env_override" and "COPILOT_HOME" in str(err.value)
+
+
+def test_vscode_install_and_uninstall_on_linux_write_the_copilot_file(ubuntu):
+    c = ubuntu
+    target = c.home / ".copilot/mcp-config.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"mcpServers": {"other": {"type": "stdio", "command": "x"}}}, indent=2) + "\n")
+    mac_file = c.home / "Library/Application Support/Code/User/mcp.json"
+    mac_before = mac_file.read_bytes() if mac_file.exists() else None
+    result = install(c, profile="lexical", clients=("vscode",))
+    assert result["ok"] is True, json.dumps({k: result.get(k) for k in ("stage", "error", "code", "clients")}, default=str)[:3000]
+    data = json.loads(target.read_text())
+    assert data["mcpServers"]["other"] == {"type": "stdio", "command": "x"}          # foreign entry preserved
+    ours = data["mcpServers"][clients.SERVER]
+    assert ours["type"] == "stdio" and ours["tools"] == ["*"] and ours["env"]["MEMORY_V4_CLIENT_ID"] == "vscode"
+    from memory_os_v4.ops.auth import read_token
+    token = read_token(c.settings.token_file)
+    assert token and token not in target.read_text()            # the token file path only, never its value
+    assert (mac_file.read_bytes() if mac_file.exists() else None) == mac_before   # the macOS file is never touched
+    plan = uninstall.plan(c.settings, home=c.home, python=c.python, run=c.system, clients=("vscode",))
+    assert plan["ok"] is True, plan.get("blockers")
+    assert [item["action"] for item in plan["clients"] if item["client"] == "vscode"] == ["remove"], plan["clients"]
+    applied = uninstall.apply(plan, c.settings, home=c.home, run=c.system, sleep=lambda s: None)
+    assert applied["ok"] is True
+    after = json.loads(target.read_text())
+    assert clients.SERVER not in after["mcpServers"] and after["mcpServers"]["other"] == {"type": "stdio", "command": "x"}
+
+
+def test_vscode_on_linux_with_copilot_home_is_refused_by_quickstart(ubuntu, monkeypatch):
+    c = ubuntu
+    monkeypatch.setenv("COPILOT_HOME", str(c.home / "relocated"))
+    before = tree(c.root)
+    plan = prepare(c, profile="lexical", clients=("vscode",))
+    assert plan["ok"] is False and "client_env_override" in plan["blocker_codes"]
+    assert tree(c.root) == before
+
+
+def test_only_tools_star_is_the_strict_relay_form():
+    base = {"type": "stdio", "command": "/usr/bin/python3.11", "args": ["-m", "memory_os_v4.ops.relay"],
+            "env": {"MEMORY_V4_URL": "u", "MEMORY_V4_TOKEN_FILE": "t"}}
+    assert qs.relay_form({**base, "tools": ["*"]}) is True
+    assert qs.relay_form({**base, "tools": ["memory_search"]}) is False   # a restriction we did not write
+    assert qs.relay_form({**base, "tools": "*"}) is False

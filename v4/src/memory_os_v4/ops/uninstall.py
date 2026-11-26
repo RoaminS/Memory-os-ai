@@ -25,6 +25,7 @@ from pathlib import Path
 from . import quickstart as qs
 from .clients import (
     CLIENTS,
+    platform_clients,
     SERVER,
     ClientPathError,
     classify,
@@ -389,7 +390,7 @@ def plan(settings, *, home, python, run, clients=None, remove_existing=()):
     selection = None if clients is None else tuple(clients)
     if selection is not None and set(selection) - known:
         raise UninstallError("Unknown clients: " + ", ".join(sorted(set(selection) - known)), code="client_unknown")
-    selected = list(clients_for_platform()) if selection is None else [client for client in CLIENTS if client.key in selection]
+    selected = list(clients_for_platform()) if selection is None else [client for client in platform_clients() if client.key in selection]
     stray = sorted(set(remove_existing) - {client.key for client in selected})
     if stray:
         raise UninstallError("Consent names a client that is not selected: " + ", ".join(stray),
@@ -608,7 +609,7 @@ def apply(plan, settings, *, home, run, stop_timeout=10.0, sleep=time.sleep):
     port = settings.port
     # 2. Clients first; a late conflict skips that client only and makes the result partial.
     for item in preview["clients"]:
-        client = next(c for c in CLIENTS if c.key == item["client"])
+        client = next(c for c in platform_clients() if c.key == item["client"])
         done = {"client": client.key, "status": _kept_status(item["action"]), "ownership": item["ownership"]}
         result["clients"].append(done)
         if item["action"] != "remove":

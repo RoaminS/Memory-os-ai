@@ -271,7 +271,7 @@ def _plist(
 
 def cmd_setup(args, s: OpsSettings) -> int:
     from .auth import create_token
-    from .clients import CLIENTS, is_macos, normalize_platform, snippet
+    from .clients import is_macos, normalize_platform, platform_clients, snippet
 
     macos = is_macos()
     write_launchd = getattr(args, "write_launchd", None)
@@ -366,10 +366,10 @@ def cmd_setup(args, s: OpsSettings) -> int:
     )
     print("# 1. Connect each AI client through the relay (the relay reads the token file; no secret in configs):")
     os_kind = normalize_platform()
-    for client in CLIENTS:
+    for client in platform_clients(os_kind):
         note = f" — {client.note}" if client.note else ""
         if not client.supported_on(os_kind):
-            print(f"\n## {client.name} — not supported on {os_kind} in 4.1.2 (no path guessed; configure manually)")
+            print(f"\n## {client.name} — not supported on {os_kind} (no path guessed; configure manually)")
             continue
         if os_kind == "linux" and client.xdg_subpath:
             shown_path = f"$XDG_CONFIG_HOME/{client.xdg_subpath} (default ~/{client.linux_path})"

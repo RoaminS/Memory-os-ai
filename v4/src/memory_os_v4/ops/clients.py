@@ -6,10 +6,16 @@ secured server), ``legacy-v3`` (old ``memory_os_ai.server``: separate, fragmente
 
 Per-OS paths (4.1.1, contract §5, lot L5):
 - macOS (``darwin``): all 11 documented user-level locations (``Client.path``).
-- Linux (``linux``): 8 clients established from official documentation (``claude-code``, ``codex``,
-  ``cursor``, ``antigravity``, ``gemini-cli``, ``zed``, ``devin``, ``grok``). ``vscode``, ``windsurf``
-  and ``claude-desktop`` are not supported on Linux in 4.1.1 (re-evaluated in 4.1.2) and receive an
-  actionable refusal without guessing any path.
+- Linux (``linux``): 9 clients established from official documentation (``claude-code``, ``codex``,
+  ``cursor``, ``antigravity``, ``gemini-cli``, ``zed``, ``devin``, ``grok`` and, since 4.1.3, ``vscode``).
+  ``windsurf`` and ``claude-desktop`` are not supported on Linux and receive an actionable refusal without
+  guessing any path.
+- VS Code on Linux (4.1.3, decision of Romain, 2026-11-26): the official VS Code documentation states no user-level
+  ``mcp.json`` path and names, for a server shared across workspaces, the Copilot user configuration
+  ``$COPILOT_HOME/mcp-config.json`` or ``~/.copilot/mcp-config.json`` (top-level ``mcpServers``; stdio entries with
+  ``type``, ``command``, ``args``, ``env``, ``tools``); https://code.visualstudio.com/docs/copilot/reference/mcp-configuration.
+  ``--clients vscode`` writes that file on Linux (format ``copilot-json``); ``COPILOT_HOME`` set, even empty, refuses
+  it (``client_env_override``). macOS keeps ``~/Library/Application Support/Code/User/mcp.json`` unchanged.
 - ``XDG_CONFIG_HOME`` applies ONLY to Zed on Linux, and ONLY when it is an absolute path under HOME
   (no ``..`` traversal, no symlink escape); otherwise an explicit refusal is raised, consistent with
   ``quickstart._safe_path`` and the L4 systemd XDG limit. Declared limit: ``scripts/memory_os_bootstrap.py``
@@ -21,7 +27,7 @@ Per-OS paths (4.1.1, contract §5, lot L5):
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -32,10 +38,6 @@ SERVER = "memory-os-ai"
 RELAY_MARKERS = ("memory_os_v4.ops.relay", "memory-os-relay", "stdio_relay.py")
 GEMINI_SYSTEM_SETTINGS = Path("/etc/gemini-cli/settings.json")
 LINUX_UNSUPPORTED_REASONS = {
-    "vscode": (
-        "VS Code / GitHub Copilot is not supported on Linux in 4.1.2 (official documentation does not "
-        "establish a single user-level mcp.json path; re-evaluated in 4.1.3); no path guessed, nothing written"
-    ),
     "windsurf": (
         "Windsurf is not supported on Linux in 4.1.2 (official documentation cites conflicting user-level "
         "paths; re-evaluated in 4.1.3); no path guessed, nothing written"
@@ -86,6 +88,15 @@ class Client:
     linux_path: str | None = None  # relative to $HOME on Linux, or None when unsupported in 4.1.1
     override_env: tuple[str, ...] = ()
     xdg_subpath: str | None = None  # Linux XDG_CONFIG_HOME subpath (Zed only)
+    linux_fmt: str | None = None  # Linux-only format when it differs (VS Code: "copilot-json")
+    linux_override_env: tuple[str, ...] = ()  # Linux-only relocating variables (VS Code: COPILOT_HOME)
+
+    def on(self, platform: str | None = None) -> "Client":
+        """This client as it is configured on ``platform`` (format and relocating variables of that OS)."""
+        if normalize_platform(platform) == "linux" and (self.linux_fmt or self.linux_override_env):
+            return replace(self, fmt=self.linux_fmt or self.fmt,
+                           override_env=self.override_env + self.linux_override_env)
+        return self
 
     def supported_on(self, platform: str | None = None) -> bool:
         os_kind = normalize_platform(platform)
@@ -198,7 +209,7 @@ CLIENTS: tuple[Client, ...] = (
     Client("codex", "Codex (CLI/app)", ".codex/config.toml", "codex-toml",
            linux_path=".codex/config.toml", override_env=("CODEX_HOME",)),
     Client("vscode", "VS Code / GitHub Copilot", "Library/Application Support/Code/User/mcp.json", "vscode",
-           linux_path=None),
+           linux_path=".copilot/mcp-config.json", linux_fmt="copilot-json", linux_override_env=("COPILOT_HOME",)),
     Client("cursor", "Cursor", ".cursor/mcp.json", "mcpServers",
            linux_path=".cursor/mcp.json"),
     Client("antigravity", "Antigravity", ".gemini/config/mcp_config.json", "mcpServers",
@@ -216,14 +227,19 @@ CLIENTS: tuple[Client, ...] = (
 )
 
 
+def platform_clients(platform: str | None = None) -> tuple[Client, ...]:
+    """Every known client as configured on ``platform`` (supported or not)."""
+    return tuple(c.on(platform) for c in CLIENTS)
+
+
 def clients_for_platform(platform: str | None = None) -> tuple[Client, ...]:
-    """Clients with an established user-level path on ``platform`` (11 on macOS, 8 on Linux)."""
-    return tuple(c for c in CLIENTS if c.supported_on(platform))
+    """Clients with an established user-level path on ``platform`` (11 on macOS, 9 on Linux)."""
+    return tuple(c for c in platform_clients(platform) if c.supported_on(platform))
 
 
 def unsupported_clients_for_platform(platform: str | None = None) -> tuple[Client, ...]:
     """Known clients without an established user-level path on ``platform``."""
-    return tuple(c for c in CLIENTS if not c.supported_on(platform))
+    return tuple(c for c in platform_clients(platform) if not c.supported_on(platform))
 
 
 def gemini_system_settings_notice(
@@ -280,7 +296,7 @@ def client_notices(
         if warning:
             notices.append(warning)
 
-    by_key = {c.key: c for c in CLIENTS}
+    by_key = {c.key: c for c in platform_clients(platform)}
     both_selected = "claude-code" in selected and "grok" in selected
     grok_with_existing_claude = False
     claude_with_existing_grok = False
@@ -416,6 +432,9 @@ def snippet(client: Client, python: str, env: dict[str, str]) -> str:
     if client.fmt == "vscode":
         return json.dumps({"servers": {SERVER: {"type": "stdio", "command": command, "args": args, "env": env}}},
                           indent=1)
+    if client.fmt == "copilot-json":
+        return json.dumps({"mcpServers": {SERVER: {"type": "stdio", "command": command, "args": args, "env": env,
+                                                   "tools": ["*"]}}}, indent=1)
     if client.fmt == "codex-toml":
         flags = " ".join(f"--env {shlex.quote(f'{k}={v}')}" for k, v in env.items())
         return f"codex mcp add {SERVER} {flags} -- " + " ".join(shlex.quote(a) for a in [command, *args])

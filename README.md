@@ -199,8 +199,8 @@ study.
 ### Add another assistant later
 
 Recommended, on macOS: `~/.memory-os/venv/bin/memory-os-admin quickstart --clients cursor,vscode` (preview), then
-`--apply`. On Linux, where VS Code is refused, name clients of the Linux column below, for example
-`--clients cursor,zed`. The command reuses the interpreter of the installation with absolute paths and the profile
+`--apply`. On Linux, name clients of the Linux column below, for example `--clients cursor,zed` (VS Code from
+4.1.3). The command reuses the interpreter of the installation with absolute paths and the profile
 of the existing installation.
 
 One-click alternatives (they add only the **relay**; the service, token and tokenizer table must already be installed;
@@ -230,12 +230,14 @@ Where each client is configured, per system (`--clients` name in the first colum
 | `grok` | `~/.grok/config.toml` | same |
 | `zed` | `~/.config/zed/settings.json` | same, or `$XDG_CONFIG_HOME/zed/settings.json` |
 | `devin` | `~/.config/devin/mcp_config.json` | same |
-| `vscode` | `~/Library/Application Support/Code/User/mcp.json` | refused in 4.1.2 |
+| `vscode` | `~/Library/Application Support/Code/User/mcp.json` | refused in 4.1.2; from 4.1.3 `~/.copilot/mcp-config.json` (Copilot user configuration, [official source](https://code.visualstudio.com/docs/copilot/reference/mcp-configuration)) |
 | `windsurf` | `~/.codeium/windsurf/mcp_config.json` | refused in 4.1.2 |
 | `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` | refused in 4.1.2 |
 
 - **Refused on Linux in 4.1.2** (as in 4.1.1): VS Code, Windsurf and Claude Desktop. The refusal is explicit
-  (`client_unsupported_on_os`): no path is guessed and nothing is written.
+  (`client_unsupported_on_os`): no path is guessed and nothing is written. From 4.1.3, VS Code on Linux is
+  configured through the Copilot user configuration `~/.copilot/mcp-config.json`, the location the official VS Code
+  documentation names (`mcpServers`; `COPILOT_HOME` set, even empty, refuses it); see [docs/CLIENTS.md](docs/CLIENTS.md).
 - **Zed on Linux** follows `XDG_CONFIG_HOME` only when it is an absolute path under your home directory, without `..`
   and without a symbolic link on the way; otherwise the configuration is refused.
 - **Relocated clients.** When `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME` or `GROK_HOME` is present in the

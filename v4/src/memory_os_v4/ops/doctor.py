@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .auth import SecretFileError, http_get, read_token
 from .clients import (
-    CLIENTS,
+    platform_clients,
     ClientPathError,
     classify,
     gemini_system_settings_notice,
@@ -358,7 +358,7 @@ def _clients(home: Path) -> list[Check]:
     checks = []
     active_entries: set[str] = set()
     gemini_seen = False
-    for client in CLIENTS:
+    for client in platform_clients():
         try:
             config_path = client.config_path(home)
         except ClientPathError as exc:

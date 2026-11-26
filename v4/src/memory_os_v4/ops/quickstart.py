@@ -32,7 +32,8 @@ from pathlib import Path
 from . import cell, sqlite_runtime
 from . import service as managers
 from .clients import (
-    CLIENTS,
+    CLIENTS,  # noqa: F401 (re-exported: qs.CLIENTS)
+    platform_clients,
     SERVER,
     Client,
     ClientPathError,
@@ -119,6 +120,8 @@ def desired_entry(client: Client, python: str, env: dict[str, str]) -> dict:
         return {"source": "custom", "command": command, "args": args, "env": env}
     if client.fmt in {"vscode", "claude-user"}:
         return {"type": "stdio", "command": command, "args": args, "env": env}
+    if client.fmt == "copilot-json":   # VS Code on Linux: Copilot user configuration (all tools; approvals kept)
+        return {"type": "stdio", "command": command, "args": args, "env": env, "tools": ["*"]}
     if client.fmt == "grok-toml":
         return {"command": command, "args": args, "env": env, "enabled": True}
     return {"command": command, "args": args, "env": env}
@@ -157,7 +160,9 @@ RELAY_ARGS = ["-m", "memory_os_v4.ops.relay"]
 RELAY_ENV = frozenset({"MEMORY_V4_CLIENT_ID", "MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE", "MEMORY_V4_OPS_DIR"})
 INTERPRETER = re.compile(r"python(3(\.[0-9]+)?)?")
 # Transport keys a client adds around command/args/env, with the only value we write for each.
-TRANSPORT_KEYS = {"type": "stdio", "source": "custom", "enabled": True}
+# Transport keys a client format adds to the relay entry, each with the ONLY value we write. 4.1.3: "tools": ["*"]
+# for the Copilot user configuration of VS Code on Linux (``copilot-json``); any other tools value is a loose form.
+TRANSPORT_KEYS = {"type": "stdio", "source": "custom", "enabled": True, "tools": ["*"]}
 
 
 def relay_form(entry) -> bool:
@@ -383,7 +388,7 @@ def preview(*, home: Path, python: str, env: dict[str, str], clients: tuple[str,
     relay form pointing to this installation AND proven by a trusted journal is replaced without
     asking; everything else needs the client named in ``replace_existing``. TOML is never rewritten.
     """
-    selected = [c for c in CLIENTS if c.key in clients]
+    selected = [c for c in platform_clients() if c.key in clients]
     unknown = sorted(set(clients) - {c.key for c in selected})
     stray = sorted(set(replace_existing) - set(clients))
     if stray:
@@ -967,7 +972,7 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
     if plan.get("unknown_clients"):
         raise QuickstartError("Unknown clients; re-preview with explicit supported choices")
     for item in plan["clients"]:
-        client = next(c for c in CLIENTS if c.key == item["client"])
+        client = next(c for c in platform_clients() if c.key == item["client"])
         if _entry_hash(desired_entry(client, python, env)) != item['desired_sha256']:
             raise QuickstartError("Desired entry changed since preview")
     jdir = journal_dir or new_journal(journal_root or home / JOURNAL_SUBDIR)
@@ -981,7 +986,7 @@ def apply_clients(plan: dict, *, home: Path, python: str, env: dict[str, str], j
         journal.chmod(0o600)
     persist()
     for item in plan["clients"]:
-        client = next(c for c in CLIENTS if c.key == item["client"])
+        client = next(c for c in platform_clients() if c.key == item["client"])
         if item["action"].startswith("refuse") and item.get("path") is None:
             records.append({"client": client.key, "path": None, "action": item["action"],
                             "status": item["action"]})
@@ -1385,7 +1390,7 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
     if not isinstance(data, dict) or not isinstance(data.get("records"), list):
         raise QuickstartError("Journal malformed; nothing done", code="journal_unsafe")
     for rec in data["records"]:
-        client = next((c for c in CLIENTS if isinstance(rec, dict) and c.key == rec.get("client")), None)
+        client = next((c for c in platform_clients() if isinstance(rec, dict) and c.key == rec.get("client")), None)
         if client is None:
             continue  # not a record of a known client: nothing we may act on
         if rec.get("status") not in {"applied", "pending", "failed-or-partial"}:
