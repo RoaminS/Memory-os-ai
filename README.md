@@ -63,27 +63,46 @@ it reports `non testé` ("not tested").
 ## Install on macOS and Ubuntu 24.04
 
 **One command (from 4.1.3).** It needs [`uv`](https://docs.astral.sh/uv/) ≥ 0.13.9 on your PATH, which is never
-downloaded for you, and `python3`:
+downloaded for you, `python3` and `bash`:
 
 ```bash
-curl -fsSL https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh
+bash -o pipefail -c "curl -q -fsSL --proto '=https' --proto-redir '=https' https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh"
 ```
 
-`install.sh` downloads the bootstrap and `SHA256SUMS` of that same release (never "latest"), refuses on any download
-failure or checksum mismatch, and runs the verified bootstrap with `--interactive`:
+Why this form: `-q` makes `curl` ignore any `curlrc`, `--proto`/`--proto-redir` allow HTTPS only, for the request and
+its redirects, and `pipefail` turns a failed download into a failure (a bare `curl … | sh` reports success when
+`curl` fails). A truncated `install.sh` runs nothing and exits non-zero: its first lines set a guard that only its
+last line lifts.
 
-- a **complete preview**: every download with its source and size, the environment, the service (label, port,
-  manager), the token file, and each assistant configuration file it would write, for the assistants found on this
-  machine (their configuration file or their command-line tool);
-- **one question**, `[y/N]`, default No. Nothing is written before your `y`. Without a terminal (CI, a pipe) it stops
-  after the preview. Every refusal (platform, SQLite, `uv`, an existing installation) comes before the question;
-- after `y`: the lexical profile (no resource download) is installed, `quickstart` must see exactly what was announced
-  (otherwise it stops before any service, token or client entry is written), then `quickstart --apply` runs, `/ready`
-  is checked, and the way to undo is printed (`quickstart --undo <stamp> --with-service`, `uninstall`).
+**What is written before your answer.** Nothing is written in `$HOME`, in the store or in any client configuration,
+and no service is installed, before you answer `y`. The only writes before it are the two verified files,
+`memory_os_bootstrap.py` and `SHA256SUMS` of the same release (never "latest"), in a private temporary directory
+removed at exit. `install.sh` refuses on any download failure or checksum mismatch, then runs the verified bootstrap
+with `--interactive`:
 
-Options go after `sh -s --`, for example `| sh -s -- --clients codex,cursor`, or `--cpython 3.13` on macOS when your
-`python3` is not the Python of a [cell](#platform-cells). The current release, 4.1.2, has no `install.sh`: use the manual
-route below.
+- a **complete preview**: every download with its source and size (a standalone CPython included, see below), the
+  environment, the service (label, port, manager, definition, program), the token file, the store, and each assistant
+  configuration file it would write, for the assistants found on this machine (their configuration file or their
+  command-line tool);
+- **one question**, `[y/N]`, read from the terminal, default No. Without a terminal (CI, a pipe) it stops after the
+  preview;
+- **checked before the question**: cell, release pin and lock, `uv`, an existing Python and the SQLite it loads, the
+  destinations, the clients and their paths, the service manager, an existing installation. **Checked only after `y`,
+  once acquired, before anything else is installed**: the SQLite and the build of a downloaded standalone CPython
+  (read back from the new environment), the digest of the installed package, and the `quickstart` preview of that
+  environment;
+- after `y`: the lexical profile (no resource download) is installed; `quickstart` must see exactly what was announced,
+  and `quickstart --apply` receives the digest of that plan (`--expect-plan`) and refuses any other one before writing;
+  then `/ready` is checked, and the follow-up commands (`doctor`, `quickstart --undo <stamp> --with-service`,
+  `uninstall`) are printed with the environment of this installation spelled out.
+
+The interpreter: on Ubuntu 24.04, the standalone CPython 3.11 named for the cell (about 49.5 MB); on macOS, your
+`python3` when it is a Python of a [cell](#platform-cells) with SQLite ≥ 3.51.3, otherwise the standalone CPython 3.13
+(about 25.6 MB). Either download is announced, with its source and size, before the question, and made only after
+`y`. Options go after `sh -s --`, for example `… | sh -s -- --clients codex,cursor` or `--python /path/to/python3.12`.
+The one command installs the lexical profile only: for the **semantic profile**, use the "Semantic profile
+(recommended)" commands of the manual install below. The current release, 4.1.2, has no `install.sh`: use the
+manual route.
 
 **Docker (from 4.1.3; lexical profile, `serve` in the foreground).** No image is published (that needs a separate
 decision): build it from a clone of the release tag, with the release wheel, checked against `SHA256SUMS`, in `dist/`.
@@ -193,9 +212,10 @@ describes the script itself; `--apply` works only in a copy whose release pin is
   and its SQLite is read back from the environment before anything is installed.
 - **Proof state.** `--p9-manifest /path/to/manifest` reads a local P9 manifest; nothing is ever fetched.
 - **`--interactive` (from 4.1.3)**, what `install.sh` runs: the same preview, plus the service, the token, the store
-  and the client files, the lexical profile by default and one `[y/N]` question read from the terminal (`/dev/tty`).
-  After `y` it creates the environment as `--apply` does, compares the `quickstart` preview run from it with what was
-  announced, then runs `quickstart --apply` and checks `/ready`; any blocker or difference stops it first. A relocated
+  and the client files, the lexical profile by default and one `[y/N]` question read from the terminal (`/dev/tty`);
+  the bootstrap writes nothing before the answer. After `y` it creates the environment as `--apply` does, compares
+  the `quickstart` preview run from it with what was announced, then runs `quickstart --apply --expect-plan
+  <digest of that preview>` and checks `/ready`; any blocker or difference stops it first. A relocated
   client (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, `GROK_HOME`, `COPILOT_HOME` for VS Code on Linux) or a
   client file that already names `memory-os-ai` is left out, with its reason, never guessed or overwritten.
 

@@ -45,7 +45,7 @@ if __name__ == "__main__":
         log.write(json.dumps({"mode": mode, "argv": argv, "env": sorted(os.environ)}) + "\n")
     answer = config[mode]
     print(json.dumps(answer))
-    sys.exit(0 if answer.get("ok") else 1)
+    sys.exit(config.get("exit", {}).get(mode, 0 if answer.get("ok") else 1))
 '''
 
 
@@ -99,6 +99,23 @@ def product_definition(home, os_kind, environ):
     return str(manager.definition_path(LABEL, Path(home))), manager.plan_extras(LABEL)
 
 
+LEXICAL_RESOURCE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}  # provision.plan(cl100k), embedded table
+
+
+def product_settings(home: Path) -> OpsSettings:
+    """OpsSettings.from_env() for ``home`` with no MEMORY_V4_* variable (the quickstart run from the venv)."""
+    return OpsSettings(url="http://127.0.0.1:8765/mcp/", token_file=home / ".config/memory-os/http.token",
+                       store_dir=home / ".memory-os-v4", backup_dir=home / "memory-os-backups",
+                       backup_key=home / ".config/memory-os/backup.key", ops_dir=home / ".local/state/memory-os",
+                       service_label=None)
+
+
+def seal(preview: dict) -> dict:
+    """The preview with the plan_digest the PRODUCT computes for it (what cli quickstart prints)."""
+    preview = {key: value for key, value in preview.items() if key != "plan_digest"}
+    return {**preview, "plan_digest": qs.plan_digest(preview)}
+
+
 class OneLiner:
     """A Machine (temporary HOME, fake uv, pinned test wheel) whose quickstart is the fake above."""
 
@@ -126,27 +143,39 @@ class OneLiner:
         path.write_text(text)
         return path
 
-    def preview(self, clients, **changes):
-        """A quickstart preview built from the PRODUCT rules for this HOME, OS and environment."""
+    def preview(self, clients, *, cell=CELL, **changes):
+        """A quickstart preview built from the PRODUCT rules (clients.py, _service_plan, plan_digest)."""
         environ = {key: value for key, value in self.environ.items() if key in ("XDG_CONFIG_HOME", "COPILOT_HOME")}
-        rows = [{"client": key, "path": product_path(key, self.home, self.os_kind, environ)[0], "action": "create"}
+        rows = [{"client": key, "path": product_path(key, self.home, self.os_kind, environ)[0], "action": "create",
+                 "file_sha256": None, "desired_sha256": "d" * 64, "current_class": "absent", "ownership": "unproven"}
                 for key in clients]
-        definition, extras = product_definition(self.home, self.os_kind, environ)
+        python = str(self.home / ".memory-os" / "venv" / "bin" / "python")
+        settings = product_settings(self.home)
+        manager = product_service.Launchd() if self.os_kind == "darwin" else product_service.SystemdUser(
+            {"HOME": str(self.home), **environ})
+        service = qs._service_plan(settings, self.home, python, LEXICAL_RESOURCE_ENV, backend="sqlite",
+                                   profile="lexical", manager=manager)
+        service["loaded_state"] = "absent"
         answer = {"ok": True, "stage": "preview", "writes": "none (preview)", "blockers": [], "blocker_codes": [],
-                  "profile": "lexical", "cell": {"cell_id": CELL}, "clients": rows, "unknown_clients": [],
-                  "service": {"label": LABEL, "path": definition, "state": "absent", **extras}, "port": 8765,
-                  "token": {"path": str(self.home / ".config/memory-os/http.token"), "state": "absent"},
+                  "profile": "lexical", "backend": "sqlite", "python": python, "cell": {"cell_id": cell},
+                  "clients": rows, "unknown_clients": [], "service": service, "port": 8765,
+                  "token": {"path": str(settings.token_file), "state": "absent"},
+                  "client_env": {"MEMORY_V4_URL": settings.url, "MEMORY_V4_TOKEN_FILE": str(settings.token_file),
+                                 "MEMORY_V4_OPS_DIR": str(settings.ops_dir)},
+                  "identity": {"version": VERSION, "commit": "0" * 40}, "replace_existing": [],
                   "downloads_required_bytes": 0, "notices": []}
         answer.update(changes)
-        return answer
+        return seal(answer)
 
-    def answers(self, *, preview=None, apply=None):
+    def answers(self, *, preview=None, apply=None, exit=None):
         path = self.root / "fakeqs.json"
         current = json.loads(path.read_text()) if path.exists() else {"preview": {}, "apply": {}}
         if preview is not None:
             current["preview"] = preview
         if apply is not None:
             current["apply"] = apply
+        if exit is not None:
+            current["exit"] = exit
         path.write_text(json.dumps(current))
 
     def qs_calls(self):
@@ -416,8 +445,14 @@ def test_without_a_terminal_it_is_the_complete_preview_and_nothing_is_written(o)
     before = o.inventory()
     code, text = o.main(terminal=lambda: None)
     assert code == bs.EXIT_NOT_CONFIRMED == 3
-    assert "No terminal" in text and "nothing written" in text
-    for words in ("acquisitions", "wheel " + o.m.wheel.name, "bytes fetched by --apply", f"venv             : {o.home}",
+    assert "No terminal" in text and "the bootstrap wrote nothing" in text
+    for words in (bs.WRITES_BEFORE_ANSWER, bs.CHECKED_BEFORE, bs.CHECKED_AFTER, "private temporary directory removed",
+                  "nothing is written in HOME, in the store or in any client configuration, and no service",
+                  f"interpreter      : {o.home}/.memory-os/venv/bin/python",
+                  "service program  : " + bs.quote([str(o.home / ".memory-os/venv/bin/python"), "-m",
+                                                    "memory_os_v4.server", "--transport", "http", "--host",
+                                                    "127.0.0.1", "--port", "8765", "--warm"]),
+                  "acquisitions", "wheel " + o.m.wheel.name, "bytes fetched by --apply", f"venv             : {o.home}",
                   f"{LABEL} on http://127.0.0.1:8765/mcp/", "manager launchd",
                   str(o.home / "Library/LaunchAgents" / (LABEL + ".plist")),
                   str(o.home / ".config/memory-os/http.token"), "created (0600), never printed",
@@ -481,16 +516,19 @@ def test_after_y_every_step_runs_in_order_with_exactly_the_announced_clients(o):
     calls = o.qs_calls()
     assert [call["mode"] for call in calls] == ["preview", "apply"]
     assert calls[0]["argv"] == ["quickstart", "--profile", "lexical", "--clients", "codex,cursor"]
-    assert calls[1]["argv"] == ["quickstart", "--profile", "lexical", "--clients", "codex,cursor", "--apply"]
+    digest = json.loads((o.root / "fakeqs.json").read_text())["preview"]["plan_digest"]
+    assert calls[1]["argv"] == ["quickstart", "--profile", "lexical", "--clients", "codex,cursor", "--apply",
+                                "--expect-plan", digest]
     for call in calls:  # the allow-listed environment, for the preview and the apply alike
         assert set(call["env"]) <= set(bs.CHILD_ENV_KEEP) | {"PYTHONDONTWRITEBYTECODE", "__CF_USER_TEXT_ENCODING",
                                                              "XDG_CONFIG_HOME"}
     assert o.ready_calls == [(bs.READY_URL, str(o.home / ".config/memory-os/http.token"), VERSION)]
     venv = o.home / ".memory-os" / "venv"
     admin = str(venv / "bin" / "memory-os-admin")
-    assert shlex.split(report["next"]["undo"]) == [admin, "quickstart", "--undo", "20261126T101500Z-aaaa",
+    bound = ["env", *bs.installation_env(report["announced"])]
+    assert shlex.split(report["next"]["undo"]) == [*bound, admin, "quickstart", "--undo", "20261126T101500Z-aaaa",
                                                    "--with-service"]
-    assert shlex.split(report["next"]["doctor"]) == [admin, "doctor"]
+    assert shlex.split(report["next"]["doctor"]) == [*bound, admin, "doctor"]
     assert "installed and ready" in text and "doctor" in text and "--undo 20261126T101500Z-aaaa" in text
     saved = Path(report["report_path"])
     assert saved.parent == Path(report["plan"]["work_dir"]) and json.loads(saved.read_text())["ok"] is True
@@ -507,32 +545,72 @@ def test_a_blocker_of_the_quickstart_preview_after_y_stops_before_apply(o):
     assert "is kept" in text and "--profile lexical --clients codex,cursor" in text
 
 
-@pytest.mark.parametrize("label,change", [
-    ("client path", lambda o, p: p["clients"][0].update(path=str(o.home / "elsewhere.toml"))),
-    ("extra client", lambda o, p: p["clients"].append({"client": "zed", "path": "/x", "action": "create"})),
-    ("missing client", lambda o, p: p["clients"].pop()),
-    ("refused client", lambda o, p: p["clients"][1].update(action="refuse-existing-other")),
-    ("service label", lambda o, p: p["service"].update(label="other.label")),
-    ("service path", lambda o, p: p["service"].update(path="/elsewhere/x.plist")),
-    ("service manager", lambda o, p: p["service"].update(manager="systemd-user")),
-    ("service owned", lambda o, p: p["service"].update(state="owned")),
-    ("port", lambda o, p: p.update(port=9999)),
-    ("token", lambda o, p: p["token"].update(path="/elsewhere/token")),
-    ("download", lambda o, p: p.update(downloads_required_bytes=1_681_126)),
-    ("profile", lambda o, p: p.update(profile="semantic")),
-    ("cell", lambda o, p: p.update(cell={"cell_id": "ubuntu2404-arm64-py311"})),
-    ("unknown", lambda o, p: p.update(unknown_clients=["x"])),
-    ("not a preview", lambda o, p: p.update(writes="something")),
+def _env(key, value):
+    return lambda o, p: p["service"]["env"].update({key: value})
+
+
+@pytest.mark.parametrize("label,change,words", [
+    ("client path", lambda o, p: p["clients"][0].update(path=str(o.home / "elsewhere.toml")), "codex: path"),
+    ("extra client", lambda o, p: p["clients"].append({"client": "zed", "path": "/x", "action": "create"}), "clients"),
+    ("missing client", lambda o, p: p["clients"].pop(), "clients"),
+    ("refused client", lambda o, p: p["clients"][1].update(action="refuse-existing-other"), "cursor: action"),
+    ("service label", lambda o, p: p["service"].update(label="other.label"), "service 'other.label'"),
+    ("service path", lambda o, p: p["service"].update(path="/elsewhere/x.plist"), "/elsewhere/x.plist"),
+    ("service manager", lambda o, p: p["service"].update(manager="systemd-user"), "service manager"),
+    ("service owned", lambda o, p: p["service"].update(state="owned"), "service state 'owned'"),
+    ("job loaded", lambda o, p: p["service"].update(loaded_state="loaded"), "service job state"),
+    ("service program", lambda o, p: p["service"]["argv"].__setitem__(0, "/other/python"), "service program"),
+    ("service port arg", lambda o, p: p["service"]["argv"].__setitem__(-2, "9999"), "service program"),
+    ("store", _env("MEMORY_V4_DIR", "/elsewhere/store"), "service environment differs on MEMORY_V4_DIR"),
+    ("ops dir", _env("MEMORY_V4_OPS_DIR", "/elsewhere/ops"), "differs on MEMORY_V4_OPS_DIR"),
+    ("service token", _env("MEMORY_V4_TOKEN_FILE", "/elsewhere/t"), "differs on MEMORY_V4_TOKEN_FILE"),
+    ("service label env", _env("MEMORY_V4_SERVICE_LABEL", "x"), "differs on MEMORY_V4_SERVICE_LABEL"),
+    ("extra env", _env("MEMORY_V4_EMBED_MODEL", "x"), "differs on MEMORY_V4_EMBED_MODEL"),
+    ("port", lambda o, p: p.update(port=9999), "port 9999"),
+    ("token", lambda o, p: p["token"].update(path="/elsewhere/token"), "token '/elsewhere/token'"),
+    ("download", lambda o, p: p.update(downloads_required_bytes=1_681_126), "resource downloads"),
+    ("profile", lambda o, p: p.update(profile="semantic"), "profile 'semantic'"),
+    ("cell", lambda o, p: p.update(cell={"cell_id": "ubuntu2404-arm64-py311"}), "cell"),
+    ("unknown", lambda o, p: p.update(unknown_clients=["x"]), "clients"),
+    ("not a preview", lambda o, p: p.update(writes="something"), "not a quickstart preview"),
+    ("interpreter", lambda o, p: p.update(python="/other/python"), "interpreter '/other/python'"),
+    ("backend", lambda o, p: p.update(backend="jsonl"), "backend 'jsonl'"),
+    ("client env", lambda o, p: p["client_env"].update(MEMORY_V4_OPS_DIR="/elsewhere"), "client environment"),
 ])
-def test_a_quickstart_preview_that_differs_from_the_announcement_stops_before_apply(o, label, change):
+def test_a_quickstart_preview_that_differs_from_the_announcement_stops_before_apply(o, label, change, words):
     preview = o.preview(["codex", "cursor"])
     change(o, preview)
-    o.answers(preview=preview)
+    o.answers(preview=seal(preview))  # a coherent digest: only the announced property differs
     report, text = o.run()
     assert report["code"] == "interactive_preview_mismatch", (label, report.get("error"))
-    assert report["differences"] and "quickstart --apply was NOT run" in report["error"]
+    assert any(words in item for item in report["differences"]), (label, report["differences"])
+    assert not any("plan_digest" in item for item in report["differences"]), label
+    assert "quickstart --apply was NOT run" in report["error"]
     assert [call["mode"] for call in o.qs_calls()] == ["preview"] and o.ready_calls == []
     assert "quickstart_apply" not in [step["step"] for step in report["steps"]]
+
+
+@pytest.mark.parametrize("label,change", [
+    ("absent", lambda p: p.pop("plan_digest")),
+    ("forged", lambda p: p.update(plan_digest="e" * 64)),
+    ("not hex", lambda p: p.update(plan_digest="digest")),
+    ("stale", lambda p: p["clients"][0].update(file_sha256="f" * 64)),  # content changed, digest kept
+])
+def test_a_preview_whose_digest_is_not_its_own_stops_before_apply(o, label, change):
+    preview = o.preview(["codex", "cursor"])
+    change(preview)
+    o.answers(preview=preview)
+    report, _ = o.run()
+    assert report["code"] == "interactive_preview_mismatch", label
+    assert any("plan_digest" in item for item in report["differences"]), label
+    assert [call["mode"] for call in o.qs_calls()] == ["preview"]
+
+
+def test_an_ok_preview_with_a_failing_process_is_not_trusted(o):
+    o.answers(exit={"preview": 3})
+    report, _ = o.run()
+    assert report["code"] == "quickstart_returncode" and [call["mode"] for call in o.qs_calls()] == ["preview"]
+    assert o.ready_calls == [] and "quickstart_apply" not in [step["step"] for step in report["steps"]]
 
 
 def test_a_failed_quickstart_apply_names_its_undo_and_skips_ready(o):
@@ -685,3 +763,196 @@ def test_the_options_namespace_is_never_mutated(o):
     bs.interactive(options, pin=bs.load_pin(json.dumps(o.m.pin)), run=o.m.run, environ=o.environ, host=o.m.host,
                    out=io.StringIO(), terminal=lambda: None, ready=o.ready, which=o.which)
     assert vars(options) == snapshot and isinstance(options, argparse.Namespace)
+
+
+# ---------------------------------------------------------------- round 2 (Codex r1 of the one-liner, decisions of Romain)
+
+class RecordingOut(io.StringIO):
+    """stdout that remembers how much had been flushed (a pipe or ``tee`` shows only that much)."""
+
+    flushed = 0
+
+    def flush(self):
+        super().flush()
+        self.flushed = len(self.getvalue())
+
+
+def test_the_whole_preview_is_flushed_before_the_question(o):
+    out = RecordingOut()
+    seen = {}
+
+    class Watching(FakeTerminal):
+        def write(self, text):
+            seen["flushed"], seen["total"] = out.flushed, len(out.getvalue())
+            super().write(text)
+    bs.interactive(o.options(), pin=bs.load_pin(json.dumps(o.m.pin)), run=o.m.run, environ=o.environ, host=o.m.host,
+                   out=out, terminal=Watching("n"), ready=o.ready, which=o.which)
+    assert seen["total"] > 0 and seen["flushed"] == seen["total"]
+    assert "ONE-COMMAND INSTALL" in out.getvalue()[:seen["flushed"]]
+
+
+def test_follow_up_commands_name_the_announced_installation(o, monkeypatch):
+    o.environ.update(MEMORY_V4_SERVICE_LABEL="other.label", MEMORY_V4_DIR="/elsewhere/store",
+                     MEMORY_V4_URL="http://127.0.0.1:9999/mcp/", MEMORY_V4_TOKEN_FILE="/elsewhere/token",
+                     MEMORY_V4_OPS_DIR="/elsewhere/ops")
+    report, text = o.run()
+    assert report["ok"] is True, report.get("error")
+    announced = report["announced"]
+    for name in ("doctor", "undo", "uninstall"):
+        words = shlex.split(report["next"][name].split(" (preview)")[0])
+        assert words[0] == "env" and words[1:6] == bs.installation_env(announced), name
+        assert words[1:6] == [f"MEMORY_V4_SERVICE_LABEL={LABEL}", "MEMORY_V4_URL=http://127.0.0.1:8765/mcp/",
+                              f"MEMORY_V4_DIR={o.home}/.memory-os-v4",
+                              f"MEMORY_V4_TOKEN_FILE={o.home}/.config/memory-os/http.token",
+                              f"MEMORY_V4_OPS_DIR={o.home}/.local/state/memory-os"]
+        assert report["next"][name] in text
+    # what the product reads from exactly those assignments is the announced installation
+    for key in [key for key in os.environ if key.startswith("MEMORY_V4_")]:
+        monkeypatch.delenv(key)
+    for assignment in bs.installation_env(announced):
+        key, value = assignment.split("=", 1)
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("HOME", str(o.home))
+    settings = OpsSettings.from_env()
+    assert (settings.service_label, settings.url, str(settings.store_dir), str(settings.token_file),
+            str(settings.ops_dir)) == (LABEL, bs.SERVICE_URL, announced["store"], announced["token"]["path"],
+                                       announced["ops_dir"])
+
+
+def test_the_manual_continuation_after_a_stop_is_bound_too(o):
+    o.answers(preview=o.preview(["codex"]))  # differs: cursor was announced
+    report, text = o.run()
+    assert report["code"] == "interactive_preview_mismatch"
+    assert "env MEMORY_V4_SERVICE_LABEL=local.memory-os-v4 MEMORY_V4_URL=" in text
+
+
+def test_the_standalone_cpython_is_announced_before_the_question_and_fetched_only_after_y(tmp_path):
+    one = OneLiner(tmp_path)
+    one.m.pin = make_pin(one.m.wheel, cells=tuple(bs.CELLS))
+    one.touch(".cursor/mcp.json")
+    one.answers(preview=one.preview(["cursor"], cell="macos-arm64-py313"))
+    terminal = FakeTerminal("n")
+    report, text = one.run("--cpython", "3.13", terminal=terminal)
+    asked = text.index("No terminal") if "No terminal" in text else len(text)
+    line = next(item for item in text[:asked].splitlines() if item.startswith("  download after y"))
+    assert "CPython 3.13.18" in line and "25600000 bytes (about 25.6 MB)" in line and bs.STANDALONE_SOURCE in line
+    assert str(one.home / ".local/share/uv/python") in line
+    assert "| after y (skipped by uv when already installed)" in text
+    assert report["stage"] == "declined" and one.m.verbs() == ["--version"]  # nothing acquired without y
+    # with y: the acquisition happens after the answer, then the attestation of the downloaded build
+    one.m.rewrite = ("venv/bin/python", lambda seen: {**seen, "python": [3, 13, 18], "sqlite": [3, 53, 1],
+                                                      "build": "20261110", "standalone": True,
+                                                      "sys_version": "3.13.18 (main) [Clang]"})
+    calls_at_answer = []
+    report, text = one.run("--cpython", "3.13", terminal=FakeTerminal(
+        "y", on_read=lambda: calls_at_answer.append(list(one.m.verbs()))))
+    assert calls_at_answer == [["--version", "--version"]]  # only uv --version before the answer
+    assert one.m.verbs()[2:5] == ["--version", "python install", "venv --no-config"]
+    assert report["ok"] is True, report.get("error")
+    assert report["apply"]["standalone"]["build_state"] == "attested"
+
+
+def test_ubuntu_announces_its_standalone_cpython_with_its_size(tmp_path):
+    one = OneLiner(tmp_path, host=UBUNTU)
+    one.m.pin = make_pin(one.m.wheel, cells=tuple(bs.CELLS))
+    one.touch(".cursor/mcp.json")
+    report, text = one.run("--cpython", "3.11", terminal=lambda: None)
+    assert report["stage"] == "no-terminal", report["plan"]["blockers"]
+    line = next(item for item in text.splitlines() if item.startswith("  download after y"))
+    assert "CPython 3.11.18" in line and "49500000 bytes (about 49.5 MB)" in line
+    assert "manager systemd-user" in text and one.m.verbs() == ["--version"]
+
+
+def test_the_semantic_refusal_points_to_the_readme_section(o):
+    report, text = o.run("--profile", "semantic", terminal=FakeTerminal("y"))
+    assert "interactive_profile_lexical_only" in report["plan"]["blocker_codes"]
+    assert "'Semantic profile (recommended)'" in text
+    readme = (Path(bs.__file__).resolve().parents[1] / "README.md").read_text()
+    assert "**Semantic profile (recommended)**" in readme
+
+
+# ---- the product side of the binding: plan_digest and --expect-plan
+
+def test_the_bootstrap_digest_is_the_product_digest_of_a_real_plan(c):
+    from setup_fixture_410 import prepare
+    plan = prepare(c, profile="lexical")
+    assert plan["ok"], plan["blockers"]
+    printed = json.loads(json.dumps({**plan, "plan_digest": qs.plan_digest(plan)}, ensure_ascii=False))
+    assert bs.quickstart_plan_digest(printed) == qs.plan_digest(plan) == printed["plan_digest"]
+    assert (bs.PLAN_DIGEST_VERSION, bs.PLAN_DIGEST_CLIENT_KEYS, bs.PLAN_DIGEST_SERVICE_KEYS) == \
+        (qs.PLAN_DIGEST_VERSION, qs.PLAN_DIGEST_CLIENT_KEYS, qs.PLAN_DIGEST_SERVICE_KEYS)
+
+
+@pytest.mark.parametrize("label,change", [
+    ("service owned", lambda p: p["service"].update(state="owned")),
+    ("job loaded", lambda p: p["service"].update(loaded_state="loaded")),
+    ("service argv", lambda p: p["service"]["argv"].append("--other")),
+    ("service env", lambda p: p["service"]["env"].update(MEMORY_V4_DIR="/elsewhere")),
+    ("definition", lambda p: p["service"].update(path="/elsewhere.plist")),
+    ("client file", lambda p: p["clients"][0].update(file_sha256="f" * 64)),
+    ("client path", lambda p: p["clients"][0].update(path="/elsewhere.json")),
+    ("client action", lambda p: p["clients"][0].update(action="replace")),
+    ("token", lambda p: p["token"].update(path="/elsewhere/token")),
+    ("profile", lambda p: p.update(profile="semantic")),
+    ("python", lambda p: p.update(python="/other/python")),
+    ("download", lambda p: p.update(downloads_required_bytes=1)),
+    ("consent", lambda p: p.update(replace_existing=["cursor"])),
+])
+def test_the_plan_digest_moves_with_every_written_property(c, label, change):
+    from setup_fixture_410 import prepare
+    plan = prepare(c, profile="lexical")
+    other = json.loads(json.dumps(plan))
+    change(other)
+    assert qs.plan_digest(other) != qs.plan_digest(plan), label
+    unchanged = json.loads(json.dumps(plan))
+    unchanged.update(created_at=0, disk_free_bytes=1, port_state="unknown")  # volatile facts are outside
+    assert qs.plan_digest(unchanged) == qs.plan_digest(plan)
+
+
+def test_apply_refuses_a_plan_that_is_not_the_accepted_one_before_any_write(c):
+    from memory_os_v4.ops.doctor import Check
+    from setup_fixture_410 import fake_probe, prepare
+    plan = prepare(c, profile="lexical")
+    before = tree(c.home)
+    with pytest.raises(qs.QuickstartError) as refused:
+        qs.apply_install(plan, c.settings, home=c.home, run=c.system, probe=fake_probe, clock=c.clock,
+                         doctor_run=lambda s: [Check("server", "PASS", "synthetic")], expected_plan="0" * 64)
+    assert refused.value.code == "plan_digest_mismatch" and "nothing written" in str(refused.value)
+    assert tree(c.home) == before and not (c.home / qs.JOURNAL_SUBDIR).exists()
+    result = qs.apply_install(plan, c.settings, home=c.home, run=c.system, probe=fake_probe, clock=c.clock,
+                              doctor_run=lambda s: [Check("server", "PASS", "synthetic")],
+                              expected_plan=qs.plan_digest(plan))
+    assert result["ok"] is True, result.get("error")
+
+
+def test_the_cli_prints_the_digest_and_hands_expect_plan_to_apply(monkeypatch, capsys):
+    from memory_os_v4.ops import cli
+    plan = {"ok": True, "profile": "lexical", "clients": [], "service": {"label": LABEL}, "blockers": []}
+    seen = {}
+    monkeypatch.setattr(qs, "settings_for_install", lambda s, backend=None: (s, "sqlite"))
+    monkeypatch.setattr(qs, "prepare", lambda *a, **k: plan)
+
+    def apply_install(p, s, **kwargs):
+        seen.update(kwargs)
+        return {"ok": True, "stage": "complete"}
+    monkeypatch.setattr(qs, "apply_install", apply_install)
+    args = argparse.Namespace(undo=None, clients="cursor", backend=None, profile="lexical", replace_existing=None,
+                              apply=False, report=False, download_approved=False, demo=False, expect_plan=None)
+    assert cli.cmd_quickstart(args, None) == 0
+    assert json.loads(capsys.readouterr().out)["plan_digest"] == qs.plan_digest(plan)
+    args.apply = True
+    assert cli.cmd_quickstart(args, None) == 0 and "expected_plan" not in seen  # unchanged call without the option
+    args.expect_plan = "a" * 64
+    assert cli.cmd_quickstart(args, None) == 0 and seen["expected_plan"] == "a" * 64
+    capsys.readouterr()
+    for argv in (["quickstart", "--profile", "lexical", "--expect-plan", "a" * 64],
+                 ["quickstart", "--profile", "lexical", "--apply", "--expect-plan", "not-a-digest"]):
+        with pytest.raises(SystemExit) as refused:
+            cli.main(argv)
+        assert refused.value.code == 2 and "--expect-plan" in capsys.readouterr().err
+
+
+@pytest.fixture
+def c(tmp_path, monkeypatch):
+    from setup_fixture_410 import setup_context
+    return setup_context(tmp_path, monkeypatch)

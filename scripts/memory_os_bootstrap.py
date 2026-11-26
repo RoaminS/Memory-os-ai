@@ -37,13 +37,19 @@ preview, plus what the install as a whole would write: the MCP clients DETECTED 
 configuration file, or their command-line tool, at the per-OS paths of ``ops/clients.py``; a relocating variable or
 an unsafe path excludes a client, never guessed), the service (label, port, manager, definition), the token, the
 store. Profile ``lexical`` by default (``semantic`` is refused here: its model download would not be announced).
-Every refusal of the preview happens BEFORE any question. Then ONE question, read from ``/dev/tty`` (``[y/N]``,
-default No; anything but y/yes is No; without a terminal: preview only). Nothing is written before the answer. After
-``y``: the plan is recomputed and must be the announced one; the venv is created as by ``--apply``; the quickstart
-preview run from the venv must match the announcement (profile, cell, clients and paths, service, token, no download,
-no blocker), otherwise it stops fail-closed; then ``quickstart --apply`` with exactly the announced clients, and an
-authenticated ``/ready`` (token read from its file, never printed). The confirmation is also the consent to the
-standalone CPython download of route (i) when the preview lists it.
+Every refusal of the preview happens BEFORE any question; what can only be attested once acquired (route (i): the
+SQLite and the build of the downloaded standalone CPython, read back from the created venv; the installed artifact;
+the quickstart preview of the venv) is checked after the answer, before anything else is installed or written. Then
+ONE question, read from ``/dev/tty`` (``[y/N]``, default No; anything but y/yes is No; without a terminal: preview
+only). The bootstrap writes nothing before the answer: nothing in HOME, the store or any client configuration, and no
+service (``install.sh``, when it launches it, has only written the two verified files of its private temporary
+directory, removed at exit). After ``y``: the plan is recomputed and must be the announced one; the venv is created
+as by ``--apply``; the quickstart preview run from the venv must match the announcement (profile, cell, interpreter,
+clients and paths, service argv/environment/definition/state, store, ops directory, token, no download, no blocker),
+otherwise it stops fail-closed; its ``plan_digest`` is recomputed here and handed to ``quickstart --apply
+--expect-plan``, which refuses before any write a plan that is not that one; then an authenticated ``/ready`` (token
+read from its file, never printed). The confirmation is also the consent to the standalone CPython download of route
+(i) that the preview lists with its source and size. Follow-up commands name the installation explicitly (env).
 
 RELEASE PIN: the block below is rewritten by the release tooling (``fill_pin``) once the wheel is
 built and the locks are frozen. The repository copy is a TEMPLATE: it previews, and refuses to
@@ -192,6 +198,21 @@ TOKEN_SUBPATH, STORE_SUBPATH, OPS_SUBPATH = ".config/memory-os/http.token", ".me
 # Actions of the quickstart preview that write a client entry as announced ("unchanged" writes nothing).
 WRITING_ACTIONS = ("create", "replace", "unchanged")
 CONFIRM_PROMPT = "Install Memory OS AI with exactly this plan? [y/N] "
+# Same digest as ``ops/quickstart.plan_digest`` (a test compares them on a real plan).
+PLAN_DIGEST_VERSION = 1
+PLAN_DIGEST_CLIENT_KEYS = ("client", "path", "file_sha256", "action", "desired_sha256", "current_class", "ownership")
+PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "manager", "plist", "unit",
+                            "loaded_state")
+WRITES_BEFORE_ANSWER = ("nothing is written in HOME, in the store or in any client configuration, and no service is "
+                        "installed, before your y: this bootstrap writes nothing before it (when install.sh launched "
+                        "it, its only writes were the two verified files, this bootstrap and SHA256SUMS, in a private "
+                        "temporary directory removed at exit)")
+CHECKED_BEFORE = ("cell, release pin and lock, uv, the interpreter of route (a) and its SQLite (read back by executing "
+                  "it), destinations, clients and their paths, service manager and definition, existing installation")
+CHECKED_AFTER = ("only once acquired, after y and before anything else is installed: route (i) the SQLite and the "
+                 "build of the downloaded standalone CPython (read back from the created venv), then the digest of "
+                 "the installed artifact, then the quickstart preview of the venv (compared with this announcement "
+                 "and bound to quickstart --apply by its plan digest)")
 EXIT_NOT_CONFIRMED = 3  # nothing written: no terminal, or an answer other than y/yes
 ENTRY_SCAN_MAX_BYTES = 16_000_000
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43,256}")
@@ -819,11 +840,14 @@ def uv_commands(*, uv, venv, route, base_python, cell_id, requirements, wheelhou
     return commands
 
 
-def quickstart_command(venv, profile, clients, *, apply=False, download_approved=True) -> list:
+def quickstart_command(venv, profile, clients, *, apply=False, download_approved=True, expect_plan=None) -> list:
     argv = [os.path.join(venv, "bin", "python"), "-I", "-m", MODULE + ".ops.cli", "quickstart", "--profile", profile]
     if clients:
         argv += ["--clients", clients]
-    return argv + ((["--apply"] + (["--download-approved"] if download_approved else [])) if apply else [])
+    if not apply:
+        return argv
+    return argv + ["--apply"] + (["--download-approved"] if download_approved else []) + (
+        ["--expect-plan", expect_plan] if expect_plan else [])
 
 
 def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None, clock=time.time) -> dict:
@@ -1266,6 +1290,9 @@ def apply_plan(plan: dict, options, *, pin=None, run=subprocess.run, environ=Non
         if preview.get("ok") is not True:
             raise Refused("quickstart_blocked", "the venv is installed and attested, but the quickstart preview "
                           "reports blockers: " + "; ".join(str(item) for item in preview.get("blockers", [])))
+        if code != 0:
+            raise Refused("quickstart_returncode", f"the quickstart preview says ok but its process returned {code}; "
+                          "it is not trusted")
         report.update(ok=True, stage="complete",
                       next=quote(quickstart_command(venv, profile, options.clients, apply=True)))
     except Refused as refusal:
@@ -1471,8 +1498,9 @@ def interactive_extras(options, *, host, environ, which) -> dict:
     blockers, notices = list(clients["blockers"]), []
     if options.profile != "lexical":
         blockers.append(("interactive_profile_lexical_only", "interactive_profile_lexical_only: the one-command "
-                         "install is the lexical profile (no resource download); for the semantic profile use "
-                         "--apply, then the quickstart preview and apply yourself; nothing written"))
+                         "install is the lexical profile (no resource download); for the semantic profile follow "
+                         "the 'Semantic profile (recommended)' commands of the README manual install (or --apply, "
+                         "then the quickstart preview and apply yourself); nothing written"))
     if not clients["selected"] and explicit is None:
         blockers.append(("no_client_detected", "no_client_detected: no MCP client was found on this machine "
                          "(user-level configuration file or command-line tool); name them with --clients a,b; "
@@ -1521,10 +1549,58 @@ def interactive_extras(options, *, host, environ, which) -> dict:
         "token": {"path": token, "state": "exists: validated and reused, never printed" if os.path.lexists(token)
                   else "created (0600), never printed"},
         "store": store, "ops_dir": str(PurePosixPath(home) / OPS_SUBPATH),
-        "resource_downloads_bytes": 0,
+        "resource_downloads_bytes": 0, "backend": "sqlite", "python": None,
     }
+    announced["client_env"] = {"MEMORY_V4_URL": SERVICE_URL, "MEMORY_V4_TOKEN_FILE": token,
+                               "MEMORY_V4_OPS_DIR": announced["ops_dir"]}
     return {"announced": announced, "blockers": blockers, "notices": notices,
             "clients_arg": ",".join(item["client"] for item in clients["selected"])}
+
+
+def quickstart_plan_digest(plan) -> str | None:
+    """``ops/quickstart.plan_digest`` of a printed preview (same fields, same canonical JSON); None if unusable."""
+    if not isinstance(plan, dict):
+        return None
+    service = plan.get("service") if isinstance(plan.get("service"), dict) else {}
+    clients = plan.get("clients") if isinstance(plan.get("clients"), list) else []
+    if not all(isinstance(client, dict) for client in clients):
+        return None
+    body = {"version": PLAN_DIGEST_VERSION, "profile": plan.get("profile"), "backend": plan.get("backend"),
+            "python": plan.get("python"), "port": plan.get("port"),
+            "token_file": (plan.get("token") or {}).get("path") if isinstance(plan.get("token"), dict) else None,
+            "client_env": plan.get("client_env"),
+            "cell_id": (plan.get("cell") or {}).get("cell_id") if isinstance(plan.get("cell"), dict) else None,
+            "identity": plan.get("identity"), "downloads_required_bytes": plan.get("downloads_required_bytes"),
+            "replace_existing": plan.get("replace_existing"),
+            "clients": [{key: client.get(key) for key in PLAN_DIGEST_CLIENT_KEYS} for client in clients],
+            "service": {key: service.get(key) for key in PLAN_DIGEST_SERVICE_KEYS}}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def expected_service(*, python, store, ops_dir, token) -> dict:
+    """The service quickstart defines for a new lexical SQLite install from ``python`` (``_service_plan``)."""
+    argv = [python, "-m", "memory_os_v4.server", "--transport", "http", "--host", "127.0.0.1", "--port",
+            str(SERVICE_PORT), "--warm"]
+    env = {"MEMORY_V4_DIR": store, "MEMORY_V4_TOKEN_FILE": token, "MEMORY_V4_URL": SERVICE_URL,
+           "MEMORY_V4_SERVICE_LABEL": SERVICE_LABEL, "MEMORY_V4_STORE_BACKEND": "sqlite_s1",
+           "MEMORY_V4_WORK_STATE": "true", "MEMORY_V4_MAINTENANCE_MODE": "disabled",
+           "MEMORY_V4_BM25_PROFILE": "scoped_literal", "MEMORY_V4_LEXICAL_GUARD_K": "3",
+           "TOKENIZERS_PARALLELISM": "false", "MEMORY_V4_OPS_DIR": ops_dir, "HF_HUB_OFFLINE": "1",
+           "TRANSFORMERS_OFFLINE": "1", "MEMORY_V4_RETRIEVAL_PROFILE": "lexical"}
+    return {"argv": argv, "env": env}
+
+
+def installation_env(announced) -> list:
+    """``NAME=value`` words naming the announced installation, so that no inherited variable selects another."""
+    return [f"MEMORY_V4_SERVICE_LABEL={announced['service']['label']}", f"MEMORY_V4_URL={announced['service']['url']}",
+            f"MEMORY_V4_DIR={announced['store']}", f"MEMORY_V4_TOKEN_FILE={announced['token']['path']}",
+            f"MEMORY_V4_OPS_DIR={announced['ops_dir']}"]
+
+
+def follow_up(announced, argv) -> str:
+    """A follow-up command (doctor, undo, uninstall, quickstart) bound to the announced installation."""
+    return quote(["env", *installation_env(announced), *argv])
 
 
 def compare_preview(preview, announced, *, cell_id) -> list:
@@ -1568,6 +1644,24 @@ def compare_preview(preview, announced, *, cell_id) -> list:
     if preview.get("downloads_required_bytes") != announced["resource_downloads_bytes"]:
         diffs.append(f"resource downloads {preview.get('downloads_required_bytes')!r} bytes, announced "
                      f"{announced['resource_downloads_bytes']}")
+    if preview.get("python") != announced["python"]:
+        diffs.append(f"interpreter {preview.get('python')!r} instead of {announced['python']!r}")
+    if preview.get("backend") != announced["backend"]:
+        diffs.append(f"backend {preview.get('backend')!r} instead of {announced['backend']!r}")
+    if preview.get("client_env") != announced["client_env"]:
+        diffs.append("client environment differs from the announced one (URL, token file, ops directory)")
+    if service.get("argv") != expected.get("argv"):
+        diffs.append(f"service program {service.get('argv')!r} instead of {expected.get('argv')!r}")
+    if service.get("env") != expected.get("env"):
+        wanted_env = expected.get("env") or {}
+        seen_env = service.get("env") if isinstance(service.get("env"), dict) else {}
+        keys = sorted(key for key in set(wanted_env) | set(seen_env) if wanted_env.get(key) != seen_env.get(key))
+        diffs.append("service environment differs on " + ", ".join(keys))
+    if service.get("loaded_state") != "absent":
+        diffs.append(f"service job state {service.get('loaded_state')!r} (no job was announced)")
+    digest = preview.get("plan_digest")
+    if not isinstance(digest, str) or not HEX64.fullmatch(digest) or digest != quickstart_plan_digest(preview):
+        diffs.append("plan_digest absent or not the digest of this preview")
     return diffs
 
 
@@ -1674,10 +1768,16 @@ def render_interactive(extras: dict) -> str:
     announced = extras["announced"]
     service, token = announced["service"], announced["token"]
     lines = ["", "ONE-COMMAND INSTALL: one confirmation covers everything listed above and below",
+             "  before y         : " + WRITES_BEFORE_ANSWER,
              f"  profile          : {announced['profile']} (no resource download; the wheels listed above come from "
-             "their pinned sources)",
+             "their pinned sources)"]
+    for item in extras.get("downloads_after_y") or []:
+        lines.append(f"  download after y : {item['object']} ({item['version']}), {item['size']} bytes "
+                     f"(about {item['size'] / 1e6:.1f} MB), from {item['source']}, into {item['destination']}")
+    lines += [f"  interpreter      : {announced['python']} (the venv)",
              f"  service          : {service['label']} on {service['url']} ({service['listens']}), manager "
              f"{service['manager']}, definition {service['definition']}",
+             "  service program  : " + quote(service.get("argv") or []),
              f"  token            : {token['path']} ({token['state']})",
              f"  store            : {announced['store']} (new SQLite store); logs and journals: {announced['ops_dir']}",
              f"  clients ({announced['mode']}), files written:"]
@@ -1686,9 +1786,12 @@ def render_interactive(extras: dict) -> str:
     if announced["excluded_clients"]:
         lines.append("  clients NOT configured:")
         lines += [f"    - {item['client']}: {item['reason']}" for item in announced["excluded_clients"]]
-    lines += ["  after y          : the plan is computed again and must not change; the venv is created; the "
+    lines += ["  checked now      : " + CHECKED_BEFORE,
+              "  checked after y  : " + CHECKED_AFTER,
+              "  after y          : the plan is computed again and must not change; the venv is created; the "
               "quickstart preview run from it must match this announcement exactly (any blocker or difference stops "
-              "before quickstart --apply); then quickstart --apply and an authenticated /ready check",
+              "before quickstart --apply); then quickstart --apply --expect-plan <its digest> and an authenticated "
+              "/ready check",
               "  undo afterwards  : quickstart --undo STAMP --with-service, or uninstall (printed at the end); data "
               "is never deleted"]
     lines += ["  notice: " + notice for notice in extras["notices"]]
@@ -1733,6 +1836,14 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
         planned.work_dir = work_dir or options.work_dir
         planned.replay = []
         plan = build_plan(planned, pin=pin, run=run, environ=environ, host=host, clock=clock)
+        announced = extras["announced"]
+        announced["python"] = os.path.join(plan["venv"], "bin", "python")
+        announced["service"].update(expected_service(python=announced["python"], store=announced["store"],
+                                                     ops_dir=announced["ops_dir"], token=announced["token"]["path"]))
+        for item in plan["acquisitions"]:
+            if item["object"].startswith("CPython "):  # consented by the single y (one-command install)
+                item["when"] = "after y (skipped by uv when already installed)"
+        extras["downloads_after_y"] = [item for item in plan["acquisitions"] if item["object"].startswith("CPython ")]
         for code, message in extras["blockers"]:
             plan["blocker_codes"].append(code)
             plan["blockers"].append(message)
@@ -1752,10 +1863,16 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
     say(render_interactive(extras))
     if not plan["ok"]:
         return stop("refused", "preflight_refused", "preflight_refused: refused before any question; nothing written")
+    for stream in (out, sys.stdout, sys.stderr):  # the whole preview is visible before the question (tee, pipes)
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
     tty = terminal()
     if tty is None:
         report.update(stage="no-terminal", code="no_terminal")
-        say("  No terminal (/dev/tty) to ask the question: this was the preview only; nothing written.")
+        say("  No terminal (/dev/tty) to ask the question: this was the preview only; the bootstrap wrote nothing "
+            "(nothing in HOME, the store or any client configuration; no service).")
         say("  Run the same command from a terminal to answer it.")
         return report
     try:
@@ -1770,7 +1887,8 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
             pass
     if not confirmed(answer):
         report.update(stage="declined", code="not_confirmed")
-        say("  Not confirmed (only y or yes installs): nothing written.")
+        say("  Not confirmed (only y or yes installs): the bootstrap wrote nothing (nothing in HOME, the store or "
+            "any client configuration; no service).")
         return report
     # ---- after y: nothing has been written yet; the plan must be the one that was announced
     again, extras_again, planned = prepare(work_dir=plan["work_dir"])
@@ -1784,8 +1902,10 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
     report.update(apply=_public(applied), steps=list(applied["steps"]), writes=list(applied["writes"]))
     venv, profile, clients = again["venv"], again["profile"], extras["clients_arg"]
     admin = os.path.join(venv, "bin", "memory-os-admin")
+    announced = extras["announced"]
     by_hand = (f"The venv {venv} is kept (nothing is ever removed). To continue by hand from it: "
-               + quote(quickstart_command(venv, profile, clients)) + " (preview). The one-command install refuses "
+               + follow_up(announced, quickstart_command(venv, profile, clients)) + " (preview). The one-command "
+               "install refuses "
                f"an existing venv: remove {venv} yourself before running it again, or give --venv.")
     if not applied["ok"]:
         return stop("failed", applied["code"] or "apply_failed", applied["error"] or "the venv step failed",
@@ -1799,7 +1919,8 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
                     "quickstart --apply was NOT run; no service, token or client entry was written", kept=by_hand)
     # ---- quickstart --apply with exactly the announced clients (no download is announced, none is approved)
     say("[2/3] the quickstart preview matches the announcement; quickstart --apply (token, service, clients)...")
-    command = quickstart_command(venv, profile, clients, apply=True, download_approved=False)
+    command = quickstart_command(venv, profile, clients, apply=True, download_approved=False,
+                                 expect_plan=applied["_quickstart_plan"]["plan_digest"])
     started = clock()
     code, text = _run(run, command, env=quickstart_environment(environ), timeout=QUICKSTART_APPLY_TIMEOUT)
     report["steps"].append({"step": "quickstart_apply", "command": quote(command), "returncode": code,
@@ -1812,12 +1933,13 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
     stamp = result.get("stamp") if isinstance(result.get("stamp"), str) else None
     report["quickstart_apply"] = {"returncode": code, "ok": result.get("ok"), "stage": result.get("stage"),
                                   "code": result.get("code"), "error": result.get("error"), "stamp": stamp}
-    undo = (quote([admin, "quickstart", "--undo", stamp, "--with-service"]) if stamp else None)
+    undo = follow_up(announced, [admin, "quickstart", "--undo", stamp, "--with-service"]) if stamp else None
+    doctor = follow_up(announced, [admin, "doctor"])
     if code != 0 or result.get("ok") is not True:
         return stop("failed", "quickstart_apply_failed", "quickstart_apply_failed: quickstart --apply did not "
                     f"complete (code {result.get('code')!r}: {result.get('error')!r})",
                     kept=(f"Its journal is kept; roll back with: {undo}" if undo else
-                          "No journal stamp was reported.") + f" Then inspect with {quote([admin, 'doctor'])}.")
+                          "No journal stamp was reported.") + f" Then inspect with {doctor}.")
     # ---- authenticated /ready, token read from its file
     token_path = extras["announced"]["token"]["path"]
     say(f"[3/3] authenticated {READY_URL} check...")
@@ -1834,11 +1956,12 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
     report["ready"] = seen
     if not seen.get("ok"):
         return stop("failed", "ready_check_failed", f"ready_check_failed: {READY_URL} answered {seen.get('code')} "
-                    f"(status {seen.get('status')})", kept=f"Inspect with {quote([admin, 'doctor'])}"
+                    f"(status {seen.get('status')})", kept=f"Inspect with {doctor}"
                     + (f"; roll back with: {undo}" if undo else ""))
     report.update(ok=True, stage="complete", code=None, error=None,
-                  next={"doctor": quote([admin, "doctor"]), "undo": undo,
-                        "uninstall": quote([admin, "uninstall"]) + " (preview), then the same with --apply"})
+                  next={"doctor": doctor, "undo": undo,
+                        "uninstall": follow_up(announced, [admin, "uninstall"]) + " (preview), then the same with "
+                                     "--apply"})
     say("")
     say(f"Memory OS AI is installed and ready ({READY_URL}, profile {profile}).")
     say("  configured clients (restart them, then check that the memory-os-ai tools appear): "

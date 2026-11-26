@@ -26,6 +26,10 @@ INSTALL = REPO / "scripts" / "install.sh"
 TEXT = INSTALL.read_text()
 SHELLS = [shell for shell in ("/bin/sh", "/bin/dash") if os.path.exists(shell)]
 BASE_LINE = re.compile(r'^  RELEASE_BASE="[^"\n]*"$', re.M)
+PROTO_LINE = re.compile(r'^  CURL_PROTO="[^"\n]*"$', re.M)
+README = (REPO / "README.md").read_text()
+ONE_LINER = ("bash -o pipefail -c \"curl -q -fsSL --proto '=https' --proto-redir '=https' "
+             "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh\"")
 pytestmark = pytest.mark.skipif(MINOR not in ((3, 11), (3, 12), (3, 13)), reason="needs a Python of a retained cell")
 
 MARKER_BOOTSTRAP = '''import json, os, sys
@@ -42,7 +46,7 @@ def sha(data: bytes) -> str:
 class Release:
     """A HOME, a PATH of tools, a fixture release directory and a private TMPDIR, all under ``tmp_path``."""
 
-    def __init__(self, tmp_path: Path, *, bootstrap=MARKER_BOOTSTRAP, uv=True, uname=None):
+    def __init__(self, tmp_path: Path, *, bootstrap=MARKER_BOOTSTRAP, uv=True, uname=None, cell=None):
         self.root = tmp_path
         self.machine = Machine(tmp_path)
         self.home = self.machine.home
@@ -53,7 +57,8 @@ class Release:
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         python = self.bin / f"python{MINOR[0]}.{MINOR[1]}"
-        python.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        answer = f'case "$*" in *memory-os-cell:*) echo memory-os-cell:{cell}; exit 0 ;; esac\n' if cell else ""
+        python.write_text(f'#!/bin/sh\n{answer}exec "{sys.executable}" "$@"\n')
         python.chmod(0o755)
         self.uv_dir = self.machine.tools if uv else None  # the fake uv reads its configuration next to itself
         if uname:
@@ -69,15 +74,18 @@ class Release:
             f"{sha(b'other')}  memory_os_ai-4.1.3-py3-none-any.whl\n{sha(data)}  memory_os_bootstrap.py\n"
             if sums is None else sums)
 
-    def script(self) -> str:
-        assert len(BASE_LINE.findall(TEXT)) == 1
-        return BASE_LINE.sub(f'  RELEASE_BASE="file://{self.release}"', TEXT)
+    def script(self, *, https_only=False) -> str:
+        """The shipped script with its two test lines rewritten: file:// base, and file allowed unless https_only."""
+        assert len(BASE_LINE.findall(TEXT)) == 1 and len(PROTO_LINE.findall(TEXT)) == 1
+        text = BASE_LINE.sub(f'  RELEASE_BASE="file://{self.release}"', TEXT)
+        return text if https_only else PROTO_LINE.sub('  CURL_PROTO="=https,file"', text)
 
-    def run(self, *args, shell="/bin/sh", cwd=None):
+    def run(self, *args, shell="/bin/sh", cwd=None, script=None):
         tools = f"{self.bin}:{self.uv_dir}" if self.uv_dir else str(self.bin)
         environ = {"HOME": str(self.home), "PATH": f"{tools}:/usr/bin:/bin", "TMPDIR": str(self.tmpdir),
                    "LANG": "en_US.UTF-8"}
-        return subprocess.run([shell, "-s", "--", *args], input=self.script(), capture_output=True, text=True,
+        return subprocess.run([shell, "-s", "--", *args], input=self.script() if script is None else script,
+                              capture_output=True, text=True,
                               env=environ, cwd=str(cwd or self.home), timeout=180, start_new_session=True)
 
     def ran(self):
@@ -95,13 +103,25 @@ def test_the_shipped_script_is_posix_pinned_to_its_release_and_has_no_override()
     assert tags == ["v4.1.3"] and TEXT.count("RELEASE_TAG=") == 1
     assert BASE_LINE.findall(TEXT) == [
         '  RELEASE_BASE="https://github.com/RoaminS/Memory-os-ai/releases/download/$RELEASE_TAG"']
+    assert PROTO_LINE.findall(TEXT) == ['  CURL_PROTO="=https"']
     code = "\n".join(line for line in TEXT.splitlines() if not line.lstrip().startswith("#"))
     assert "latest" not in code and ":-" not in code.replace("${TMPDIR:-/tmp}", "")  # no default/override variable
     assert "MEMORY_OS" not in code and "INSTALL_BASE" not in code
     assert not re.search(r"\|\s*(ba|z|da)?sh\b", code)          # never pipes anything into a shell
     assert "astral.sh/uv/install" not in TEXT and "pip install" not in code  # uv is never downloaded
     assert '--interactive --uv "$UV" "$@" </dev/null' in code
-    assert "--proto-redir '=https'" in code and 'main "$@"' in code.splitlines()[-1]
+    curls = [line.strip() for line in code.splitlines() if re.search(r"\bcurl -", line)]
+    assert curls == ['curl -q -fsSL --proto "$CURL_PROTO" --proto-redir "$CURL_PROTO" -o "$WORK/$NAME" '
+                     '"$RELEASE_BASE/$NAME" \\']                       # -q first: no curlrc
+    assert code.splitlines()[-1] == 'main "$@" "--memory-os-install-script-complete"'
+    assert TEXT.splitlines()[3].startswith("trap ") and "incomplete" in TEXT.splitlines()[3]
+    header = TEXT[:TEXT.index("END_MARKER=")]
+    assert "nothing is written in $HOME, in the store or in any client configuration, and no" in header
+    assert "The only writes before it are the two verified files" in header and "removed at exit" in header
+    # the README one-liner: curlrc ignored, HTTPS only for the request and its redirects, failure propagated
+    assert README.count(ONE_LINER) == 1
+    assert ONE_LINER.replace("https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3",
+                             "<release-asset-url>") in header
 
 
 # ---------------------------------------------------------------- refusals: nothing is run
@@ -167,6 +187,68 @@ def test_the_verified_bootstrap_runs_interactive_with_the_explicit_uv(tmp_path):
     assert list(r.tmpdir.iterdir()) == []  # the private download directory is removed at exit
 
 
+def test_the_shipped_protocols_refuse_anything_but_https(tmp_path):
+    r = Release(tmp_path)
+    done = r.run(script=r.script(https_only=True))          # file:// base, shipped CURL_PROTO="=https"
+    assert done.returncode == 1 and "download of memory_os_bootstrap.py" in done.stderr and r.ran() is None
+    assert list(r.tmpdir.iterdir()) == []
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_truncated_script_never_runs_and_never_exits_zero(tmp_path, shell):
+    """From the end of the guard line on, every cut (every 97 bytes, and each byte of the last line) fails."""
+    r = Release(tmp_path)
+    script = r.script()
+    guard_end = script.index("\n", script.index("\ntrap ") + 1) + 1
+    tail = script.rindex("\nmain ") + 1
+    failures = []
+    for args in ((), ("--clients", "codex")):               # with user options, a cut after "$@" must fail too
+        for cut in sorted(set(range(guard_end, len(script) - 1, 97)) | set(range(tail, len(script) - 1))):
+            done = r.run(*args, shell=shell, script=script[:cut])
+            if done.returncode == 0 or r.ran() is not None:
+                failures.append((args, cut))
+    assert failures == []
+    assert list(r.tmpdir.iterdir()) == []
+    done = r.run("--clients", "codex", shell=shell, script=script[:-1])  # only the final newline missing: complete
+    assert done.returncode == 0 and r.ran()["argv"][-2:] == ["--clients", "codex"]
+
+
+def test_the_readme_one_liner_fails_when_the_download_fails(tmp_path):
+    bash = shutil.which("bash", path="/bin:/usr/bin")
+    if not bash:
+        pytest.skip("no bash")
+    inner = ONE_LINER[len('bash -o pipefail -c "'):-1].replace(
+        "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh", f"file://{tmp_path}/absent.sh")
+    environ = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    for protocols, label in (("'=https'", "shipped: file refused"), ("'=https,file'", "file allowed, absent")):
+        line = inner.replace("'=https'", protocols)
+        done = subprocess.run([bash, "-o", "pipefail", "-c", line], capture_output=True, text=True, env=environ,
+                              timeout=60, start_new_session=True)
+        assert done.returncode != 0, label
+        bare = subprocess.run([bash, "-c", line], capture_output=True, text=True, env=environ, timeout=60,
+                              start_new_session=True)
+        assert bare.returncode == 0, label                  # why pipefail: a bare "curl | sh" reports success
+
+
+def test_on_macos_a_python_outside_the_cells_gets_the_standalone_cpython_3_13(tmp_path):
+    r = Release(tmp_path, uname="Darwin", cell="other")
+    done = r.run()
+    assert done.returncode == 0, done.stderr
+    assert r.ran()["argv"] == ["--interactive", "--uv", str(r.machine.uv), "--cpython", "3.13"]
+    assert "the standalone CPython 3.13" in done.stdout and "downloaded only after y" in done.stdout
+    r = Release(tmp_path / "retained", uname="Darwin", cell="retained")
+    assert r.run().returncode == 0 and r.ran()["argv"] == ["--interactive", "--uv", str(r.machine.uv)]
+    r = Release(tmp_path / "explicit", uname="Darwin", cell="other")
+    assert r.run("--python", "/opt/py/bin/python3.12").returncode == 0
+    assert r.ran()["argv"][3:] == ["--python", "/opt/py/bin/python3.12"]
+    assert r.run("--cpython", "3.12").returncode == 0 and r.ran()["argv"][3:] == ["--cpython", "3.12"]
+
+
+def test_on_macos_the_cell_probe_reads_the_real_interpreter(tmp_path):
+    r = Release(tmp_path, uname="Darwin")                    # the test interpreter: a Python of a retained cell
+    assert r.run().returncode == 0 and r.ran()["argv"] == ["--interactive", "--uv", str(r.machine.uv)]
+
+
 def test_on_linux_the_standalone_cpython_route_is_chosen_unless_one_is_given(tmp_path):
     r = Release(tmp_path, uname="Linux")
     assert r.run().returncode == 0 and r.ran()["argv"][-2:] == ["--cpython", "3.11"]
@@ -189,6 +271,6 @@ def test_without_a_terminal_the_real_bootstrap_previews_and_writes_nothing(tmp_p
     assert done.returncode == (3 if on_cell else 1), done.stdout + done.stderr
     assert "ONE-COMMAND INSTALL" in done.stdout and str(r.home / ".cursor" / "mcp.json") in done.stdout
     if on_cell:
-        assert "No terminal (/dev/tty)" in done.stdout and "nothing written" in done.stdout
+        assert "No terminal (/dev/tty)" in done.stdout and "the bootstrap wrote nothing" in done.stdout
     assert tree(r.home) == home_before and list(r.tmpdir.iterdir()) == []
     assert {" ".join(call["argv"][:2]) for call in r.machine.calls()} == {"--version"}
