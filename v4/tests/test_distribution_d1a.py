@@ -271,7 +271,10 @@ include = ["memory_os_v4*"]
     checker.loader.exec_module(gate)
     for folder in (direct_dist, rebuilt_dist):
         proof = gate.wheel_markers(next(folder.glob("*.whl")))
-        assert proof["ok"] and "legacy-v3" in proof["extras"] and "v3" not in proof["extras"]
+        # 4.1.3 (D2-b): the dead v3-only extras are gone; the v4 extras remain
+        assert proof["ok"] and "v3" not in proof["extras"]
+        assert not {"legacy-v3", "audio", "gpu", "doc-legacy", "cloud-all", "cloud-s3"} & set(proof["extras"])
+        assert {"brief", "ops", "semantic", "documents"} <= set(proof["extras"])
         assert all(n > 0 for n in proof["marker_evaluations"].values())
         from email.parser import BytesParser
         from memory_os_v4.ops.qualified_runtime import check_requirements
@@ -365,6 +368,8 @@ def test_doctor_explains_embedded_identity(monkeypatch, tmp_path):
 
 
 def test_extras_are_explicit():
+    """4.1.3 (D2-b): only the v4 extras are published; the v3-only ones (legacy-v3, audio, gpu, doc-legacy,
+    cloud-*) installed dependencies without any code once the v3 package left the wheel."""
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert not any(name.startswith(("pymupdf", "pytesseract", "python-pptx", "python-docx", "Pillow", "requests")) for name in meta["dependencies"])
     # 4.1.0: the ML closure left the core for the [semantic] extra, with a bound containing the
@@ -379,6 +384,7 @@ def test_extras_are_explicit():
     assert "sentence-transformers==5.2.3" in constraints
     assert qualified_runtime.check_constraints(constraints, profile="semantic", extras=("ops", "brief"))["ok"]
     assert "pymupdf>=1.24" in meta["optional-dependencies"]["documents"]
+    assert sorted(meta["optional-dependencies"]) == ["brief", "dev", "documents", "ops", "semantic"]
 
 
 def test_legacy_v3_package_is_not_shipped():
