@@ -153,6 +153,18 @@ def cmd_store_doctor(args, s: OpsSettings) -> int:
         return 1
 
 
+def cmd_audit_naive_times(args, s: OpsSettings) -> int:
+    """4.1.3 D1-c: read-only list of instants a pre-4.1.3 server may have stored from a naive date."""
+    import sqlite3
+    from .naive_times_audit import audit
+    try:
+        report = audit(s.store_dir, args.tz)
+    except (OSError, sqlite3.Error) as exc:
+        report = {"ok": False, "code": "store_unreadable", "error": str(exc)}
+    _print_json(report)
+    return 0 if report.get("ok") else 1
+
+
 def cmd_backup(args, s: OpsSettings) -> int:
     if args.backend == "sqlite":
         from .sqlite_backup import backup as sqlite_backup
@@ -558,6 +570,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-server", action="store_true")
     k = sub.add_parser("hook")
     k.add_argument("name", choices=["session-start", "stop-nudge"])
+    an = sub.add_parser("audit-naive-times",
+                        help="read-only: items a pre-4.1.3 server may have dated from a naive date in its local zone")
+    an.add_argument("--tz", metavar="ZONE", default=None,
+                    help="IANA zone the server ran in when the items were written (default: the system zone)")
     dr = sub.add_parser("doctor", help="read-only check of the whole installation and of every AI client")
     dr.add_argument("--json", action="store_true")
     dr.add_argument("--store-only", action="store_true", help="local store counters only (no HTTP or client reads)")
@@ -582,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         "hook": cmd_hook,
         "setup": cmd_setup,
         "doctor": cmd_doctor,
+        "audit-naive-times": cmd_audit_naive_times,
     }[args.cmd]
     return handler(args, s)
 
