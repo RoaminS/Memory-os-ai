@@ -1522,8 +1522,11 @@ PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "
                             "loaded_state")
 
 
-def target_identity(path) -> dict | None:
-    """What a write decision depends on for ``path`` (no content, never a secret): None when absent."""
+def target_identity(path, *, count_entries=False) -> dict | None:
+    """What a write decision depends on for ``path`` (no content, never a secret): None when absent.
+
+    ``count_entries`` only where emptiness decides (the store): the ops and journal directories receive files of
+    their own (a caller's work directory, logs) that change no write decision of an apply."""
     try:
         status = os.lstat(path)
     except FileNotFoundError:
@@ -1533,10 +1536,10 @@ def target_identity(path) -> dict | None:
     kind = ("link" if stat.S_ISLNK(status.st_mode) else "directory" if stat.S_ISDIR(status.st_mode)
             else "file" if stat.S_ISREG(status.st_mode) else "other")
     identity = {"kind": kind, "mode": stat.S_IMODE(status.st_mode), "uid": status.st_uid, "dev": status.st_dev,
-                "ino": status.st_ino, "nlink": status.st_nlink}
-    if kind == "file":
-        identity["size"] = status.st_size
-    if kind == "directory":
+                "ino": status.st_ino}
+    if kind == "file":  # a directory's link count follows its entries on some file systems (APFS): files only
+        identity.update(size=status.st_size, nlink=status.st_nlink)
+    if kind == "directory" and count_entries:
         try:
             identity["entries"] = len(os.listdir(path))
         except OSError:
@@ -1546,7 +1549,8 @@ def target_identity(path) -> dict | None:
 
 def write_targets(settings, home) -> dict:
     """Identity of every location an apply may create or reuse besides clients, service and resources."""
-    return {"token": target_identity(settings.token_file), "store": target_identity(settings.store_dir),
+    return {"token": target_identity(settings.token_file),
+            "store": target_identity(settings.store_dir, count_entries=True),
             "ops_dir": target_identity(settings.ops_dir), "journals": target_identity(Path(home) / JOURNAL_SUBDIR)}
 
 

@@ -1143,3 +1143,79 @@ def test_the_quickstart_commands_never_write_bytecode():
                  bs.quickstart_command("/v", "lexical", "codex", apply=True, download_approved=False,
                                        expect_plan="a" * 64)):
         assert argv[1:4] == ["-I", "-B", "-m"]
+
+
+# ---------------------------------------------------------------- round 4 (Codex r3 of the one-liner)
+
+@pytest.mark.parametrize("where", ["ops", "logs", "journals"])
+def test_a_work_directory_inside_the_state_directory_does_not_invalidate_the_digest(c, where):
+    """Codex r3 #2: the bootstrap creates its work directory, previews, then writes report.json there before
+    quickstart --apply: the digest of the apply process must still be the accepted one."""
+    from setup_fixture_410 import prepare
+    work = {"ops": c.settings.ops_dir, "logs": c.settings.ops_dir / "logs",
+            "journals": c.home / qs.JOURNAL_SUBDIR}[where]
+    work.mkdir(parents=True, mode=0o700)                     # created by the bootstrap before the preview
+    (work / "requirements-x.txt").write_text("x\n")
+    (work / "uv-cache").mkdir()
+    accepted = qs.plan_digest(prepare(c, profile="lexical"))
+    (work / "report.json").write_text("{}")                 # written by the bootstrap after the preview
+    assert qs.plan_digest(prepare(c, profile="lexical")) == accepted
+
+
+@pytest.mark.parametrize("setup", ["empty", "file", "dangling link", "with data"])
+def test_an_existing_legacy_store_is_refused_before_the_question_and_never_touched(o, setup):
+    legacy = o.home / ".memory-os-v4"
+    if setup == "empty":
+        legacy.mkdir()
+    elif setup == "file":
+        legacy.write_text("x")
+    elif setup == "dangling link":
+        legacy.symlink_to(o.root / "nowhere")
+    else:
+        legacy.mkdir()
+        (legacy / "items.jsonl").write_text("{}\n")
+    terminal = FakeTerminal("y")
+    before = o.inventory()
+    report, text = o.run(terminal=terminal)
+    assert report["stage"] == "refused" and "legacy_store_present" in report["plan"]["blocker_codes"]
+    assert terminal.opened == 0 and o.inventory() == before and o.qs_calls() == []
+    assert "never created there" in text
+
+
+def test_a_new_store_resolving_into_the_legacy_one_is_refused(tmp_path):
+    one = OneLiner(tmp_path)
+    one.touch(".cursor/mcp.json")
+    elsewhere = tmp_path / "legacy-target"
+    elsewhere.mkdir()
+    (one.home / ".local" / "share" / "memory-os").mkdir(parents=True)
+    (one.home / ".local" / "share" / "memory-os" / "store").symlink_to(one.home / "Memory-os-ai",
+                                                                        target_is_directory=True)
+    (one.home / "Memory-os-ai").mkdir()
+    report, _ = one.run(terminal=FakeTerminal("y"))
+    assert "store_path_forbidden" in report["plan"]["blocker_codes"]
+
+
+@pytest.mark.parametrize("name", ["--work-dir", "--venv"])
+def test_a_work_directory_or_venv_inside_the_store_is_refused(o, name):
+    terminal = FakeTerminal("y")
+    report, _ = o.run(name, str(o.home / ".local/share/memory-os/store/inside"), terminal=terminal)
+    assert "destination_in_store" in report["plan"]["blocker_codes"] and terminal.opened == 0
+
+
+@pytest.mark.parametrize("where", [".local/state/memory-os", ".local/state/memory-os/logs",
+                                   ".local/state/memory-os/quickstart"])
+def test_a_work_directory_inside_the_state_directory_is_accepted(o, where):
+    report, _ = o.run("--work-dir", str(o.home / where))
+    assert report["ok"] is True, report.get("error") or report["plan"]["blockers"]
+    assert (o.home / where / "report.json").exists()
+
+
+def test_a_store_that_fills_between_preview_and_apply_moves_the_digest(c):
+    """The store's emptiness IS a write decision: its entries stay in the digest (unlike ops and journals)."""
+    from setup_fixture_410 import prepare
+    c.settings.store_dir.mkdir(parents=True)
+    plan = prepare(c, profile="lexical")
+    assert plan["write_targets"]["store"]["entries"] == 0
+    accepted = qs.plan_digest(plan)
+    (c.settings.store_dir / "store.sqlite3").write_bytes(b"")
+    assert qs.plan_digest(prepare(c, profile="lexical")) != accepted

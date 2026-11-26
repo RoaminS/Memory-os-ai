@@ -13,8 +13,9 @@ trap 'printf "%s\n" "memory-os-ai install: this script is incomplete (truncated 
 # WRITES BEFORE THE CONFIRMATION: nothing is written in $HOME, in the store or in any client configuration, and no
 # service is installed, before your "y". The only writes before it are the two verified files (memory_os_bootstrap.py
 # and SHA256SUMS of this release) in a private temporary directory (mktemp -d), removed at exit. Its base is TMPDIR
-# resolved physically (links followed) and never under HOME, the store or a client configuration directory (then /tmp
-# is used instead). Both Python launches before the answer run with -I -S -B: no site, .pth or sitecustomize, no
+# resolved physically (links followed) and never under HOME, nor under the physical destination of a store, the state
+# directory, the venv, the service or a client configuration directory, defaults followed through their links (then
+# /tmp is used instead). Both Python launches before the answer run with -I -S -B: no site, .pth or sitecustomize, no
 # bytecode written.
 #
 # What it does, in order:
@@ -118,17 +119,58 @@ main() {
     esac
   fi
 
-  # The temporary base, resolved PHYSICALLY (symbolic links followed) before anything is created in it: never under
-  # HOME, the store or a client configuration directory (then /tmp is used instead; refused if /tmp is one too).
+  # The temporary base, resolved PHYSICALLY (symbolic links followed) before anything is created in it. It is never
+  # under HOME, nor under the physical destination of a default write location below HOME (both stores, the state
+  # and token directories, the venv, the service directory, every default client configuration directory) or of
+  # one of its existing ancestors, nor under anything HOME links to directly, nor under a relocated store or client
+  # directory. Then /tmp is used instead; refused if /tmp is one of them too.
+  DEFAULT_PLACES='.memory-os-v4
+.local/share/memory-os/store
+.local/state/memory-os
+.config/memory-os
+.memory-os
+Library/LaunchAgents
+.config/systemd/user
+.claude
+Library/Application Support/Claude
+.codex
+Library/Application Support/Code/User
+.copilot
+.cursor
+.gemini/config
+.gemini
+.grok
+.config/zed
+.config/devin
+.codeium/windsurf'
   physical() { (cd "$1" 2>/dev/null && pwd -P); }
+  under() { case "$1/" in "$2"/*) return 0 ;; esac; [ "$2" = / ]; }
   forbidden() {
     for PLACE in "$HOME" "${MEMORY_V4_DIR-}" "${CLAUDE_CONFIG_DIR-}" "${CODEX_HOME-}" "${GEMINI_CLI_HOME-}" \
                  "${GROK_HOME-}" "${COPILOT_HOME-}" "${XDG_CONFIG_HOME-}"; do
       [ -n "$PLACE" ] || continue
       PLACE_P=$(physical "$PLACE") || continue
-      [ -n "$PLACE_P" ] || continue
-      case "$1/" in "$PLACE_P"/*) return 0 ;; esac
-      [ "$PLACE_P" = / ] && return 0
+      [ -n "$PLACE_P" ] && under "$1" "$PLACE_P" && return 0
+    done
+    while IFS= read -r REL; do
+      [ -n "$REL" ] || continue
+      STEP="$HOME"
+      REST="$REL"
+      while [ -n "$REST" ]; do
+        COMPONENT=${REST%%/*}
+        case "$REST" in */*) REST=${REST#*/} ;; *) REST= ;; esac
+        STEP="$STEP/$COMPONENT"
+        [ -d "$STEP" ] || break
+        PLACE_P=$(physical "$STEP") || break
+        [ -n "$PLACE_P" ] && under "$1" "$PLACE_P" && return 0
+      done
+    done <<PLACES
+$DEFAULT_PLACES
+PLACES
+    for ENTRY in "$HOME"/* "$HOME"/.[!.]* "$HOME"/..?*; do
+      [ -L "$ENTRY" ] || continue
+      PLACE_P=$(physical "$ENTRY") || continue
+      [ -n "$PLACE_P" ] && under "$1" "$PLACE_P" && return 0
     done
     return 1
   }
@@ -137,7 +179,8 @@ main() {
     BASE=$(physical /tmp || true)
     [ -n "$BASE" ] && ! forbidden "$BASE" \
       || refuse "no temporary directory outside your home, store and client configurations; nothing written"
-    say "TMPDIR is not usable before your answer (missing, or under your home, store or a client configuration):"
+    say "TMPDIR is not usable before your answer (missing, or physically under your home, a store, the state"
+    say "directory or a client configuration):"
     say "the temporary directory is created under $BASE instead."
   fi
   WORK=$(mktemp -d "$BASE/memory-os-install.XXXXXX") || refuse "cannot create a temporary directory"

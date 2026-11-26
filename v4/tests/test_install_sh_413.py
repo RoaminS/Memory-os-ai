@@ -332,3 +332,55 @@ def test_the_interpreter_runs_without_site_pth_sitecustomize_or_bytecode(tmp_pat
     assert not witness.exists() and r.ran() is not None
     assert tree(r.home) == before
     assert not [path for path in r.home.rglob("__pycache__")]
+
+
+# ---------------------------------------------------------------- round 4: physical destinations of the defaults
+
+def _default_places():
+    block = TEXT[TEXT.index("DEFAULT_PLACES='") + len("DEFAULT_PLACES='"):]
+    return block[:block.index("'")].splitlines()
+
+
+def test_the_default_places_cover_every_write_location_the_bootstrap_knows():
+    places = set(_default_places())
+    parents = set()
+    for record in bs.CLIENT_TABLE.values():
+        for relative in (record["darwin"], record["linux"]):
+            if relative and "/" in relative:
+                parents.add(relative.rsplit("/", 1)[0])
+    assert parents <= places, parents - places
+    assert {bs.STORE_SUBPATH, bs.NEW_STORE_SUBPATH, bs.OPS_SUBPATH, bs.TOKEN_SUBPATH.rsplit("/", 1)[0],
+            bs.DEFAULT_VENV[2:].rsplit("/", 1)[0], "Library/LaunchAgents", ".config/systemd/user", ".claude"} <= places
+
+
+@pytest.mark.parametrize("link,target,tmpdir", [
+    (".memory-os-v4", "store", "store"),                                  # Codex r3: the legacy store moved away
+    (".codex", "codex", "codex"),                                         # a client directory moved away
+    (".local", "local", "local/share/memory-os"),                         # an ancestor linked from HOME
+    (".local/share", "share", "share/memory-os"),                         # a deeper ancestor of the new store
+    ("Library/Application Support/Code/User", "code user", "code user"),  # with spaces
+    ("Documents", "documents", "documents/tmp"),                          # anything HOME links to directly
+])
+def test_a_tmpdir_inside_a_linked_default_location_is_never_used(tmp_path, link, target, tmpdir):
+    r = Release(tmp_path)
+    volume = tmp_path / "volume"
+    (volume / tmpdir).mkdir(parents=True)
+    (volume / target).mkdir(parents=True, exist_ok=True)
+    entry = r.home / link
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.symlink_to(volume / target, target_is_directory=True)
+    before_home, before_volume = tree(r.home), tree(volume)
+    done = r.run(tmpdir=volume / tmpdir)
+    assert done.returncode == 0, done.stderr
+    assert "TMPDIR is not usable before your answer" in done.stdout, done.stdout
+    used = _temporary(done)
+    assert Path(os.path.realpath(volume)) not in used.parents and not used.exists()
+    assert tree(r.home) == before_home and tree(volume) == before_volume
+
+
+def test_an_unrelated_tmpdir_next_to_home_is_still_used(tmp_path):
+    r = Release(tmp_path)
+    (r.home / ".codex").mkdir()                  # a real directory, not a link: its parent is HOME, not the TMPDIR
+    done = r.run()
+    assert done.returncode == 0 and "not usable" not in done.stdout
+    assert _temporary(done).parent == Path(os.path.realpath(r.tmpdir))

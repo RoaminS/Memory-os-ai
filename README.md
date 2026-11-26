@@ -77,13 +77,15 @@ last line lifts.
 **What is written before your answer.** Nothing is written in `$HOME`, in the store or in any client configuration,
 and no service is installed, before you answer `y`. The only writes before it are the two verified files,
 `memory_os_bootstrap.py` and `SHA256SUMS` of the same release (never "latest"), in a private temporary directory
-removed at exit and never under your home (a `TMPDIR` there is replaced by `/tmp`). Python runs with `-I -S -B` before
+removed at exit and never under your home, physically (a `TMPDIR` there, or where a store, the state directory or
+a client configuration directory of your home really lives through a link, is replaced by `/tmp`). Python runs with `-I -S -B` before
 the answer: no `.pth`, no `sitecustomize`, no bytecode. `install.sh` refuses on any download failure or checksum mismatch, then runs the verified bootstrap
 with `--interactive`:
 
 - a **complete preview**: every download with its source and size (a standalone CPython included, see below), the
   environment, the service (label, port, manager, definition, program), the token file (created or reused), the store
-  (a new install gets `~/.local/share/memory-os/store`, as `quickstart` selects it), and each assistant
+  (a new install gets `~/.local/share/memory-os/store`, as `quickstart` selects it; an existing `~/.memory-os-v4`,
+  even empty, is refused before the question and never touched), and each assistant
   configuration file it would write, for the assistants found on this machine (their configuration file or their
   command-line tool);
 - **one question**, `[y/N]`, read from the terminal, default No. Without a terminal (CI, a pipe) it stops after the

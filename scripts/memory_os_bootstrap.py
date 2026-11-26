@@ -1543,6 +1543,21 @@ def interactive_extras(options, *, host, environ, which) -> dict:
         [store, str(PurePosixPath(home) / STORE_SUBPATH), str(PurePosixPath(home) / NEW_STORE_SUBPATH)]) if used(path)]
     if definition and os.path.lexists(definition):
         existing.append(f"{definition} (service definition)")
+    legacy = str(PurePosixPath(home) / STORE_SUBPATH)
+    if os.path.lexists(legacy):
+        # quickstart would select it, and the SQLite engine refuses it even empty (validate_sqlite_target): never
+        # touched, never used, refused here before any question instead of after the venv.
+        blockers.append(("legacy_store_present", f"legacy_store_present: {legacy} exists (even empty); quickstart "
+                         "would select it and the SQLite store is never created there, so the one-command install "
+                         "refuses it: leave it untouched and use the upgrade runbook, or install by hand with "
+                         "MEMORY_V4_DIR set to a fresh directory; nothing written"))
+    else:
+        resolved = os.path.realpath(store)
+        for protected in (legacy, str(PurePosixPath(home) / "Memory-os-ai")):
+            protected = os.path.realpath(protected)
+            if resolved == protected or resolved.startswith(protected.rstrip(os.sep) + os.sep):
+                blockers.append(("store_path_forbidden", f"store_path_forbidden: {store} resolves to {resolved}, "
+                                 f"inside {protected}, where the SQLite store is never created; nothing written"))
     if existing:
         blockers.append(("existing_installation", "existing_installation: " + ", ".join(existing) + " already "
                          "exist; the one-command install is for a new installation only (use quickstart from the "
@@ -1872,6 +1887,13 @@ def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=Non
         planned.replay = []
         plan = build_plan(planned, pin=pin, run=run, environ=environ, host=host, clock=clock)
         announced = extras["announced"]
+        stores = [os.path.realpath(announced["store"])]
+        for name in ("venv", "work_dir"):
+            where = os.path.realpath(plan[name])
+            if any(where == item or where.startswith(item.rstrip(os.sep) + os.sep) for item in stores):
+                extras["blockers"].append(("destination_in_store", f"destination_in_store: the {name} {plan[name]} "
+                                           f"is inside the store {announced['store']}, which must stay new and "
+                                           "empty; choose another --venv/--work-dir; nothing written"))
         announced["python"] = os.path.join(plan["venv"], "bin", "python")
         announced["service"].update(expected_service(python=announced["python"], store=announced["store"],
                                                      ops_dir=announced["ops_dir"], token=announced["token"]["path"]))
