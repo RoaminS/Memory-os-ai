@@ -97,7 +97,9 @@ def main():
     if args.build_python:
         env["MEMORY_TEST_BUILD_PYTHON"] = str(args.build_python.resolve())
     try:
-        provision = load("d1_guard", ROOT / "v4/src/memory_os_v4/ops/provision.py")
+        # provision.py uses package-relative imports (since 4.1.2): import it from the source package, not as a file
+        sys.path.insert(0, str(ROOT / "v4/src"))
+        from memory_os_v4.ops import provision
         report["min_free_bytes"] = provision.min_free_bytes()
         if "MEMORY_V4_MIN_FREE_BYTES" in os.environ:
             env["MEMORY_V4_MIN_FREE_BYTES"] = str(report["min_free_bytes"])
