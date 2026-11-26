@@ -42,6 +42,7 @@ from .maintenance import MaintenanceDenied, MaintenancePolicy, MaintenanceWindow
 from .qualification import QualificationMetrics, enabled_from_env, result_text
 from .migrate import resolve_under_home as _resolve_under_home
 from .store import MemoryItem
+from .temporal import iso_to_timestamp, naive_time_notices
 from .text import tokenize
 from . import __version__, models
 
@@ -117,8 +118,9 @@ def parse_iso(value: str | float | int | None) -> float | None:
     """Parse an ISO date/datetime (or unix timestamp) into a unix float.
 
     Accepts date-only strings ("2026-09-12") and full ISO datetimes with or
-    without a timezone offset ("Z" is treated as "+00:00"); naive datetimes
-    are interpreted as local time, matching ``datetime.timestamp()``.
+    without a timezone offset ("Z" is treated as "+00:00"). 4.1.3 single
+    policy (``temporal.iso_to_timestamp``): naive values are read in UTC, never
+    in the server's local time zone; a naive date-time adds a notice.
     """
     if value is None:
         return None
@@ -128,10 +130,9 @@ def parse_iso(value: str | float | int | None) -> float | None:
     if not text:
         return None
     try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return iso_to_timestamp(text)
     except ValueError as exc:
         raise ValueError(f"invalid ISO timestamp: {value!r}") from exc
-    return dt.timestamp()
 
 
 def _iso(ts: float | None) -> str | None:
@@ -756,6 +757,19 @@ def dispatch(name: str, arguments: dict | None) -> dict:
 
 
 def _dispatch(name: str, arguments: dict | None) -> dict:
+    """Run one tool call and attach the 4.1.3 naive-time notices it produced, if any.
+
+    The notices are computed from the arguments and go to a dedicated ``time_notices`` key of a COPY of
+    the result: an idempotent receipt cached by the engine is never altered, and a replay with the same
+    arguments yields the same notices."""
+    result = _dispatch_call(name, arguments)
+    notices = naive_time_notices(arguments or {})
+    if notices and isinstance(result, dict):
+        result = {**result, "time_notices": notices}
+    return result
+
+
+def _dispatch_call(name: str, arguments: dict | None) -> dict:
     """Validate ``arguments`` against ``name``'s model, call its handler, and
     normalize any exception into ``{"ok": False, "error": ...}``."""
     arguments = arguments or {}

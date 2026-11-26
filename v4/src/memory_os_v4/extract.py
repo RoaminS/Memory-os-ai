@@ -3,12 +3,11 @@ declarative sentences, and an optional LLM-backed extractor."""
 
 from __future__ import annotations
 
-from datetime import datetime
 
 from .entities import extract_entities
 from .identity_policy import validate_new_identity
 from .llm import LLMClient
-from .temporal import parse_absolute_dates
+from .temporal import iso_to_timestamp, parse_absolute_dates
 from .text import split_sentences, tokenize
 
 VALID_FACT_KINDS = {"fact", "belief", "summary", "procedure"}
@@ -21,7 +20,7 @@ def _coerce_time(value) -> float | None:
         return float(value)
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            return iso_to_timestamp(value)          # 4.1.3 single policy: naive values are UTC
         except ValueError:
             return None
     return None

@@ -18,7 +18,8 @@ _PROJECT_DESC = (
     "Project label to scope this call to; defaults to MEMORY_V4_PROJECT or 'default'. "
     "'*' reads across all projects (writes then go to 'default')."
 )
-_ISO_DESC_SUFFIX = " ISO date ('2026-09-12') or datetime, with or without timezone; naive times are local."
+_ISO_DESC_SUFFIX = (" ISO date ('2026-09-12') or datetime, with or without timezone; naive values are read in UTC "
+                    "(a date alone is midnight UTC); send an offset such as +01:00 to state another zone.")
 _KEYWORDS_DESC = (
     "3-8 lowercase topical keywords (concrete nouns, activities, places, names) describing this "
     "content. Indexed for dense/BM25 recall alongside the text but never shown or appended to it."

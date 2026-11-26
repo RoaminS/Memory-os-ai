@@ -12,7 +12,6 @@ import hashlib
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger("memory_os_v4")
@@ -50,10 +49,8 @@ def _parse_v3_timestamp(ts: str) -> float:
     naive datetime otherwise silently assumes the LOCAL system timezone,
     which would shift every migrated episode's event_time by the host's UTC
     offset."""
-    dt = datetime.fromisoformat(ts)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    from .temporal import iso_to_timestamp
+    return iso_to_timestamp(ts)   # 4.1.3: the same single policy as the server
 
 
 def _deterministic_id(prefix: str, *parts: str) -> str:

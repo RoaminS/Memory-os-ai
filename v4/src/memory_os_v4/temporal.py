@@ -54,6 +54,59 @@ def _add_months(dt: datetime, delta: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
+# --------------------------------------------------------------- 4.1.3 single time policy
+# One rule for every time a client or a migration hands to the engine (event_time, valid_from,
+# valid_until, at_time, before, v3 timestamps, dates found in a fact's text):
+#   * a number is a unix timestamp;
+#   * an ISO string WITH an offset ("Z" = "+00:00") is honoured as given;
+#   * a NAIVE ISO string is read in UTC, never in the server's local time zone. A date alone
+#     ("2026-11-26") is midnight UTC; a naive date-time ("2026-11-26T10:00") is also read in UTC and
+#     the tool response carries a ``naive_time_assumed_utc`` notice (``naive_time_notices``).
+# Before 4.1.3, explicit naive values were read in local time while dates extracted from text and
+# v3 timestamps were read in UTC, so the same date gave different instants (demo412, anomaly 6).
+_DATE_ONLY_RE = re.compile(r"\d{4}-?\d{2}-?\d{2}")
+TIME_FIELDS = frozenset({"event_time", "valid_from", "valid_until", "at_time", "before"})
+
+
+def iso_to_timestamp(text: str) -> float:
+    """Parse one ISO date or date-time string under the single time policy (raises ``ValueError``)."""
+    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def naive_time_notices(arguments) -> list[dict]:
+    """Notices for the naive DATE-TIMES among the time fields of a tool call's arguments (any depth).
+
+    Computed from the arguments alone, so a first call and its idempotent replay get the same notices.
+    A date alone is documented midnight UTC and gets none; unparsable values are left to the handler."""
+    found: list[dict] = []
+
+    def visit(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in TIME_FIELDS and isinstance(value, str):
+                    text = value.strip()
+                    try:
+                        naive = datetime.fromisoformat(text.replace("Z", "+00:00")).tzinfo is None
+                    except ValueError:
+                        continue
+                    notice = {"code": "naive_time_assumed_utc", "field": key, "value": text,
+                              "message": "naive date-time read in UTC; send an offset (e.g. +01:00 or Z) "
+                                         "to state another time zone"}
+                    if naive and not _DATE_ONLY_RE.fullmatch(text) and notice not in found:
+                        found.append(notice)
+                else:
+                    visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+
+    visit(arguments)
+    return found
+
+
 def _to_ts(dt: datetime) -> float:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
