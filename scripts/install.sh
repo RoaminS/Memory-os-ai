@@ -11,12 +11,15 @@ trap 'printf "%s\n" "memory-os-ai install: this script is incomplete (truncated 
 #   (options for the bootstrap go after "sh -s --", for example: ... | sh -s -- --clients codex,cursor)
 #
 # WRITES BEFORE THE CONFIRMATION: nothing is written in $HOME, in the store or in any client configuration, and no
-# service is installed, before your "y". The only writes before it are the two verified files (memory_os_bootstrap.py
-# and SHA256SUMS of this release) in a private temporary directory (mktemp -d), removed at exit. Its base is TMPDIR
+# service is installed, before your "y"; in your TMPDIR, nothing but the private temporary directory itself. The only
+# writes before the answer are the two verified files (memory_os_bootstrap.py and SHA256SUMS of this release) and the
+# xcrun cache that Apple's python3 launcher may create, all in that private directory (mktemp -d), removed at exit. Its base is TMPDIR
 # resolved physically (links followed) and never under HOME, nor under the physical destination of a store, the state
 # directory, the venv, the service or a client configuration directory, defaults followed through their links (then
 # /tmp is used instead). Both Python launches before the answer run with -I -S -B: no site, .pth or sitecustomize, no
-# bytecode written. The script itself uses no construct that writes a transient file (no here-document: bash 3.2, the
+# bytecode written. Apple's /usr/bin/python3 launcher may write its xcrun lookup cache: it is redirected into that same
+# private temporary directory (xcrun_db) and removed with it. The script itself uses no construct that writes a
+# transient file (no here-document: bash 3.2, the
 # macOS /bin/sh, writes those under /var/tmp; no here-string, sort or tee).
 #
 # What it does, in order:
@@ -69,7 +72,8 @@ main() {
 
   say "Memory OS AI $RELEASE_TAG: one-command install. Nothing is written in your home, store or client configuration,"
   say "and no service is installed, before your answer to its single question; the only writes before it are the"
-  say "bootstrap and SHA256SUMS of this release, verified, in a private temporary directory removed at exit."
+  say "verified bootstrap and SHA256SUMS of this release, and the xcrun cache Apple's python3 launcher may create, all"
+  say "in a private temporary directory (the only thing created in TMPDIR), removed at exit."
 
   command -v curl >/dev/null 2>&1 || refuse "curl is required; nothing downloaded, nothing written"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -99,28 +103,6 @@ main() {
     case "$FOUND" in /*) PY=$FOUND; break ;; esac
   done
   [ -n "$PY" ] || refuse "python3 is required to run the bootstrap (standard library only); nothing downloaded"
-
-  ROUTE_GIVEN=no
-  for ARGUMENT in "$@"; do
-    case "$ARGUMENT" in --python|--python=*|--cpython|--cpython=*) ROUTE_GIVEN=yes ;; esac
-  done
-  if [ "$ROUTE_GIVEN" = no ]; then
-    case "$(uname -s 2>/dev/null)" in
-      Linux)
-        set -- --cpython 3.11 "$@"
-        say "Route: the standalone CPython 3.11 named for Ubuntu 24.04 (announced with its size; downloaded only after y)."
-        ;;
-      Darwin)
-        if [ "$("$PY" -I -S -B -c "$CELL_PROBE" 2>/dev/null)" = "memory-os-cell:retained" ]; then
-          say "Route: $PY (a Python of a retained cell, SQLite >= 3.51.3)."
-        else
-          set -- --cpython 3.13 "$@"
-          say "Route: $PY is not a Python of a retained cell (version or SQLite): the standalone CPython 3.13"
-          say "(announced with its source and size; downloaded only after y)."
-        fi
-        ;;
-    esac
-  fi
 
   # The temporary base, resolved PHYSICALLY (symbolic links followed) before anything is created in it. It is never
   # under HOME, nor under the physical destination of a default write location below HOME (both stores, the state
@@ -193,8 +175,36 @@ main() {
     refuse "the temporary directory $WORK does not resolve to itself outside your home; nothing written"
   fi
   say "Temporary directory (removed at exit): $WORK"
-  trap 'rm -f "$WORK/memory_os_bootstrap.py" "$WORK/SHA256SUMS"; rmdir "$WORK" 2>/dev/null || true' EXIT
+  trap 'rm -f "$WORK/memory_os_bootstrap.py" "$WORK/SHA256SUMS" "$WORK/xcrun_db" "$WORK"/xcrun_db-*; rmdir "$WORK" 2>/dev/null || true' EXIT
   trap 'exit 130' INT TERM HUP
+  # Apple's /usr/bin/python3 is an xcrun launcher that writes a lookup cache (xcrun_db, by default in the per-user
+  # temporary directory): it goes into WORK, removed at exit. An inherited xcrun_db is overridden, never used. Set
+  # BEFORE the first Python invocation (the route probe below), and passed on to the bootstrap and its probes.
+  xcrun_db="$WORK/xcrun_db"
+  export xcrun_db
+
+  ROUTE_GIVEN=no
+  for ARGUMENT in "$@"; do
+    case "$ARGUMENT" in --python|--python=*|--cpython|--cpython=*) ROUTE_GIVEN=yes ;; esac
+  done
+  if [ "$ROUTE_GIVEN" = no ]; then
+    case "$(uname -s 2>/dev/null)" in
+      Linux)
+        set -- --cpython 3.11 "$@"
+        say "Route: the standalone CPython 3.11 named for Ubuntu 24.04 (announced with its size; downloaded only after y)."
+        ;;
+      Darwin)
+        if [ "$("$PY" -I -S -B -c "$CELL_PROBE" 2>/dev/null)" = "memory-os-cell:retained" ]; then
+          say "Route: $PY (a Python of a retained cell, SQLite >= 3.51.3)."
+        else
+          set -- --cpython 3.13 "$@"
+          say "Route: $PY is not a Python of a retained cell (version or SQLite): the standalone CPython 3.13"
+          say "(announced with its source and size; downloaded only after y)."
+        fi
+        ;;
+    esac
+  fi
+
 
   for NAME in memory_os_bootstrap.py SHA256SUMS; do
     curl -q -fsSL --proto "$CURL_PROTO" --proto-redir "$CURL_PROTO" -o "$WORK/$NAME" "$RELEASE_BASE/$NAME" \

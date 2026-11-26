@@ -451,7 +451,8 @@ def test_without_a_terminal_it_is_the_complete_preview_and_nothing_is_written(o)
     code, text = o.main(terminal=lambda: None)
     assert code == bs.EXIT_NOT_CONFIRMED == 3
     assert "No terminal" in text and "the bootstrap wrote nothing" in text
-    for words in (bs.WRITES_BEFORE_ANSWER, bs.CHECKED_BEFORE, bs.CHECKED_AFTER, "private temporary directory removed",
+    for words in (bs.WRITES_BEFORE_ANSWER, bs.CHECKED_BEFORE, bs.CHECKED_AFTER, "the only thing created in TMPDIR",
+                  "the xcrun cache that Apple's python3 launcher may create", "removed at exit",
                   "nothing is written in HOME, in the store or in any client configuration, and no service",
                   f"interpreter      : {o.home}/.memory-os/venv/bin/python",
                   "service program  : " + bs.quote([str(o.home / ".memory-os/venv/bin/python"), "-m",
@@ -1256,3 +1257,10 @@ def test_a_link_into_the_historical_location_is_refused_too(o):
     (o.home / "build-link").symlink_to(o.home / ".memory-os-v4", target_is_directory=True)  # dangling: absent store
     report, _ = o.run("--work-dir", str(o.home / "build-link" / "w"), terminal=FakeTerminal("y"))
     assert "destination_in_legacy_store" in report["plan"]["blocker_codes"]
+
+
+def test_the_probes_forward_the_redirected_xcrun_cache_only():
+    environ = {"HOME": "/h", "PATH": "/usr/bin", "xcrun_db": "/w/memory-os-install.x/xcrun_db", "xcrun_log": "1"}
+    assert bs.child_environment(environ)["xcrun_db"] == "/w/memory-os-install.x/xcrun_db"
+    assert "xcrun_log" not in bs.child_environment(environ)
+    assert "xcrun_db" not in bs.uv_environment(environ)

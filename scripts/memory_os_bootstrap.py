@@ -148,7 +148,10 @@ UV_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "S
 # bootstrap itself and reported consistently with ``client_env_override`` without being forwarded.
 # 4.1.3 (lifts the 4.1.1 L5 limit): the quickstart preview ALONE also receives XDG_CONFIG_HOME, see
 # ``quickstart_environment``; quickstart validates it itself (client_xdg_invalid, client_xdg_outside_home).
-CHILD_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_RUNTIME_DIR")
+# xcrun_db: where Apple's /usr/bin/python3 launcher (an xcrun shim) writes its lookup cache; install.sh points it into
+# its private temporary directory, so that probing --python /usr/bin/python3 writes nothing elsewhere before y.
+CHILD_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "XDG_RUNTIME_DIR",
+                  "xcrun_db")
 DEFAULT_CLIENTS = ("claude-code", "codex")
 CLIENT_OVERRIDE_ENV = {
     "claude-code": ("CLAUDE_CONFIG_DIR",),
@@ -210,8 +213,9 @@ PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "
                             "loaded_state")
 WRITES_BEFORE_ANSWER = ("nothing is written in HOME, in the store or in any client configuration, and no service is "
                         "installed, before your y: this bootstrap writes nothing before it (when install.sh launched "
-                        "it, its only writes were the two verified files, this bootstrap and SHA256SUMS, in a private "
-                        "temporary directory removed at exit)")
+                        "it, its only writes are the two verified files, this bootstrap and SHA256SUMS, and the xcrun "
+                        "cache that Apple's python3 launcher may create, all in a private temporary directory, the "
+                        "only thing created in TMPDIR, removed at exit)")
 CHECKED_BEFORE = ("cell, release pin and lock, uv, the interpreter of route (a) and its SQLite (read back by executing "
                   "it), destinations, clients and their paths, service manager and definition, existing installation")
 CHECKED_AFTER = ("only once acquired, after y and before anything else is installed: route (i) the SQLite and the "

@@ -76,8 +76,11 @@ request and its redirects, and `pipefail` turns a failed download into a failure
 last line lifts.
 
 **What is written before your answer.** Nothing is written in `$HOME`, in the store or in any client configuration,
-and no service is installed, before you answer `y`. The only writes before it are the two verified files,
-`memory_os_bootstrap.py` and `SHA256SUMS` of the same release (never "latest"), in a private temporary directory
+and no service is installed, before you answer `y`; in your `TMPDIR`, nothing but one private temporary directory.
+The only writes before the answer are the two
+verified files, `memory_os_bootstrap.py` and `SHA256SUMS` of the same release (never "latest"), and the lookup cache
+that Apple's `/usr/bin/python3` launcher (an `xcrun` shim) may create, redirected with `xcrun_db`, all in a private
+temporary directory
 removed at exit and never under your home, physically (a `TMPDIR` there, or where a store, the state directory or
 a client configuration directory of your home really lives through a link, is replaced by `/tmp`). Python runs with `-I -S -B` before
 the answer: no `.pth`, no `sitecustomize`, no bytecode. `install.sh` refuses on any download failure or checksum mismatch, then runs the verified bootstrap

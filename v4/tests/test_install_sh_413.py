@@ -119,7 +119,10 @@ def test_the_shipped_script_is_posix_pinned_to_its_release_and_has_no_override()
     assert TEXT.splitlines()[3].startswith("trap ") and "incomplete" in TEXT.splitlines()[3]
     header = TEXT[:TEXT.index("END_MARKER=")]
     assert "nothing is written in $HOME, in the store or in any client configuration, and no" in header
-    assert "The only writes before it are the two verified files" in header and "removed at exit" in header
+    flat = " ".join(line.lstrip("# ") for line in header.splitlines())
+    assert "writes before the answer are the two verified files" in flat and "removed at exit" in flat
+    assert "the xcrun cache that Apple's python3 launcher may create, all in that private directory" in flat
+    assert "in your TMPDIR, nothing but the private temporary directory itself" in flat
     # the README one-liner: curlrc ignored, HTTPS only for the request and its redirects, failure propagated
     assert README.count(ONE_LINER) == 1
     assert ONE_LINER.replace("https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3",
@@ -486,3 +489,111 @@ def test_the_readme_command_runs_its_first_curl_without_sslkeylogfile(tmp_path):
                           timeout=60, start_new_session=True)
     assert done.returncode == 0, done.stderr
     assert log.read_text().splitlines() == ["unset"] and not keys.exists()
+
+
+# ---------------------------------------------------------------- round 7: the xcrun cache of Apple's python3
+
+CACHE_BOOTSTRAP = '''import json, os, sys
+cache = os.environ.get("xcrun_db")
+if cache and os.environ.get("FAKE_XCRUN_CACHE") == "1":      # what the xcrun launcher leaves: a cache, a temporary
+    open(cache, "w").close()
+    open(cache + "-Ab12Cd34", "w").close()
+target = os.path.join(os.path.dirname(os.path.abspath(os.environ["HOME"])), "bootstrap-ran.json")
+with open(target, "w") as handle:
+    json.dump({"argv": sys.argv[1:], "xcrun_db": cache, "cache_exists": bool(cache) and os.path.exists(cache),
+               "work": os.path.dirname(os.path.abspath(sys.argv[0]))}, handle)
+'''
+
+
+def test_the_xcrun_cache_is_redirected_into_work_before_the_first_python():
+    code = "\n".join(_code_lines())
+    first_python = code.index('"$PY" -I')
+    assert code.index("mktemp -d") < code.index('xcrun_db="$WORK/xcrun_db"') < code.index("export xcrun_db") \
+        < first_python
+    assert code.index("forbidden \"$BASE\"") < code.index("mktemp -d")
+    assert "${xcrun_db" not in code                                     # an inherited value is never used
+    trap = next(line for line in code.splitlines() if line.strip().startswith("trap 'rm -f"))
+    assert '"$WORK/xcrun_db" "$WORK"/xcrun_db-*' in trap and 'rmdir "$WORK"' in trap
+
+
+def _logging_python(r, log: Path, cell="other"):
+    """python3 of the PATH: logs the xcrun_db each invocation sees, answers the cell probe, runs the bootstrap."""
+    shim = r.bin / f"python{MINOR[0]}.{MINOR[1]}"
+    shim.write_text(f'#!/bin/sh\ncase "$*" in *memory-os-cell:*) echo "probe:${{xcrun_db-}}" >> "{log}"; '
+                    f'echo memory-os-cell:{cell}; exit 0 ;; esac\necho "launch:${{xcrun_db-}}" >> "{log}"\n'
+                    f'exec "{sys.executable}" "$@"\n')
+    shim.chmod(0o755)
+
+
+@pytest.mark.parametrize("inherited", [None, "home"])
+def test_every_python_invocation_before_the_answer_gets_the_redirect(tmp_path, inherited):
+    r = Release(tmp_path, bootstrap=CACHE_BOOTSTRAP, uname="Darwin")
+    log = tmp_path / "python.log"
+    _logging_python(r, log)
+    environ = {"HOME": str(r.home), "PATH": f"{r.bin}:{r.uv_dir}:/usr/bin:/bin", "TMPDIR": str(r.tmpdir),
+               "LANG": "en_US.UTF-8"}
+    if inherited:
+        environ["xcrun_db"] = str(r.home / "xcrun_db")               # inherited: overridden, never honoured
+    before = tree(r.home)
+    done = subprocess.run(["/bin/sh", "-s", "--"], input=r.script(), capture_output=True, text=True, env=environ,
+                          cwd=str(r.home), timeout=180, start_new_session=True)
+    assert done.returncode == 0, done.stderr
+    seen = r.ran()
+    cache = os.path.join(seen["work"], "xcrun_db")
+    assert log.read_text().splitlines() == [f"probe:{cache}", f"launch:{cache}"]
+    assert seen["xcrun_db"] == cache and Path(seen["work"]).parent == Path(os.path.realpath(r.tmpdir))
+    assert tree(r.home) == before and not (r.home / "xcrun_db").exists()
+
+
+def test_the_exit_trap_removes_the_xcrun_cache_with_the_private_directory(tmp_path):
+    r = Release(tmp_path, bootstrap=CACHE_BOOTSTRAP, uname="Darwin", cell="retained")
+    environ = {"HOME": str(r.home), "PATH": f"{r.bin}:{r.uv_dir}:/usr/bin:/bin", "TMPDIR": str(r.tmpdir),
+               "LANG": "en_US.UTF-8", "FAKE_XCRUN_CACHE": "1"}
+    done = subprocess.run(["/bin/sh", "-s", "--"], input=r.script(), capture_output=True, text=True, env=environ,
+                          cwd=str(r.home), timeout=180, start_new_session=True)
+    assert done.returncode == 0, done.stderr
+    seen = r.ran()
+    assert seen["cache_exists"] is True and not Path(seen["work"]).exists()
+    assert list(r.tmpdir.iterdir()) == []                              # no residue: rmdir succeeded
+
+
+def _apple_launcher() -> bool:
+    if sys.platform != "darwin" or not os.path.isfile("/usr/bin/python3"):
+        return False
+    import tempfile
+    with tempfile.TemporaryDirectory() as scratch:  # the detection's own cache stays in a throwaway directory
+        probe = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", "-c", "pass"], capture_output=True, text=True,
+                               env={"PATH": "/usr/bin:/bin", "xcrun_verbose": "1",
+                                    "xcrun_db": os.path.join(scratch, "xcrun_db")}, timeout=60)
+    return "xcrun_db = " in probe.stderr
+
+
+def _default_cache():
+    base = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True).stdout.strip()
+    directory = Path(base)
+    state = sorted((path.name, path.stat().st_mtime_ns, path.stat().st_size)
+                   for path in directory.glob("xcrun_db*")) if directory.is_dir() else None
+    return directory, state
+
+
+@pytest.mark.skipif(not _apple_launcher(), reason="/usr/bin/python3 is not Apple's xcrun launcher here")
+def test_apple_python3_launcher_honours_the_redirect_for_real(tmp_path):
+    """The real /usr/bin/python3 (Apple's xcrun shim), with an inherited xcrun_db into HOME: its cache appears in the
+    private directory only, never in HOME, the user's TMPDIR or the default per-user location, and is removed."""
+    r = Release(tmp_path, bootstrap=CACHE_BOOTSTRAP, uname="Darwin", python="/usr/bin/python3")
+    environ = {"HOME": str(r.home), "PATH": f"{r.bin}:{r.uv_dir}:/usr/bin:/bin", "TMPDIR": str(r.tmpdir),
+               "LANG": "en_US.UTF-8", "xcrun_db": str(r.home / "xcrun_db")}
+    unchanged = []
+    for attempt in range(3):  # another program may refresh the default cache meanwhile; a leak would every time
+        home_before, default_before = tree(r.home), _default_cache()
+        done = subprocess.run(["/bin/sh", "-s", "--"], input=r.script(), capture_output=True, text=True,
+                              env=environ, cwd=str(r.home), timeout=180, start_new_session=True)
+        assert done.returncode == 0, done.stderr
+        seen = r.ran()
+        assert seen["xcrun_db"] == os.path.join(seen["work"], "xcrun_db") and seen["cache_exists"] is True
+        assert "--cpython" in seen["argv"] and "3.13" in seen["argv"]  # Apple's 3.9 is not of a cell: Q2
+        assert tree(r.home) == home_before and list(r.tmpdir.iterdir()) == [] and not Path(seen["work"]).exists()
+        unchanged.append(_default_cache() == default_before)
+        if unchanged[-1]:
+            break
+    assert any(unchanged), "the default xcrun cache was written"
