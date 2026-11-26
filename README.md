@@ -87,10 +87,12 @@ route below.
 
 **Docker (from 4.1.3; lexical profile, `serve` in the foreground).** No image is published (that needs a separate
 decision): build it from a clone of the release tag, with the release wheel, checked against `SHA256SUMS`, in `dist/`.
-The token file is yours (mode 0600, owned by uid 10001, the user of the image); the image holds no secret.
+The token file is yours (mode 0600, owned by uid 10001, the user of the image); the image holds no secret. By default
+the service listens on the container's own loopback; `--container-listen-all` (the explicit opt-in, never the
+default) lets the port published on the host loopback, with the same number on both sides, reach it.
 
 ```bash
-docker build --build-arg WHEEL=memory_os_ai-4.1.3-py3-none-any.whl -t memory-os-ai:local . && docker run --rm -p 127.0.0.1:8765:8765 -v memory-os-data:/data -v /path/to/http.token:/run/memory-os/http.token:ro memory-os-ai:local
+docker build --build-arg WHEEL=memory_os_ai-4.1.3-py3-none-any.whl -t memory-os-ai:local . && docker run --rm -p 127.0.0.1:8765:8765 -v memory-os-data:/data -v /path/to/http.token:/run/memory-os/http.token:ro memory-os-ai:local --container-listen-all
 ```
 
 <details>
