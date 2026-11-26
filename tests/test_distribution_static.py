@@ -40,14 +40,14 @@ def test_data_files_missing_literal_glob_or_directory_is_refused(tmp_path, patte
 def test_console_scripts_resolve_to_source_functions_without_importing_server():
     scripts = metadata()["project"]["scripts"]
     assert set(scripts) == {
-        "memory-os-ai", "memory-os-v4", "memory-os-ai-v3",
+        "memory-os-ai", "memory-os-v4",       # 4.1.3 (D2): memory-os-ai-v3 is no longer shipped
         "memory-os-relay", "memory-os-admin",
         "memory-os-constraints",  # 4.1.0 setup contract §9: stdlib-only constraints locator
     }
     for entry in scripts.values():
         module, function = entry.split(":")
         candidates = [ROOT / base / (module.replace(".", "/") + ".py")
-                      for base in ("src", "v4/src")]
+                      for base in ("v4/src",)]
         sources = [path for path in candidates if path.is_file()]
         assert len(sources) == 1, entry
         tree = ast.parse(sources[0].read_text())
@@ -74,14 +74,14 @@ def test_sdist_manifest_covers_release_tooling_helpers_resources_and_data(monkey
     # Setuptools automatically includes discovered package Python sources before
     # applying MANIFEST.in. Match that declared discovery (no setup/build call).
     discovery = metadata()["tool"]["setuptools"]["packages"]["find"]
-    assert discovery["where"] == ["src", "v4/src"]
-    assert set(discovery["include"]) == {"memory_os_ai*", "memory_os_v4*"}
-    for base, package in (("src", "memory_os_ai"), ("v4/src", "memory_os_v4")):
+    assert discovery["where"] == ["v4/src"]               # 4.1.3 (D2): no legacy v3 package
+    assert set(discovery["include"]) == {"memory_os_v4*"}
+    for base, package in (("v4/src", "memory_os_v4"),):
         included.update(str(path.relative_to(ROOT))
                         for path in (ROOT / base / package).rglob("*.py"))
     required = data_files(ROOT, metadata()["tool"]["setuptools"]["data-files"])
     required.update(name for name in inventory if name.startswith(
-        ("scripts/", "v4/src/memory_os_v4/", "src/memory_os_ai/", "tests/", "v4/tests/")
+        ("scripts/", "v4/src/memory_os_v4/", "tests/", "v4/tests/")
     ))
     required.update({"setup.py", "memory_os_build.py", "conftest.py"})
     assert not (required - included), sorted(required - included)

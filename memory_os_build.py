@@ -21,7 +21,7 @@ from setuptools.command.sdist import sdist
 
 SEED = "_memory_os_build_source.json"
 DESCRIPTOR = "_build_identity.json"
-PACKAGES = ("memory_os_ai", "memory_os_v4")
+PACKAGES = ("memory_os_v4",)  # 4.1.3: the legacy v3 package is no longer shipped
 INPUTS = ("pyproject.toml", "setup.py", "memory_os_build.py", "MANIFEST.in", "README.md",
           "LICENSE", "LICENSE.GPL-3.0")
 
@@ -69,7 +69,7 @@ def selected(name: str, root: Path) -> bool:
         return False
     if "__pycache__" in name.split("/") or name.endswith((".pyc", ".pyo")) or name.rsplit("/", 1)[-1] == DESCRIPTOR:
         return False
-    if name in INPUTS or name.startswith(("src/memory_os_ai/", "v4/src/memory_os_v4/")):
+    if name in INPUTS or name.startswith("v4/src/memory_os_v4/"):
         return True
     for words in rules:
         if words and words[0] == "include" and any(fnmatch(name, p) for p in words[1:]):
@@ -84,7 +84,7 @@ def selected(name: str, root: Path) -> bool:
 
 def seal(root: Path, version: str) -> dict:
     files = source_inventory(root)
-    for name in ("src/memory_os_ai/__init__.py", "v4/src/memory_os_v4/__init__.py"):
+    for name in ("v4/src/memory_os_v4/__init__.py",):
         match = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)', (root / name).read_text())
         if not match or match[1] != version:
             raise RuntimeError("Package source version differs from build metadata")
@@ -130,9 +130,9 @@ def seal(root: Path, version: str) -> dict:
 
 def descriptor(build_root: Path, record: dict) -> dict:
     files = inventory(build_root)
-    expected = {name.removeprefix("v4/src/").removeprefix("src/"): value
+    expected = {name.removeprefix("v4/src/"): value
                 for name, value in record["source_files"].items()
-                if name.startswith(("src/memory_os_ai/", "v4/src/memory_os_v4/"))}
+                if name.startswith("v4/src/memory_os_v4/")}
     if files != expected:
         raise RuntimeError("Installed payload differs from sealed source (or stale build directory)")
     def canonical(value):

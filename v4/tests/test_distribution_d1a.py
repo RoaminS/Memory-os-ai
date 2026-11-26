@@ -20,7 +20,6 @@ import pytest
 from memory_os_v4.build_descriptor import NAME, verify
 from memory_os_v4.ops import cli, doctor, provision
 from memory_os_v4 import readiness, __version__ as VERSION
-from memory_os_ai import legacy_cli
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("memory_os_build", ROOT / "memory_os_build.py")
@@ -31,12 +30,10 @@ SHA = "a" * 40
 
 def test_release_versions_and_packaged_notes_are_consistent():
     """Check public release identities without pinning a future test to this version."""
-    from memory_os_ai import __version__ as legacy_version
-
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     standalone = tomllib.loads((ROOT / "v4/pyproject.toml").read_text())
     registry = json.loads((ROOT / "server.json").read_text())
-    assert project["project"]["version"] == standalone["project"]["version"] == VERSION == legacy_version
+    assert project["project"]["version"] == standalone["project"]["version"] == VERSION
     assert registry["version"] == VERSION
     package = registry["packages"][0]
     assert package["version"] == VERSION
@@ -56,7 +53,7 @@ def sealed(tmp_path, monkeypatch):
     for name in builder.INPUTS:
         (root / name).write_text("fixture " + name)
     (root / "pyproject.toml").write_text(f'[project]\nname = "memory-os-ai"\nversion = "{VERSION}"\n')
-    for directory, package in (("src", "memory_os_ai"), ("v4/src", "memory_os_v4")):
+    for directory, package in (("v4/src", "memory_os_v4"),):   # 4.1.3: no legacy v3 package
         folder = root / directory / package
         folder.mkdir(parents=True)
         (folder / "__init__.py").write_text(f'__version__ = "{VERSION}"\n')
@@ -68,7 +65,7 @@ def sealed(tmp_path, monkeypatch):
 
 
 def install(sealed, target):
-    for directory, package in (("src", "memory_os_ai"), ("v4/src", "memory_os_v4")):
+    for directory, package in (("v4/src", "memory_os_v4"),):
         shutil.copytree(sealed / directory / package, target / package)
     record = builder.seal(sealed, VERSION)
     descriptor = builder.descriptor(target, record)
@@ -85,7 +82,7 @@ def test_sdist_git_free_identity_matches_payload_and_source_commit(sealed, tmp_p
     install(exported, tmp_path / "installed")
     check = verify(tmp_path / "installed", VERSION)
     assert check["ok"] and check["commit"] == original["source_commit"]
-    module = exported / "src/memory_os_ai/__init__.py"
+    module = exported / "v4/src/memory_os_v4/__init__.py"
     module.write_text(module.read_text() + "\n# tampered\n")
     with pytest.raises(RuntimeError, match="Modified"):
         builder.seal(exported, VERSION)
@@ -96,7 +93,7 @@ def test_installed_descriptor_fails_closed(sealed, tmp_path, damage):
     root = tmp_path / "installed"
     install(sealed, root)
     path = root / "memory_os_v4" / NAME
-    module = root / "memory_os_ai/__init__.py"
+    module = root / "memory_os_v4/__init__.py"
     if damage == "missing":
         path.unlink()
     elif damage == "changed":
@@ -117,7 +114,7 @@ def test_installed_descriptor_fails_closed(sealed, tmp_path, damage):
         module.rename(other)
         module.symlink_to(other)
     else:
-        folder = root / "memory_os_ai"
+        folder = root / "memory_os_v4"
         folder.rename(tmp_path / "other")
         folder.symlink_to(tmp_path / "other", target_is_directory=True)
     assert verify(root, VERSION)["code"] == "build_unqualified"
@@ -141,8 +138,8 @@ def test_real_hooks_tiny_wheel_and_git_free_sdist_roundtrip(sealed, tmp_path, mo
 name = "memory-os-ai"
 version = "{VERSION}"
 [tool.setuptools.packages.find]
-where = ["src", "v4/src"]
-include = ["memory_os_ai*", "memory_os_v4*"]
+where = ["v4/src"]
+include = ["memory_os_v4*"]
 ''')
     (sealed / "MANIFEST.in").write_text("include setup.py memory_os_build.py LICENSE LICENSE.GPL-3.0\n")
     subprocess.run(["git", "-C", str(sealed), "add", "."], check=True, capture_output=True)
@@ -189,8 +186,8 @@ dependencies = {json.dumps(tomllib.loads((ROOT / 'pyproject.toml').read_text())[
 [project.optional-dependencies]
 {chr(10).join(f'{json.dumps(k)} = {json.dumps(v)}' for k, v in tomllib.loads((ROOT / 'pyproject.toml').read_text())['project']['optional-dependencies'].items())}
 [tool.setuptools.packages.find]
-where = ["src", "v4/src"]
-include = ["memory_os_ai*", "memory_os_v4*"]
+where = ["v4/src"]
+include = ["memory_os_v4*"]
 ''')
     (sealed / "MANIFEST.in").write_text("include setup.py memory_os_build.py LICENSE LICENSE.GPL-3.0\n")
     git = ["git", "-C", str(sealed)]
@@ -305,7 +302,7 @@ async def test_ready_rechecks_installed_payload_after_startup(sealed, tmp_path, 
                                      headers={"Authorization": "Bearer " + token}) as client:
             response = await client.get("/ready")
             assert response.status_code == 200 and response.json()["identity_source"] == "embedded_descriptor"
-            (root / "memory_os_ai/__init__.py").write_text("tampered")
+            (root / "memory_os_v4/__init__.py").write_text("tampered")
             response = await client.get("/ready")
             assert response.status_code == 503 and response.json()["reason"] == "build_unqualified"
 
@@ -333,7 +330,7 @@ def test_doctor_explains_embedded_identity(monkeypatch, tmp_path):
     assert result.status == "PASS" and "no longer needed" in result.hint
 
 
-def test_extras_and_v3_failure_are_explicit(monkeypatch, capsys):
+def test_extras_are_explicit():
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert not any(name.startswith(("pymupdf", "pytesseract", "python-pptx", "python-docx", "Pillow", "requests")) for name in meta["dependencies"])
     # 4.1.0: the ML closure left the core for the [semantic] extra, with a bound containing the
@@ -348,15 +345,23 @@ def test_extras_and_v3_failure_are_explicit(monkeypatch, capsys):
     assert "sentence-transformers==5.2.3" in constraints
     assert qualified_runtime.check_constraints(constraints, profile="semantic", extras=("ops", "brief"))["ok"]
     assert "pymupdf>=1.24" in meta["optional-dependencies"]["documents"]
-    monkeypatch.setattr(legacy_cli.importlib.util, "find_spec", lambda *a: None)
-    assert legacy_cli.main() == 2
-    assert "memory-os-ai[legacy-v3]==" in capsys.readouterr().err
 
 
-def test_v3_help_does_not_import_legacy_server(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["memory-os-ai-v3", "--help"])
-    monkeypatch.setattr(legacy_cli, "require_v3", lambda: pytest.fail("Help must not load an engine"))
-    assert legacy_cli.main() == 0 and "optional legacy" in capsys.readouterr().out
+def test_legacy_v3_package_is_not_shipped():
+    """4.1.3 (D2): the legacy ``memory_os_ai`` package and its ``memory-os-ai-v3`` command leave the wheel.
+
+    The sources are kept, unshipped, under ``legacy/v3/`` until 4.2.0; v3 configurations are still RECOGNISED
+    by ``quickstart``/``uninstall`` (string match only), so an old client entry can be found and removed."""
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    assert "memory-os-ai-v3" not in project["project"]["scripts"]
+    assert not any(target.startswith("memory_os_ai.") for target in project["project"]["scripts"].values())
+    find = project["tool"]["setuptools"]["packages"]["find"]
+    assert find == {"where": ["v4/src"], "include": ["memory_os_v4*"]}
+    assert builder.PACKAGES == ("memory_os_v4",)
+    assert not (ROOT / "src/memory_os_ai").exists() and (ROOT / "legacy/v3/memory_os_ai/__init__.py").is_file()
+    assert not any(line.split()[:2] == ["recursive-include", "legacy"] for line in
+                   (ROOT / "MANIFEST.in").read_text().splitlines())
+    assert importlib.util.find_spec("memory_os_ai") is None
 
 
 @pytest.fixture

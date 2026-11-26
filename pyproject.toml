@@ -180,7 +180,6 @@ cloud-all = [
 [project.scripts]
 memory-os-ai = "memory_os_v4.server:run"
 memory-os-v4 = "memory_os_v4.server:run"
-memory-os-ai-v3 = "memory_os_ai.legacy_cli:main"
 memory-os-relay = "memory_os_v4.ops.relay:main"
 memory-os-admin = "memory_os_v4.ops.cli:main"
 # Standard library only: usable right after `pip install --no-deps`, before any dependency exists.
@@ -191,8 +190,8 @@ py-modules = ["memory_os_constraints"]
 package-dir = {"" = "v4/src"}
 
 [tool.setuptools.packages.find]
-where = ["src", "v4/src"]
-include = ["memory_os_ai*", "memory_os_v4*"]
+where = ["v4/src"]
+include = ["memory_os_v4*"]
 
 [tool.setuptools.package-data]
 memory_os_v4 = ["resources/*.json", "resources/*.txt"]
@@ -204,7 +203,7 @@ memory_os_v4 = ["resources/*.json", "resources/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "v4/src", "v4"]
+pythonpath = ["v4/src", "v4"]
 markers = ["slow: loads a real sentence-transformers model"]
 asyncio_mode = "auto"
 filterwarnings = [
@@ -214,7 +213,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src/memory_os_ai"]
+source = ["v4/src/memory_os_v4"]
 branch = true
 
 [tool.coverage.report]

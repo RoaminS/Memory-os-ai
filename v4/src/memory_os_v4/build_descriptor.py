@@ -22,7 +22,7 @@ def _stamp(root):
     # Include directory entries, permissions and symlinks: additions/removals
     # or replacements must invalidate without waiting for the TTL.
     return tuple((str(p.relative_to(root)), file_stamp(p))
-                 for package in ('memory_os_v4', 'memory_os_ai')
+                 for package in ('memory_os_v4',)
                  for p in (root/package, *sorted((root/package).rglob('*')))
                  if '__pycache__' not in p.parts and p.suffix not in {'.pyc', '.pyo'})
 
@@ -52,7 +52,7 @@ def _verify(root: Path, version: str) -> dict:
         files = record.get("files")
         if not isinstance(files, dict) or not files or any(
             not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts
-            or name.split("/")[0] not in {"memory_os_v4", "memory_os_ai"}
+            or name.split("/")[0] != "memory_os_v4"
             or not re.fullmatch(r"[0-9a-f]{64}", str(value)) for name, value in files.items()
         ):
             raise ValueError("invalid payload inventory")
@@ -60,7 +60,7 @@ def _verify(root: Path, version: str) -> dict:
         if hashlib.sha256(canonical).hexdigest() != record.get("payload_sha256"):
             raise ValueError("invalid payload root")
         actual = {}
-        for package in ("memory_os_v4", "memory_os_ai"):
+        for package in ("memory_os_v4",):  # 4.1.3: no legacy v3 package
             directory = root / package
             if directory.is_symlink():
                 raise ValueError("symlinked package")

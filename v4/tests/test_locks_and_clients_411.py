@@ -1619,9 +1619,8 @@ def test_classifiers_declare_python_312_313_and_linux():
     assert "Operating System :: MacOS :: MacOS X" in classifiers
     assert [item for item in classifiers if "Linux" in item or "POSIX" in item] == ["Operating System :: POSIX :: Linux"]
     assert "# \"Operating System" not in text     # no commented-out classifier left behind
-    import memory_os_ai
     import memory_os_v4
-    assert project["version"] == memory_os_v4.__version__ == memory_os_ai.__version__ == "4.1.2"
+    assert project["version"] == memory_os_v4.__version__ == "4.1.2"   # 4.1.3 (D2): no legacy v3 package
 
 
 # ===================================================================== 8. Codex E3-gel-r1: wheels bound to the cell
