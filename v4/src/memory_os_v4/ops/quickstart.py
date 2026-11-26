@@ -1516,6 +1516,69 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
     return result
 
 
+PLAN_DIGEST_VERSION = 2
+PLAN_DIGEST_CLIENT_KEYS = ("client", "path", "file_sha256", "action", "desired_sha256", "current_class", "ownership")
+PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "manager", "plist", "unit",
+                            "loaded_state")
+
+
+def target_identity(path, *, count_entries=False) -> dict | None:
+    """What a write decision depends on for ``path`` (no content, never a secret): None when absent.
+
+    ``count_entries`` only where emptiness decides (the store): the ops and journal directories receive files of
+    their own (a caller's work directory, logs) that change no write decision of an apply."""
+    try:
+        status = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"kind": "unreadable"}
+    kind = ("link" if stat.S_ISLNK(status.st_mode) else "directory" if stat.S_ISDIR(status.st_mode)
+            else "file" if stat.S_ISREG(status.st_mode) else "other")
+    identity = {"kind": kind, "mode": stat.S_IMODE(status.st_mode), "uid": status.st_uid, "dev": status.st_dev,
+                "ino": status.st_ino}
+    if kind == "file":  # a directory's link count follows its entries on some file systems (APFS): files only
+        identity.update(size=status.st_size, nlink=status.st_nlink)
+    if kind == "directory" and count_entries:
+        try:
+            identity["entries"] = len(os.listdir(path))
+        except OSError:
+            identity["entries"] = None
+    return identity
+
+
+def write_targets(settings, home) -> dict:
+    """Identity of every location an apply may create or reuse besides clients, service and resources."""
+    return {"token": target_identity(settings.token_file),
+            "store": target_identity(settings.store_dir, count_entries=True),
+            "ops_dir": target_identity(settings.ops_dir), "journals": target_identity(Path(home) / JOURNAL_SUBDIR)}
+
+
+def plan_digest(plan: dict) -> str:
+    """SHA-256 of what an apply of ``plan`` would write or reuse (4.1.3, one-command install).
+
+    Covers the profile, backend, interpreter, port, token (path, state, identity of an existing file; never its
+    value), client environment, cell, build identity, the whole resource plan (resources, files and destinations,
+    presence, ref readiness, download bytes, environment), named consents, the identity of every other write target
+    (store, ops directory, journals), every client (path, file digest, action, desired entry) and the whole service
+    (label, definition path and text, argv, environment, state, job state). Volatile facts (time, free disk, port
+    probe) are outside. Computed on the JSON form of the plan, so that a caller holding only the printed preview (the
+    standard-library bootstrap) computes the same value; ``--expect-plan`` binds an apply to it.
+    """
+    service = plan.get("service") or {}
+    body = {"version": PLAN_DIGEST_VERSION, "profile": plan.get("profile"), "backend": plan.get("backend"),
+            "python": plan.get("python"), "port": plan.get("port"), "token": plan.get("token"),
+            "provision": plan.get("provision"), "write_targets": plan.get("write_targets"),
+            "client_env": plan.get("client_env"), "cell_id": (plan.get("cell") or {}).get("cell_id"),
+            "identity": plan.get("identity"), "downloads_required_bytes": plan.get("downloads_required_bytes"),
+            "replace_existing": plan.get("replace_existing"),
+            "clients": [{key: client.get(key) for key in PLAN_DIGEST_CLIENT_KEYS} for client in plan.get("clients") or []],
+            "service": {key: service.get(key) for key in PLAN_DIGEST_SERVICE_KEYS}}
+    canonical = json.dumps(json.loads(json.dumps(body, default=str)), sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def attestation_summary(attestation: dict | None) -> dict | None:
     """Both SQLite read-back values without any path: what every report carries, failures included."""
     if not attestation:
@@ -1928,6 +1991,7 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
     if manager is not None:
         notices += manager.notices(service['label'])
     return {**result, 'ok': not blockers, 'profile': effective, 'identity': identity, 'service': service,
+            'write_targets': write_targets(settings, home),
             'blockers': blockers, 'blocker_codes': blocker_codes, 'sqlite_runtime': sqlite_report, 'notices': notices,
             'sqlite_attestation': sqlite_attestation,
             **({'sqlite_runtime_target': target_report} if target_report is not sqlite_report else {}),
@@ -2100,7 +2164,8 @@ def _confirmed_stop(service, port, *, run, stop_timeout=10.0, sleep=None, clock=
 
 
 def apply_install(plan, settings, *, download_approved=False, demo=False, home=None, run=subprocess.run,
-                  probe=None, doctor_run=None, timeout=180, clock=time.monotonic, stop_timeout=10.0):
+                  probe=None, doctor_run=None, timeout=180, clock=time.monotonic, stop_timeout=10.0,
+                  expected_plan=None):
     """Explicit apply. Journal every stage; failure preserves evidence, never repairs a foreign job.
 
     Stages: sqlite (WAL probe) -> resources -> token -> service -> service_ready -> clients -> checks
@@ -2129,6 +2194,10 @@ def apply_install(plan, settings, *, download_approved=False, demo=False, home=N
         raise QuickstartError('Preflight changed; re-preview, nothing activated', code='preflight_changed')
     if any(a['file_sha256'] != b['file_sha256'] for a, b in zip(current['clients'], plan['clients'])):
         raise QuickstartError('Client file changed; re-preview before apply', code='preflight_changed')
+    if expected_plan is not None and not plan_digest(plan) == plan_digest(current) == expected_plan:
+        # 4.1.3 (--expect-plan): the plan applied must be the very plan a caller accepted; checked before any write.
+        raise QuickstartError('The plan to apply differs from the accepted plan (--expect-plan); nothing written, '
+                              're-preview', code='plan_digest_mismatch')
     if plan['service']['state'] == 'owned' and _ready(settings, plan['identity'], backend=plan['backend'],
                                                       profile=profile) is None:
         raise QuickstartError('Existing owned service not ready: no repair or config writes', code='service_not_ready')

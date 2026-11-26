@@ -62,7 +62,71 @@ it reports `non testé` ("not tested").
 
 ## Install on macOS and Ubuntu 24.04
 
-**Quick install** with the bootstrap of the latest release, checked against its `SHA256SUMS`. It needs
+**One command (from 4.1.3).** It needs [`uv`](https://docs.astral.sh/uv/) ≥ 0.13.9 on your PATH, which is never
+downloaded for you, `python3` and `bash`:
+
+```bash
+env -u BASH_ENV bash -o pipefail -c "unset SSLKEYLOGFILE; curl -q -fsSL --proto '=https' --proto-redir '=https' https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh"
+```
+
+Why this form: `env -u BASH_ENV` keeps `bash` from running a startup file named by `BASH_ENV` before anything
+else, `unset SSLKEYLOGFILE` stops `curl` from writing a TLS key log (the one environment variable its manual
+documents as writing a file), `-q` makes it ignore any `curlrc`, `--proto`/`--proto-redir` allow HTTPS only, for the
+request and its redirects, and `pipefail` turns a failed download into a failure (a bare `curl … | sh` reports success when
+`curl` fails). A truncated `install.sh` runs nothing and exits non-zero: its first lines set a guard that only its
+last line lifts.
+
+**What is written before your answer.** Nothing is written in `$HOME`, in the store or in any client configuration,
+and no service is installed, before you answer `y`; in your `TMPDIR`, nothing but one private temporary directory.
+The only writes before the answer are the two
+verified files, `memory_os_bootstrap.py` and `SHA256SUMS` of the same release (never "latest"), and the lookup cache
+that Apple's `/usr/bin/python3` launcher (an `xcrun` shim) may create, redirected with `xcrun_db`, all in a private
+temporary directory
+removed at exit and never under your home, physically (a `TMPDIR` there, or where a store, the state directory or
+a client configuration directory of your home really lives through a link, is replaced by `/tmp`). Python runs with `-I -S -B` before
+the answer: no `.pth`, no `sitecustomize`, no bytecode. `install.sh` refuses on any download failure or checksum mismatch, then runs the verified bootstrap
+with `--interactive`:
+
+- a **complete preview**: every download with its source and size (a standalone CPython included, see below), the
+  environment, the service (label, port, manager, definition, program), the token file (created or reused), the store
+  (a new install gets `~/.local/share/memory-os/store`, as `quickstart` selects it; an existing `~/.memory-os-v4`,
+  even empty, is refused before the question and never touched), and each assistant
+  configuration file it would write, for the assistants found on this machine (their configuration file or their
+  command-line tool);
+- **one question**, `[y/N]`, read from the terminal, default No. Without a terminal (CI, a pipe) it stops after the
+  preview;
+- **checked before the question**: cell, release pin and lock, `uv`, an existing Python and the SQLite it loads, the
+  destinations, the clients and their paths, the service manager, an existing installation. **Checked only after `y`,
+  once acquired, before anything else is installed**: the SQLite and the build of a downloaded standalone CPython
+  (read back from the new environment), the digest of the installed package, and the `quickstart` preview of that
+  environment;
+- after `y`: the lexical profile (no resource download) is installed; `quickstart` must see exactly what was announced,
+  and `quickstart --apply` receives the digest of that plan (`--expect-plan`) and refuses any other one before writing;
+  then `/ready` is checked, and the follow-up commands (`doctor`, `quickstart --undo <stamp> --with-service`,
+  `uninstall`) are printed with the environment of this installation spelled out.
+
+The interpreter: on Ubuntu 24.04, the standalone CPython 3.11 named for the cell (about 49.5 MB); on macOS, your
+`python3` when it is a Python of a [cell](#platform-cells) with SQLite ≥ 3.51.3, otherwise the standalone CPython 3.13
+(about 25.6 MB). Either download is announced, with its source and size, before the question, and made only after
+`y`. Options go after `sh -s --`, for example `… | sh -s -- --clients codex,cursor` or `--python /path/to/python3.12`.
+The one command installs the lexical profile only: for the **semantic profile**, use the "Semantic profile
+(recommended)" commands of the manual install below. The current release, 4.1.2, has no `install.sh`: use the
+manual route.
+
+**Docker (from 4.1.3; lexical profile, `serve` in the foreground).** No image is published (that needs a separate
+decision): build it from a clone of the release tag, with the release wheel, checked against `SHA256SUMS`, in `dist/`.
+The token file is yours (mode 0600, owned by uid 10001, the user of the image); the image holds no secret. By default
+the service listens on the container's own loopback; `--container-listen-all` (the explicit opt-in, never the
+default) lets the port published on the host loopback, with the same number on both sides, reach it.
+
+```bash
+docker build --build-arg WHEEL=memory_os_ai-4.1.3-py3-none-any.whl -t memory-os-ai:local . && docker run --rm -p 127.0.0.1:8765:8765 -v memory-os-data:/data -v /path/to/http.token:/run/memory-os/http.token:ro memory-os-ai:local --container-listen-all
+```
+
+<details>
+<summary><b>Manual install</b>: checked downloads, the <code>pip</code> route with its constraints, the bootstrap options</summary>
+
+**The bootstrap, downloaded and checked by hand** (latest release, against its `SHA256SUMS`). It needs
 [`uv`](https://docs.astral.sh/uv/) ≥ 0.13.9 and a Python of your [cell](#platform-cells). The first run is a preview
 that writes nothing; `--apply` installs and then prints the `quickstart --apply` command, which you run yourself.
 
@@ -132,6 +196,8 @@ The first `pip` command installs the package alone so that `memory-os-constraint
 your profile and of the detected cell; the second installs the dependencies at exactly the versions of that lock.
 `quickstart` refuses a runtime whose installed versions differ from that lock.
 
+</details>
+
 ### The bootstrap template (preview only)
 
 The sdist contains `scripts/memory_os_bootstrap.py`, one script that uses the standard library only. That copy is a
@@ -154,6 +220,13 @@ describes the script itself; `--apply` works only in a copy whose release pin is
   `--cpython 3.11` on Ubuntu 24.04. That interpreter is downloaded only with the consent `--apply --acquire-cpython`,
   and its SQLite is read back from the environment before anything is installed.
 - **Proof state.** `--p9-manifest /path/to/manifest` reads a local P9 manifest; nothing is ever fetched.
+- **`--interactive` (from 4.1.3)**, what `install.sh` runs: the same preview, plus the service, the token, the store
+  and the client files, the lexical profile by default and one `[y/N]` question read from the terminal (`/dev/tty`);
+  the bootstrap writes nothing before the answer. After `y` it creates the environment as `--apply` does, compares
+  the `quickstart` preview run from it with what was announced, then runs `quickstart --apply --expect-plan
+  <digest of that preview>` and checks `/ready`; any blocker or difference stops it first. A relocated
+  client (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, `GROK_HOME`, `COPILOT_HOME` for VS Code on Linux) or a
+  client file that already names `memory-os-ai` is left out, with its reason, never guessed or overwritten.
 
 Preview on Ubuntu 24.04 arm64 (writes nothing):
 

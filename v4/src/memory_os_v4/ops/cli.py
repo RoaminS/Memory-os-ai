@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import sys
 from urllib.parse import urlsplit
@@ -75,7 +76,9 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
         plan = quickstart.prepare(s, clients=chosen, backend=backend, profile=getattr(args, 'profile', None),
                                   replace_existing=tuple(consent.split(',')) if consent else ())
         if args.apply:
-            result = quickstart.apply_install(plan, s, download_approved=args.download_approved, demo=args.demo)
+            expected = getattr(args, 'expect_plan', None)  # 4.1.3: passed only when given (unchanged call otherwise)
+            result = quickstart.apply_install(plan, s, download_approved=args.download_approved, demo=args.demo,
+                                              **({'expected_plan': expected} if expected is not None else {}))
             if args.report:
                 result = {**quickstart.report(plan), 'ok': result['ok'], 'stage': result['stage'],
                           'stamp': result['stamp'], 'elapsed_s': result['elapsed_s'],
@@ -88,7 +91,8 @@ def cmd_quickstart(args, s: OpsSettings) -> int:
         else:
             result = {**quickstart.report(plan), 'ok': plan['ok'], 'stage': 'preview',
                       'writes': 'none', 'blockers': plan['blockers'],
-                      'blocker_codes': plan.get('blocker_codes', [])} if args.report else plan
+                      'blocker_codes': plan.get('blocker_codes', [])} if args.report else {
+                **plan, 'plan_digest': quickstart.plan_digest(plan)}
         _print_json(result)
         return 0 if result['ok'] else 1
     except Exception as exc:
@@ -542,6 +546,8 @@ def main(argv: list[str] | None = None) -> int:
                     help='with --undo: also stop the service THAT install created (confirmed stop, launchd plist or '
                          'systemd unit moved into its journal); data is never touched')
     qs.add_argument('--download-approved', action='store_true')
+    qs.add_argument('--expect-plan', metavar='SHA256',
+                    help='with --apply: refuse before any write unless the plan has this digest (plan_digest of a preview)')
     qs.add_argument('--demo', action='store_true', help='opt-in save/search through relay in a unique demo project')
     qs.add_argument('--report', action='store_true', help='anonymized diagnostic summary')
     un = sub.add_parser('uninstall', allow_abbrev=False,
@@ -596,6 +602,9 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     if args.cmd == 'quickstart' and (args.download_approved or args.demo) and not args.apply:
         p.error('--download-approved/--demo require --apply')
+    if args.cmd == 'quickstart' and args.expect_plan is not None and (
+            not args.apply or re.fullmatch(r'[0-9a-f]{64}', args.expect_plan) is None):
+        p.error('--expect-plan takes the 64-hex plan_digest of a preview and requires --apply')
     if args.cmd == 'quickstart' and args.with_service and not args.undo:
         p.error('--with-service requires --undo STAMP')
     s = OpsSettings.from_env()
