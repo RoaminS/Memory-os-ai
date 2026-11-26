@@ -214,8 +214,10 @@ class Run:
     def p1(self):
         venv = self.venv("p1-venv")
         self.uv_install(venv, "lock", "-r", self.hashed_lock(), hashes=True)
+        # setuptools and wheel: the build backend that the distribution tests import (memory_os_build.py). The
+        # 4.1.1 harness got them from the seeding of a CPython 3.11 venv; `uv venv` seeds nothing (CI run 1).
         self.uv_install(venv, "test-pins", "-r", ROOT / "scripts/qualify_410_pytest_pins.txt", "pytest-asyncio==1.3.0",
-                        "ruff==0.17.6")
+                        "ruff==0.17.6", "setuptools==80.9.0", "wheel==0.48.0")
         deselect = ROOT / f"tools/qualify413/p1_deselection_{self.cell}.json"
         listed = json.loads(deselect.read_text()) if deselect.is_file() else {"format": "qualify413-p1-v1", "tests": [],
                                                                               "expected_skips": []}
@@ -228,21 +230,28 @@ class Run:
                     "expected_skips": len(listed.get("expected_skips", []))})
         if deselect.is_file():
             self.report["artifacts"][deselect.name] = sha256(deselect)
+        # The test write guard (scripts/test_home_guard.py) admits, under the operator's real HOME, only the session
+        # HOME and <repo>/.local-qualification; on the runner the checkout and --output are under /home/runner, so
+        # the JUnit file is written there first, then copied into the report (CI run 1).
         basetemp = ROOT / ".local-qualification" / f"p1-{self.cell}"
+        junit_written = ROOT / ".local-qualification" / f"p1-{self.cell}-junit.xml"
         junit = self.output / "p1-junit.xml"
         home = self.R / "p1-home"
         home.mkdir()
         env = {"HOME": str(home), "PATH": f"{venv}/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TZ": "Europe/Paris",
                "TMPDIR": "/tmp", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0", "MEMORY_V4_EMBED_MODEL": "hash",
-               "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+               "MEMORY_TEST_HASH_V3": "1", "VECLIB_MAXIMUM_THREADS": "1", "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
         for name, argv in (("lint-correctness", ["tests", "v4/src", "v4/tests", "v4/bench", "scripts", "--select", "E9,F"]),
                            ("lint-default", ["tests", "scripts"])):
             self.step(name, [venv / "bin/ruff", "check", *argv], env=env, cwd=ROOT)
         argv = [venv / "bin/python", "-B", "-m", "pytest", "-c", "pyproject.toml", "-m", "not slow", "-q",
-                "-p", "no:cacheprovider", f"--basetemp={basetemp}", f"--junitxml={junit}", "v4/tests", "tests"]
+                "-p", "no:cacheprovider", f"--basetemp={basetemp}", f"--junitxml={junit_written}", "v4/tests", "tests"]
         for test in listed["tests"]:
             argv += ["--deselect", test["nodeid"]]
         rc, _ = self.step("suite", argv, env=env, cwd=ROOT, timeout=2400, expect=(0, 1))
+        if not junit_written.is_file():
+            raise Refused(f"P1: pytest wrote no JUnit report (rc={rc}); see logs/P1-suite.log")
+        shutil.copyfile(junit_written, junit)
         cases = list(ET.parse(junit).getroot().iter("testcase"))
         failed = [f"{c.get('classname')}::{c.get('name')}" for c in cases
                   if c.find("failure") is not None or c.find("error") is not None]
