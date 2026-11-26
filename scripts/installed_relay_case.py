@@ -23,7 +23,7 @@ from mcp.client.stdio import stdio_client
 # 4.0.8/4.0.9 keep both (4.0.9 adds no relay change); the 4.0.8 qualification ran from another checkout.
 # 4.1.0 keeps both and adds an explicit retrieval profile, attested in every case (QUALIFY_4_1_0 G14).
 COMPACT_BRIEF_AND_LOCAL_STATUS_VERSIONS = frozenset({'4.0.4', '4.0.5', '4.0.6', '4.0.7rc1', '4.0.7', '4.0.8', '4.0.9',
-                                                     '4.1.0'})
+                                                     '4.1.0', '4.1.1', '4.1.2', '4.1.3'})
 ML_MODULES = ('torch', 'sentence_transformers', 'transformers', 'faiss')
 
 
@@ -50,13 +50,16 @@ def main() -> int:
     parser.add_argument('--profile', choices=['semantic', 'lexical'],
                         help='4.1.0: explicit retrieval profile, attested in the result')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--port', type=int, default=None,
+                        help='4.1.3: optional fixed test port (default: an ephemeral loopback port)')
     args = parser.parse_args()
     report = {'kind': args.kind, 'artifact_sha256': args.sha256, 'source_commit': args.source_commit, 'ok': False}
     if args.profile:
         report['profile'] = args.profile
     try:
-        if (args.version == '4.1.0') != (args.profile is not None):
-            raise ValueError('explicit --profile is required for 4.1.0, and only for 4.1.0')
+        explicit_profile = tuple(int(part) for part in args.version.split('.')[:3] if part.isdigit()) >= (4, 1, 0)
+        if explicit_profile != (args.profile is not None):
+            raise ValueError('explicit --profile is required from 4.1.0 on, and only from 4.1.0 on')
         if args.profile == 'lexical':
             # The lexical case runs in the environment without ML.
             report['find_spec'] = {name: (None if importlib.util.find_spec(name) is None else 'present')
@@ -79,9 +82,12 @@ def main() -> int:
             token_file = root / 'token'
             create_token(token_file)
             token = read_token(token_file)
-            with socket.socket() as sock:
-                sock.bind(('127.0.0.1', 0))
-                port = sock.getsockname()[1]
+            if args.port is None:
+                with socket.socket() as sock:
+                    sock.bind(('127.0.0.1', 0))
+                    port = sock.getsockname()[1]
+            else:
+                port = args.port
             assert port not in (8765, 8799)
             env = {**os.environ, 'MEMORY_V4_DIR': str(root / 'store'), 'MEMORY_V4_EMBED_MODEL': 'hash',
                    'MEMORY_V4_PROJECT': '*', 'MEMORY_V4_TOKEN_FILE': str(token_file),

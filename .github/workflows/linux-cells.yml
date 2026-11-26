@@ -1,0 +1,146 @@
+name: Linux cells and container (4.1.3)
+
+# Scope (4.1.3, Lot 3, decision D6): qualification of the Linux lexical cells on GitHub-hosted runners, replacing the
+# Lima VM, and the minimal container image (decision D8, never published from here).
+# - build: wheel + sdist of THIS commit (sealed build identity), with SHA256SUMS, kept as an artifact.
+# - resolve-lock-x86_64: the frozen 4.1.1 recipe (uv 0.13.9, --exclude-newer 2026-11-24) for x86_64-manylinux_2_28;
+#   its outputs feed scripts/generate_cell_locks_411.py OFFLINE, in a later commit (the cell is not retained before).
+# - qualify-arm64 / qualify-x86_64: gates P1 and P3-P7 (tools/qualify413/linux_cell.py) on the runner; their report
+#   records the artifact SHA-256 values for the P9 manifest. x86_64 runs only on request, once its lock is embedded.
+# - container-arm64: build the image from the qualified wheel, wait for /ready, stop it, require exit code 0.
+# Actions are pinned by commit SHA; tools by exact version.
+
+on:
+  push:
+    branches: ["feature/4.1.3"]
+  workflow_dispatch:
+    inputs:
+      qualify_x86_64:
+        description: "Also qualify ubuntu2404-x86_64-py311 (only once its lock is embedded)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.13.9"
+  CPYTHON: "3.11.18"
+  BUILD_VERSION: "1.6.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "build==${BUILD_VERSION}" "wheel" "setuptools>=77"
+      - name: Build wheel and sdist of this commit
+        run: |
+          MEMORY_OS_BUILD_SOURCE_COMMIT="${GITHUB_SHA}" python -B -m build --no-isolation --outdir dist
+          (cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  resolve-lock-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "uv==${UV_VERSION}"
+      - name: Resolve the frozen lexical closure for x86_64 (4.1.1 recipe)
+        env:
+          UV_NO_CONFIG: "1"
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          mkdir -p lock
+          common="tools/locks/411/entree_lexical.txt --python-version 3.11 --python-platform x86_64-manylinux_2_28 --only-binary :all: --no-header --exclude-newer 2026-11-24T00:00:00Z"
+          uv pip compile $common --generate-hashes -o lock/ubuntu2404-x86_64-py311.txt
+          uv pip compile $common --format pylock.toml -o lock/pylock.ubuntu2404-x86_64-py311.toml
+          (cd lock && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lock-ubuntu2404-x86_64-py311
+          path: lock/
+          if-no-files-found: error
+
+  qualify-arm64:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "uv==${UV_VERSION}"
+      - name: Gates P1, P3-P7 (ubuntu2404-arm64-py311)
+        run: python -B tools/qualify413/linux_cell.py --cell ubuntu2404-arm64-py311 --dist dist --cpython "${CPYTHON}" --output report
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: report-ubuntu2404-arm64-py311
+          path: report/
+          if-no-files-found: error
+
+  qualify-x86_64:
+    if: github.event_name == 'workflow_dispatch' && inputs.qualify_x86_64
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "uv==${UV_VERSION}"
+      - name: Gates P1, P3-P7 (ubuntu2404-x86_64-py311)
+        run: python -B tools/qualify413/linux_cell.py --cell ubuntu2404-x86_64-py311 --dist dist --cpython "${CPYTHON}" --output report
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: report-ubuntu2404-x86_64-py311
+          path: report/
+          if-no-files-found: error
+
+  container-arm64:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+      - name: Build the image from the qualified wheel (not pushed anywhere)
+        run: |
+          wheel="$(cd dist && ls memory_os_ai-*-py3-none-any.whl)"
+          docker build --build-arg "WHEEL=${wheel}" --build-arg "UV_VERSION=${UV_VERSION}" -t memory-os-ai:ci .
+      - name: Run, wait for /ready, stop cleanly
+        run: python -B tools/qualify413/container_smoke.py --image memory-os-ai:ci --output container-report
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: container-report-arm64
+          path: container-report/
+          if-no-files-found: error
