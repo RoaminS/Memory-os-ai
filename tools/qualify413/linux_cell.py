@@ -64,12 +64,13 @@ def inventory(root: Path, exclude=()) -> dict:
         rel = path.relative_to(root).as_posix()
         if rel.split("/", 1)[0] in exclude:
             continue
+        mode = oct(path.lstat().st_mode & 0o7777)
         if path.is_symlink():
             out[rel] = "link:" + os.readlink(path)
         elif path.is_file():
-            out[rel] = "file:" + sha256(path)
+            out[rel] = f"file:{mode}:{sha256(path)}"
         elif path.is_dir():
-            out[rel] = "dir"
+            out[rel] = f"dir:{mode}"
     return out
 
 
@@ -410,6 +411,29 @@ class Run:
                     out.update({f"{root}/{rel}": v for rel, v in inventory(home / root).items()})
             return out
 
+        helper = ROOT / "scripts/qualify_install_410_helper.py"
+
+        def store_logical(name):
+            """``store_logical`` of the 4.1.0 install qualification, run by the venv (product receipt reader)."""
+            code = ("import json, sys; sys.path.insert(0, sys.argv[1]); from qualify_install_410_helper import "
+                    "store_logical; print(json.dumps(store_logical(sys.argv[2])))")
+            rc, out = self.step(name, [venv / "bin/python", "-I", "-B", "-c", code, helper.parent, store], env=env,
+                                cwd=self.R)
+            return self.last_json(out)
+
+        def store_kept(before, after):
+            """``store_compare`` of the 4.1.0 install qualification, run by the venv too (product receipt reader)."""
+            pair = self.R / f"store-pair-{len(self.report['gates']['P5'].get('steps', {}))}.json"
+            pair.write_text(json.dumps({"before": before, "after": after}))
+            code = ("import json, sys; sys.path.insert(0, sys.argv[1]); from qualify_install_410_helper import "
+                    "store_compare; d = json.load(open(sys.argv[2])); print(json.dumps(store_compare(d['before'], "
+                    "d['after'])))")
+            rc, out = self.step(f"store-compare-{pair.stem}", [venv / "bin/python", "-I", "-B", "-c", code,
+                                                               helper.parent, pair], env=env, cwd=self.R)
+            verdict = self.last_json(out)
+            same = bool(before.get("store_instance_id")) and before.get("store_instance_id") == after.get("store_instance_id")
+            return same and verdict["store_logical_unchanged"] is True, {"instance_unchanged": same, **verdict}
+
         def store_counters():
             rc, out = self.step(f"store-counters-{len(self.report['gates']['P5'].get('steps', {}))}",
                                 [admin, "doctor", "--store-only", "--json"], env=env, cwd=self.R, expect=(0, 1))
@@ -483,6 +507,16 @@ class Run:
         counters = store_counters()
         self.check("the store holds data before the uninstall (demo item through the relay)",
                    isinstance(counters.get("live_total"), int) and counters["live_total"] >= 1, counters)
+        # Non-empty witnesses that the uninstall must keep: a real backup and its key (S4), and the token.
+        self.step("backup-witness", ["nice", "-n", "15", admin, "backup", "--backend", "sqlite", "--online", "--apply"],
+                  env=env, cwd=self.R, timeout=600)
+        witnesses = {"token": home / ".config/memory-os/http.token", "backup key": home / ".config/memory-os/backup.key"}
+        backups = sorted(p for p in (home / "memory-os-backups").rglob("*") if p.is_file()) \
+            if (home / "memory-os-backups").is_dir() else []
+        self.check("non-empty witnesses exist before the uninstall (token, backup key, backup)",
+                   all(p.is_file() and p.stat().st_size > 0 for p in witnesses.values())
+                   and any(p.stat().st_size > 0 for p in backups), {k: p.is_file() for k, p in witnesses.items()})
+        logical_before = store_logical("store-logical-before-preview")
         before = snapshot()
         logs = {rel: (home / rel).stat().st_size for rel in before if rel.startswith(".local/state/memory-os/")
                 and "/logs/" in rel and (home / rel).is_file()}
@@ -490,7 +524,10 @@ class Run:
         journals_raw = {rel: (home / rel).read_bytes() for rel in before
                         if rel.startswith(".local/state/memory-os/quickstart/") and rel.endswith(".json")}
         rc, out = self.step("uninstall-preview", [admin, "uninstall"], env=env, cwd=self.R, expect=(0, 1))
-        self.check("uninstall preview wrote nothing", snapshot() == before)
+        logical_preview = store_logical("store-logical-after-preview")
+        kept, detail = store_kept(logical_before, logical_preview)
+        self.check("uninstall preview wrote nothing (installation locations, permissions, store content)",
+                   snapshot() == before and kept and detail.get("store_raw_hash_identical") is True, detail)
         rc, out = self.step("uninstall-apply", [admin, "uninstall", "--apply"], env=env, cwd=self.R, timeout=600,
                             expect=(0, 1))
         result = self.last_json(out)
@@ -499,16 +536,28 @@ class Run:
         after = snapshot()
 
         def revocation_only(old, new):
+            """The ONLY journal rewrite admitted (4.1.1 ``revocation_seule``): records go from not revoked to
+            ``revoked: true`` with an author; nothing else is added, removed or changed."""
             try:
                 a, b = json.loads(old), json.loads(new)
-            except ValueError:
+            except (TypeError, ValueError):
                 return False
-            for document in (a, b):
-                for record in document.get("records", []) if isinstance(document, dict) else []:
-                    if isinstance(record, dict):
-                        record.pop("revoked", None)
-                        record.pop("revoked_by", None)
-            return a == b
+            if not (isinstance(a, dict) and isinstance(b, dict) and isinstance(a.get("records"), list)
+                    and isinstance(b.get("records"), list) and len(a["records"]) == len(b["records"])):
+                return False
+            if {k: v for k, v in a.items() if k != "records"} != {k: v for k, v in b.items() if k != "records"}:
+                return False
+            revoked = 0
+            for old_record, new_record in zip(a["records"], b["records"]):
+                if old_record == new_record:
+                    continue
+                rest = lambda d: {k: v for k, v in d.items() if k not in ("revoked", "revoked_by")}  # noqa: E731
+                if not (isinstance(old_record, dict) and isinstance(new_record, dict) and not old_record.get("revoked")
+                        and new_record.get("revoked") is True and new_record.get("revoked_by")
+                        and rest(old_record) == rest(new_record)):
+                    return False
+                revoked += 1
+            return revoked > 0
         unexpected = []
         for rel in sorted(set(before) | set(after)):
             old, new = before.get(rel), after.get(rel)
@@ -533,8 +582,10 @@ class Run:
                    not unexpected, unexpected[:30])
         self.check("journals never removed nor shortened", all(rel in after for rel in journals_raw)
                    and bool(journals_raw), sorted(journals_raw))
-        self.check("store content kept (same instance, same live items, same journal)", store_counters() == counters,
-                   counters)
+        kept, detail = store_kept(logical_before, store_logical("store-logical-after-uninstall"))
+        self.check("store content kept: same instance, every table identical, old receipts unchanged, only the "
+                   "engine's own closing receipts added", kept, detail)
+        self.check("store counters unchanged", store_counters() == counters, counters)
 
     # ---------------------------------------------------------------- P6
     def p6(self):

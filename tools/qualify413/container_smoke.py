@@ -53,7 +53,11 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 action = sys.argv[1]
 async def run():
-    params = StdioServerParameters(command="/opt/memory-os/venv/bin/memory-os-relay", args=[])
+    import os
+    # The SDK passes a filtered environment to the server process: give the relay its configuration explicitly.
+    env = {key: os.environ[key] for key in ("HOME", "PATH", "MEMORY_V4_URL", "MEMORY_V4_TOKEN_FILE", "MEMORY_V4_OPS_DIR")
+           if key in os.environ}
+    params = StdioServerParameters(command="/opt/memory-os/venv/bin/memory-os-relay", args=[], env=env)
     async with stdio_client(params) as (r, w), ClientSession(r, w) as session:
         await session.initialize()
         if action == "write":
