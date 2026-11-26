@@ -62,7 +62,41 @@ it reports `non testé` ("not tested").
 
 ## Install on macOS and Ubuntu 24.04
 
-**Quick install** with the bootstrap of the latest release, checked against its `SHA256SUMS`. It needs
+**One command (from 4.1.3).** It needs [`uv`](https://docs.astral.sh/uv/) ≥ 0.13.9 on your PATH, which is never
+downloaded for you, and `python3`:
+
+```bash
+curl -fsSL https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh
+```
+
+`install.sh` downloads the bootstrap and `SHA256SUMS` of that same release (never "latest"), refuses on any download
+failure or checksum mismatch, and runs the verified bootstrap with `--interactive`:
+
+- a **complete preview**: every download with its source and size, the environment, the service (label, port,
+  manager), the token file, and each assistant configuration file it would write, for the assistants found on this
+  machine (their configuration file or their command-line tool);
+- **one question**, `[y/N]`, default No. Nothing is written before your `y`. Without a terminal (CI, a pipe) it stops
+  after the preview. Every refusal (platform, SQLite, `uv`, an existing installation) comes before the question;
+- after `y`: the lexical profile (no resource download) is installed, `quickstart` must see exactly what was announced
+  (otherwise it stops before any service, token or client entry is written), then `quickstart --apply` runs, `/ready`
+  is checked, and the way to undo is printed (`quickstart --undo <stamp> --with-service`, `uninstall`).
+
+Options go after `sh -s --`, for example `| sh -s -- --clients codex,cursor`, or `--cpython 3.13` on macOS when your
+`python3` is not the Python of a [cell](#platform-cells). The current release, 4.1.2, has no `install.sh`: use the manual
+route below.
+
+**Docker (from 4.1.3; lexical profile, `serve` in the foreground).** No image is published (that needs a separate
+decision): build it from a clone of the release tag, with the release wheel, checked against `SHA256SUMS`, in `dist/`.
+The token file is yours (mode 0600, owned by uid 10001, the user of the image); the image holds no secret.
+
+```bash
+docker build --build-arg WHEEL=memory_os_ai-4.1.3-py3-none-any.whl -t memory-os-ai:local . && docker run --rm -p 127.0.0.1:8765:8765 -v memory-os-data:/data -v /path/to/http.token:/run/memory-os/http.token:ro memory-os-ai:local
+```
+
+<details>
+<summary><b>Manual install</b>: checked downloads, the <code>pip</code> route with its constraints, the bootstrap options</summary>
+
+**The bootstrap, downloaded and checked by hand** (latest release, against its `SHA256SUMS`). It needs
 [`uv`](https://docs.astral.sh/uv/) ≥ 0.13.9 and a Python of your [cell](#platform-cells). The first run is a preview
 that writes nothing; `--apply` installs and then prints the `quickstart --apply` command, which you run yourself.
 
@@ -132,6 +166,8 @@ The first `pip` command installs the package alone so that `memory-os-constraint
 your profile and of the detected cell; the second installs the dependencies at exactly the versions of that lock.
 `quickstart` refuses a runtime whose installed versions differ from that lock.
 
+</details>
+
 ### The bootstrap template (preview only)
 
 The sdist contains `scripts/memory_os_bootstrap.py`, one script that uses the standard library only. That copy is a
@@ -154,6 +190,12 @@ describes the script itself; `--apply` works only in a copy whose release pin is
   `--cpython 3.11` on Ubuntu 24.04. That interpreter is downloaded only with the consent `--apply --acquire-cpython`,
   and its SQLite is read back from the environment before anything is installed.
 - **Proof state.** `--p9-manifest /path/to/manifest` reads a local P9 manifest; nothing is ever fetched.
+- **`--interactive` (from 4.1.3)**, what `install.sh` runs: the same preview, plus the service, the token, the store
+  and the client files, the lexical profile by default and one `[y/N]` question read from the terminal (`/dev/tty`).
+  After `y` it creates the environment as `--apply` does, compares the `quickstart` preview run from it with what was
+  announced, then runs `quickstart --apply` and checks `/ready`; any blocker or difference stops it first. A relocated
+  client (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, `GROK_HOME`, `COPILOT_HOME` for VS Code on Linux) or a
+  client file that already names `memory-os-ai` is left out, with its reason, never guessed or overwritten.
 
 Preview on Ubuntu 24.04 arm64 (writes nothing):
 

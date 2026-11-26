@@ -32,6 +32,19 @@ from an allow-list (no ``MEMORY_V4_*`` variable is inherited). It never runs ``q
 created exclusively inside a private work directory that it creates itself (refused if it
 exists), which also holds the uv cache; symbolic links on the destinations are refused.
 
+ONE-COMMAND INSTALL (``--interactive``, 4.1.3, decision of Romain 2026-11-26; what ``install.sh`` runs): the same
+preview, plus what the install as a whole would write: the MCP clients DETECTED on this machine (their user-level
+configuration file, or their command-line tool, at the per-OS paths of ``ops/clients.py``; a relocating variable or
+an unsafe path excludes a client, never guessed), the service (label, port, manager, definition), the token, the
+store. Profile ``lexical`` by default (``semantic`` is refused here: its model download would not be announced).
+Every refusal of the preview happens BEFORE any question. Then ONE question, read from ``/dev/tty`` (``[y/N]``,
+default No; anything but y/yes is No; without a terminal: preview only). Nothing is written before the answer. After
+``y``: the plan is recomputed and must be the announced one; the venv is created as by ``--apply``; the quickstart
+preview run from the venv must match the announcement (profile, cell, clients and paths, service, token, no download,
+no blocker), otherwise it stops fail-closed; then ``quickstart --apply`` with exactly the announced clients, and an
+authenticated ``/ready`` (token read from its file, never printed). The confirmation is also the consent to the
+standalone CPython download of route (i) when the preview lists it.
+
 RELEASE PIN: the block below is rewritten by the release tooling (``fill_pin``) once the wheel is
 built and the locks are frozen. The repository copy is a TEMPLATE: it previews, and refuses to
 apply (``release_pin_unfilled``). Format (JSON, ``schema_version`` 1):
@@ -53,7 +66,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import re
 import shlex
@@ -61,6 +74,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import zipfile
 
 BOOTSTRAP_FORMAT = 1
@@ -123,7 +138,7 @@ UV_ENV_KEEP = ("HOME", "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "S
 # Environment of every interpreter the bootstrap starts (probes, installed-artifact check and the
 # quickstart preview run from the venv): rebuilt from this list. No MEMORY_V4_*, PYTHON*, XDG data
 # or configuration variable, nor any client-relocating variable (CLAUDE_CONFIG_DIR, CODEX_HOME,
-# GEMINI_CLI_HOME, GROK_HOME), is inherited. Relocating client variables are detected by the
+# GEMINI_CLI_HOME, GROK_HOME and, on Linux, COPILOT_HOME), is inherited. Relocating client variables are detected by the
 # bootstrap itself and reported consistently with ``client_env_override`` without being forwarded.
 # 4.1.3 (lifts the 4.1.1 L5 limit): the quickstart preview ALONE also receives XDG_CONFIG_HOME, see
 # ``quickstart_environment``; quickstart validates it itself (client_xdg_invalid, client_xdg_outside_home).
@@ -135,9 +150,55 @@ CLIENT_OVERRIDE_ENV = {
     "gemini-cli": ("GEMINI_CLI_HOME",),
     "grok": ("GROK_HOME",),
 }
+# 4.1.3 (1af4619, Codex review of Lot 3 point 6): VS Code on Linux is the Copilot user configuration, relocated by
+# COPILOT_HOME (present, even empty, refuses it) on Linux ONLY; macOS keeps its own path and ignores the variable.
+LINUX_CLIENT_OVERRIDE_ENV = {"vscode": ("COPILOT_HOME",)}
+# The known clients, as ``ops/clients.py`` CLIENTS (same keys, names, per-OS paths relative to HOME, relocating
+# variables and Zed's XDG subpath; a test compares them field by field). ``cli``: the command-line tool whose presence
+# on PATH also detects the client (claude-code is configured ONLY through it: ``claude mcp add --scope user``).
+CLIENT_TABLE = {
+    "claude-code": {"name": "Claude Code", "darwin": ".claude.json", "linux": ".claude.json",
+                    "override": ("CLAUDE_CONFIG_DIR",), "cli": "claude"},
+    "claude-desktop": {"name": "Claude Desktop", "darwin": "Library/Application Support/Claude/claude_desktop_config.json",
+                       "linux": None},
+    "codex": {"name": "Codex (CLI/app)", "darwin": ".codex/config.toml", "linux": ".codex/config.toml",
+              "override": ("CODEX_HOME",), "cli": "codex"},
+    "vscode": {"name": "VS Code / GitHub Copilot", "darwin": "Library/Application Support/Code/User/mcp.json",
+               "linux": ".copilot/mcp-config.json", "linux_override": ("COPILOT_HOME",)},
+    "cursor": {"name": "Cursor", "darwin": ".cursor/mcp.json", "linux": ".cursor/mcp.json"},
+    "antigravity": {"name": "Antigravity", "darwin": ".gemini/config/mcp_config.json",
+                    "linux": ".gemini/config/mcp_config.json"},
+    "gemini-cli": {"name": "Gemini CLI", "darwin": ".gemini/settings.json", "linux": ".gemini/settings.json",
+                   "override": ("GEMINI_CLI_HOME",), "cli": "gemini"},
+    "grok": {"name": "Grok CLI", "darwin": ".grok/config.toml", "linux": ".grok/config.toml",
+             "override": ("GROK_HOME",), "cli": "grok"},
+    "zed": {"name": "Zed", "darwin": ".config/zed/settings.json", "linux": ".config/zed/settings.json",
+            "xdg": "zed/settings.json"},
+    "devin": {"name": "Devin Desktop", "darwin": ".config/devin/mcp_config.json", "linux": ".config/devin/mcp_config.json"},
+    "windsurf": {"name": "Windsurf", "darwin": ".codeium/windsurf/mcp_config.json", "linux": None},
+}
+# Same text as ``ops/clients.py`` LINUX_UNSUPPORTED_REASONS.
+LINUX_UNSUPPORTED_REASONS = {
+    "windsurf": ("Windsurf is not supported on Linux in 4.1.2 (official documentation cites conflicting user-level "
+                 "paths; re-evaluated in 4.1.3); no path guessed, nothing written"),
+    "claude-desktop": ("Claude Desktop is not supported on Linux in 4.1.2 (official Linux version is in beta; "
+                       "re-evaluated in 4.1.3); no path guessed, nothing written"),
+}
+# What a quickstart run from the venv uses when no MEMORY_V4_* variable reaches it (OpsSettings.from_env defaults).
+SERVICE_LABEL, SERVICE_PORT = "local.memory-os-v4", 8765
+SERVICE_URL = f"http://127.0.0.1:{SERVICE_PORT}/mcp/"
+READY_URL = f"http://127.0.0.1:{SERVICE_PORT}/ready"
+TOKEN_SUBPATH, STORE_SUBPATH, OPS_SUBPATH = ".config/memory-os/http.token", ".memory-os-v4", ".local/state/memory-os"
+# Actions of the quickstart preview that write a client entry as announced ("unchanged" writes nothing).
+WRITING_ACTIONS = ("create", "replace", "unchanged")
+CONFIRM_PROMPT = "Install Memory OS AI with exactly this plan? [y/N] "
+EXIT_NOT_CONFIRMED = 3  # nothing written: no terminal, or an answer other than y/yes
+ENTRY_SCAN_MAX_BYTES = 16_000_000
+TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43,256}")
 PREVIEW_WRITES = "none detected on the inventoried destinations (preview)"
 PREVIEW_NETWORK = "none opened by the bootstrap; absence of network use not proven here (gate P3, lot L6)"
 PROBE_TIMEOUT, UV_TIMEOUT, QUICKSTART_TIMEOUT = 30, 1800, 300
+QUICKSTART_APPLY_TIMEOUT, READY_TIMEOUT, READY_ATTEMPTS, READY_PAUSE = 900, 5, 3, 2.0
 
 # Run BY another interpreter: what it says of itself and of the SQLite it loads (in memory only).
 PROBE_SCRIPT = r"""
@@ -513,14 +574,30 @@ def parse_clients_arg(value, default=DEFAULT_CLIENTS):
     return tuple(value.split(",")) if value else default
 
 
-def detect_client_env_overrides(environ, clients_arg=None) -> list:
+def normalize_os(value=None) -> str:
+    """``darwin``, ``linux`` or the raw value (same rule as ``ops/clients.normalize_platform``)."""
+    raw = sys.platform if value is None else str(value)
+    return "darwin" if raw == "darwin" else "linux" if raw.startswith("linux") else raw
+
+
+def client_override_env(os_kind=None) -> dict:
+    """Relocating variables per client on ``os_kind``: COPILOT_HOME (vscode) is a Linux variable only."""
+    table = {key: tuple(variables) for key, variables in CLIENT_OVERRIDE_ENV.items()}
+    if normalize_os(os_kind) == "linux":
+        for key, variables in LINUX_CLIENT_OVERRIDE_ENV.items():
+            table[key] = table.get(key, ()) + tuple(variables)
+    return table
+
+
+def detect_client_env_overrides(environ, clients_arg=None, *, os_kind=None) -> list:
     """Detect relocating client env vars by presence (empty values included), without forwarding them.
 
-    A client is ``selected`` only when its exact name is in the parsed ``--clients`` tuple.
+    A client is ``selected`` only when its exact name is in the parsed ``--clients`` tuple. ``os_kind``
+    (default: this system) decides the per-OS variables: COPILOT_HOME counts for vscode on Linux only.
     """
     selected = parse_clients_arg(clients_arg)
     found = []
-    for client_key, variables in CLIENT_OVERRIDE_ENV.items():
+    for client_key, variables in client_override_env(os_kind).items():
         for var in variables:
             if var in environ:
                 found.append({
@@ -742,11 +819,11 @@ def uv_commands(*, uv, venv, route, base_python, cell_id, requirements, wheelhou
     return commands
 
 
-def quickstart_command(venv, profile, clients, *, apply=False) -> list:
+def quickstart_command(venv, profile, clients, *, apply=False, download_approved=True) -> list:
     argv = [os.path.join(venv, "bin", "python"), "-I", "-m", MODULE + ".ops.cli", "quickstart", "--profile", profile]
     if clients:
         argv += ["--clients", clients]
-    return argv + (["--apply", "--download-approved"] if apply else [])
+    return argv + ((["--apply"] + (["--download-approved"] if download_approved else [])) if apply else [])
 
 
 def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None, clock=time.time) -> dict:
@@ -937,7 +1014,7 @@ def build_plan(options, *, pin=None, run=subprocess.run, environ=None, host=None
                        "that option the venv is created only if uv already manages " + standalone["request"])
         notices.append(f"SQLite {STANDALONE_SQLITE_DECLARED} is DECLARED by the build, not attested: it is read back "
                        "from the venv before anything is installed")
-    client_env_overrides = detect_client_env_overrides(environ, options.clients)
+    client_env_overrides = detect_client_env_overrides(environ, options.clients, os_kind=host["os"])
     for override in client_env_overrides:
         if override["selected"]:
             block("client_env_override", override["message"])
@@ -1024,7 +1101,9 @@ def apply_plan(plan: dict, options, *, pin=None, run=subprocess.run, environ=Non
                       writes="none by the bootstrap (refused before any write)",
                       network="none opened by the bootstrap (refused before any uv command)")
         return report
-    selected_overrides = [item for item in detect_client_env_overrides(environ, options.clients) if item["selected"]]
+    selected_overrides = [item for item in detect_client_env_overrides(environ, options.clients,
+                                                                        os_kind=plan["system"]["os"])
+                          if item["selected"]]
     if selected_overrides:
         report.update(code="client_env_override",
                       error="client_env_override: " + "; ".join(item["message"] for item in selected_overrides),
@@ -1177,6 +1256,7 @@ def apply_plan(plan: dict, options, *, pin=None, run=subprocess.run, environ=Non
             preview = None
         if not isinstance(preview, dict):
             raise Refused("quickstart_unreadable", "quickstart (preview) run from the venv gave no readable report")
+        report["_quickstart_plan"] = preview  # the whole preview, compared by --interactive (never saved)
         report["quickstart"] = {"returncode": code, "ok": preview.get("ok"), "stage": preview.get("stage"),
                                 "writes": preview.get("writes"), "blockers": preview.get("blockers", []),
                                 "blocker_codes": preview.get("blocker_codes", []),
@@ -1207,6 +1287,573 @@ def apply_plan(plan: dict, options, *, pin=None, run=subprocess.run, environ=Non
 
 def _public(report: dict) -> dict:
     return {key: value for key, value in report.items() if not key.startswith("_")}
+
+
+# ---------------------------------------------------------------- one-command install (--interactive)
+
+def _under(path: PurePosixPath, base: PurePosixPath) -> bool:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def client_path(key: str, home, *, os_kind, environ) -> tuple:
+    """``(path, None, None)`` or ``(None, code, message)``: ``ops/clients.Client.config_path``, rule for rule.
+
+    Order and texts are those of the product: unsupported on the OS, then a relocating variable (present, even
+    empty), then, for Zed on Linux only, ``XDG_CONFIG_HOME`` (absolute, under HOME, no ``..``, no symbolic link).
+    Nothing is created; a refused client is never given a guessed path.
+    """
+    record, os_kind = CLIENT_TABLE[key], normalize_os(os_kind)
+    name = record["name"]
+    if os_kind == "darwin":
+        relative = record["darwin"]
+    elif os_kind == "linux":
+        relative = record["linux"]
+        if relative is None:
+            return None, "client_unsupported_on_os", LINUX_UNSUPPORTED_REASONS.get(
+                key, f"{name} ({key}) is not supported on Linux in 4.1.2; no path guessed, nothing written")
+    else:
+        return None, "client_unsupported_on_os", (f"{name} ({key}) has no established user-level config path on "
+                                                  f"platform {os_kind!r}; no path guessed, nothing written")
+    for var in client_override_env(os_kind).get(key, ()):
+        if var in environ:
+            return None, "client_env_override", (
+                f"{name} ({key}) config location is overridden by {var}; automatic configuration is refused without "
+                f"guessing a path (unset {var} or configure {name} manually)")
+    xdg = environ.get("XDG_CONFIG_HOME") if os_kind == "linux" and record.get("xdg") else None
+    if xdg:
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in xdg):
+            return None, "client_xdg_invalid", (f"{name} ({key}): XDG_CONFIG_HOME contains control characters; "
+                                                "refusing to guess or write")
+        if not os.path.isabs(xdg):
+            return None, "client_xdg_invalid", (
+                f"{name} ({key}): XDG_CONFIG_HOME must be an absolute path under HOME (relative XDG_CONFIG_HOME is "
+                "refused); unset XDG_CONFIG_HOME or set an absolute path under HOME")
+        if ".." in PurePosixPath(xdg).parts:
+            return None, "client_xdg_outside_home", (f"{name} ({key}): XDG_CONFIG_HOME contains parent traversal "
+                                                     "('..'); refusing to write outside HOME")
+        norm_home = PurePosixPath(os.path.normpath(os.path.abspath(str(home))))
+        norm_xdg = PurePosixPath(os.path.normpath(xdg))
+        if not _under(norm_xdg, norm_home):
+            return None, "client_xdg_outside_home", (
+                f"{name} ({key}): XDG_CONFIG_HOME is outside the selected HOME (XDG_CONFIG_HOME outside HOME is not "
+                "supported, consistent with _safe_path and L4 systemd unit rules); move XDG_CONFIG_HOME under HOME "
+                "or configure Zed manually")
+        cursor = norm_home
+        for part in norm_xdg.relative_to(norm_home).parts:
+            cursor = cursor / part
+            if os.path.islink(str(cursor)):
+                return None, "client_xdg_outside_home", (f"{name} ({key}): XDG_CONFIG_HOME traverses a symbolic "
+                                                         "link under HOME; refusing to write")
+        return str(norm_xdg / record["xdg"]), None, None
+    return str(PurePosixPath(str(home)) / relative), None, None
+
+
+def config_file_problem(path, home) -> str | None:
+    """Why quickstart's ``_safe_path`` would refuse ``path``, or None (read-only, nothing followed)."""
+    target, base = PurePosixPath(os.path.abspath(str(path))), PurePosixPath(os.path.abspath(str(home)))
+    if not _under(target, base):
+        return f"{target} is outside the selected HOME"
+    for candidate in [target, *target.parents]:
+        if candidate == base.parent:
+            break
+        if os.path.islink(str(candidate)):
+            return f"{candidate} is a symbolic link (manual setup required)"
+    try:
+        status = os.stat(str(target))
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return f"{target} cannot be inspected"
+    if not os.path.isfile(str(target)):
+        return f"{target} is not a regular file"
+    if status.st_nlink != 1 or status.st_uid != os.getuid():
+        return f"{target} must be owned by this user with one link"
+    return None
+
+
+def mentions_server(path) -> bool | None:
+    """Whether the file already names ``memory-os-ai`` (bytes only, nothing parsed or kept); None when unknown."""
+    try:
+        if os.path.getsize(path) > ENTRY_SCAN_MAX_BYTES:
+            return None
+        with open(path, "rb") as handle:
+            return b"memory-os-ai" in handle.read(ENTRY_SCAN_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+
+def detect_clients(home, *, os_kind, environ, which, explicit=None) -> dict:
+    """The clients the one-command install would configure (read-only).
+
+    Without ``explicit`` (``--clients``): a client is DETECTED by its user-level configuration file at the per-OS
+    path, or by its command-line tool on PATH. A relocated, unsupported or unsafe client, a Claude Code without its
+    ``claude`` CLI, or a file that already names ``memory-os-ai`` is listed as excluded, with its reason, and never
+    configured. With ``explicit``, each named client must be configurable: any such reason is a blocker.
+    """
+    os_kind = normalize_os(os_kind)
+    selected, excluded, blockers = [], [], []
+    path_env = environ.get("PATH") or ""
+
+    def refuse(key, code, message, **facts):
+        if explicit is not None:
+            blockers.append((code, message if message.startswith(code) else f"{code}: {message}"))
+        else:
+            excluded.append({"client": key, "code": code, "reason": message, **facts})
+    for key in (explicit if explicit is not None else tuple(CLIENT_TABLE)):
+        if key not in CLIENT_TABLE:
+            blockers.append(("client_unknown", f"client_unknown: {key!r} is not a known client (known: "
+                             f"{', '.join(CLIENT_TABLE)}); nothing written"))
+            continue
+        path, code, message = client_path(key, home, os_kind=os_kind, environ=environ)
+        if code:
+            refuse(key, code, message)
+            continue
+        cli = CLIENT_TABLE[key].get("cli")
+        cli_path = which(cli, path=path_env) if cli and path_env else None
+        cli_path = cli_path if cli_path and os.path.isabs(cli_path) else None  # never a command of the current dir
+        evidence = (["configuration file present"] if os.path.lexists(path) else []) + (
+            [f"{cli} command on PATH ({cli_path})"] if cli_path else [])
+        if explicit is None and not evidence:
+            continue  # not present on this machine
+        if key == "claude-code" and not cli_path:
+            refuse(key, "client_cli_missing", "client_cli_missing: Claude Code is configured only through "
+                   "`claude mcp add --scope user` and the claude CLI is not on PATH; nothing written", path=path)
+            continue
+        problem = config_file_problem(path, home)
+        if problem:
+            refuse(key, "client_path_unsafe", f"client_path_unsafe: {problem}; nothing written", path=path)
+            continue
+        if mentions_server(path) is not False:
+            refuse(key, "client_entry_present", f"client_entry_present: {path} already names memory-os-ai (or "
+                   "cannot be read); the one-command install never touches an existing entry: configure this "
+                   f"client afterwards with quickstart --clients {key} (it decides, with --replace-existing for a "
+                   "named consent); nothing written", path=path)
+            continue
+        selected.append({"client": key, "name": CLIENT_TABLE[key]["name"], "path": path,
+                         "evidence": evidence or ["named with --clients"],
+                         "written_by": ("claude mcp add --scope user (claude CLI)" if key == "claude-code"
+                                        else "quickstart (backup and journal, undoable)")})
+    return {"selected": selected, "excluded": excluded, "blockers": blockers,
+            "mode": "named with --clients" if explicit is not None else "detected"}
+
+
+def service_definition(home, *, manager_kind, environ) -> tuple:
+    """(definition path, problem): ``service.Launchd`` / ``SystemdUser.definition_path`` for the default label."""
+    home_path = PurePosixPath(str(home))
+    if manager_kind == "launchd":
+        path = home_path / "Library/LaunchAgents" / (SERVICE_LABEL + ".plist")
+    elif manager_kind == "systemd-user":
+        base = environ.get("XDG_CONFIG_HOME") or ""
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in base) or ".." in PurePosixPath(base).parts:
+            return None, "XDG_CONFIG_HOME holds control characters or '..'; the unit path is not attested"
+        root = PurePosixPath(base) if os.path.isabs(base) else home_path / ".config"
+        path = root / "systemd/user" / (SERVICE_LABEL + ".service")
+    else:
+        return None, "no service manager is available on this system"
+    if not _under(path, home_path):
+        return None, (f"the service definition {path} is outside the selected HOME (XDG_CONFIG_HOME outside HOME is "
+                      "not supported)")
+    return str(path), None
+
+
+def interactive_extras(options, *, host, environ, which) -> dict:
+    """Everything the one-command install writes beyond the venv, and its own refusals (read-only)."""
+    home = environ.get("HOME") or os.path.expanduser("~")
+    home = os.path.abspath(home)
+    explicit = parse_clients_arg(options.clients, None)
+    clients = detect_clients(home, os_kind=host["os"], environ=environ, which=which, explicit=explicit)
+    blockers, notices = list(clients["blockers"]), []
+    if options.profile != "lexical":
+        blockers.append(("interactive_profile_lexical_only", "interactive_profile_lexical_only: the one-command "
+                         "install is the lexical profile (no resource download); for the semantic profile use "
+                         "--apply, then the quickstart preview and apply yourself; nothing written"))
+    if not clients["selected"] and explicit is None:
+        blockers.append(("no_client_detected", "no_client_detected: no MCP client was found on this machine "
+                         "(user-level configuration file or command-line tool); name them with --clients a,b; "
+                         "nothing written"))
+    manager = host.get("service_manager") or {}
+    definition, problem = service_definition(home, manager_kind=manager.get("kind"), environ=environ)
+    if problem:
+        blockers.append(("service_definition_unavailable", f"service_definition_unavailable: {problem}; nothing "
+                         "written"))
+    elif not manager.get("available"):
+        blockers.append(("service_manager_unavailable", f"service_manager_unavailable: {manager.get('kind')} is not "
+                         "usable here (presence check); the service cannot be installed; nothing written"))
+    else:
+        unsafe = config_file_problem(definition, home)
+        if unsafe:
+            blockers.append(("service_definition_unavailable", f"service_definition_unavailable: {unsafe}; nothing "
+                             "written"))
+    store = str(PurePosixPath(home) / STORE_SUBPATH)
+    token = str(PurePosixPath(home) / TOKEN_SUBPATH)
+    try:
+        store_used = os.path.isdir(store) and not os.path.islink(store) and bool(os.listdir(store))
+    except OSError:
+        store_used = True
+    existing = [item for item, present in ((store + " (non-empty store)", store_used or os.path.islink(store)),
+                                           (str(definition) + " (service definition)",
+                                            bool(definition) and os.path.lexists(definition))) if present]
+    if existing:
+        blockers.append(("existing_installation", "existing_installation: " + ", ".join(existing) + " already "
+                         "exist; the one-command install is for a new installation only (use quickstart from the "
+                         "existing venv, or the upgrade runbook); nothing written"))
+    if any(key.startswith("MEMORY_V4_") for key in environ):
+        notices.append("MEMORY_V4_* variables of this shell are not passed on: the install uses the default "
+                       "locations shown here")
+    if any(item["client"] == "claude-desktop" for item in clients["selected"]):
+        notices.append("Claude Desktop: quit the app before answering y (quickstart refuses while it runs, "
+                       "client_app_running, and the install would stop after the venv)")
+    if {"claude-code", "grok"} <= {item["client"] for item in clients["selected"]}:
+        notices.append("Grok also reads ~/.claude.json: configuring both claude-code and grok can expose duplicate "
+                       "memory-os-ai entries in Grok (disable compatibility import in ~/.grok/config.toml with "
+                       "[compat.claude] mcps = false)")
+    announced = {
+        "profile": options.profile, "mode": clients["mode"],
+        "clients": clients["selected"], "excluded_clients": clients["excluded"],
+        "service": {"label": SERVICE_LABEL, "port": SERVICE_PORT, "url": SERVICE_URL, "manager": manager.get("kind"),
+                    "definition": definition, "listens": "127.0.0.1 only"},
+        "token": {"path": token, "state": "exists: validated and reused, never printed" if os.path.lexists(token)
+                  else "created (0600), never printed"},
+        "store": store, "ops_dir": str(PurePosixPath(home) / OPS_SUBPATH),
+        "resource_downloads_bytes": 0,
+    }
+    return {"announced": announced, "blockers": blockers, "notices": notices,
+            "clients_arg": ",".join(item["client"] for item in clients["selected"])}
+
+
+def compare_preview(preview, announced, *, cell_id) -> list:
+    """Every difference between the quickstart preview run from the venv and what was announced (empty: same)."""
+    if not isinstance(preview, dict):
+        return ["the quickstart preview is not a report"]
+    diffs = []
+    if preview.get("ok") is not True or preview.get("blockers"):
+        diffs.append("blockers: " + "; ".join(str(item) for item in preview.get("blockers") or ["(not ok)"]))
+    if preview.get("stage") != "preview" or preview.get("writes") != "none (preview)":
+        diffs.append("the report is not a quickstart preview")
+    if preview.get("profile") != announced["profile"]:
+        diffs.append(f"profile {preview.get('profile')!r} instead of {announced['profile']!r}")
+    if (preview.get("cell") or {}).get("cell_id") != cell_id:
+        diffs.append(f"cell {(preview.get('cell') or {}).get('cell_id')!r} instead of {cell_id!r}")
+    rows = preview.get("clients")
+    rows = rows if isinstance(rows, list) and all(isinstance(row, dict) for row in rows) else []
+    seen = {row.get("client"): row for row in rows}
+    wanted = {item["client"]: item for item in announced["clients"]}
+    if len(seen) != len(rows) or set(seen) != set(wanted) or preview.get("unknown_clients"):
+        diffs.append(f"clients {sorted(str(key) for key in seen)} instead of {sorted(wanted)}")
+    for key in sorted(set(seen) & set(wanted)):
+        if seen[key].get("path") != wanted[key]["path"]:
+            diffs.append(f"{key}: path {seen[key].get('path')!r} instead of {wanted[key]['path']!r}")
+        if seen[key].get("action") not in WRITING_ACTIONS:
+            diffs.append(f"{key}: action {seen[key].get('action')!r}")
+    service, expected = preview.get("service") or {}, announced["service"]
+    if not isinstance(service, dict):
+        service = {}
+    if service.get("label") != expected["label"] or service.get("path") != expected["definition"]:
+        diffs.append(f"service {service.get('label')!r} at {service.get('path')!r} instead of {expected['label']!r} "
+                     f"at {expected['definition']!r}")
+    if (service.get("manager") or "launchd") != expected["manager"]:
+        diffs.append(f"service manager {service.get('manager') or 'launchd'!r} instead of {expected['manager']!r}")
+    if service.get("state") != "absent":
+        diffs.append(f"service state {service.get('state')!r} (a new service was announced)")
+    if preview.get("port") != expected["port"]:
+        diffs.append(f"port {preview.get('port')!r} instead of {expected['port']}")
+    if (preview.get("token") or {}).get("path") != announced["token"]["path"]:
+        diffs.append(f"token {(preview.get('token') or {}).get('path')!r} instead of {announced['token']['path']!r}")
+    if preview.get("downloads_required_bytes") != announced["resource_downloads_bytes"]:
+        diffs.append(f"resource downloads {preview.get('downloads_required_bytes')!r} bytes, announced "
+                     f"{announced['resource_downloads_bytes']}")
+    return diffs
+
+
+class Terminal:
+    """The controlling terminal, read and written directly (``curl ... | sh``: stdin is the script)."""
+
+    def __init__(self, descriptor: int):
+        self.descriptor = descriptor
+
+    def write(self, text: str) -> None:
+        data = text.encode("utf-8", "replace")
+        while data:
+            data = data[os.write(self.descriptor, data):]
+
+    def readline(self, limit: int = 1024) -> str:
+        data = b""
+        while len(data) < limit:
+            chunk = os.read(self.descriptor, 1)
+            if not chunk or chunk == b"\n":
+                break
+            data += chunk
+        return data.decode("utf-8", "replace")
+
+    def close(self) -> None:
+        os.close(self.descriptor)
+
+
+def open_terminal():
+    """``/dev/tty`` or None (no controlling terminal: the one-command install stays a preview)."""
+    try:
+        return Terminal(os.open("/dev/tty", os.O_RDWR | getattr(os, "O_NOCTTY", 0)))
+    except OSError:
+        return None
+
+
+def confirmed(answer) -> bool:
+    """Only y or yes (any case, surrounding spaces ignored) is a yes; everything else, EOF included, is a no."""
+    return isinstance(answer, str) and answer.strip().lower() in ("y", "yes")
+
+
+def read_token_file(path) -> str:
+    """The bearer token of a private file (regular, this user's, 0600, no link); never printed. ValueError."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise ValueError(f"token file {path} cannot be opened ({type(exc).__name__})") from None
+    try:
+        status = os.fstat(descriptor)
+        if not os.path.isfile(path) or status.st_uid != os.getuid() or status.st_mode & 0o077 or status.st_size > 257:
+            raise ValueError(f"token file {path} is not a private regular file of this user")
+        raw = os.read(descriptor, 258)
+    finally:
+        os.close(descriptor)
+    raw = raw[:-1] if raw.endswith(b"\n") else raw
+    text = raw.decode("ascii", "replace")
+    if not TOKEN_PATTERN.fullmatch(text):
+        raise ValueError(f"token file {path} does not hold a token of the expected format")
+    return text
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def check_ready(url, token_path, *, expected_version=None, timeout=READY_TIMEOUT) -> dict:
+    """Authenticated ``GET /ready`` of the local service; the token goes in the header only, never in the report."""
+    result = {"ok": False, "code": None, "status": None, "url": url, "token_file": str(token_path),
+              "ready": None, "reason": None, "version": None}
+    try:
+        token = read_token_file(token_path)
+    except ValueError as exc:
+        result.update(code="token_unreadable", reason=str(exc))
+        return result
+    request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            result["status"], body = response.status, response.read(65536)
+    except urllib.error.HTTPError as exc:
+        result.update(status=exc.code, code="ready_refused")
+        return result
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        result.update(code="ready_unreachable", reason=type(exc).__name__)
+        return result
+    try:
+        document = json.loads(body)
+    except ValueError:
+        document = None
+    if not isinstance(document, dict):
+        result["code"] = "ready_unreadable"
+        return result
+    result.update(ready=document.get("ready"), reason=document.get("reason"), version=document.get("version"))
+    if result["status"] != 200 or document.get("ready") is not True or document.get("reason") != "ready":
+        result["code"] = "ready_not_ready"
+    elif expected_version is not None and document.get("version") != expected_version:
+        result["code"] = "ready_version_mismatch"
+    else:
+        result["ok"] = True
+    return result
+
+
+def render_interactive(extras: dict) -> str:
+    announced = extras["announced"]
+    service, token = announced["service"], announced["token"]
+    lines = ["", "ONE-COMMAND INSTALL: one confirmation covers everything listed above and below",
+             f"  profile          : {announced['profile']} (no resource download; the wheels listed above come from "
+             "their pinned sources)",
+             f"  service          : {service['label']} on {service['url']} ({service['listens']}), manager "
+             f"{service['manager']}, definition {service['definition']}",
+             f"  token            : {token['path']} ({token['state']})",
+             f"  store            : {announced['store']} (new SQLite store); logs and journals: {announced['ops_dir']}",
+             f"  clients ({announced['mode']}), files written:"]
+    lines += [f"    - {item['client']}: {item['path']} [{'; '.join(item['evidence'])}] via {item['written_by']}"
+              for item in announced["clients"]] or ["    (none)"]
+    if announced["excluded_clients"]:
+        lines.append("  clients NOT configured:")
+        lines += [f"    - {item['client']}: {item['reason']}" for item in announced["excluded_clients"]]
+    lines += ["  after y          : the plan is computed again and must not change; the venv is created; the "
+              "quickstart preview run from it must match this announcement exactly (any blocker or difference stops "
+              "before quickstart --apply); then quickstart --apply and an authenticated /ready check",
+              "  undo afterwards  : quickstart --undo STAMP --with-service, or uninstall (printed at the end); data "
+              "is never deleted"]
+    lines += ["  notice: " + notice for notice in extras["notices"]]
+    lines += ["  REFUSED: " + message for _, message in extras["blockers"]]
+    return "\n".join(lines)
+
+
+def _announcement(plan: dict, extras: dict) -> str:
+    """What the user confirmed, as one comparable text (the plan computed again after y must give the same)."""
+    keys = ("venv", "work_dir", "uv_cache", "uv_python_dir", "requirements", "route", "profile", "acquisitions",
+            "commands", "lock", "release", "download_bytes", "wheel_local")
+    body = {key: plan.get(key) for key in keys}
+    body["cell"] = (plan.get("cell") or {}).get("cell_id")
+    body["announced"] = extras["announced"]
+    return json.dumps(body, sort_keys=True, default=str)
+
+
+def interactive(options, *, pin=None, run=subprocess.run, environ=None, host=None, out=None, terminal=None,
+                ready=None, which=None, sleep=time.sleep, clock=time.time) -> dict:
+    """The one-command install: complete preview, ONE confirmation, then venv, compared preview, apply, /ready."""
+    environ = os.environ if environ is None else environ
+    pin = load_pin() if pin is None else pin
+    host = detect_host(environ=environ) if host is None else host
+    out = sys.stdout if out is None else out
+    terminal = open_terminal if terminal is None else terminal
+    ready = check_ready if ready is None else ready
+    which = shutil.which if which is None else which
+    options = argparse.Namespace(**vars(options))
+    options.profile = options.profile or "lexical"
+    options.host = host
+    report = {"schema_version": 1, "tool": "memory-os-bootstrap", "stage": "preview", "ok": False, "code": None,
+              "error": None, "steps": [], "writes": "none (preview)", "announced": None, "plan": None, "apply": None,
+              "quickstart_apply": None, "ready": None, "next": None}
+
+    def say(text=""):
+        print(text, file=out)
+
+    def prepare(work_dir=None):
+        extras = interactive_extras(options, host=host, environ=environ, which=which)
+        planned = argparse.Namespace(**vars(options))
+        planned.clients = extras["clients_arg"] or None
+        planned.work_dir = work_dir or options.work_dir
+        planned.replay = []
+        plan = build_plan(planned, pin=pin, run=run, environ=environ, host=host, clock=clock)
+        for code, message in extras["blockers"]:
+            plan["blocker_codes"].append(code)
+            plan["blockers"].append(message)
+        plan["ok"], plan["next"] = not plan["blockers"], None
+        return plan, extras, planned
+
+    def stop(stage, code, message, *, kept=None):
+        report.update(stage=stage, code=code, error=message if message.startswith(code) else f"{code}: {message}")
+        say("  STOPPED: " + report["error"])
+        if kept:
+            say("  " + kept)
+        return report
+
+    plan, extras, planned = prepare()
+    report.update(announced=extras["announced"], plan=_public(plan))
+    say(render(plan))
+    say(render_interactive(extras))
+    if not plan["ok"]:
+        return stop("refused", "preflight_refused", "preflight_refused: refused before any question; nothing written")
+    tty = terminal()
+    if tty is None:
+        report.update(stage="no-terminal", code="no_terminal")
+        say("  No terminal (/dev/tty) to ask the question: this was the preview only; nothing written.")
+        say("  Run the same command from a terminal to answer it.")
+        return report
+    try:
+        tty.write(CONFIRM_PROMPT)
+        answer = tty.readline()
+    except (OSError, KeyboardInterrupt):  # Ctrl-C at the question is a no
+        answer = ""
+    finally:
+        try:
+            tty.close()
+        except OSError:
+            pass
+    if not confirmed(answer):
+        report.update(stage="declined", code="not_confirmed")
+        say("  Not confirmed (only y or yes installs): nothing written.")
+        return report
+    # ---- after y: nothing has been written yet; the plan must be the one that was announced
+    again, extras_again, planned = prepare(work_dir=plan["work_dir"])
+    if not again["ok"] or _announcement(again, extras_again) != _announcement(plan, extras):
+        return stop("refused", "preflight_changed", "preflight_changed: the plan computed again after the "
+                    "confirmation differs from the announced one (" + ("; ".join(again["blockers"]) or
+                                                                        "machine state changed") + "); nothing written")
+    planned.acquire_cpython = again["route"] == "i"  # the confirmation is the consent to the CPython listed above
+    say("Confirmed. [1/3] venv, pinned wheels and quickstart preview from the venv (uv; this can take a minute)...")
+    applied = apply_plan(again, planned, pin=pin, run=run, environ=environ, clock=clock)
+    report.update(apply=_public(applied), steps=list(applied["steps"]), writes=list(applied["writes"]))
+    venv, profile, clients = again["venv"], again["profile"], extras["clients_arg"]
+    admin = os.path.join(venv, "bin", "memory-os-admin")
+    by_hand = (f"The venv {venv} is kept (nothing is ever removed). To continue by hand from it: "
+               + quote(quickstart_command(venv, profile, clients)) + " (preview). The one-command install refuses "
+               f"an existing venv: remove {venv} yourself before running it again, or give --venv.")
+    if not applied["ok"]:
+        return stop("failed", applied["code"] or "apply_failed", applied["error"] or "the venv step failed",
+                    kept=by_hand if applied.get("venv_kept") else "Nothing was installed.")
+    differences = compare_preview(applied.get("_quickstart_plan"), extras["announced"],
+                                  cell_id=(again.get("cell") or {}).get("cell_id"))
+    if differences:
+        report["differences"] = differences
+        return stop("failed", "interactive_preview_mismatch", "interactive_preview_mismatch: the quickstart preview "
+                    "run from the venv differs from what was announced (" + "; ".join(differences) + "); "
+                    "quickstart --apply was NOT run; no service, token or client entry was written", kept=by_hand)
+    # ---- quickstart --apply with exactly the announced clients (no download is announced, none is approved)
+    say("[2/3] the quickstart preview matches the announcement; quickstart --apply (token, service, clients)...")
+    command = quickstart_command(venv, profile, clients, apply=True, download_approved=False)
+    started = clock()
+    code, text = _run(run, command, env=quickstart_environment(environ), timeout=QUICKSTART_APPLY_TIMEOUT)
+    report["steps"].append({"step": "quickstart_apply", "command": quote(command), "returncode": code,
+                            "elapsed_s": round(clock() - started, 3)})
+    try:
+        result = json.loads(text)
+    except ValueError:
+        result = None
+    result = result if isinstance(result, dict) else {}
+    stamp = result.get("stamp") if isinstance(result.get("stamp"), str) else None
+    report["quickstart_apply"] = {"returncode": code, "ok": result.get("ok"), "stage": result.get("stage"),
+                                  "code": result.get("code"), "error": result.get("error"), "stamp": stamp}
+    undo = (quote([admin, "quickstart", "--undo", stamp, "--with-service"]) if stamp else None)
+    if code != 0 or result.get("ok") is not True:
+        return stop("failed", "quickstart_apply_failed", "quickstart_apply_failed: quickstart --apply did not "
+                    f"complete (code {result.get('code')!r}: {result.get('error')!r})",
+                    kept=(f"Its journal is kept; roll back with: {undo}" if undo else
+                          "No journal stamp was reported.") + f" Then inspect with {quote([admin, 'doctor'])}.")
+    # ---- authenticated /ready, token read from its file
+    token_path = extras["announced"]["token"]["path"]
+    say(f"[3/3] authenticated {READY_URL} check...")
+    seen = None
+    for attempt in range(READY_ATTEMPTS):
+        started = clock()
+        seen = ready(READY_URL, token_path, expected_version=pin.get("version"))
+        report["steps"].append({"step": "ready", "command": "GET " + READY_URL + " (Authorization from "
+                                + token_path + ")", "returncode": seen.get("status"),
+                                "elapsed_s": round(clock() - started, 3)})
+        if seen.get("ok") or attempt == READY_ATTEMPTS - 1:
+            break
+        sleep(READY_PAUSE)
+    report["ready"] = seen
+    if not seen.get("ok"):
+        return stop("failed", "ready_check_failed", f"ready_check_failed: {READY_URL} answered {seen.get('code')} "
+                    f"(status {seen.get('status')})", kept=f"Inspect with {quote([admin, 'doctor'])}"
+                    + (f"; roll back with: {undo}" if undo else ""))
+    report.update(ok=True, stage="complete", code=None, error=None,
+                  next={"doctor": quote([admin, "doctor"]), "undo": undo,
+                        "uninstall": quote([admin, "uninstall"]) + " (preview), then the same with --apply"})
+    say("")
+    say(f"Memory OS AI is installed and ready ({READY_URL}, profile {profile}).")
+    say("  configured clients (restart them, then check that the memory-os-ai tools appear): "
+        + ", ".join(item["client"] for item in extras["announced"]["clients"]))
+    say("  next: " + report["next"]["doctor"])
+    say("  undo: " + (undo or "quickstart --undo STAMP --with-service (no stamp was reported)") + "  |  remove: "
+        + report["next"]["uninstall"] + " (your data is never deleted)")
+    try:
+        target = os.path.join(again["work_dir"], "interactive-report.json")
+        write_new(target, json.dumps(_public(report), indent=1, ensure_ascii=False))
+        report["report_path"] = target
+        say("  report: " + target)
+    except OSError:
+        report["report_path"] = None
+    return report
 
 
 # ---------------------------------------------------------------- command line
@@ -1279,13 +1926,32 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--acquire-cpython", action="store_true",
                    help="with --apply and --cpython: consent to the download of the named standalone CPython")
     p.add_argument("--json", action="store_true", help="print the whole report as JSON")
+    p.add_argument("--interactive", action="store_true",
+                   help="one-command install (lexical by default): complete preview, ONE [y/N] question read from "
+                        "/dev/tty (no terminal: preview only), then venv, compared quickstart preview, quickstart "
+                        "--apply and /ready; --clients overrides the detected clients")
     return p
 
 
-def main(argv=None, *, pin=None, run=subprocess.run, environ=None, host=None, out=None) -> int:
+def main(argv=None, *, pin=None, run=subprocess.run, environ=None, host=None, out=None, terminal=None, ready=None,
+         which=None, sleep=time.sleep) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     options = parser().parse_args(arguments)
     out = sys.stdout if out is None else out
+    if options.interactive:
+        conflict = ("--apply" if options.apply else "--acquire-cpython" if options.acquire_cpython else
+                    "--json" if options.json else None)
+        if conflict:
+            print(f"--interactive excludes {conflict}: it is the one-command install for a person at a terminal "
+                  "(its single [y/N] confirmation creates the venv and consents to the listed CPython download); "
+                  "use the preview / --apply route for scripts", file=sys.stderr)
+            return 2
+        options.replay = []
+        report = interactive(options, pin=pin, run=run, environ=environ, host=host, out=out, terminal=terminal,
+                             ready=ready, which=which, sleep=sleep)
+        if report["ok"]:
+            return 0
+        return EXIT_NOT_CONFIRMED if report["stage"] in ("no-terminal", "declined") else 1
     if options.acquire_cpython and not (options.apply and options.cpython):
         print("--acquire-cpython is a consent given with --apply and --cpython X.Y", file=sys.stderr)
         return 2
