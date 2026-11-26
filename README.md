@@ -50,8 +50,11 @@ A cell is a system, an architecture and a Python minor version. 4.1.2 retains th
 | macOS Apple Silicon (arm64), Python 3.12 or 3.13 | lexical only |
 | Ubuntu 24.04 arm64, Python 3.11 | lexical only; the service runs under `systemd --user` |
 
+From 4.1.3 (not released yet), a fifth cell is added: Ubuntu 24.04 x86_64, Python 3.11, lexical only, the service under
+`systemd --user`. Its lock is embedded; its qualification on GitHub Actions is pending.
+
 Every other platform is refused before anything is written: macOS on Intel, another Linux distribution or version,
-Linux on x86_64, WSL, Windows, another Python version or a Python that is not CPython. The semantic profile stays
+Linux on x86_64 (until 4.1.3), WSL, Windows, another Python version or a Python that is not CPython. The semantic profile stays
 limited to macOS arm64 with Python 3.11.
 
 This table is a scope, not a result. The proof state of each cell (a state and the means used to establish it) is
@@ -105,7 +108,7 @@ with `--interactive`:
   then `/ready` is checked, and the follow-up commands (`doctor`, `quickstart --undo <stamp> --with-service`,
   `uninstall`) are printed with the environment of this installation spelled out.
 
-The interpreter: on Ubuntu 24.04, the standalone CPython 3.11 named for the cell (about 49.5 MB); on macOS, your
+The interpreter: on Ubuntu 24.04, the standalone CPython 3.11 named for the cell (about 49.5 MB on arm64, 49.2 MB on x86_64); on macOS, your
 `python3` when it is a Python of a [cell](#platform-cells) with SQLite ≥ 3.51.3, otherwise the standalone CPython 3.13
 (about 25.6 MB). Either download is announced, with its source and size, before the question, and made only after
 `y`. Options go after `sh -s --`, for example `… | sh -s -- --clients codex,cursor` or `--python /path/to/python3.12`.
