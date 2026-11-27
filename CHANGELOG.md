@@ -22,8 +22,10 @@
 - Cinquième cellule `ubuntu2404-x86_64-py311` (verrou embarqué). Les deux cellules Ubuntu sont qualifiées sur
   GitHub Actions (D6 : P1 et P3–P7 verts sur le candidat `e858ed7`, avant le gel de la version) ; qualification de
   l'artefact exact 4.1.3 (cellules Linux et macOS, P2, P8, P10-a, P9) : avant la publication.
-- Outillage de Release (Q1) : `scripts/release_assets_413.py` écrit `SHA256SUMS` sur les six actifs (wheel, sdist,
-  amorce épinglée, manifeste P9, `install.sh`) et refuse un `RELEASE_TAG` différent de `v{version}` ; test de gel
+- Outillage de Release (Q1) : `scripts/release_assets_413.py` écrit `SHA256SUMS` sur les cinq fichiers couverts
+  (wheel, sdist, amorce épinglée, manifeste P9, `install.sh`), six actifs avec `SHA256SUMS` ; il refuse un
+  `RELEASE_TAG` différent de `v{version}`, et juge l'épingle et le manifeste P9 par les lecteurs du gabarit de
+  l'amorce (`load_pin`, `proof_state` PASS pour chaque cellule et profil) ; test de gel
   `v4/tests/test_release_assets_413.py`.
 - Version 4.1.3 : deux `pyproject.toml`, `memory_os_v4.__version__`, `server.json` (validé contre son schéma
   `2025-12-11`, icônes comprises), README, liens Cursor / VS Code, messages de refus qui nomment la version.

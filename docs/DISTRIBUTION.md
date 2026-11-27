@@ -53,7 +53,8 @@ Publication is manual, by the maintainer, after the gates: the exact qualified w
 then the qualified commit is pushed without force, tagged, and a GitHub Release carries the release assets. A change
 of a single byte after a gate invalidates its evidence: the candidate is rebuilt and fully requalified.
 
-The release assets of version `X.Y.Z` (since 4.1.3; up to 4.1.2 the same list without `install.sh`):
+The release assets of version `X.Y.Z`: five files that `SHA256SUMS` covers, and `SHA256SUMS` itself, six assets in all
+(since 4.1.3; up to 4.1.2 the same list without `install.sh`):
 
 | Asset | What it is |
 |---|---|
@@ -67,11 +68,14 @@ The release assets of version `X.Y.Z` (since 4.1.3; up to 4.1.2 the same list wi
 one `SHA256SUMS` line for the bootstrap. `install.sh` itself is in `SHA256SUMS`, which the manual route can check; the
 one command cannot check the script it runs.
 
-`scripts/release_assets_413.py <directory>` writes that `SHA256SUMS` at publication, once the other five assets are in
-one directory. It refuses, writing nothing, when an asset is missing, duplicated or extra (the proof complement has
+`scripts/release_assets_413.py <directory>` writes that `SHA256SUMS` at publication, once the five covered files are
+in one directory. It refuses, writing nothing, when a file is missing, duplicated or extra (the proof complement has
 its own checksum file), when the wheel and the sdist do not name the same version, when `install.sh` does not
 carry exactly `RELEASE_TAG="v<that version>"`, when the bootstrap pin is not the release pin of that wheel, when the
-P9 manifest does not name the wheel's SHA-256, or when a `SHA256SUMS` is already there. The freeze test
+P9 manifest does not prove every cell and profile of that pin, or when a `SHA256SUMS` is already there. The pin and
+the manifest are judged by the readers of the bootstrap template of this repository (`load_pin`, then `proof_state`:
+`PASS` with `manifest_matches_artifact_cell_and_lock` for each cell and profile, the 4.1.2 publication rule); the
+published bootstrap itself is read as text and never executed. The freeze test
 `v4/tests/test_release_assets_413.py` requires `RELEASE_TAG` to equal `v` plus the version of both `pyproject.toml`
 files, and the one-command URLs of the README and of the release notes to use that tag.
 

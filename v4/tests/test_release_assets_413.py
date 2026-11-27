@@ -2,9 +2,11 @@
 
 - ``scripts/install.sh`` is pinned to ``v`` + the version of both ``pyproject.toml`` files, and every one-command URL
   of the README and of the release notes names that same tag;
-- ``scripts/release_assets_413.py`` refuses a directory that is not exactly the asset set of one version, and writes
-  a ``SHA256SUMS`` that covers every asset (``install.sh`` and ``memory_os_bootstrap.py`` included, never itself),
-  which the checksum step of ``install.sh`` accepts. Temporary directories only; no real asset is touched.
+- ``scripts/release_assets_413.py`` refuses a directory that is not exactly the five files of one version, judges the
+  bootstrap pin and the P9 manifest with the readers of the bootstrap TEMPLATE (``load_pin``, ``proof_state``: PASS
+  for every cell and profile of the pin), never executes the bootstrap ASSET, and writes a ``SHA256SUMS`` covering
+  the five files (``install.sh`` and ``memory_os_bootstrap.py`` included, never itself: six assets with it), which the
+  checksum step of ``install.sh`` accepts. Temporary directories only; no real asset is touched.
 """
 from __future__ import annotations
 
@@ -77,8 +79,11 @@ def test_the_readme_docker_line_builds_the_wheel_of_this_version():
     assert f"--build-arg WHEEL=memory_os_ai-{V}-py3-none-any.whl " in (ROOT / "README.md").read_text()
 
 
-def test_the_helper_reads_the_pin_with_the_markers_of_the_bootstrap():
-    assert (ra.PIN_BEGIN, ra.PIN_END, ra.P9_KIND, ra.PACKAGE) == (bs.PIN_BEGIN, bs.PIN_END, bs.P9_KIND, bs.PACKAGE)
+def test_the_helper_judges_with_the_template_of_this_repository():
+    assert ra.TEMPLATE == ROOT / "scripts" / "memory_os_bootstrap.py"
+    template = ra.load_template()
+    assert template is not bs and (template.PIN_BEGIN, template.PIN_END) == (bs.PIN_BEGIN, bs.PIN_END)
+    assert template.load_pin()["code"] == "release_pin_unfilled"          # the repository copy is the template
 
 
 # ---------------------------------------------------------------- the asset helper
@@ -91,15 +96,39 @@ def make_wheel(directory: Path, version: str = V) -> Path:
     return path
 
 
+CELLS = (f"macos-arm64-py{sys.version_info[0]}{sys.version_info[1]}", "ubuntu2404-x86_64-py311")
+
+
 def release_pin(wheel: Path, version: str = V) -> dict:
-    pin = make_pin(wheel, state="release")
+    """A release pin of ``wheel`` (locks fingerprinted by the template's ``lock_fingerprint``), valid for load_pin."""
+    pin = make_pin(wheel, cells=CELLS, profiles=("lexical", "semantic"), state="release")
     pin["version"] = version
     assert bs.load_pin(json.dumps(pin))["ok"]
     return pin
 
 
+def pairs(pin: dict) -> list:
+    return sorted((cell_id, profile) for cell_id, profiles in pin["cells"].items() for profile in profiles)
+
+
+def p9_manifest(pin: dict, state: str = "PASS") -> dict:
+    """A P9 manifest of the pinned wheel: one entry per (cell, profile), lock_sha256 = the pin's fingerprint."""
+    return {"schema_version": 1, "kind": bs.P9_KIND, "artifact": {"sha256": pin["wheel"]["sha256"]},
+            "cells": [{"cell_id": cell_id, "profile": profile, "state": state, "means": "synthetic test entry",
+                       "lock_sha256": pin["cells"][cell_id][profile]["lock_sha256"]} for cell_id, profile in pairs(pin)]}
+
+
+def put_pin(directory: Path, pin: dict) -> None:
+    """The template text with ``pin`` spliced in as is (no validation: for the refusal cases)."""
+    text = (ROOT / "scripts" / "memory_os_bootstrap.py").read_text()
+    start, end = text.index(bs.PIN_BEGIN + "\nRELEASE_PIN"), text.index("\n" + bs.PIN_END + "\n")
+    (directory / "memory_os_bootstrap.py").write_text(text[:start] + bs.render_pin_block(pin)
+                                                      + text[end + len(bs.PIN_END) + 1:])
+
+
 def assemble(directory: Path, *, version: str = V, tag: str | None = None, bootstrap: str | None = None) -> dict:
-    """The six assets of ``version`` (SHA256SUMS not yet written): the real bootstrap with a filled release pin."""
+    """The five files of ``version`` (SHA256SUMS not yet written; six assets with it): the real bootstrap with a
+    filled release pin, and a P9 manifest that proves every cell and profile of that pin."""
     directory.mkdir()
     wheel = make_wheel(directory, version)
     (directory / f"memory_os_ai-{version}.tar.gz").write_bytes(b"sdist of " + version.encode())
@@ -107,8 +136,7 @@ def assemble(directory: Path, *, version: str = V, tag: str | None = None, boots
     text = bs.fill_pin((ROOT / "scripts" / "memory_os_bootstrap.py").read_text(), pin) if bootstrap is None \
         else bootstrap + "\n" + bs.render_pin_block(pin) + "\n"
     (directory / "memory_os_bootstrap.py").write_text(text)
-    manifest = {"schema_version": 1, "kind": bs.P9_KIND, "artifact": {"sha256": pin["wheel"]["sha256"]}, "cells": []}
-    (directory / f"memory-os-ai-{version}.p9-manifest.json").write_text(json.dumps(manifest))
+    (directory / f"memory-os-ai-{version}.p9-manifest.json").write_text(json.dumps(p9_manifest(pin)))
     script = INSTALL.read_text().replace(f'  RELEASE_TAG="{TAG}"', f'  RELEASE_TAG="{"v" + version if tag is None else tag}"')
     (directory / "install.sh").write_text(script)
     return pin
@@ -122,6 +150,9 @@ def test_the_correct_set_gives_the_exact_sha256sums(tmp_path):
     result = ra.write(assets)
     written = (assets / "SHA256SUMS").read_text()
     assert written == expected == result["sums"] and result["version"] == V and result["tag"] == TAG
+    assert [(p["cell_id"], p["profile"], p["state"]) for p in result["proofs"]] == \
+        [(cell_id, profile, "PASS") for cell_id, profile in pairs(json.loads(ra.pin_text(
+            (assets / "memory_os_bootstrap.py").read_text(), bs)))] and len(result["proofs"]) >= 3
     assert names == sorted(["install.sh", "memory_os_bootstrap.py", f"memory-os-ai-{V}.p9-manifest.json",
                             f"memory_os_ai-{V}-py3-none-any.whl", f"memory_os_ai-{V}.tar.gz"])
     assert [line.split("  ")[1] for line in written.splitlines()] == names       # sorted, one line per asset
@@ -213,42 +244,91 @@ def test_the_wheel_and_the_sdist_must_name_the_same_version(tmp_path):
         ra.check(assets)
 
 
+REFUSED_PIN = "the bootstrap refuses its own pin"
+
+
 @pytest.mark.parametrize("change,words", [
-    (lambda pin: pin.update(state="test"), "not a release pin"),
-    (lambda pin: pin.update(version="9.9.9"), "not a release pin"),
+    (lambda pin: pin.update(state="test"), "not a release pin of .*state 'test'"),
+    (lambda pin: pin.update(state="template"), REFUSED_PIN + ": release_pin_unfilled"),
+    (lambda pin: pin.update(version="9.9.9"), REFUSED_PIN),
+    (lambda pin: pin.update(cells="invalide"), REFUSED_PIN + ": release_pin_invalid"),
+    (lambda pin: pin.update(cells={"debian-12-arm64-py311": {}}), "names no cell and profile"),
+    (lambda pin: pin.update(cells={}), "names no cell and profile"),
+    (lambda pin: pin["cells"][CELLS[1]].update(lexical={"constraints": [], "artifacts": []}), REFUSED_PIN),
+    (lambda pin: pin["cells"][CELLS[1]]["lexical"].update(lock_sha256="0" * 64), REFUSED_PIN),
+    (lambda pin: pin["wheel"].pop("content_sha256"), REFUSED_PIN + ": release_pin_invalid"),
+    (lambda pin: pin.update(schema_version=2), REFUSED_PIN),
     (lambda pin: pin["wheel"].update(sha256="0" * 64), "pinned wheel is not"),
     (lambda pin: pin["wheel"].update(size=pin["wheel"]["size"] + 1), "pinned wheel is not"),
-    (lambda pin: pin["wheel"].update(filename="memory_os_ai-9.9.9-py3-none-any.whl"), "pinned wheel is not"),
+    (lambda pin: pin["wheel"].update(filename=f"memory_os_ai-{V}-py3-none-other.whl"), "pinned wheel is not"),
 ])
-def test_a_bootstrap_not_pinned_to_this_wheel_is_refused(tmp_path, change, words):
+def test_a_bootstrap_pin_that_the_template_refuses_or_that_pins_another_wheel_is_refused(tmp_path, change, words):
     assets = tmp_path / "assets"
     pin = assemble(assets)
     change(pin)
-    text = (ROOT / "scripts" / "memory_os_bootstrap.py").read_text()
-    start, end = text.index(bs.PIN_BEGIN + "\nRELEASE_PIN"), text.index("\n" + bs.PIN_END + "\n")
-    (assets / "memory_os_bootstrap.py").write_text(text[:start] + bs.render_pin_block(pin) + text[end + len(bs.PIN_END) + 1:])
+    put_pin(assets, pin)
     with pytest.raises(ra.AssetError, match=words):
         ra.check(assets)
+    assert ra.main([str(assets)]) == 1 and not (assets / "SHA256SUMS").exists()
 
 
 def test_the_template_bootstrap_of_the_repository_is_refused(tmp_path):
     assets = tmp_path / "assets"
     assemble(assets)
     (assets / "memory_os_bootstrap.py").write_text((ROOT / "scripts" / "memory_os_bootstrap.py").read_text())
-    with pytest.raises(ra.AssetError, match="not a release pin"):
+    with pytest.raises(ra.AssetError, match=REFUSED_PIN + ": release_pin_unfilled"):
         ra.check(assets)
 
 
-@pytest.mark.parametrize("manifest", [
-    {"schema_version": 1, "kind": "memory-os-ai-p9-manifest", "artifact": {"sha256": "0" * 64}, "cells": []},
-    {"schema_version": 2, "kind": "memory-os-ai-p9-manifest", "artifact": {"sha256": None}, "cells": []},
-    [],
-])
-def test_a_p9_manifest_that_does_not_name_the_wheel_is_refused(tmp_path, manifest):
+def test_a_bootstrap_without_exactly_one_pin_block_is_refused(tmp_path):
     assets = tmp_path / "assets"
     assemble(assets)
+    text = (assets / "memory_os_bootstrap.py").read_text()
+    (assets / "memory_os_bootstrap.py").write_text(text + text[text.index(bs.PIN_BEGIN):])
+    with pytest.raises(ra.AssetError, match="not found exactly once"):
+        ra.check(assets)
+
+
+def test_the_bootstrap_asset_is_read_as_text_and_never_run(tmp_path):
+    witness = tmp_path / "asset-ran"
+    assets = tmp_path / "assets"
+    assemble(assets, bootstrap=f"open({str(witness)!r}, 'w').close()\nraise SystemExit(3)\n")
+    assert ra.write(assets)["version"] == V and not witness.exists()
+
+
+@pytest.mark.parametrize("change,reason", [
+    (lambda m, pin: m.pop("cells"), "manifest_malformed"),
+    (lambda m, pin: m.update(cells=None), "manifest_malformed"),
+    (lambda m, pin: m.update(cells=[{"cell_id": 1}]), "manifest_malformed"),
+    (lambda m, pin: m.update(schema_version=True), "manifest_unreadable"),
+    (lambda m, pin: m.update(schema_version=2), "manifest_unreadable"),
+    (lambda m, pin: m.update(kind="other"), "manifest_unreadable"),
+    (lambda m, pin: m.update(artifact={"sha256": "0" * 64}), "artifact_mismatch"),
+    (lambda m, pin: m.pop("artifact"), "manifest_malformed"),
+    (lambda m, pin: m.update(cells=[e for e in m["cells"] if e["cell_id"] != CELLS[1]]), "cell_absent_from_manifest"),
+    (lambda m, pin: m["cells"][-1].update(lock_sha256="0" * 64), "lock_mismatch"),
+    (lambda m, pin: m["cells"][-1].update(state="FAIL"), "manifest_matches_artifact_cell_and_lock"),
+    (lambda m, pin: m["cells"][-1].update(state="UNKNOWN"), "state_not_proven"),
+    (lambda m, pin: m["cells"].append({**m["cells"][-1], "state": "FAIL"}), "manifest_ambiguous"),
+])
+def test_a_p9_manifest_that_does_not_prove_every_cell_and_profile_is_refused(tmp_path, change, reason):
+    """Judged by the template's proof_state: PASS with manifest_matches_artifact_cell_and_lock, or refused."""
+    assets = tmp_path / "assets"
+    pin = assemble(assets)
+    manifest = p9_manifest(pin)
+    change(manifest, pin)
     (assets / f"memory-os-ai-{V}.p9-manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(ra.AssetError, match="not a P9 manifest"):
+    with pytest.raises(ra.AssetError, match=r"is not proven for this wheel and lock .*reason " + reason):
+        ra.check(assets)
+    assert ra.main([str(assets)]) == 1 and not (assets / "SHA256SUMS").exists()
+
+
+@pytest.mark.parametrize("content", [b"not json", b"[]", b"\xff\xfe"])
+def test_an_unreadable_p9_manifest_is_refused(tmp_path, content):
+    assets = tmp_path / "assets"
+    assemble(assets)
+    (assets / f"memory-os-ai-{V}.p9-manifest.json").write_bytes(content)
+    with pytest.raises(ra.AssetError, match="manifest_unreadable"):
         ra.check(assets)
 
 
