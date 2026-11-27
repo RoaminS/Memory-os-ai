@@ -3,7 +3,8 @@ name: CI — lint and secrets
 # Scope (4.1.2 lot 0): GitHub CI runs ruff correctness lint and a scan for *verified* secrets only (an empty
 # result does not prove that no secret exists). Release qualification runs locally,
 # per retained platform cell (gates P1–P9), and its proof is the P9 manifest attached to each GitHub Release.
-# GitHub-hosted x86_64 runners are not a retained cell; per-cell CI jobs are planned for 4.1.3.
+# Since 4.1.3 the Linux cells ubuntu2404-arm64-py311 and ubuntu2404-x86_64-py311 are qualified on GitHub-hosted
+# runners by the separate workflow linux-cells.yml (gates P1 and P3-P7, decision D6); the macOS cells stay local.
 # Tools and actions are pinned to the versions used by the last successful lint and secrets-scan jobs
 # (run 45457000824, 2026-11-24; the other jobs of that run failed and are not carried over).
 

@@ -6,7 +6,7 @@ name: Linux cells and container (4.1.3)
 # - resolve-lock-x86_64: the frozen 4.1.1 recipe (uv 0.13.9, --exclude-newer 2026-11-24) for x86_64-manylinux_2_28;
 #   its outputs (run 45879240439) fed scripts/generate_cell_locks_411.py OFFLINE: the lock is embedded since 4.1.3.
 # - qualify-arm64 / qualify-x86_64: gates P1 and P3-P7 (tools/qualify413/linux_cell.py) on the runner; their report
-#   records the artifact SHA-256 values for the P9 manifest. x86_64 runs only on request (its qualification is pending).
+#   records the artifact SHA-256 values for the P9 manifest. x86_64 runs only on request (workflow_dispatch input qualify_x86_64).
 # - container-arm64: build the image from the qualified wheel, wait for /ready, stop it, require exit code 0.
 # Actions are pinned by commit SHA; tools by exact version.
 
