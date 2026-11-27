@@ -17,11 +17,14 @@ The five files of version V (read from the wheel and sdist names, which must agr
 
 Two pieces of code are told apart. The bootstrap ASSET is untrusted input: it is read as text, its pin block is cut
 out as text, and it is never imported or run. The bootstrap TEMPLATE of this repository (``memory_os_bootstrap.py``
-next to this script, from the same commit) is trusted code: it is loaded, and its own readers judge the asset, with
-no parallel reimplementation:
+next to this script, from the same commit) is trusted code: its SOURCE bytes are compiled and executed (no import
+loader, so no ``__pycache__`` is read), and its own readers judge the asset, with no parallel reimplementation:
 
 - ``template.load_pin(<pin text of the asset>)`` must be ``ok``, in state ``release``, of version V, and pin exactly
   the wheel present (filename, SHA-256, size);
+- the pin must name exactly the retained pairs of the template: each cell of ``CELLS`` in ``lexical`` and each cell
+  of ``SEMANTIC_CELLS`` in ``semantic`` (4.1.3: five lexical, one semantic); a missing or extra pair is refused, since
+  an install on an omitted cell would stop on ``cell_lock_missing``;
 - for EACH (cell, profile) of that pin, ``template.proof_state(<P9 manifest>, pin=..., cell_id=..., profile=...)``
   must give ``PASS`` with ``manifest_matches_artifact_cell_and_lock`` (the 4.1.2 publication rule); any other state or
   reason is refused with the cell, the profile and the reason.
@@ -35,17 +38,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+import types
 
 SUMS = "SHA256SUMS"
 BOOTSTRAP = "memory_os_bootstrap.py"
 INSTALL = "install.sh"
 TEMPLATE = Path(__file__).resolve().parent / BOOTSTRAP
+TEMPLATE_MODULE = "memory_os_bootstrap_template_413"
 PROVEN = ("PASS", "manifest_matches_artifact_cell_and_lock")
 VERSION = r"[0-9]+(?:\.[0-9]+)*"
 WHEEL = re.compile(rf"memory_os_ai-(?P<version>{VERSION})-py3-none-any\.whl")
@@ -83,15 +87,22 @@ def release_tag(text: str) -> str:
 def load_template(path: Path = TEMPLATE):
     """The bootstrap TEMPLATE of this repository (trusted code of the same commit), loaded without bytecode.
 
-    Never called on the bootstrap ASSET, which is only ever read as text (``pin_text``)."""
-    spec = importlib.util.spec_from_file_location("memory_os_bootstrap_template_413", path)
-    module = importlib.util.module_from_spec(spec)
-    before, sys.dont_write_bytecode = sys.dont_write_bytecode, True
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.dont_write_bytecode = before
+    Never called on the bootstrap ASSET, which is only ever read as text (``pin_text``).
+    The SOURCE bytes are compiled and executed into a fresh module: no import loader, so no ``__pycache__`` is ever
+    read (``sys.dont_write_bytecode`` only stops writing one) nor written."""
+    path = Path(path)
+    source = path.read_bytes()
+    module = types.ModuleType(TEMPLATE_MODULE)
+    module.__file__ = str(path)
+    sys.modules[TEMPLATE_MODULE] = module          # dataclasses and typing resolve the module by name
+    exec(compile(source, str(path), "exec", dont_inherit=True), module.__dict__)
     return module
+
+
+def retained_pairs(template) -> list:
+    """Every (cell, profile) a release must pin: each retained cell in lexical, the semantic cells in semantic."""
+    return sorted({(cell_id, "lexical") for cell_id in template.CELLS}
+                  | {(cell_id, "semantic") for cell_id in template.SEMANTIC_CELLS})
 
 
 def pin_text(text: str, template) -> str:
@@ -156,8 +167,12 @@ def check(directory, *, template=None) -> dict:
     if (pinned["filename"], pinned["sha256"], pinned["size"]) != (wheel.name, wheel_sha, wheel_size):
         raise AssetError(f"{BOOTSTRAP}: the pinned wheel is not {wheel.name} (SHA-256 {wheel_sha}, {wheel_size} bytes)")
     pairs = sorted((cell_id, profile) for cell_id, profiles in pin["cells"].items() for profile in profiles)
-    if not pairs:
-        raise AssetError(f"{BOOTSTRAP}: the release pin names no cell and profile")
+    wanted = retained_pairs(template)
+    if pairs != wanted:
+        missing = [f"{c}/{p}" for c, p in wanted if (c, p) not in pairs]
+        extra = [f"{c}/{p}" for c, p in pairs if (c, p) not in wanted]
+        raise AssetError(f"{BOOTSTRAP}: the release pin must name exactly the {len(wanted)} retained cell/profile "
+                         f"pairs: missing {missing}, extra {extra}")
 
     proofs = []
     for cell_id, profile in pairs:
