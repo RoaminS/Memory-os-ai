@@ -1516,7 +1516,7 @@ def undo(stamp: str, *, home: Path, journal_root: Path | None = None, run=subpro
     return result
 
 
-PLAN_DIGEST_VERSION = 2
+PLAN_DIGEST_VERSION = 3  # 3 (4.1.3, CI run 2): modification and change dates in the identity of a file
 PLAN_DIGEST_CLIENT_KEYS = ("client", "path", "file_sha256", "action", "desired_sha256", "current_class", "ownership")
 PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "manager", "plist", "unit",
                             "loaded_state")
@@ -1538,7 +1538,14 @@ def target_identity(path, *, count_entries=False) -> dict | None:
     identity = {"kind": kind, "mode": stat.S_IMODE(status.st_mode), "uid": status.st_uid, "dev": status.st_dev,
                 "ino": status.st_ino}
     if kind == "file":  # a directory's link count follows its entries on some file systems (APFS): files only
-        identity.update(size=status.st_size, nlink=status.st_nlink)
+        # Dates, files only (the ops and journal directories receive files of their own). ext4, xfs and tmpfs reuse
+        # a freed inode at once: a file deleted then recreated with the same size keeps device and inode, but not
+        # its change date (set by the kernel at creation, write, chmod or link; os.utime cannot set it) nor, as a
+        # rule, its modification date. Declared limit: before Linux 6.13 (no multigrain timestamps) both advance
+        # at the kernel tick (1-4 ms), so a recreation within the same tick, same inode and same size stays
+        # invisible. Metadata only: the token's content never enters the identity nor the digest.
+        identity.update(size=status.st_size, nlink=status.st_nlink, mtime_ns=status.st_mtime_ns,
+                        ctime_ns=status.st_ctime_ns)
     if kind == "directory" and count_entries:
         try:
             identity["entries"] = len(os.listdir(path))
@@ -1557,9 +1564,9 @@ def write_targets(settings, home) -> dict:
 def plan_digest(plan: dict) -> str:
     """SHA-256 of what an apply of ``plan`` would write or reuse (4.1.3, one-command install).
 
-    Covers the profile, backend, interpreter, port, token (path, state, identity of an existing file; never its
-    value), client environment, cell, build identity, the whole resource plan (resources, files and destinations,
-    presence, ref readiness, download bytes, environment), named consents, the identity of every other write target
+    Covers the profile, backend, interpreter, port, token (path, state, and the metadata of an existing file:
+    device, inode, mode, owner, size, link count, modification and change dates; never its content), client
+    environment, cell, build identity, the whole resource plan (resources, files and destinations, presence, ref readiness, download bytes, environment), named consents, the identity of every other write target
     (store, ops directory, journals), every client (path, file digest, action, desired entry) and the whole service
     (label, definition path and text, argv, environment, state, job state). Volatile facts (time, free disk, port
     probe) are outside. Computed on the JSON form of the plan, so that a caller holding only the printed preview (the
@@ -1944,7 +1951,11 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         desktop, _, _ = _job_run(['pgrep', '-x', 'Claude'], run=run, timeout=5)
         if desktop != 1:
             block('client_app_running', 'quit Claude Desktop before apply; live config may be rewritten by the app')
-    token = read_token(settings.token_file)  # strict permissions/owner/format, never returned
+    # The preview validates an existing token (owner, mode 0600, one link, size, format; 4.0 behaviour): a corrupt
+    # one is refused during this quickstart preview, before its apply. In the interactive bootstrap this preview
+    # runs after the [y/N] answer and the venv creation, still before quickstart --apply. The value stays in this
+    # frame: never returned, printed, hashed nor put in the plan or its digest.
+    token = read_token(settings.token_file)
     required = max(minimum, resource_plan['peak_additional_bytes_upper_bound'] + 1_000_000_000)
     if result['disk_free_bytes'] < required:
         block('disk_guard', f'disk guard: {result["disk_free_bytes"]} bytes free < required {required} bytes '

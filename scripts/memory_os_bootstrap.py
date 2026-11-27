@@ -215,7 +215,7 @@ JOURNAL_SUBPATH = ".local/state/memory-os/quickstart"
 WRITING_ACTIONS = ("create", "replace", "unchanged")
 CONFIRM_PROMPT = "Install Memory OS AI with exactly this plan? [y/N] "
 # Same digest as ``ops/quickstart.plan_digest`` (a test compares them on a real plan).
-PLAN_DIGEST_VERSION = 2
+PLAN_DIGEST_VERSION = 3
 PLAN_DIGEST_CLIENT_KEYS = ("client", "path", "file_sha256", "action", "desired_sha256", "current_class", "ownership")
 PLAN_DIGEST_SERVICE_KEYS = ("label", "path", "argv", "env", "state", "sha256", "manager", "plist", "unit",
                             "loaded_state")
@@ -1772,7 +1772,13 @@ def confirmed(answer) -> bool:
 
 
 def read_token_file(path) -> str:
-    """The bearer token of a private file (regular, this user's, 0600, no link); never printed. ValueError."""
+    """The bearer token of a private file, for the authenticated /ready check after the install; never printed.
+
+    Checks exactly: opened without following a final symbolic link (O_NOFOLLOW where available), a regular file
+    owned by this user, no permission for group or others (0600, 0400 or 0700 pass), at most 257 bytes, and the
+    token format. Hard links are not checked here; the product's reader (ops/auth.read_token: quickstart preview,
+    doctor, relay) requires mode 0600 and a single link. ValueError.
+    """
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     except OSError as exc:

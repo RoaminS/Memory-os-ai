@@ -1065,13 +1065,53 @@ def test_a_token_removed_between_preview_and_apply_is_refused_before_any_write(c
 
 
 def test_a_token_whose_identity_changed_moves_the_digest(c):
+    """Same value, another file. Deterministic on every file system (CI run 2: ext4 reuses a freed inode at once,
+    so an unlink + recreate could keep the inode): the new file is written beside, then renamed over the token,
+    so both exist together and their inodes necessarily differ."""
     from setup_fixture_410 import prepare
-    _write_token(c.settings.token_file)
+    token = c.settings.token_file
+    _write_token(token)
     first = qs.plan_digest(prepare(c, profile="lexical"))
-    c.settings.token_file.unlink()
-    _write_token(c.settings.token_file)  # same value, another file
+    replacement = token.with_name(token.name + ".new")
+    _write_token(replacement)
+    os.replace(replacement, token)
     assert qs.plan_digest(prepare(c, profile="lexical")) != first
     assert "T" * 43 not in json.dumps(prepare(c, profile="lexical"))  # never its value
+
+
+def test_a_token_rewritten_in_place_with_another_date_moves_the_digest(c):
+    """Same inode, same size, same mode: only the dates differ (version 3 of the digest)."""
+    from setup_fixture_410 import prepare
+    token = c.settings.token_file
+    _write_token(token)
+    before = os.lstat(token)
+    first = qs.plan_digest(prepare(c, profile="lexical"))
+    os.utime(token, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    after = os.lstat(token)
+    assert (after.st_dev, after.st_ino, after.st_size, after.st_mode) == \
+        (before.st_dev, before.st_ino, before.st_size, before.st_mode)
+    assert qs.plan_digest(prepare(c, profile="lexical")) != first
+
+
+def test_the_identity_of_a_file_carries_its_dates_and_a_directory_none(tmp_path):
+    path = tmp_path / "file"
+    path.write_text("x")
+    status = os.lstat(path)
+    identity = qs.target_identity(path)
+    assert (identity["mtime_ns"], identity["ctime_ns"]) == (status.st_mtime_ns, status.st_ctime_ns)
+    directory = qs.target_identity(tmp_path, count_entries=True)
+    assert directory["kind"] == "directory" and not {"mtime_ns", "ctime_ns", "size", "nlink"} & set(directory)
+    assert qs.PLAN_DIGEST_VERSION == bs.PLAN_DIGEST_VERSION == 3
+
+
+@pytest.mark.parametrize("field", ["mtime_ns", "ctime_ns"])
+def test_each_date_of_the_token_is_bound_by_the_digest(field):
+    """The change date cannot be set from user space: prove its binding on the plan itself."""
+    token = {"kind": "file", "mode": 0o600, "uid": 501, "dev": 1, "ino": 2, "size": 44, "nlink": 1,
+             "mtime_ns": 10, "ctime_ns": 20}
+    plan = {"profile": "lexical", "service": {}, "clients": [], "write_targets": {"token": token}}
+    moved = {**plan, "write_targets": {"token": {**token, field: token[field] + 1}}}
+    assert qs.plan_digest(plan) != qs.plan_digest(moved)
 
 
 def test_the_semantic_manual_route_with_refs_main_removed_has_another_digest(tmp_path, monkeypatch):

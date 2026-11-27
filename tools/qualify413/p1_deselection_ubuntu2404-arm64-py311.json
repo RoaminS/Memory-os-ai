@@ -17,8 +17,7 @@
   "g": "test ancré sur la cellule de référence macos-arm64-py311 (chemins, cellule ou service macOS attendus en dur) ; sous Linux le produit applique à juste titre les règles de la cellule Linux",
   "h": "client dont la configuration Linux diffère à dessein de macOS (claude-desktop, windsurf : refus client_unsupported_on_os ; vscode depuis 4.1.3 : ~/.copilot/mcp-config.json au format copilot-json) ; le test attend le chemin et le format macOS du client",
   "i": "test d'outillage qui lit l'historique Git du dépôt (objets d'anciens commits) ; la cellule CI extrait le commit seul (actions/checkout, profondeur 1, job qualify-arm64 sans fetch-depth) : objets absents",
-  "j": "outillage de qualification 4.1.0 à sémantique de socket macOS/BSD (scripts/qualify_install_410_helper.py, installeur launchd) : sous Linux un bind SO_REUSEADDR est refusé sur une connexion TIME_WAIT laissée par un socket sans SO_REUSEADDR ; la sonde répond « busy », le sens sûr",
-  "k": "limite déclarée, décision de Romain en attente (défaut produit analysé, non corrigé dans cet outillage)"
+  "j": "outillage de qualification 4.1.0 à sémantique de socket macOS/BSD (scripts/qualify_install_410_helper.py, installeur launchd) : sous Linux un bind SO_REUSEADDR est refusé sur une connexion TIME_WAIT laissée par un socket sans SO_REUSEADDR ; la sonde répond « busy », le sens sûr"
  },
  "lexicale": {
   "ignore": [
@@ -2779,16 +2778,6 @@
      "origine": "4.1.3 (run CI n° 2)",
      "verification_locale": "non reproductible sous macOS (sémantique BSD) ; observé sur les deux cellules CI",
      "cas_junit": 1
-    },
-    {
-     "noeud": "tests/test_bootstrap_oneliner_413.py::test_a_token_whose_identity_changed_moves_the_digest",
-     "categorie": "k",
-     "motif": "target_identity (quickstart.py:1525-1547) = kind, mode, uid, dev, ino, size, nlink, sans date : sur ext4 le fichier recréé après unlink reprend le même inode, même taille et mêmes droits, donc la même identité et le même digest de plan ; défaut produit réel (un jeton remplacé à l'identique de taille entre aperçu et apply n'est pas détecté sous Linux), non corrigé ici : proposition remise, décision de Romain en attente",
-     "preuve": "AssertionError: assert 'b13797e69fd3d0fe68afeee28acfeda24e63e368a43881e12763bf3ad1e2745f' != 'b13797e69fd3d0fe68afeee28acfeda24e63e368a43881e12763bf3ad1e2745f'",
-     "couverture": "suite complète macOS (APFS ne réutilise pas l'inode : PASS) ; jeton supprimé entre aperçu et apply : test_a_token_removed_between_preview_and_apply_is_refused_before_any_write, PASS sous Linux",
-     "origine": "4.1.3 (run CI n° 2)",
-     "verification_locale": "non reproductible sous macOS (APFS) ; observé sur les deux cellules CI",
-     "cas_junit": 1
     }
    ]
   }
@@ -2894,20 +2883,26 @@
    "noeud": "tests/test_setup_clients_410_setup.py::test_second_run_is_unchanged_and_writes_nothing[vscode]",
    "categorie_v7": "h",
    "pourquoi": "VS Code est pris en charge sous Linux depuis 4.1.3 (clients.py, copilot-json) ; le test passe en simulation Linux (sys.platform=linux) : non désélectionné, le run CI réel le juge"
+  },
+  {
+   "origine": "4.1.3 (run CI n° 2), section de cellule",
+   "noeud": "tests/test_bootstrap_oneliner_413.py::test_a_token_whose_identity_changed_moves_the_digest",
+   "categorie_v7": null,
+   "categorie_413": "k",
+   "pourquoi": "défaut produit corrigé sur décision de Romain (2026-11-26) : target_identity porte mtime_ns et ctime_ns des fichiers, PLAN_DIGEST_VERSION 3 ; test rendu déterministe (os.replace : les deux fichiers coexistent, inodes forcément distincts) ; non désélectionné, le run CI réel le juge"
   }
  ],
  "comptes": {
   "ignore": 59,
   "deselect_commun": 160,
-  "deselect_cellule": 93,
+  "deselect_cellule": 92,
   "cas_commun": 240,
   "sauts_prevus": 6,
-  "retirees": 8,
+  "retirees": 9,
   "b_new": 43,
   "b_port": 108,
   "b_reclass_S1": 9,
   "ci2_cell_j": 1,
-  "ci2_cell_k": 1,
   "g_port": 25,
   "h_port": 25,
   "h_port_vscode": 10,
