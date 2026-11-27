@@ -466,14 +466,22 @@ class Run:
 
     # ---------------------------------------------------------------- P4 + P5
     def install(self):
-        venv = self.venv("venv")
-        self.uv_install(venv, "wheel-no-deps", "--no-deps", self.wheel)
+        """The README's manual route, as the 4.1.1 gate did (qual411 supervision.py): ``python -m venv`` of the cell's
+        CPython, then the README's two pip commands and ``pip check``. pip records the artifact's SHA-256 in
+        direct_url.json, which P7 verifies; uv records none (CI run 9)."""
+        venv = self.R / "venv"
+        self.step("venv-venv", [self.python, "-I", "-m", "venv", venv])
+        pip = [venv / "bin/python", "-I", "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+               "--only-binary", ":all:"]
+        pip_env = {**os.environ, "PIP_CONFIG_FILE": os.devnull, "PIP_NO_CACHE_DIR": "1"}
+        self.step("install-wheel-no-deps", [*pip, "--no-deps", self.wheel], env=pip_env, timeout=900)
         rc, out = self.step("constraints-path", [venv / "bin/memory-os-constraints", "lexical"])
         located = Path(out.strip().splitlines()[-1])
         self.check("memory-os-constraints names the lock of this cell from the installed package",
                    located.name == f"qualified_runtime_constraints_lexical_{self.cell}_v1.txt"
                    and venv in located.parents and located.read_text() == self.constraints_text, str(located))
-        self.uv_install(venv, "closure", "-c", located, f"memory-os-ai[ops,brief] @ file://{self.wheel}")
+        self.step("install-closure", [*pip, "-c", located, f"{self.wheel}[ops,brief]"], env=pip_env, timeout=900)
+        self.step("pip-check", [venv / "bin/python", "-I", "-m", "pip", "check"], env=pip_env)
         return venv
 
     def p4(self):
@@ -486,7 +494,9 @@ class Run:
                  " 'pythonpath': os.environ.get('PYTHONPATH'),\n"
                  f" 'find_spec': {{m: importlib.util.find_spec(m) is not None for m in {ML_MODULES!r}}},\n"
                  " 'runtime': q.inspect_current(profile='lexical', extras=('ops', 'brief'), cell_id=cell),\n"
-                 " 'extra': q.check_no_extra_packages(installed, profile='lexical', extras=('ops', 'brief'), cell_id=cell)}))\n")
+                 " 'extra': q.check_no_extra_packages(installed, profile='lexical', extras=('ops', 'brief'), cell_id=cell),\n"
+                 " 'extra_admitted': q.check_no_extra_packages(installed, profile='lexical', extras=('ops', 'brief'),\n"
+                 "     cell_id=cell, allowed_extra=('memory-os-ai', 'pip', 'setuptools'))}))\n")
         rc, out = self.step("probe", [venv / "bin/python", "-I", "-B", "-c", probe], cwd=self.R,
                             env={"HOME": str(Path.home()), "PATH": "/usr/bin:/bin"})
         facts = self.last_json(out)
@@ -495,8 +505,13 @@ class Run:
                    and not facts["pythonpath"], facts["package"])
         self.check("find_spec of the ML = None", not any(facts["find_spec"].values()), facts["find_spec"])
         self.check("versions = lock of the cell", facts["runtime"].get("ok") is True, facts["runtime"].get("mismatches"))
-        self.check("no extra package", facts["extra"].get("ok") is True and not facts["extra"].get("unexpected"),
-                   facts["extra"])
+        # pip and setuptools: the seeding of a CPython 3.11 venv, declared exactly as the 4.1.1 gate did (portes.py):
+        # the admitted check (allowed_extra adds pip and setuptools) is ok, and the strict one finds nothing else.
+        strict, admitted = facts["extra"], facts["extra_admitted"]
+        self.check("no extra package (venv seeding pip and setuptools declared)",
+                   admitted.get("ok") is True and set(strict.get("unexpected") or {}) <= {"pip", "setuptools"}
+                   and not strict.get("duplicates") and not strict.get("malformed"),
+                   {"unexpected": strict.get("unexpected"), "duplicates": strict.get("duplicates")})
 
     def user_systemd(self) -> dict:
         uid = os.getuid()
