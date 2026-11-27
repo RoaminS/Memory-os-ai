@@ -1543,7 +1543,7 @@ def target_identity(path, *, count_entries=False) -> dict | None:
         # its change date (set by the kernel at creation, write, chmod or link; os.utime cannot set it) nor, as a
         # rule, its modification date. Declared limit: before Linux 6.13 (no multigrain timestamps) both advance
         # at the kernel tick (1-4 ms), so a recreation within the same tick, same inode and same size stays
-        # invisible. Never the content: the preview never reads the token.
+        # invisible. Metadata only: the token's content never enters the identity nor the digest.
         identity.update(size=status.st_size, nlink=status.st_nlink, mtime_ns=status.st_mtime_ns,
                         ctime_ns=status.st_ctime_ns)
     if kind == "directory" and count_entries:
@@ -1564,9 +1564,9 @@ def write_targets(settings, home) -> dict:
 def plan_digest(plan: dict) -> str:
     """SHA-256 of what an apply of ``plan`` would write or reuse (4.1.3, one-command install).
 
-    Covers the profile, backend, interpreter, port, token (path, state, identity of an existing file: device,
-    inode, mode, owner, size, link count, modification and change dates; never its value), client environment, cell, build identity, the whole resource plan (resources, files and destinations,
-    presence, ref readiness, download bytes, environment), named consents, the identity of every other write target
+    Covers the profile, backend, interpreter, port, token (path, state, and the metadata of an existing file:
+    device, inode, mode, owner, size, link count, modification and change dates; never its content), client
+    environment, cell, build identity, the whole resource plan (resources, files and destinations, presence, ref readiness, download bytes, environment), named consents, the identity of every other write target
     (store, ops directory, journals), every client (path, file digest, action, desired entry) and the whole service
     (label, definition path and text, argv, environment, state, job state). Volatile facts (time, free disk, port
     probe) are outside. Computed on the JSON form of the plan, so that a caller holding only the printed preview (the
@@ -1951,7 +1951,10 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         desktop, _, _ = _job_run(['pgrep', '-x', 'Claude'], run=run, timeout=5)
         if desktop != 1:
             block('client_app_running', 'quit Claude Desktop before apply; live config may be rewritten by the app')
-    token = read_token(settings.token_file)  # strict permissions/owner/format, never returned
+    # The preview validates an existing token (owner, mode 0600, one link, size, format) so that a corrupt one is
+    # refused before the [y/N] question (4.0 behaviour); the value stays in this frame: never returned, printed,
+    # hashed nor put in the plan or its digest.
+    token = read_token(settings.token_file)
     required = max(minimum, resource_plan['peak_additional_bytes_upper_bound'] + 1_000_000_000)
     if result['disk_free_bytes'] < required:
         block('disk_guard', f'disk guard: {result["disk_free_bytes"]} bytes free < required {required} bytes '
