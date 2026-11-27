@@ -643,13 +643,27 @@ class Run:
         counters = store_counters()
         self.check("the store holds data before the uninstall (demo item through the relay)",
                    isinstance(counters.get("live_total"), int) and counters["live_total"] >= 1, counters)
-        # Non-empty witnesses that the uninstall must keep: a real backup and its key (S4), and the token.
-        self.step("backup-witness", ["nice", "-n", "15", admin, "backup", "--backend", "sqlite", "--online", "--apply"],
-                  env=env, cwd=self.R, timeout=600)
+        # Non-empty witnesses that the uninstall must keep (frozen 4.1.0 spec, QUALIFY_4_1_0.md G8, as the 4.1.1 gate
+        # did): the harness CREATES memory-os-backups/qualify-410-witness.mosb and, only if no non-empty key exists,
+        # .config/memory-os/backup.key; synthetic, non-secret, non-empty, mode 0600, recorded; an existing non-empty
+        # key is never replaced. They attest file conservation by uninstall only, not a restorable backup nor a
+        # valid key (CI run 7: a real SQLite online backup never creates its key, by design).
+        created_witnesses = []
+        for rel, text in (("memory-os-backups/qualify-410-witness.mosb", f"qualify413 backup witness {self.cell}\n"),
+                          (".config/memory-os/backup.key", f"qualify413 key witness {self.cell}\n")):
+            target = home / rel
+            if rel.endswith("backup.key") and target.is_file() and target.stat().st_size > 0:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as stream:
+                stream.write(text)
+            created_witnesses.append(rel)
+        self.report["gates"]["P5"]["witnesses_created"] = created_witnesses
         witnesses = {"token": home / ".config/memory-os/http.token", "backup key": home / ".config/memory-os/backup.key"}
         backups = sorted(p for p in (home / "memory-os-backups").rglob("*") if p.is_file()) \
             if (home / "memory-os-backups").is_dir() else []
-        self.check("non-empty witnesses exist before the uninstall (token, backup key, backup)",
+        self.check("non-empty witnesses exist before the uninstall (token, backup key, backup; synthetic, G8)",
                    all(p.is_file() and p.stat().st_size > 0 for p in witnesses.values())
                    and any(p.stat().st_size > 0 for p in backups), {k: p.is_file() for k, p in witnesses.items()})
         logical_before = store_logical("store-logical-before-preview")
