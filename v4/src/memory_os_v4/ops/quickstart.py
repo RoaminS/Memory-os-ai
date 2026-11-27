@@ -1951,9 +1951,10 @@ def prepare(settings, *, clients=DEFAULT_CLIENTS, home=None, python=None, backen
         desktop, _, _ = _job_run(['pgrep', '-x', 'Claude'], run=run, timeout=5)
         if desktop != 1:
             block('client_app_running', 'quit Claude Desktop before apply; live config may be rewritten by the app')
-    # The preview validates an existing token (owner, mode 0600, one link, size, format) so that a corrupt one is
-    # refused before the [y/N] question (4.0 behaviour); the value stays in this frame: never returned, printed,
-    # hashed nor put in the plan or its digest.
+    # The preview validates an existing token (owner, mode 0600, one link, size, format; 4.0 behaviour): a corrupt
+    # one is refused during this quickstart preview, before its apply. In the interactive bootstrap this preview
+    # runs after the [y/N] answer and the venv creation, still before quickstart --apply. The value stays in this
+    # frame: never returned, printed, hashed nor put in the plan or its digest.
     token = read_token(settings.token_file)
     required = max(minimum, resource_plan['peak_additional_bytes_upper_bound'] + 1_000_000_000)
     if result['disk_free_bytes'] < required:
