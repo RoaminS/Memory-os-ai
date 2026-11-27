@@ -625,13 +625,19 @@ class Run:
         failing = [c for c in (checks if isinstance(checks, list) else checks.get("checks", []))
                    if isinstance(c, dict) and c.get("status") == "FAIL"]
         self.check("doctor: 0 FAIL", rc == 0 and not failing, failing)
-        sys.path.insert(0, str(ROOT / "v4/src"))
-        from memory_os_v4.ops.clients import classify, platform_clients, read_entry
-        attested = {}
-        for client in platform_clients("linux"):
-            if client.key in TEST_CLIENTS:
-                state, entry = read_entry(client, home, platform="linux")
-                attested[client.key] = {"state": state, "class": classify(entry)}
+        # Read by the INSTALLED package in the P4 venv (CI run 6): importing memory_os_v4 into this tool's own
+        # interpreter (the runner's Python, without the lexical closure) failed on numpy.
+        code = ("import json, sys; from pathlib import Path; "
+                "from memory_os_v4.ops.clients import classify, platform_clients, read_entry; "
+                "home, keys = Path(sys.argv[1]), sys.argv[2].split(','); attested = {}\n"
+                "for client in platform_clients('linux'):\n"
+                "    if client.key in keys:\n"
+                "        state, entry = read_entry(client, home, platform='linux')\n"
+                "        attested[client.key] = {'state': state, 'class': classify(entry)}\n"
+                "print(json.dumps(attested))")
+        rc, out = self.step("clients-attested", [venv / "bin/python", "-I", "-B", "-c", code, home,
+                                                 ",".join(TEST_CLIENTS)], env=env, cwd=self.R)
+        attested = self.last_json(out)
         self.check("client configurations attested (relay entries)",
                    all(v == {"state": "ok", "class": "relay"} for v in attested.values()), attested)
         counters = store_counters()
@@ -793,7 +799,7 @@ class Run:
                 getattr(self, gate.lower())()
                 self.report["gates"][gate]["ok"] = True
             self.report["ok"] = True
-        except (Refused, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        except Exception as exc:  # every failure is recorded in the report, never a bare traceback (CI run 6)
             self.report["error"] = f"{type(exc).__name__}: {exc}"
             if self.current in self.report["gates"]:
                 self.report["gates"][self.current]["ok"] = False
