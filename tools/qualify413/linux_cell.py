@@ -725,8 +725,13 @@ class Run:
                 continue                                    # new log
             if rel in journals_raw and new is not None and revocation_only(journals_raw[rel], (home / rel).read_bytes()):
                 continue                                    # proof revoked, field by field
-            if rel.startswith(".config/systemd/user/") and old == "dir":
-                continue                                    # empty unit directory left by systemd
+            if (rel == f".config/systemd/user/default.target.wants/{TEST_LABEL}.service" and new is None
+                    and old == f"link:{unit}"):
+                continue                                    # its enablement link, removed by the disable (CI run 8)
+            if rel.startswith(".config/systemd/user/") and isinstance(old, str) and old.startswith("dir") \
+                    and (new is None or new.startswith("dir")):
+                continue                                    # unit directory left (or emptied and removed) by systemd;
+                #                                             the inventory records "dir:<mode>" (CI run 8)
             unexpected.append({"path": rel, "before": old, "after": new})
         self.check("uninstall changed only what its protocol allows (token, key, backups, journals kept)",
                    not unexpected, unexpected[:30])
