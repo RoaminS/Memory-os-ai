@@ -515,7 +515,7 @@ class Run:
         venv, home = self.venv_path, Path.home()
         port = free_port()
         admin = venv / "bin/memory-os-admin"
-        store = self.R / "p5-store"          # ONE explicit disposable store for every command of the gate
+        store = self.R / "p5-store-a"        # installation A's explicit disposable store (B gets its own, below)
         env = {**self.user_systemd(), "MEMORY_V4_URL": f"http://127.0.0.1:{port}/mcp/", "MEMORY_V4_DIR": str(store),
                "MEMORY_V4_SERVICE_LABEL": TEST_LABEL, "PATH": f"{venv}/bin:/usr/bin:/bin"}
         for key in [k for k in env if k.startswith("MEMORY_V4_")
@@ -613,7 +613,12 @@ class Run:
             r.get("undo") in ("restored", "nothing-to-undo") for r in undone.get("results", [])), undone.get("results"))
         stopped("rollback")
         self.check("rollback: the store is the same store, nothing lost", store_counters() == counters_running)
-        # 2. install again, then uninstall; the uninstall is judged path by path
+        # 2. installation B on its OWN disposable store, as the 4.1.1 gate did with a second HOME and store
+        # (qual411 portes.py, installation B): the product refuses by rule to install onto the non-empty store that
+        # installation A kept (preflight store_not_empty, CI run 5). HOME stays the runner's (systemd --user reads
+        # its units there). Then uninstall; the uninstall is judged path by path.
+        store = self.R / "p5-store-b"
+        env["MEMORY_V4_DIR"] = str(store)
         apply("apply-2", "--demo")             # the opt-in demo saves and searches through the relay: real data
         rc, out = self.step("doctor", [admin, "doctor", "--json"], env=env, cwd=self.R, expect=(0, 1))
         checks = self.last_json(out)
