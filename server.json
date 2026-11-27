@@ -20,19 +20,19 @@
       "sizes": ["512x512"]
     }
   ],
-  "version": "4.1.2",
+  "version": "4.1.3",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "memory-os-ai",
-      "version": "4.1.2",
+      "version": "4.1.3",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "named",
           "name": "--from",
-          "value": "memory-os-ai[ops,brief]==4.1.2"
+          "value": "memory-os-ai[ops,brief]==4.1.3"
         },
         {
           "type": "positional",
@@ -63,12 +63,12 @@
   "_meta": {
     "io.modelcontextprotocol.registry/publisher-provided": {
       "publication_ready": true,
-      "status": "published-only-if-gate-P10a-passes-result-in-4.1.2-release-P9-manifest",
+      "status": "published-only-if-P9-and-gate-P10a-pass-for-4.1.3-results-in-4.1.3-release-P9-manifest-and-proof-complement",
       "launch": {
         "command": "memory-os-relay",
         "requires_existing_shared_service": true,
         "consumer_argument_convention": "runtimeArguments before the consumer-appended package identifier; trailing identifier ignored by relay.main",
-        "manual_pinned_command": "uvx --from memory-os-ai[ops,brief]==4.1.2 memory-os-relay"
+        "manual_pinned_command": "uvx --from memory-os-ai[ops,brief]==4.1.3 memory-os-relay"
       },
       "public_source_status": "github-RoaminS-active"
     }

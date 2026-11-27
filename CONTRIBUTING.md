@@ -6,25 +6,23 @@ Use Python 3.11 or 3.12. Install from the repository root:
 python -m pip install -e ".[dev]"
 ```
 
-Add `audio` only when working on Whisper ingestion; Tesseract, FFmpeg and Antiword
-are system dependencies for the corresponding v3 document formats.
-
-Production engines are `src/memory_os_ai` (v3) and `v4/src/memory_os_v4` (v4).
-The installed commands `memory-os-ai` and `memory-os-v4` start v4;
-`memory-os-ai-v3` starts v3. Keep both engines covered when changing shared
-packaging or client configurations.
+The production engine is `v4/src/memory_os_v4` (v4). The installed commands
+`memory-os-ai` and `memory-os-v4` start it. Since 4.1.3 the legacy v3 package is no
+longer shipped: its sources stay, not installed, under `legacy/v3/` until 4.2.0
+(see [legacy/README.md](legacy/README.md)).
 
 ```bash
-ruff check src tests v4/src v4/tests v4/bench scripts --select E9,F
-ruff check src tests scripts
-python -m pytest tests --cov=memory_os_ai --cov-report=term-missing
+ruff check tests v4/src v4/tests v4/bench scripts --select E9,F
+ruff check tests scripts
+python -m pytest tests
 python -m pytest v4/tests -m "not slow" --cov=memory_os_v4 --cov-report=term-missing
 python -m build
 python -m twine check dist/*
 ```
 
-GitHub CI runs only the two `ruff` commands above and a scan for verified secrets;
-the test suites, the build and the installation checks run locally, as described in
+GitHub CI runs the two `ruff` commands above and a scan for verified secrets on every
+push; since 4.1.3 a second workflow qualifies the two Ubuntu 24.04 cells (build, gates
+P1 and P3–P7, container). The macOS gates run locally. Both are described in
 [distribution qualification](docs/DISTRIBUTION.md). Semantic tests
 require cached public model weights; deterministic tests use fake/hash embeddings.
 Evaluation claims must follow the [versioned protocol](v4/bench/protocols/v1.md).

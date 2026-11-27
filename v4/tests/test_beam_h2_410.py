@@ -374,7 +374,7 @@ def test_lexical_worker_imports_no_ml_and_the_run_scores_only_when_complete(froz
     assert set(lexical['ml_modules']) >= {'start', 'import', 'end'}
     assert not any(lexical['ml_modules'].values())
     import memory_os_v4
-    assert lexical['config_patch'] == {} and lexical['engine_version'] == memory_os_v4.__version__ == '4.1.2'
+    assert lexical['config_patch'] == {} and lexical['engine_version'] == memory_os_v4.__version__ == '4.1.3'
     assert Path(lexical['engine_file']).is_relative_to(V4 / 'src')
     marker = {'name': 'lexical', 'policy': 'lex-4.1.0-v1'}
     assert [c['marker'] for c in lexical['conversations']] == [marker] * 4

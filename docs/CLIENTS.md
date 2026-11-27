@@ -1,6 +1,6 @@
 # Connecting your assistants to Memory OS AI
 
-Applies to releases **4.0.6 and later** (current release: **4.1.2**). At its introduction in 4.0.6 (October 2026),
+Applies to releases **4.0.6 and later** (current release: **4.1.3**). At its introduction in 4.0.6 (October 2026),
 `quickstart` was covered by synthetic tests; this sentence says nothing about 4.1.x.
 New quickstart installations default to SQLite + tasks; `--backend jsonl` is available.
 An existing service/store is never migrated by quickstart. Relay configurations stay the same for both backends.
@@ -68,9 +68,10 @@ args = []
 
 ## Linux (4.1.1)
 
-**Since 4.1.1, unchanged in 4.1.2.** These paths apply to the one Linux cell that 4.1.x retains, Ubuntu 24.04
-arm64 with Python 3.11 (lexical profile, `systemd --user` service). This section describes where `quickstart` writes;
-it announces no result. The proof state of the cell is written neither here nor in the package.
+**Since 4.1.1; VS Code added in 4.1.3.** These paths apply to the Linux cells: Ubuntu 24.04 arm64 with Python 3.11
+(since 4.1.1) and Ubuntu 24.04 x86_64 with Python 3.11 (since 4.1.3), lexical profile, `systemd --user` service. This
+section describes where `quickstart` writes; it announces no result. The proof state of a cell is written neither here
+nor in the package.
 
 | Assistant (`--clients` name) | File on Linux | Refused when this variable is present |
 |---|---|---|

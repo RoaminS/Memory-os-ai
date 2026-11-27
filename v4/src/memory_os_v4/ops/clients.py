@@ -40,12 +40,12 @@ RELAY_MARKERS = ("memory_os_v4.ops.relay", "memory-os-relay", "stdio_relay.py")
 GEMINI_SYSTEM_SETTINGS = Path("/etc/gemini-cli/settings.json")
 LINUX_UNSUPPORTED_REASONS = {
     "windsurf": (
-        "Windsurf is not supported on Linux in 4.1.2 (official documentation cites conflicting user-level "
-        "paths; re-evaluated in 4.1.3); no path guessed, nothing written"
+        "Windsurf is not supported on Linux in 4.1.3 (official documentation cites conflicting user-level "
+        "paths; re-evaluated in 4.1.3, still refused); no path guessed, nothing written"
     ),
     "claude-desktop": (
-        "Claude Desktop is not supported on Linux in 4.1.2 (official Linux version is in beta; "
-        "re-evaluated in 4.1.3); no path guessed, nothing written"
+        "Claude Desktop is not supported on Linux in 4.1.3 (official Linux version is in beta; "
+        "re-evaluated in 4.1.3, still refused); no path guessed, nothing written"
     ),
 }
 
@@ -127,7 +127,7 @@ class Client:
             if self.linux_path is None:
                 reason = LINUX_UNSUPPORTED_REASONS.get(
                     self.key,
-                    f"{self.name} ({self.key}) is not supported on Linux in 4.1.2; no path guessed, nothing written",
+                    f"{self.name} ({self.key}) is not supported on Linux in 4.1.3; no path guessed, nothing written",
                 )
                 raise ClientPathError(reason, code="client_unsupported_on_os")
             rel_path = self.linux_path

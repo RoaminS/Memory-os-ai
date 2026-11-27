@@ -1668,8 +1668,8 @@ def test_bootstrap_cell_entry_lists_every_admitted_wheel_of_the_frozen_manifest(
 
 
 def test_classifiers_declare_python_312_313_and_linux():
-    """Contract §10 D2: 3.12/3.13 are declared (frozen locks, attested SQLite). 4.1.2 lot A: Linux is declared;
-    its support stays the one retained Linux cell (Ubuntu 24.04 arm64), which the README and notes state."""
+    """Contract §10 D2: 3.12/3.13 are declared (frozen locks, attested SQLite). 4.1.2 lot A: Linux is declared; it
+    covers the retained Linux cells (4.1.3: Ubuntu 24.04 arm64 and x86_64), which the README and notes state."""
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     project = tomllib.loads(text)["project"]
     classifiers = project["classifiers"]
@@ -1679,7 +1679,7 @@ def test_classifiers_declare_python_312_313_and_linux():
     assert [item for item in classifiers if "Linux" in item or "POSIX" in item] == ["Operating System :: POSIX :: Linux"]
     assert "# \"Operating System" not in text     # no commented-out classifier left behind
     import memory_os_v4
-    assert project["version"] == memory_os_v4.__version__ == "4.1.2"   # 4.1.3 (D2): no legacy v3 package
+    assert project["version"] == memory_os_v4.__version__ == "4.1.3"   # 4.1.3 (D2): no legacy v3 package
 
 
 # ===================================================================== 8. Codex E3-gel-r1: wheels bound to the cell

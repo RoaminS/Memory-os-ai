@@ -196,10 +196,10 @@ CLIENT_TABLE = {
 }
 # Same text as ``ops/clients.py`` LINUX_UNSUPPORTED_REASONS.
 LINUX_UNSUPPORTED_REASONS = {
-    "windsurf": ("Windsurf is not supported on Linux in 4.1.2 (official documentation cites conflicting user-level "
-                 "paths; re-evaluated in 4.1.3); no path guessed, nothing written"),
-    "claude-desktop": ("Claude Desktop is not supported on Linux in 4.1.2 (official Linux version is in beta; "
-                       "re-evaluated in 4.1.3); no path guessed, nothing written"),
+    "windsurf": ("Windsurf is not supported on Linux in 4.1.3 (official documentation cites conflicting user-level "
+                 "paths; re-evaluated in 4.1.3, still refused); no path guessed, nothing written"),
+    "claude-desktop": ("Claude Desktop is not supported on Linux in 4.1.3 (official Linux version is in beta; "
+                       "re-evaluated in 4.1.3, still refused); no path guessed, nothing written"),
 }
 # What a quickstart run from the venv uses when no MEMORY_V4_* variable reaches it (OpsSettings.from_env defaults).
 SERVICE_LABEL, SERVICE_PORT = "local.memory-os-v4", 8765
@@ -1366,7 +1366,7 @@ def client_path(key: str, home, *, os_kind, environ) -> tuple:
         relative = record["linux"]
         if relative is None:
             return None, "client_unsupported_on_os", LINUX_UNSUPPORTED_REASONS.get(
-                key, f"{name} ({key}) is not supported on Linux in 4.1.2; no path guessed, nothing written")
+                key, f"{name} ({key}) is not supported on Linux in 4.1.3; no path guessed, nothing written")
     else:
         return None, "client_unsupported_on_os", (f"{name} ({key}) has no established user-level config path on "
                                                   f"platform {os_kind!r}; no path guessed, nothing written")

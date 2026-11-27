@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.1.3 — moteur, installation en une commande, cinquième cellule (Ubuntu 24.04 x86_64)
+
+- Entrée figée au gel de la version, avant la qualification de l'artefact exact 4.1.3 : elle décrit un périmètre et
+  n'annonce aucun résultat sur cet artefact. Aucun gain mesuré ; P-A et P-B non lancés (dérogation reconduite, D11).
+- Dates sans décalage : une date seule vaut minuit UTC, une date-heure naïve est lue en UTC avec l'avis
+  `naive_time_assumed_utc` ; instants déjà enregistrés non réécrits ; `memory-os-admin audit-naive-times` en
+  lecture seule (D1-a, D1-b, D1-c).
+- `doctor` et `health` lisent le magasin par un ouvreur unique qui ne supprime jamais rien (WAL `-wal`/`-shm`) ;
+  curseur de `memory_timeline` canonique ; l'amorce transmet `XDG_CONFIG_HOME` à l'aperçu `quickstart`.
+- Paquet hérité v3 (`memory_os_ai`, `memory-os-ai-v3`) et extras v3 retirés du wheel (D2) ; sources sous
+  `legacy/v3/` jusqu'en 4.2.0 ; `memory_migrate_v3` conservé.
+- Table `cl100k_base` embarquée (notice MIT, licence `LGPL-3.0-or-later AND MIT`), `tiktoken>=0.12.0,<1` avec
+  auto-test au chargement (D3, D4) : le profil lexical ne télécharge plus rien.
+- Installation en une commande (D5, D13) : `install.sh`, actif de Release épinglé à `v4.1.3` et listé dans
+  `SHA256SUMS`, lance l'amorce `--interactive` (aperçu complet, une seule question `[y/N]`) ;
+  `quickstart --expect-plan` et empreinte du plan en version 3 (métadonnées du jeton, jamais son contenu).
+- `memory-os-admin serve` au premier plan, arrêt propre par signal, `Dockerfile` minimal en construction locale
+  (aucune image publiée, D8), `--allow-unqualified-platform` (D7), VS Code sous Linux (`~/.copilot/mcp-config.json`,
+  D9) ; Windsurf et Claude Desktop toujours refusés sous Linux.
+- Cinquième cellule `ubuntu2404-x86_64-py311` (verrou embarqué). Les deux cellules Ubuntu sont qualifiées sur
+  GitHub Actions (D6 : P1 et P3–P7 verts sur le candidat `e858ed7`, avant le gel de la version) ; qualification de
+  l'artefact exact 4.1.3 (cellules Linux et macOS, P2, P8, P10-a, P9) : avant la publication.
+- Outillage de Release (Q1) : `scripts/release_assets_413.py` écrit `SHA256SUMS` sur les six actifs (wheel, sdist,
+  amorce épinglée, manifeste P9, `install.sh`) et refuse un `RELEASE_TAG` différent de `v{version}` ; test de gel
+  `v4/tests/test_release_assets_413.py`.
+- Version 4.1.3 : deux `pyproject.toml`, `memory_os_v4.__version__`, `server.json` (validé contre son schéma
+  `2025-12-11`, icônes comprises), README, liens Cursor / VS Code, messages de refus qui nomment la version.
+- Limites déclarées : P1 Linux ne couvre ni l'ouverture en lecture seule ni la politique horaire (suite sémantique
+  macOS seulement) ; refus croisé P6 sous macOS seulement ; conteneur essayé sur arm64 seulement ; clé de
+  sauvegarde SQLite sans commande de création (suivi 4.1.4). Détail : `docs/releases/v4.1.3.md`.
+
 ## 4.1.2 — identité du dépôt et du registre, sans changement du moteur
 
 - Dépôt actif `RoaminS/Memory-os-ai` (URL `Source`/`Issues`, `repository.url` de `server.json`, bandeau du README) ;
