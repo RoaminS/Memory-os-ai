@@ -314,7 +314,10 @@ class Run:
         return path
 
     def uv_install(self, venv: Path, name, *requirements, hashes=False, extra=()):
-        argv = [self.uv, "pip", "install", "--python", venv / "bin/python", "--only-binary", ":all:", *extra]
+        # --link-mode copy, as the product's bootstrap does (memory_os_bootstrap.py): on Linux uv hard-links from its
+        # cache by default, and memory-os-constraints refuses a lock file with more than one link (CI run 4, P4).
+        argv = [self.uv, "pip", "install", "--python", venv / "bin/python", "--only-binary", ":all:",
+                "--link-mode", "copy", *extra]
         if hashes:
             argv += ["--require-hashes"]
         self.step(f"install-{name}", [*argv, *requirements], timeout=900,
