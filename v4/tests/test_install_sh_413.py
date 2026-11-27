@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -32,12 +33,27 @@ ONE_LINER = ("env -u BASH_ENV bash -o pipefail -c \"unset SSLKEYLOGFILE; "
              "curl -q -fsSL --proto '=https' --proto-redir '=https' "
              "https://github.com/RoaminS/Memory-os-ai/releases/download/v4.1.3/install.sh | sh\"")
 pytestmark = pytest.mark.skipif(MINOR not in ((3, 11), (3, 12), (3, 13)), reason="needs a Python of a retained cell")
+# install.sh takes the first NAME of this list found on the PATH (names in order, then the PATH): the test interpreter
+# is installed under every name, so that no python3.13/python3.12 of the host is chosen before it (Ubuntu 24.04 has
+# /usr/bin/python3.12: CI run 3 probed and launched it instead of the test's shim).
+CANDIDATES = re.search(r"^  for CANDIDATE in ([^;]+); do$", TEXT, re.M).group(1).split()
+# What the cell probe of install.sh (CELL_PROBE) answers for the real test interpreter.
+REAL_PROBE = "retained" if MINOR in ((3, 11), (3, 12), (3, 13)) and sqlite3.sqlite_version_info >= (3, 51, 3) \
+    else "other"
 
 MARKER_BOOTSTRAP = '''import json, os, sys
 target = os.path.join(os.path.dirname(os.path.abspath(os.environ["HOME"])), "bootstrap-ran.json")
 with open(target, "w") as handle:
     json.dump({"argv": sys.argv[1:], "executable": sys.executable}, handle)
 '''
+
+
+def python_shims(directory: Path, text: str) -> None:
+    """The same python launcher under every candidate name of install.sh, first on the PATH of each run."""
+    assert CANDIDATES == ["python3.13", "python3.12", "python3.11", "python3"]
+    for name in CANDIDATES:
+        (directory / name).write_text(text)
+        (directory / name).chmod(0o755)
 
 
 def sha(data: bytes) -> str:
@@ -57,11 +73,8 @@ class Release:
         self.tmpdir.mkdir()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
-        python_target = python
-        python = self.bin / f"python{MINOR[0]}.{MINOR[1]}"
         answer = f'case "$*" in *memory-os-cell:*) echo memory-os-cell:{cell}; exit 0 ;; esac\n' if cell else ""
-        python.write_text(f'#!/bin/sh\n{answer}exec "{python_target or sys.executable}" "$@"\n')
-        python.chmod(0o755)
+        python_shims(self.bin, f'#!/bin/sh\n{answer}exec "{python or sys.executable}" "$@"\n')
         self.uv_dir = self.machine.tools if uv else None  # the fake uv reads its configuration next to itself
         if uname:
             shim = self.bin / "uname"
@@ -184,7 +197,7 @@ def test_without_uv_it_explains_and_exits_before_any_download(tmp_path, shell):
 # ---------------------------------------------------------------- the verified bootstrap and its arguments
 
 def test_the_verified_bootstrap_runs_interactive_with_the_explicit_uv(tmp_path):
-    r = Release(tmp_path, uname="Darwin")
+    r = Release(tmp_path, uname="Darwin", cell="retained")  # the route is that of the probe answer, not of the host
     done = r.run()
     assert done.returncode == 0, done.stderr
     seen = r.ran()
@@ -251,8 +264,12 @@ def test_on_macos_a_python_outside_the_cells_gets_the_standalone_cpython_3_13(tm
 
 
 def test_on_macos_the_cell_probe_reads_the_real_interpreter(tmp_path):
-    r = Release(tmp_path, uname="Darwin")                    # the test interpreter: a Python of a retained cell
-    assert r.run().returncode == 0 and r.ran()["argv"] == ["--interactive", "--uv", str(r.machine.uv)]
+    r = Release(tmp_path, uname="Darwin")                    # the shims run the real test interpreter, unanswered
+    done = r.run()
+    route = [] if REAL_PROBE == "retained" else ["--cpython", "3.13"]
+    assert done.returncode == 0 and r.ran()["argv"] == ["--interactive", "--uv", str(r.machine.uv), *route]
+    assert f"Route: {r.bin / CANDIDATES[0]} " + ("(a Python of a retained cell" if not route else
+                                                 "is not a Python of a retained cell") in done.stdout
 
 
 def test_on_linux_the_standalone_cpython_route_is_chosen_unless_one_is_given(tmp_path):
@@ -273,7 +290,12 @@ def test_without_a_terminal_the_real_bootstrap_previews_and_writes_nothing(tmp_p
     (r.home / ".cursor" / "mcp.json").write_text("{}\n")
     home_before = tree(r.home)
     done = r.run(shell=shell)
-    on_cell = sys.platform == "darwin" and os.uname().machine == "arm64"
+    # The cell of the route install.sh takes on this host, as the product detects it: on Linux the standalone
+    # CPython 3.11 (a retained cell on Ubuntu 24.04 arm64/x86_64), on macOS the interpreter of the PATH when it is
+    # of a retained cell (here the real test interpreter), otherwise the standalone 3.13.
+    host = bs.detect_host()
+    version = (3, 11) if host["os"] == "linux" else MINOR if REAL_PROBE == "retained" else (3, 13)
+    on_cell = host["os"] in ("linux", "darwin") and bs.match_cell(host, version)["retained"]
     assert done.returncode == (3 if on_cell else 1), done.stdout + done.stderr
     assert "ONE-COMMAND INSTALL" in done.stdout and str(r.home / ".cursor" / "mcp.json") in done.stdout
     if on_cell:
@@ -329,7 +351,7 @@ def test_the_interpreter_runs_without_site_pth_sitecustomize_or_bytecode(tmp_pat
     (site / "sitecustomize.py").write_text(f"import pathlib; pathlib.Path({str(witness)!r}).write_text('site')\n")
     r = Release(tmp_path / "run", uname="Darwin", python=home_python / "bin" / "python")
     shutil.move(str(home_python), str(r.home / "python"))   # the interpreter now lives under HOME
-    (r.bin / f"python{MINOR[0]}.{MINOR[1]}").write_text(f'#!/bin/sh\nexec "{r.home}/python/bin/python" "$@"\n')
+    python_shims(r.bin, f'#!/bin/sh\nexec "{r.home}/python/bin/python" "$@"\n')
     before = tree(r.home)
     done = r.run()
     assert done.returncode == 0, done.stderr
@@ -519,11 +541,9 @@ def test_the_xcrun_cache_is_redirected_into_work_before_the_first_python():
 
 def _logging_python(r, log: Path, cell="other"):
     """python3 of the PATH: logs the xcrun_db each invocation sees, answers the cell probe, runs the bootstrap."""
-    shim = r.bin / f"python{MINOR[0]}.{MINOR[1]}"
-    shim.write_text(f'#!/bin/sh\ncase "$*" in *memory-os-cell:*) echo "probe:${{xcrun_db-}}" >> "{log}"; '
-                    f'echo memory-os-cell:{cell}; exit 0 ;; esac\necho "launch:${{xcrun_db-}}" >> "{log}"\n'
-                    f'exec "{sys.executable}" "$@"\n')
-    shim.chmod(0o755)
+    python_shims(r.bin, f'#!/bin/sh\ncase "$*" in *memory-os-cell:*) echo "probe:${{xcrun_db-}}" >> "{log}"; '
+                        f'echo memory-os-cell:{cell}; exit 0 ;; esac\necho "launch:${{xcrun_db-}}" >> "{log}"\n'
+                        f'exec "{sys.executable}" "$@"\n')
 
 
 @pytest.mark.parametrize("inherited", [None, "home"])
